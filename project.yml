@@ -8,8 +8,9 @@ settings:
     SWIFT_VERSION: "6.0"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-    CODE_SIGN_IDENTITY: "-"
     CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: "5VF5BV7C9Q"
+    ENABLE_HARDENED_RUNTIME: YES
 packages:
   TillerCore:
     path: Packages/TillerCore
@@ -48,4 +49,8 @@ targets:
           set -e
           swift build --package-path "$SRCROOT/Packages/TillerControl" --product tillerctl -c "$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
           cp "$SRCROOT/Packages/TillerControl/.build/$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')/tillerctl" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/tillerctl"
+          if [ "$CODE_SIGNING_ALLOWED" != "NO" ] && [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
+            codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/tillerctl"
+            codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          fi
         basedOnDependencyAnalysis: false
