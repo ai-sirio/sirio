@@ -1,0 +1,23 @@
+import Foundation
+
+/// Pi has no lifecycle hook mechanism (see
+/// docs/contracts/agent-hook-capabilities.md): prepare writes nothing and
+/// Tiller falls back to watching the pane's exit code.
+public struct PiAdapter: AgentAdapter {
+    public let id = "pi"
+    public let displayName = "Pi"
+    public var hasNativeHooks: Bool { false }
+
+    public init() {}
+
+    public func prepare(worktreePath: String, paneId: UUID, tillerctlPath: String) throws {}
+
+    public func command(worktreePath: String, paneId: UUID, tillerctlPath: String) -> String {
+        "pi"
+    }
+
+    public func resumeCommand(worktreePath: String, paneId: UUID,
+                              tillerctlPath: String, sessionRef: String) -> String? {
+        "pi --session \(shellQuote(sessionRef))"
+    }
+}
