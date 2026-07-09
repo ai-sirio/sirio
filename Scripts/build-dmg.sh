@@ -26,6 +26,6 @@ cp -R "$APP_PATH" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
 
 rm -f "$OUTPUT_DMG"
-hdiutil create -volname "$VOLUME_NAME" -srcfolder "$STAGING" -ov -format UDZO "$OUTPUT_DMG"
+hdiutil create -volname "$VOLUME_NAME" -srcfolder "$STAGING" -ov -format UDZO "$OUTPUT_DMG" >/dev/null
 
 echo "$OUTPUT_DMG"

@@ -16,7 +16,12 @@ mkdir -p "$FIXTURE/Fake.app/Contents/MacOS"
 echo "fake binary" > "$FIXTURE/Fake.app/Contents/MacOS/Fake"
 
 OUTPUT_DMG="$FIXTURE/Fake.dmg"
-"$BUILD_DMG_SCRIPT" "$FIXTURE/Fake.app" "FakeVolume" "$OUTPUT_DMG"
+CAPTURED_OUTPUT=$("$BUILD_DMG_SCRIPT" "$FIXTURE/Fake.app" "FakeVolume" "$OUTPUT_DMG")
+
+if [ "$CAPTURED_OUTPUT" != "$OUTPUT_DMG" ]; then
+  echo "FAIL: expected stdout to be exactly $OUTPUT_DMG, got: $CAPTURED_OUTPUT" >&2
+  exit 1
+fi
 
 if [ ! -f "$OUTPUT_DMG" ]; then
   echo "FAIL: dmg not created at $OUTPUT_DMG" >&2
