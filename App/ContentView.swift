@@ -32,6 +32,29 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 560)
         .configuresWindowChrome()
+        .toolbar {
+            if model.route == .workspace {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        model.splitCurrent(.horizontal)
+                    } label: {
+                        Image(systemName: "square.split.1x2")
+                    }
+                    .help("Split terminale")
+                    .accessibilityLabel("Split terminale")
+
+                    Button {
+                        model.settingsCategory = .permissions
+                        model.openSettings()
+                    } label: {
+                        Image(systemName: "lock.shield")
+                    }
+                    .help("Permessi")
+                    .accessibilityLabel("Permessi")
+                }
+            }
+        }
+        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .task { await model.bootstrap() }
         .alert(
             "Error",
@@ -58,10 +81,12 @@ struct ContentView: View {
 
     private var workspaceView: some View {
         VStack(spacing: 0) {
-            TopBarView(model: model)
             NavigationSplitView {
                 SidebarView(model: model)
-                    .background(SidebarMaterialContainer())
+                    .background(
+                        SidebarMaterialContainer()
+                            .ignoresSafeArea(.container, edges: .vertical)
+                    )
                     .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 400)
             } detail: {
                 VStack(spacing: 0) {
