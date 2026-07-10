@@ -1,15 +1,15 @@
 import SwiftUI
 import AppKit
 
-/// Makes the native titlebar transparent and paints the window background
-/// with `AppTheme.background`, so the titlebar strip (traffic lights + app
-/// title) matches the sidebar/detail pane instead of the default system
-/// titlebar material.
+/// Makes the titlebar transparent and lets split-view backgrounds extend under
+/// it. The window itself stays on `AppTheme.background`; the sidebar supplies
+/// its own full-height navy-tinted material through its native column.
 private struct WindowChromeConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
             guard let window = view.window else { return }
+            window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.backgroundColor = NSColor(AppTheme.background)
         }

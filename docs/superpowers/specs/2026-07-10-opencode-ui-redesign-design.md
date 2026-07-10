@@ -21,7 +21,8 @@ il footer usage già esteso con branch e path del worktree selezionato.
   sotto la titlebar.
 - Tutta la chrome UI usa **SF Pro** tramite `Font.system` senza design
   monospaziato.
-- La sidebar usa un **materiale nativo macOS** a effetto vetro leggero.
+- La sidebar usa un **materiale nativo macOS** a effetto vetro leggero, tintato navy con `AppTheme.background.opacity(0.86)` per evitare la resa grigio-verde del materiale di sistema puro.
+- La superficie della sidebar si estende dalla titlebar fino al footer del workspace: è una colonna continua e ridimensionabile, mai un riquadro con angoli arrotondati.
 - Main pane e terminale restano dark navy opachi.
 - Il divario visivo resta limitato a un divisore verticale a basso contrasto e
   al materiale della sidebar; non vengono introdotti bordi pesanti o pannelli
@@ -31,10 +32,17 @@ il footer usage già esteso con branch e path del worktree selezionato.
 
 ### `ContentView`
 
-`ContentView.workspaceView` torna a comporre direttamente il
-`NavigationSplitView`: `TopBarView` viene rimosso dalla gerarchia. Gli shortcut
-sono forniti da un `ToolbarItemGroup` della titlebar, allineato a destra e
-presenti solo nel workspace.
+`ContentView.workspaceView` compone direttamente il `NavigationSplitView`:
+`TopBarView` viene rimosso dalla gerarchia. Gli shortcut sono forniti da un
+`ToolbarItemGroup` della titlebar, allineato a destra e presenti solo nel
+workspace.
+
+`WindowChromeConfigurator` abilita `fullSizeContentView`; `ContentView` nasconde
+lo sfondo della window toolbar. Il background della sidebar ignora soltanto la
+safe area verticale del container, così raggiunge la titlebar e il fondo del
+workspace restando agganciato alla larghezza reale e ridimensionabile della
+colonna di `NavigationSplitView`. Nessun overlay a larghezza fissa misura o
+duplica la geometria della split view.
 
 Le azioni conservano gli entry point esistenti:
 
@@ -46,13 +54,15 @@ Non viene creata alcuna nuova logica in `AppModel`.
 
 ### `SidebarMaterialContainer`
 
-Un solo contenitore SwiftUI/AppKit circoscrive la sidebar del workspace. Espone
-un `NSVisualEffectView` con materiale `.sidebar`, blending `.withinWindow` e
-stato attivo/inattivo gestito dal sistema. Il materiale è dark, traslucido e
-sfocato; è applicato una volta all’intera colonna e ritagliato al suo confine.
-
-Il bridge non conosce progetti, worktree, selezioni o azioni. Non alloca né
-applica blur per righe individuali.
+`SidebarMaterialContainer` compone un solo `NSVisualEffectView` con materiale
+`.sidebar`, blending `.withinWindow` e stato attivo/inattivo gestito dal
+sistema, poi vi sovrappone `AppTheme.background.opacity(0.86)`. La tintatura
+mantiene il blur reale ma conserva il navy della reference (`#1A1C22`) invece
+del grigio-verde del materiale di sistema puro. Applicato come background della
+sidebar con estensione verticale di safe area, l'effetto arriva alla titlebar e
+al footer senza trasformare la colonna ridimensionabile in un pannello fisso.
+Non conosce progetti, worktree, selezioni o azioni e non applica blur per righe
+individuali.
 
 ### `SidebarView`
 
@@ -115,7 +125,7 @@ per cablaggi SwiftUI:
 2. Lanciare la build e verificare manualmente:
    - titlebar continua, senza barra orizzontale separata;
    - shortcut Split e Permessi presenti nella toolbar nativa e azionabili;
-   - sidebar in vetro scuro, traslucida, con blur contenuto alla colonna;
+   - sidebar in vetro navy scuro, traslucida e priva di dominanti grigio-verdi, con blur contenuto alla colonna;
    - testo, filtro, hover e selezione leggibili;
    - main pane e terminale opachi;
    - footer usage, branch e path invariati con worktree selezionato;
