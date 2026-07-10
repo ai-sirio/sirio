@@ -30,8 +30,10 @@ non ri-mostra mai il prompt dopo un rifiuto).
 
 ## Architettura
 
-Tutto in `App/Permissions/` — nessun nuovo package: è I/O di sistema
-AppKit/TCC, non logica di dominio.
+Logica pura e testabile (enum, mapping, model con probe iniettabile) in
+`Packages/TillerCore` — il target App non ha test target, e questo è il
+pattern del repo. Chiamate TCC reali e viste SwiftUI in `App/Permissions/`.
+Nessun nuovo package.
 
 - **`PermissionKind`** — enum con i 6 casi. Per ogni caso: nome
   visualizzato, SF Symbol, descrizione breve (cosa abilita).
