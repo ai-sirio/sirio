@@ -27,7 +27,7 @@ struct ContentView: View {
         Group {
             switch model.route {
             case .workspace: workspaceView
-            case .settings: SettingsSurface(model: model)
+            case .settings: SettingsSurface(model: model, updater: updater)
             }
         }
         .frame(minWidth: 900, minHeight: 560)
