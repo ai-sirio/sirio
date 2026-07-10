@@ -2,11 +2,11 @@
 import SwiftUI
 import TillerCore
 
-/// Shared color tokens for the app's flat dark appearance. `background` is
-/// the app-wide surface color (sidebar + detail pane + terminal surface via
-/// TillerTerminalTheme). The rest are sidebar-row-specific tokens
-/// (hover/selection/labels) kept in the same namespace. Agent accent colors
-/// live in AgentIcon; these are only the chrome around them.
+/// Shared color tokens for Tiller's dark chrome. `background` is the opaque
+/// main-pane and terminal surface, and it tints the native sidebar material
+/// through `SidebarMaterialContainer`. The remaining tokens style sidebar
+/// rows, labels, filter controls, hover, and selection. Agent accent colors
+/// live in `AgentIcon`.
 enum AppTheme {
     static let background      = Color(red: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue)
     static let hairline       = Color(red: 0.165, green: 0.176, blue: 0.220)

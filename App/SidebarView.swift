@@ -75,7 +75,6 @@ struct SidebarView: View {
             .foregroundStyle(AppTheme.subtitle)
             .padding(8)
         }
-        .background(AppTheme.background)
         .toolbar {
             Button {
                 showAddProjectSheet = true

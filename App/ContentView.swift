@@ -61,6 +61,7 @@ struct ContentView: View {
             TopBarView(model: model)
             NavigationSplitView {
                 SidebarView(model: model)
+                    .background(SidebarMaterialContainer())
                     .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 400)
             } detail: {
                 VStack(spacing: 0) {
