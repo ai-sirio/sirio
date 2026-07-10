@@ -61,7 +61,11 @@ struct TabBarView: View {
     private func tabItem(_ tab: WorkspaceTab) -> some View {
         let isActive = model.activeTab(for: worktree.id)?.id == tab.id
         HStack(spacing: 5) {
-            if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
+            if tab.markdownFileURL != nil {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            } else if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
                 AgentIcon(agentId: agentId, size: 12)
             }
             if renamingTabId == tab.id {
@@ -75,11 +79,16 @@ struct TabBarView: View {
                     }
                     .onExitCommand { renamingTabId = nil }
             } else {
-                Text(tab.title)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 160)
-                    .fixedSize(horizontal: true, vertical: false)
+                HStack(spacing: 4) {
+                    Text(tab.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 160)
+                        .fixedSize(horizontal: true, vertical: false)
+                    if model.markdownDocuments[tab.id]?.isDirty == true {
+                        Circle().fill(.secondary).frame(width: 5, height: 5)
+                    }
+                }
             }
             Button {
                 model.closeTab(tab.id, in: worktree)
