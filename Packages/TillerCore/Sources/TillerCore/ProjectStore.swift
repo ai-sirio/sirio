@@ -183,7 +183,7 @@ public actor ProjectStore {
 
     /// Riscrive l'intera lista tab del worktree (delete + insert): poche
     /// righe, elimina la sincronizzazione incrementale DB↔memoria.
-    public func saveTabs(worktreeId: UUID, tabs: [TerminalTab], activeTabId: UUID?) throws {
+    public func saveTabs(worktreeId: UUID, tabs: [WorkspaceTab], activeTabId: UUID?) throws {
         let encoder = JSONEncoder()
         try database.write { db in
             try db.execute(
@@ -191,7 +191,8 @@ public actor ProjectStore {
                 arguments: [worktreeId.uuidString]
             )
             for (idx, tab) in tabs.enumerated() {
-                let treeJSON = String(decoding: try encoder.encode(tab.tree), as: UTF8.self)
+                guard case .terminal(let tree) = tab.content else { continue }
+                let treeJSON = String(decoding: try encoder.encode(tree), as: UTF8.self)
                 try TerminalTabRecord(
                     id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
                     title: tab.title, orderIdx: idx,
@@ -202,14 +203,14 @@ public actor ProjectStore {
         }
     }
 
-    public func loadTabs(of worktreeId: UUID) throws -> (tabs: [TerminalTab], activeTabId: UUID?) {
+    public func loadTabs(of worktreeId: UUID) throws -> (tabs: [WorkspaceTab], activeTabId: UUID?) {
         let decoder = JSONDecoder()
         return try database.read { db in
             let records = try TerminalTabRecord
                 .filter(Column("worktreeId") == worktreeId.uuidString)
                 .order(Column("orderIdx"))
                 .fetchAll(db)
-            var tabs: [TerminalTab] = []
+            var tabs: [WorkspaceTab] = []
             var active: UUID?
             for record in records {
                 // ids/treeJSON scritti da questo store; righe non parsabili = corruzione esterna
@@ -219,7 +220,7 @@ public actor ProjectStore {
                     logger.warning("loadTabs: skipping corrupt TerminalTabRecord '\(record.id)'")
                     continue
                 }
-                tabs.append(TerminalTab(id: id, title: record.title, tree: tree))
+                tabs.append(WorkspaceTab(id: id, title: record.title, tree: tree))
                 if record.isActive { active = id }
             }
             return (tabs, active)

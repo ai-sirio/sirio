@@ -3,3 +3,4 @@ DerivedData/
 .build/
 App/Info.plist
 build/
+.tokensave/

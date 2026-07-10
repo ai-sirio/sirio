@@ -58,10 +58,10 @@ struct TabBarView: View {
     }
 
     @ViewBuilder
-    private func tabItem(_ tab: TerminalTab) -> some View {
+    private func tabItem(_ tab: WorkspaceTab) -> some View {
         let isActive = model.activeTab(for: worktree.id)?.id == tab.id
         HStack(spacing: 5) {
-            if let agentId = tab.tree.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
+            if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
                 AgentIcon(agentId: agentId, size: 12)
             }
             if renamingTabId == tab.id {

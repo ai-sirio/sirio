@@ -6,12 +6,12 @@ import Foundation
 ///
 /// `tabs` è un Dictionary: l'ordine tra worktree diverse non è definito.
 public func scrollbackFlushTargets(
-    tabs: [UUID: [TerminalTab]]
+    tabs: [UUID: [WorkspaceTab]]
 ) -> [(worktreeId: UUID, paneId: UUID)] {
     var out: [(worktreeId: UUID, paneId: UUID)] = []
     for (worktreeId, tabList) in tabs {
         for tab in tabList {
-            for paneId in tab.tree.leafIds {
+            for paneId in tab.leafIds {
                 out.append((worktreeId, paneId))
             }
         }

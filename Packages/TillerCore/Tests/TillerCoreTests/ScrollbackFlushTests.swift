@@ -4,7 +4,7 @@ import Foundation
 
 @Test func flushTargetsSingleLeafYieldsOnePair() {
     let wt = UUID(); let pane = UUID()
-    let tabs = [wt: [TerminalTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: pane))]]
+    let tabs = [wt: [WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: pane))]]
 
     let targets = scrollbackFlushTargets(tabs: tabs)
 
@@ -16,7 +16,7 @@ import Foundation
 @Test func flushTargetsSplitYieldsPairPerLeaf() {
     let wt = UUID(); let a = UUID(); let b = UUID()
     let tree = SplitTree.leaf(id: a).splitting(leaf: a, axis: .horizontal, newLeaf: b)
-    let tabs = [wt: [TerminalTab(id: UUID(), title: "Terminale 1", tree: tree)]]
+    let tabs = [wt: [WorkspaceTab(id: UUID(), title: "Terminale 1", tree: tree)]]
 
     let targets = scrollbackFlushTargets(tabs: tabs)
 
@@ -28,8 +28,8 @@ import Foundation
 @Test func flushTargetsMultipleWorktreesKeepCorrectWorktreeId() {
     let wt1 = UUID(); let wt2 = UUID(); let p1 = UUID(); let p2 = UUID()
     let tabs = [
-        wt1: [TerminalTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p1))],
-        wt2: [TerminalTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p2))],
+        wt1: [WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p1))],
+        wt2: [WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p2))],
     ]
 
     let targets = scrollbackFlushTargets(tabs: tabs)
@@ -46,8 +46,8 @@ import Foundation
 @Test func flushTargetsMultipleTabsPerWorktreeCoverAll() {
     let wt = UUID(); let p1 = UUID(); let p2 = UUID()
     let tabs = [wt: [
-        TerminalTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p1)),
-        TerminalTab(id: UUID(), title: "Terminale 2", tree: .leaf(id: p2)),
+        WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p1)),
+        WorkspaceTab(id: UUID(), title: "Terminale 2", tree: .leaf(id: p2)),
     ]]
 
     let targets = scrollbackFlushTargets(tabs: tabs)
