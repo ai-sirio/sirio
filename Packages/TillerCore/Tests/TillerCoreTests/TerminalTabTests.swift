@@ -3,10 +3,10 @@ import Foundation
 @testable import TillerCore
 
 @Test func nextShellTitleCountsOnlyManualShellTabs() {
-    #expect(TerminalTab.nextShellTitle(existing: []) == "Terminale 1")
+    #expect(WorkspaceTab.nextShellTitle(existing: []) == "Terminale 1")
     let tabs = [
-        TerminalTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID())),
-        TerminalTab(id: UUID(), title: "Claude Code", tree: .leaf(id: UUID()))
+        WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID())),
+        WorkspaceTab(id: UUID(), title: "Claude Code", tree: .leaf(id: UUID()))
     ]
-    #expect(TerminalTab.nextShellTitle(existing: tabs) == "Terminale 2")
+    #expect(WorkspaceTab.nextShellTitle(existing: tabs) == "Terminale 2")
 }

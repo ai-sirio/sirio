@@ -23,7 +23,7 @@ final class TerminalContextMenuProvider {
             TerminalContextMenuItem(title: "Split Terminal Right", systemImage: "square.split.1x2", action: .splitRight),
             TerminalContextMenuItem(title: "Split Terminal Down", systemImage: "square.split.2x1", action: .splitDown),
         ]
-        if let tuple = model?.tabContaining(paneId: paneId), tuple.tab.tree.leafIds.count > 1 {
+        if let tuple = model?.tabContaining(paneId: paneId), tuple.tab.leafIds.count > 1 {
             items.append(TerminalContextMenuItem(title: "Close Terminal", systemImage: "xmark.square", action: .close))
         }
         return items

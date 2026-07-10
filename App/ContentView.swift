@@ -81,8 +81,9 @@ struct ContentView: View {
                     ForEach(model.tabs[worktreeId] ?? []) { tab in
                         let isVisible = isSelected
                             && model.activeTab(for: worktreeId)?.id == tab.id
-                        TerminalSplitHost(
-                            tree: tab.tree,
+                        if let tree = tab.terminalTree {
+                            TerminalSplitHost(
+                                tree: tree,
                             workingDirectory: worktree.path,
                             extraEnvironment: [
                                 "TILLER_ENV": "1",
@@ -112,6 +113,7 @@ struct ContentView: View {
                         .opacity(isVisible ? 1 : 0)
                         .allowsHitTesting(isVisible)
                         .accessibilityHidden(!isVisible)
+                        }
                     }
                 }
             }

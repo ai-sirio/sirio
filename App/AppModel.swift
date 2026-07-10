@@ -70,7 +70,7 @@ final class AppModel {
     /// Highest-priority agent status among all panes in a worktree's tree.
     /// Priority: error > needs-input > running > done. Returns nil if no agent panes.
     func statusForWorktree(_ worktree: Worktree) -> AgentStatus? {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.tree.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
         return agentActivity.statusForWorktree(paneIds: paneIds)
     }
 
@@ -89,9 +89,9 @@ final class AppModel {
 
     /// Tab whose panes report the worst status within `worktree` — the tab
     /// the menu-bar roster switches to when jumping back into a worktree.
-    func worstStatusTab(in worktree: Worktree) -> TerminalTab? {
+    func worstStatusTab(in worktree: Worktree) -> WorkspaceTab? {
         AttentionSort.sorted(tabs[worktree.id] ?? []) { tab in
-            agentActivity.statusForWorktree(paneIds: tab.tree.leafIds)
+            agentActivity.statusForWorktree(paneIds: tab.leafIds)
         }.first
     }
 
@@ -106,7 +106,7 @@ final class AppModel {
     /// Adapter id of the most relevant agent pane in a worktree (same
     /// priority order as statusForWorktree), nil if no agent panes.
     func agentIdForWorktree(_ worktree: Worktree) -> String? {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.tree.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
         return agentActivity.agentIdForWorktree(paneIds: paneIds)
     }
 
@@ -114,13 +114,13 @@ final class AppModel {
     /// AgentCatalog.all for stable left-to-right icon order in the
     /// worktree row's trailing running-agents badge.
     func runningAgentIds(for worktree: Worktree) -> [String] {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.tree.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
         return agentActivity.runningAgentIds(paneIds: paneIds, catalogIds: AgentCatalog.all.map(\.id))
     }
     private let notifier = AgentNotifier()
 
     private var controlServer: ControlServer?
-    var tabs: [UUID: [TerminalTab]] = [:]
+    var tabs: [UUID: [WorkspaceTab]] = [:]
     var activeTabId: [UUID: UUID] = [:]
     var lastError: String?
 
@@ -151,7 +151,7 @@ final class AppModel {
                     activeTabId[worktree.id] = loaded.activeTabId ?? loaded.tabs.first?.id
                     await restoreAgentSessions(
                         for: worktree,
-                        paneIds: Set(loaded.tabs.flatMap { $0.tree.leafIds })
+                        paneIds: Set(loaded.tabs.flatMap { $0.leafIds })
                     )
                 }
             }
@@ -465,9 +465,9 @@ final class AppModel {
     }
     func ensureTabs(for worktree: Worktree) {
         guard tabs[worktree.id, default: []].isEmpty else { return }
-        let tab = TerminalTab(
+        let tab = WorkspaceTab(
             id: UUID(),
-            title: TerminalTab.nextShellTitle(existing: []),
+            title: WorkspaceTab.nextShellTitle(existing: []),
             tree: .leaf(id: worktree.id)
         )
         tabs[worktree.id] = [tab]
@@ -475,7 +475,7 @@ final class AppModel {
         persistTabs(for: worktree.id)
     }
 
-    func activeTab(for worktreeId: UUID) -> TerminalTab? {
+    func activeTab(for worktreeId: UUID) -> WorkspaceTab? {
         guard let list = tabs[worktreeId], !list.isEmpty else { return nil }
         return list.first { $0.id == activeTabId[worktreeId] } ?? list.first
     }
@@ -483,8 +483,8 @@ final class AppModel {
     /// Apre una nuova tab con un singolo pane e la attiva. Punto unico usato
     /// da shell manuali, spawnAgent e panel.create.
     @discardableResult
-    func openTab(paneId: UUID, title: String, in worktree: Worktree) -> TerminalTab {
-        let tab = TerminalTab(id: UUID(), title: title, tree: .leaf(id: paneId))
+    func openTab(paneId: UUID, title: String, in worktree: Worktree) -> WorkspaceTab {
+        let tab = WorkspaceTab(id: UUID(), title: title, tree: .leaf(id: paneId))
         tabs[worktree.id, default: []].append(tab)
         activeTabId[worktree.id] = tab.id
         persistTabs(for: worktree.id)
@@ -492,7 +492,7 @@ final class AppModel {
     }
 
     func newShellTab(in worktree: Worktree) {
-        let title = TerminalTab.nextShellTitle(existing: tabs[worktree.id] ?? [])
+        let title = WorkspaceTab.nextShellTitle(existing: tabs[worktree.id] ?? [])
         openTab(paneId: UUID(), title: title, in: worktree)
     }
 
@@ -507,13 +507,13 @@ final class AppModel {
     func closeTab(_ tabId: UUID, in worktree: Worktree) {
         guard var list = tabs[worktree.id] else { return }
         if let closing = list.first(where: { $0.id == tabId }) {
-            deleteAgentSessionRefs(paneIds: closing.tree.leafIds)
+            deleteAgentSessionRefs(paneIds: closing.leafIds)
         }
         list.removeAll { $0.id == tabId }
         if list.isEmpty {
-            list = [TerminalTab(
+            list = [WorkspaceTab(
                 id: UUID(),
-                title: TerminalTab.nextShellTitle(existing: []),
+                title: WorkspaceTab.nextShellTitle(existing: []),
                 tree: .leaf(id: UUID())
             )]
         }
@@ -545,14 +545,14 @@ final class AppModel {
     func splitCurrent(_ axis: SplitAxis) {
         guard let worktree = selectedWorktree,
               let tab = activeTab(for: worktree.id),
-              let target = tab.tree.leafIds.first else { return }
+              let target = tab.leafIds.first else { return }
         split(paneId: target, axis: axis)
     }
 
     /// Tab (se esiste) che contiene paneId in uno qualsiasi dei worktree aperti.
-    func tabContaining(paneId: UUID) -> (worktree: Worktree, tab: TerminalTab, index: Int)? {
+    func tabContaining(paneId: UUID) -> (worktree: Worktree, tab: WorkspaceTab, index: Int)? {
         for worktree in worktrees.values.flatMap({ $0 }) {
-            if let idx = tabs[worktree.id]?.firstIndex(where: { $0.tree.leafIds.contains(paneId) }) {
+            if let idx = tabs[worktree.id]?.firstIndex(where: { $0.leafIds.contains(paneId) }) {
                 return (worktree, tabs[worktree.id]![idx], idx)
             }
         }
@@ -563,7 +563,8 @@ final class AppModel {
     func split(paneId: UUID, axis: SplitAxis) {
         guard let tuple = tabContaining(paneId: paneId) else { return }
         let idx = tuple.index
-        tabs[tuple.worktree.id]?[idx].tree = tuple.tab.tree.splitting(leaf: paneId, axis: axis, newLeaf: UUID())
+        guard let tree = tuple.tab.terminalTree else { return }
+        tabs[tuple.worktree.id]?[idx].content = .terminal(tree.splitting(leaf: paneId, axis: axis, newLeaf: UUID()))
         persistTabs(for: tuple.worktree.id)
     }
 
@@ -573,9 +574,10 @@ final class AppModel {
     /// via già usata quando si cambia tab — nessuna nuova logica qui.
     func closePane(paneId: UUID) {
         guard let tuple = tabContaining(paneId: paneId),
-              let newTree = tuple.tab.tree.removing(leaf: paneId) else { return }
+              let tree = tuple.tab.terminalTree,
+              let newTree = tree.removing(leaf: paneId) else { return }
         deleteAgentSessionRefs(paneIds: [paneId])
-        tabs[tuple.worktree.id]?[tuple.index].tree = newTree
+        tabs[tuple.worktree.id]?[tuple.index].content = .terminal(newTree)
         persistTabs(for: tuple.worktree.id)
     }
 
@@ -789,12 +791,12 @@ final class AppModel {
 
     private func isSelectedWorktreeContaining(paneId: UUID) -> Bool {
         guard let sel = selectedWorktree else { return false }
-        return (tabs[sel.id] ?? []).contains { $0.tree.leafIds.contains(paneId) }
+        return (tabs[sel.id] ?? []).contains { $0.leafIds.contains(paneId) }
     }
 
     private func worktreeContaining(paneId: UUID) -> Worktree? {
         worktrees.values.flatMap { $0 }.first { wt in
-            (tabs[wt.id] ?? []).contains { $0.tree.leafIds.contains(paneId) }
+            (tabs[wt.id] ?? []).contains { $0.leafIds.contains(paneId) }
         }
     }
 
