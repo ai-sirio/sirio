@@ -34,6 +34,7 @@
 - 🔕 **Native notifications** — Touch-free heads-up when an agent finishes or stalls
 - 💾 **Session persistence** — agent sessions survive an app restart (GRDB-backed)
 - 📊 **Provider usage tracking** — Claude / Codex / OpenCode / Ollama usage at a glance
+- 🔐 **macOS permissions page** — one-shot onboarding + Settings section to grant the TCC permissions agents inherit (notifications, screen recording, accessibility, full disk access, automation, local network)
 
 **Deliberately not doing:** diff viewer, embedded browser, remote SSH / mobile relay, scheduling — Tiller stays a focused terminal + agent hub, not an IDE.
 

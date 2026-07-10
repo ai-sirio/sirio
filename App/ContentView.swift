@@ -9,6 +9,7 @@ struct ContentView: View {
     @AppStorage("usage.codex.showInBar") private var showCodexInBar = true
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
     @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
+    @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
     private let menuProvider: TerminalContextMenuProvider
 
     private var showUsageBar: Bool {
@@ -40,6 +41,12 @@ struct ContentView: View {
             Button("OK") { model.lastError = nil }
         } message: {
             Text(model.lastError ?? "")
+        }
+        .sheet(isPresented: .init(
+            get: { !hasSeenPermissionsOnboarding },
+            set: { if !$0 { hasSeenPermissionsOnboarding = true } }
+        )) {
+            PermissionsOnboardingSheet { hasSeenPermissionsOnboarding = true }
         }
     }
 
