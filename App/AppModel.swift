@@ -442,6 +442,7 @@ final class AppModel {
             worktrees[worktree.projectId]?.removeAll { $0.id == worktree.id }
             let tabsBeingRemoved = tabs[worktree.id] ?? []
             tabs[worktree.id] = nil
+            paneCaches[worktree.id] = nil
             for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
             activeTabId[worktree.id] = nil
             openWorktreeIds.removeAll { $0 == worktree.id }
@@ -597,9 +598,73 @@ final class AppModel {
         persistTabs(for: tuple.worktree.id)
     }
 
+    // MARK: - Pane controller caches (una per worktree)
+
+    private var paneCaches: [UUID: TerminalPaneCache] = [:]
+
+    func paneCache(for worktreeId: UUID) -> TerminalPaneCache {
+        if let cache = paneCaches[worktreeId] { return cache }
+        let cache = TerminalPaneCache()
+        paneCaches[worktreeId] = cache
+        return cache
+    }
+
+    /// Tutti i pane vivi nei tab del worktree — set di pruning per gli host.
+    func liveLeafIds(for worktreeId: UUID) -> Set<UUID> {
+        Set((tabs[worktreeId] ?? []).flatMap(\.leafIds))
+    }
+
+    /// True se il pane può essere affiancato al terminale corrente: stesso
+    /// worktree del tab attivo, non già nel tab attivo, tab attivo terminale.
+    func canAdoptPane(_ paneId: UUID) -> Bool {
+        guard let worktree = selectedWorktree,
+              let source = tabContaining(paneId: paneId),
+              source.worktree.id == worktree.id,
+              let active = activeTab(for: worktree.id),
+              active.terminalTree != nil,
+              !active.leafIds.contains(paneId) else { return false }
+        return true
+    }
+
+    /// Sposta il pane in split orizzontale accanto al primo leaf del tab
+    /// attivo. Il tab sorgente svuotato viene rimosso direttamente (niente
+    /// closeTab: il pane è vivo altrove, i suoi session ref non vanno toccati).
+    func adoptPane(_ paneId: UUID) {
+        guard canAdoptPane(paneId),
+              let worktree = selectedWorktree,
+              let source = tabContaining(paneId: paneId),
+              let active = activeTab(for: worktree.id),
+              let destTree = active.terminalTree,
+              let anchor = destTree.leafIds.first,
+              let sourceTree = source.tab.terminalTree else { return }
+
+        if let remaining = sourceTree.removing(leaf: paneId) {
+            tabs[worktree.id]?[source.index].content = .terminal(remaining)
+        } else {
+            tabs[worktree.id]?.remove(at: source.index)
+        }
+        guard let destIndex = tabs[worktree.id]?.firstIndex(where: { $0.id == active.id }) else { return }
+        tabs[worktree.id]?[destIndex].content =
+            .terminal(destTree.splitting(leaf: anchor, axis: .horizontal, newLeaf: paneId))
+        persistTabs(for: worktree.id)
+    }
+
+    /// Chiude un terminale: se è l'unico pane del tab chiude l'intera tab.
+    func closeTerminal(paneId: UUID) {
+        guard let target = tabContaining(paneId: paneId) else { return }
+        if target.tab.leafIds.count <= 1 {
+            closeTab(target.tab.id, in: target.worktree)
+        } else {
+            closePane(paneId: paneId)
+        }
+    }
+
     /// Fire-and-forget: la persistenza tab non deve bloccare la UI; un
     /// fallimento lascia solo il layout non salvato (rimedio: prossima mutazione).
     private func persistTabs(for worktreeId: UUID) {
+        // Ogni mutazione tab passa di qui: il prune tiene la cache condivisa
+        // allineata (un pane chiuso viene scartato → deinit → stop PTY).
+        paneCaches[worktreeId]?.prune(keeping: liveLeafIds(for: worktreeId))
         guard let store else { return }
         let list = tabs[worktreeId] ?? []
         let active = activeTabId[worktreeId]
@@ -666,6 +731,10 @@ final class AppModel {
     // MARK: - Pane commands & agent spawning
 
     var paneCommands: [UUID: String] = [:]
+
+    /// Ultimo titolo PTY riportato da ogni pane (solo in memoria: al riavvio
+    /// la shell lo rigenera). Alimenta le etichette dei nodi pane in sidebar.
+    var paneTitles: [UUID: String] = [:]
 
     // MARK: - Markdown editor
 
@@ -889,6 +958,7 @@ final class AppModel {
     // MARK: - Title-based activity fallback & notifications
 
     func handleTitleChange(paneId: UUID, title: String) {
+        paneTitles[paneId] = title
         guard let t = agentActivity.handleTitleChange(paneId: paneId, title: title, now: Date()) else { return }
         notifyTransition(paneId: paneId, from: t.old, to: t.new)
     }

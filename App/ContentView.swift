@@ -174,6 +174,7 @@ struct ContentView: View {
                                             await MainActor.run {
                                                 model.agentActivity.paneClosed(paneId: id)
                                                 model.paneCommands[id] = nil
+                                                model.paneTitles[id] = nil
                                             }
                                         },
                                         command: { model.paneCommand(paneId: $0) },
@@ -186,7 +187,9 @@ struct ContentView: View {
                                     },
                                     onMenuAction: { action, paneId, proxy in
                                         menuProvider.handle(action, paneId: paneId, proxy: proxy)
-                                    }
+                                    },
+                                    paneCache: model.paneCache(for: worktreeId),
+                                    liveLeafIds: { model.liveLeafIds(for: worktreeId) }
                                 )
                             case .markdown:
                                 if let doc = model.markdownDocument(for: tab) {
