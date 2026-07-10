@@ -8,8 +8,11 @@ xcodegen generate
 
 # Build tillerctl so dev-build fallback exists for pane spawns.
 swift build --package-path Packages/TillerControl --product tillerctl
+# CODE_SIGNING_ALLOWED=NO: this build only needs to compile, not run or be
+# distributed — avoids requiring a "Mac Development" cert on CI runners
+# that only carry the Developer ID Application cert used for releases.
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -derivedDataPath DerivedData build | tail -5
+  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build | tail -5
 
 # --- Parallel package tests ---
 tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
