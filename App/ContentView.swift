@@ -95,9 +95,6 @@ struct ContentView: View {
                     sidebarWidth = $0
                 }
             VStack(spacing: 0) {
-                if let selected = model.selectedWorktree {
-                    TabBarView(model: model, worktree: selected)
-                }
                 terminalStack
                 if showUsageBar {
                     Divider()
