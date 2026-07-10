@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version matches tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: Scripts/check-release-version.sh "$TAG_NAME" project.yml
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Run CI gate
+        run: Scripts/ci.sh
+
+      - name: Import signing certificate
+        env:
+          DEVELOPER_ID_CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          security create-keychain -p "$KEYCHAIN_PASSWORD" ci.keychain
+          security set-keychain-settings -lut 21600 ci.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" ci.keychain
+          security list-keychains -d user -s ci.keychain $(security list-keychains -d user | tr -d '"')
+
+          echo "$DEVELOPER_ID_CERTIFICATE_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k ci.keychain -P "$DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" ci.keychain
+          rm -f cert.p12
+
+      - name: Archive and export
+        run: |
+          xcodegen generate
+          xcodebuild archive -project Tiller.xcodeproj -scheme Tiller -archivePath build/Tiller.xcarchive
+          xcodebuild -exportArchive -archivePath build/Tiller.xcarchive -exportPath build/export -exportOptionsPlist exportOptions.plist
+
+      - name: Notarize and staple
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: |
+          echo "$ASC_API_KEY_P8" | base64 --decode > AuthKey.p8
+          ditto -c -k --keepParent build/export/Tiller.app build/Tiller.zip
+          xcrun notarytool submit build/Tiller.zip --key AuthKey.p8 --key-id "$ASC_API_KEY_ID" --issuer "$ASC_API_ISSUER_ID" --wait
+          xcrun stapler staple build/export/Tiller.app
+          rm -f AuthKey.p8
+
+      - name: Build DMG
+        id: dmg
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          DMG_PATH="build/Tiller-${VERSION}.dmg"
+          Scripts/build-dmg.sh build/export/Tiller.app Tiller "$DMG_PATH"
+          echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: Scripts/generate-changelog.sh "$TAG_NAME" . > changelog.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
+        run: |
+          gh release create "$TAG_NAME" \
+            "$DMG_PATH" \
+            --title "Tiller $TAG_NAME" \
+            --notes-file changelog.md
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain ci.keychain || true
+          rm -f cert.p12
+          rm -f AuthKey.p8
