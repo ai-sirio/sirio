@@ -27,6 +27,9 @@ struct SidebarView: View {
                             ForEach(AttentionSort.sorted(model.worktrees[project.id] ?? [], statusOf: model.statusForWorktree)) { worktree in
                                 WorktreeRow(model: model, worktree: worktree)
                                     .contextMenu {
+                                        Button("Nuovo Terminale") {
+                                            model.newShellTab(in: worktree)
+                                        }
                                         ForEach(AgentCatalog.all, id: \.id) { adapter in
                                             Button("New \(adapter.displayName) Panel") {
                                                 Task { await model.spawnAgent(adapter, in: worktree) }
@@ -40,6 +43,10 @@ struct SidebarView: View {
                                             Task { await model.removeWorktree(worktree) }
                                         }
                                     }
+
+                                ForEach(model.tabs[worktree.id] ?? []) { tab in
+                                    TabRow(model: model, worktree: worktree, tab: tab)
+                                }
                             }
 
                             NewWorktreeButton { branchPromptProject = project }
@@ -50,6 +57,7 @@ struct SidebarView: View {
                 .padding(.top, 4)
                 .animation(.easeInOut(duration: 0.18), value: model.expandedProjectIds)
                 .animation(.easeInOut(duration: 0.18), value: model.worktrees.mapValues { $0.map(\.id) })
+                .animation(.easeInOut(duration: 0.18), value: model.tabs.mapValues { $0.map(\.id) })
             }
             .scrollContentBackground(.hidden)
 
@@ -293,6 +301,18 @@ private struct WorktreeRow: View {
 
             Spacer(minLength: 4)
 
+            if hovering {
+                Button {
+                    model.newShellTab(in: worktree)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11))
+                        .foregroundStyle(AppTheme.meta)
+                }
+                .buttonStyle(.plain)
+                .help("Nuovo terminale (⌘T)")
+            }
+
             let runningAgentIds = model.runningAgentIds(for: worktree)
             if !runningAgentIds.isEmpty {
                 WorktreeRunningAgentsBadge(agentIds: runningAgentIds)
@@ -377,6 +397,122 @@ private struct NewWorktreeButton: View {
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
+    }
+}
+
+/// Nodo tab del tree in sidebar: icona (agente / terminale / markdown),
+/// titolo, dirty dot per markdown, × in hover, rename inline su doppio click.
+/// Indentato sotto la WorktreeRow del proprio worktree.
+private struct TabRow: View {
+    @Bindable var model: AppModel
+    let worktree: Worktree
+    let tab: WorkspaceTab
+    @State private var hovering = false
+    @State private var renaming = false
+    @State private var draftTitle = ""
+    @FocusState private var renameFieldFocused: Bool
+
+    private var isSelected: Bool {
+        model.selectedWorktree?.id == worktree.id
+            && model.activeTab(for: worktree.id)?.id == tab.id
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            icon
+                .frame(width: 14)
+
+            if renaming {
+                TextField("", text: $draftTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($renameFieldFocused)
+                    .onSubmit {
+                        model.renameTab(tab.id, in: worktree.id, to: draftTitle)
+                        renaming = false
+                    }
+                    .onExitCommand { renaming = false }
+            } else {
+                Text(tab.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.subtitle)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if model.markdownDocuments[tab.id]?.isDirty == true {
+                    Circle().fill(.secondary).frame(width: 5, height: 5)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            if hovering && !renaming {
+                Button {
+                    model.closeTab(tab.id, in: worktree)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(AppTheme.meta)
+                }
+                .buttonStyle(.plain)
+                .help("Chiudi tab (⌘W)")
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 9)
+        .contentShape(Rectangle())
+        .background(rowBackground)
+        .padding(.leading, 28)
+        .padding(.vertical, 1)
+        .focusEffectDisabled()
+        .onHover { hovering = $0 }
+        .onTapGesture(count: 2) {
+            draftTitle = tab.title
+            renaming = true
+            renameFieldFocused = true
+        }
+        .onTapGesture {
+            model.selectedWorktree = worktree
+            model.activateTab(tab.id, in: worktree.id)
+        }
+        .contextMenu {
+            Button("Rinomina") {
+                draftTitle = tab.title
+                renaming = true
+                renameFieldFocused = true
+            }
+            Button("Chiudi") {
+                model.closeTab(tab.id, in: worktree)
+            }
+        }
+    }
+
+    @ViewBuilder private var icon: some View {
+        if tab.markdownFileURL != nil {
+            Image(systemName: "doc.text")
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.meta)
+        } else if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
+            AgentIcon(agentId: agentId, size: 12)
+        } else {
+            Image(systemName: "terminal")
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.meta)
+        }
+    }
+
+    @ViewBuilder private var rowBackground: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 7)
+                .fill(AppTheme.selectionFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(AppTheme.selectionRing, lineWidth: 1)
+                )
+        } else if hovering {
+            RoundedRectangle(cornerRadius: 7).fill(AppTheme.rowHover)
+        } else {
+            Color.clear
+        }
     }
 }
 
