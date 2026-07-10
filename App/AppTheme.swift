@@ -9,6 +9,8 @@ import TillerCore
 /// live in `AgentIcon`.
 enum AppTheme {
     static let background      = Color(red: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue)
+    /// Indigo tint for the sidebar/tab bar/usage bar material (opencode-style).
+    static let chromeTint      = Color(red: 0.110, green: 0.110, blue: 0.176)
     static let hairline       = Color(red: 0.165, green: 0.176, blue: 0.220)
     static let rowHover       = Color(red: 0.125, green: 0.137, blue: 0.176)
     static let selectionFill  = Color(red: 0.169, green: 0.184, blue: 0.227)
