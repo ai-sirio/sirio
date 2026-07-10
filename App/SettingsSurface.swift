@@ -66,6 +66,7 @@ struct SettingsSurface: View {
         case .aiProviders: AIProvidersSettingsView(store: model.usage, accounts: model.agentAccounts)
         case .general: GeneralSettingsView()
         case .appearance: AppearanceSettingsView()
+        case .permissions: PermissionsSettingsView()
         }
     }
 }

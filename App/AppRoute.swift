@@ -11,6 +11,7 @@ enum AppRoute {
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case aiProviders
     case general
+    case permissions
     case appearance
 
     var id: String { rawValue }
@@ -19,6 +20,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .aiProviders: "AI Providers"
         case .general: "General"
+        case .permissions: "Permissions"
         case .appearance: "Appearance"
         }
     }
@@ -27,6 +29,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .aiProviders: "sparkles"
         case .general: "gearshape"
+        case .permissions: "lock.shield"
         case .appearance: "paintbrush"
         }
     }
