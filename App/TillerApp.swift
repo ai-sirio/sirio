@@ -4,6 +4,7 @@ import TillerCore
 @main
 struct TillerApp: App {
     @State private var model = AppModel()
+    @State private var updater = UpdaterModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
@@ -23,9 +24,12 @@ struct TillerApp: App {
 
     var body: some Scene {
         WindowGroup(id: "main") {
-            ContentView(model: model)
+            ContentView(model: model, updater: updater)
                 .preferredColorScheme(.dark)
-                .onAppear { appDelegate.model = model }
+                .onAppear {
+                    appDelegate.model = model
+                    updater.start()
+                }
         }
         .commands {
             // Nel menu File PRIMA di Close: performKeyEquivalent trova

@@ -5,6 +5,7 @@ import TillerControl
 
 struct ContentView: View {
     var model: AppModel
+    var updater: UpdaterModel
     @AppStorage("usage.claude.showInBar") private var showClaudeInBar = true
     @AppStorage("usage.codex.showInBar") private var showCodexInBar = true
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
@@ -16,8 +17,9 @@ struct ContentView: View {
         showClaudeInBar || showCodexInBar || showOpencodeGoInBar || showOllamaCloudInBar
     }
 
-    init(model: AppModel) {
+    init(model: AppModel, updater: UpdaterModel) {
         self.model = model
+        self.updater = updater
         self.menuProvider = TerminalContextMenuProvider(model: model)
     }
 
@@ -47,6 +49,10 @@ struct ContentView: View {
             set: { if !$0 { hasSeenPermissionsOnboarding = true } }
         )) {
             PermissionsOnboardingSheet { hasSeenPermissionsOnboarding = true }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            UpdateToastView(updater: updater)
+                .padding(16)
         }
     }
 
