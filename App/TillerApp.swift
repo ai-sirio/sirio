@@ -5,6 +5,7 @@ import TillerCore
 struct TillerApp: App {
     @State private var model = AppModel()
     @State private var updater = UpdaterModel()
+    @AppStorage("sidebar.visible") private var sidebarVisible = true
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
@@ -48,6 +49,12 @@ struct TillerApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)
+            }
+            CommandGroup(after: .sidebar) {
+                Button(sidebarVisible ? "Nascondi Sidebar" : "Mostra Sidebar") {
+                    sidebarVisible.toggle()
+                }
+                .keyboardShortcut("s", modifiers: [.control, .command])
             }
         }
 

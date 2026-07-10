@@ -11,6 +11,7 @@ struct ContentView: View {
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
     @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
+    @AppStorage("sidebar.visible") private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 240
     private let menuProvider: TerminalContextMenuProvider
 
@@ -35,6 +36,16 @@ struct ContentView: View {
         .configuresWindowChrome()
         .toolbar {
             if model.route == .workspace {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        sidebarVisible.toggle()
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .help(sidebarVisible ? "Nascondi Sidebar (⌃⌘S)" : "Mostra Sidebar (⌃⌘S)")
+                    .accessibilityLabel("Sidebar")
+                }
+
                 ToolbarItem(placement: .principal) {
                     if let worktree = model.selectedWorktree {
                         HStack(spacing: 5) {
@@ -100,15 +111,17 @@ struct ContentView: View {
     // lets the sidebar run edge-to-edge for the full window height.
     private var workspaceView: some View {
         HSplitView {
-            SidebarView(model: model)
-                .frame(minWidth: 200, idealWidth: 240, maxWidth: 400, maxHeight: .infinity)
-                .background(
-                    SidebarMaterialContainer()
-                        .ignoresSafeArea()
-                )
-                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
-                    sidebarWidth = $0
-                }
+            if sidebarVisible {
+                SidebarView(model: model)
+                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 400, maxHeight: .infinity)
+                    .background(
+                        SidebarMaterialContainer()
+                            .ignoresSafeArea()
+                    )
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                        sidebarWidth = $0
+                    }
+            }
             VStack(spacing: 0) {
                 terminalStack
                 if showUsageBar {
@@ -128,12 +141,15 @@ struct ContentView: View {
         // HSplitView draws an opaque dark divider with no styling API; cover
         // it with the shared material so no seam shows between the columns.
         .overlay(alignment: .leading) {
-            SidebarMaterialContainer()
-                .frame(width: 2)
-                .offset(x: sidebarWidth)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
+            if sidebarVisible {
+                SidebarMaterialContainer()
+                    .frame(width: 2)
+                    .offset(x: sidebarWidth)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
     }
 
     @ViewBuilder
