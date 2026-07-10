@@ -15,7 +15,7 @@ struct UsageBarView: View {
         HStack(spacing: 12) {
             if let worktree {
                 WorktreeContextSegment(worktree: worktree)
-                Divider().frame(height: 10)
+                Divider().frame(height: 8)
             }
             ClaudeUsageSegment(state: store.claude)
             if showCodexInBar {
@@ -49,9 +49,9 @@ struct UsageBarView: View {
             .buttonStyle(.plain)
             .help("Refresh usage")
         }
-        .font(.system(size: 11))
-        .padding(.horizontal, 16)
-        .padding(.vertical, 4)
+        .font(.system(size: 10))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
         .frame(maxWidth: .infinity)
         .background(AppTheme.background)
     }
@@ -97,7 +97,7 @@ private struct ClaudeUsageSegment: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            AgentIcon(agentId: "claude", size: 12)
+            AgentIcon(agentId: "claude", size: 10)
             Text(text)
         }
         .foregroundStyle(isDimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
@@ -151,7 +151,7 @@ private struct ProviderUsageSegment: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            AgentIcon(agentId: agentId, size: 12)
+            AgentIcon(agentId: agentId, size: 10)
             Text(text)
         }
         .foregroundStyle(isDimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
