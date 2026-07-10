@@ -63,7 +63,7 @@ struct TabBarView: View {
         HStack(spacing: 5) {
             if tab.markdownFileURL != nil {
                 Image(systemName: "doc.text")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(.secondary)
             } else if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
                 AgentIcon(agentId: agentId, size: 12)
@@ -94,7 +94,7 @@ struct TabBarView: View {
                 model.closeTab(tab.id, in: worktree)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(AppFont.system(size: 8, weight: .bold))
             }
             .buttonStyle(.plain)
             .opacity(isActive ? 0.9 : 0.65)
