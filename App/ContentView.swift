@@ -115,7 +115,10 @@ struct ContentView: View {
                 }
             }
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-            .background(AppTheme.background.ignoresSafeArea(edges: .top))
+            // Opaque terminal surface only below the titlebar; the sidebar
+            // material extends under it so the titlebar matches the sidebar.
+            .background(AppTheme.background, ignoresSafeAreaEdges: [])
+            .background(SidebarMaterialContainer().ignoresSafeArea(edges: .top))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
                       let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }
