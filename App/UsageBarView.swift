@@ -1,16 +1,22 @@
 import SwiftUI
+import Foundation
 import TillerCore
 
 /// Slim bottom bar showing usage for each enabled provider (Claude, Codex,
 /// OpenCode Go, Ollama Cloud), e.g. `Claude 26% 5h · 53% wk · 66% Fable`.
 struct UsageBarView: View {
     let store: UsageStore
+    let worktree: Worktree?
     @AppStorage("usage.codex.showInBar") private var showCodexInBar = true
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
     @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
 
     var body: some View {
         HStack(spacing: 12) {
+            if let worktree {
+                WorktreeContextSegment(worktree: worktree)
+                Divider().frame(height: 10)
+            }
             ClaudeUsageSegment(state: store.claude)
             if showCodexInBar {
                 ProviderUsageSegment(
@@ -43,7 +49,7 @@ struct UsageBarView: View {
             .buttonStyle(.plain)
             .help("Refresh usage")
         }
-        .font(.system(size: 11))
+        .font(AppFont.system(size: 11))
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity)
@@ -185,5 +191,21 @@ private struct ProviderUsageSegment: View {
         case .loaded, .stale: return loadedTooltip
         case .unavailable(let reason): return unavailableTooltip(reason)
         }
+    }
+}
+
+/// Branch + abbreviated path of the selected worktree — shown only when a
+/// worktree is selected, so the bar degrades to just provider usage
+/// otherwise (same as today when `openWorktreeIds` is empty).
+private struct WorktreeContextSegment: View {
+    let worktree: Worktree
+
+    var body: some View {
+        Text("\(worktree.branch) · \(abbreviatedPath)")
+            .foregroundStyle(AppTheme.meta)
+    }
+
+    private var abbreviatedPath: String {
+        (worktree.path as NSString).abbreviatingWithTildeInPath
     }
 }

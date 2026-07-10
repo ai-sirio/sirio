@@ -79,7 +79,7 @@ struct ContentView: View {
             }
             if showUsageBar {
                 Divider()
-                UsageBarView(store: model.usage)
+                UsageBarView(store: model.usage, worktree: model.selectedWorktree)
             }
         }
     }
