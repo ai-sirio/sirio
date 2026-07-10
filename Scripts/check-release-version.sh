@@ -31,4 +31,11 @@ if [ "$TAG_VERSION" != "$PLIST_VERSION" ]; then
   exit 1
 fi
 
+BUILD_VERSION=$(grep -m1 'CFBundleVersion:' "$PROJECT_YML" | sed -E 's/.*CFBundleVersion: *"([^"]+)".*/\1/')
+
+if [ "$TAG_VERSION" != "$BUILD_VERSION" ]; then
+  echo "error: tag version '$TAG_VERSION' does not match CFBundleVersion '$BUILD_VERSION' in $PROJECT_YML" >&2
+  exit 1
+fi
+
 echo "$PLIST_VERSION"
