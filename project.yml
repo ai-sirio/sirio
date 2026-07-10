@@ -24,6 +24,9 @@ packages:
     path: Packages/TillerGit
   TillerAgents:
     path: Packages/TillerAgents
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: 2.4.0
 targets:
   Tiller:
     type: application
@@ -35,6 +38,7 @@ targets:
       - package: TillerPersistence
       - package: TillerControl
       - package: TillerAgents
+      - package: MarkdownUI
       - package: TillerGit
     info:
       path: App/Info.plist

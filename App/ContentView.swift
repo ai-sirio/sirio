@@ -57,6 +57,12 @@ struct ContentView: View {
                 }
                 .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
                 .background(AppTheme.background)
+                .dropDestination(for: URL.self) { urls, _ in
+                    guard let worktree = model.selectedWorktree,
+                          let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }
+                    model.openMarkdownTab(fileURL: url, in: worktree)
+                    return true
+                }
             }
             if showUsageBar {
                 Divider()
@@ -81,39 +87,52 @@ struct ContentView: View {
                     ForEach(model.tabs[worktreeId] ?? []) { tab in
                         let isVisible = isSelected
                             && model.activeTab(for: worktreeId)?.id == tab.id
-                        if let tree = tab.terminalTree {
-                            TerminalSplitHost(
-                                tree: tree,
-                            workingDirectory: worktree.path,
-                            extraEnvironment: [
-                                "TILLER_ENV": "1",
-                                "TILLER_SOCKET": ControlSocket.defaultPath(),
-                                "TILLER_WORKTREE_ID": worktreeId.uuidString
-                            ],
-                            paneContext: (
-                                initial: { model.loadScrollback(paneId: $0) },
-                                onClose: { id, data in
-                                    await model.saveScrollback(worktreeId: worktreeId, paneId: id, data: data)
-                                    await MainActor.run {
-                                        model.agentActivity.paneClosed(paneId: id)
-                                        model.paneCommands[id] = nil
+                        Group {
+                            switch tab.content {
+                            case .terminal(let tree):
+                                TerminalSplitHost(
+                                    tree: tree,
+                                    workingDirectory: worktree.path,
+                                    extraEnvironment: [
+                                        "TILLER_ENV": "1",
+                                        "TILLER_SOCKET": ControlSocket.defaultPath(),
+                                        "TILLER_WORKTREE_ID": worktreeId.uuidString
+                                    ],
+                                    paneContext: (
+                                        initial: { model.loadScrollback(paneId: $0) },
+                                        onClose: { id, data in
+                                            await model.saveScrollback(worktreeId: worktreeId, paneId: id, data: data)
+                                            await MainActor.run {
+                                                model.agentActivity.paneClosed(paneId: id)
+                                                model.paneCommands[id] = nil
+                                            }
+                                        },
+                                        command: { model.paneCommand(paneId: $0) },
+                                        onTitleChange: { id, title in model.handleTitleChange(paneId: id, title: title) },
+                                        onContentSignal: { id, tail in model.handleContentSignal(paneId: id, tailText: tail) }
+                                    ),
+                                    menuProvider: { paneId, proxy in
+                                        menuProvider.items(for: paneId, proxy: proxy)
+                                    },
+                                    onMenuAction: { action, paneId, proxy in
+                                        menuProvider.handle(action, paneId: paneId, proxy: proxy)
                                     }
-                                },
-                                command: { model.paneCommand(paneId: $0) },
-                                onTitleChange: { id, title in model.handleTitleChange(paneId: id, title: title) },
-                                onContentSignal: { id, tail in model.handleContentSignal(paneId: id, tailText: tail) }
-                            ),
-                            menuProvider: { paneId, proxy in
-                                menuProvider.items(for: paneId, proxy: proxy)
-                            },
-                            onMenuAction: { action, paneId, proxy in
-                                menuProvider.handle(action, paneId: paneId, proxy: proxy)
+                                )
+                            case .markdown:
+                                if let doc = model.markdownDocument(for: tab) {
+                                    MarkdownEditorTabView(document: doc)
+                                } else {
+                                    ContentUnavailableView(
+                                        "File non trovato",
+                                        systemImage: "doc.questionmark",
+                                        description: Text(tab.markdownFileURL?.path ?? "")
+                                    )
+                                }
                             }
-                        )
+                        }
                         .opacity(isVisible ? 1 : 0)
                         .allowsHitTesting(isVisible)
                         .accessibilityHidden(!isVisible)
-                        }
                     }
                 }
             }
