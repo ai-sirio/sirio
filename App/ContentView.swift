@@ -79,34 +79,34 @@ struct ContentView: View {
         }
     }
 
+    // HSplitView instead of NavigationSplitView: on macOS 26 the system sidebar
+    // renders as an inset floating glass card with no opt-out; owning the split
+    // lets the sidebar run edge-to-edge for the full window height.
     private var workspaceView: some View {
-        VStack(spacing: 0) {
-            NavigationSplitView {
-                SidebarView(model: model)
-                    .background(
-                        SidebarMaterialContainer()
-                            .ignoresSafeArea(.container, edges: .vertical)
-                    )
-                    .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 400)
-            } detail: {
-                VStack(spacing: 0) {
-                    if let selected = model.selectedWorktree {
-                        TabBarView(model: model, worktree: selected)
-                    }
-                    terminalStack
+        HSplitView {
+            SidebarView(model: model)
+                .frame(minWidth: 200, idealWidth: 240, maxWidth: 400, maxHeight: .infinity)
+                .background(
+                    SidebarMaterialContainer()
+                        .ignoresSafeArea()
+                )
+            VStack(spacing: 0) {
+                if let selected = model.selectedWorktree {
+                    TabBarView(model: model, worktree: selected)
                 }
-                .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-                .background(AppTheme.background)
-                .dropDestination(for: URL.self) { urls, _ in
-                    guard let worktree = model.selectedWorktree,
-                          let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }
-                    model.openMarkdownTab(fileURL: url, in: worktree)
-                    return true
+                terminalStack
+                if showUsageBar {
+                    Divider()
+                    UsageBarView(store: model.usage, worktree: model.selectedWorktree)
                 }
             }
-            if showUsageBar {
-                Divider()
-                UsageBarView(store: model.usage, worktree: model.selectedWorktree)
+            .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
+            .background(AppTheme.background)
+            .dropDestination(for: URL.self) { urls, _ in
+                guard let worktree = model.selectedWorktree,
+                      let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }
+                model.openMarkdownTab(fileURL: url, in: worktree)
+                return true
             }
         }
     }
@@ -178,5 +178,8 @@ struct ContentView: View {
                 }
             }
         }
+        // Fill the detail column even when empty, so the usage bar stays
+        // pinned to the window bottom instead of centering with the ZStack.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
