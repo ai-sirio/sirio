@@ -58,6 +58,7 @@ struct ContentView: View {
 
     private var workspaceView: some View {
         VStack(spacing: 0) {
+            TopBarView(model: model)
             NavigationSplitView {
                 SidebarView(model: model)
                     .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 400)
