@@ -302,15 +302,36 @@ private struct WorktreeRow: View {
             Spacer(minLength: 4)
 
             if hovering {
-                Button {
-                    model.newShellTab(in: worktree)
+                Menu {
+                    Button {
+                        model.newShellTab(in: worktree)
+                    } label: {
+                        Label("Nuovo Terminale", systemImage: "terminal")
+                    }
+                    Divider()
+                    ForEach(AgentCatalog.all, id: \.id) { adapter in
+                        Button {
+                            Task { await model.spawnAgent(adapter, in: worktree) }
+                        } label: {
+                            if let icon = AgentMenuIconCache.image(for: adapter.id) {
+                                Label {
+                                    Text(adapter.displayName)
+                                } icon: {
+                                    Image(nsImage: icon)
+                                }
+                            } else {
+                                Text(adapter.displayName)
+                            }
+                        }
+                    }
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(.plain)
-                .help("Nuovo terminale (⌘T)")
+                .menuIndicator(.hidden)
+                .help("Nuova tab (⌘T)")
             }
 
             let runningAgentIds = model.runningAgentIds(for: worktree)
