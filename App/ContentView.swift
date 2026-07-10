@@ -35,6 +35,21 @@ struct ContentView: View {
         .configuresWindowChrome()
         .toolbar {
             if model.route == .workspace {
+                ToolbarItem(placement: .principal) {
+                    if let worktree = model.selectedWorktree {
+                        HStack(spacing: 5) {
+                            Text(worktree.branch)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(AppTheme.title)
+                            if let project = model.projects.first(where: { $0.id == worktree.projectId }) {
+                                Text("⋅ \((project.displayName?.isEmpty == false ? project.displayName : nil) ?? project.name)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(AppTheme.meta)
+                            }
+                        }
+                    }
+                }
+
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
                         model.splitCurrent(.horizontal)
@@ -102,7 +117,7 @@ struct ContentView: View {
                 }
             }
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-            .background(AppTheme.background)
+            .background(AppTheme.background.ignoresSafeArea(edges: .top))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
                       let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }
