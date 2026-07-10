@@ -27,6 +27,7 @@
 
 - 🗂️ **Sidebar of projects & worktrees** — local git worktrees, one row per branch, sorted by urgency
 - 🖥️ **Native terminal** — built on [libghostty](https://github.com/ghostty-org/ghostty), tabs and recursive splits
+- 📝 **Markdown editor** — click a `.md` link in the terminal (or drag & drop / ⌘O) to open it in a tab: rendered preview + code mode, live reload while agents write
 - 🤖 **5 agent adapters** — Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, each with lifecycle hooks
 - 🔌 **Control socket** — `tillerctl` CLI for scripted create/write/read/wait/notify against any pane
 - 🔔 **Menu bar roster** — a live pulse on every active agent; spins while working, rings when one needs you; click to jump straight back into the right worktree, even with the window closed
@@ -57,6 +58,8 @@ Tiller asks for **Notifications permission** on first launch, so it can alert yo
 | New tab in selected worktree | `⌘T` |
 | Close active tab | `⌘W` |
 | Settings | `⌘,` |
+| Open markdown file in selected worktree | `⌘O` |
+| Save markdown file | `⌘S` |
 
 The menu bar icon is always one click away — it reflects the worst status across every active agent and opens straight into a full roster.
 
