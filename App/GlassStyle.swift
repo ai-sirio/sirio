@@ -25,19 +25,6 @@ extension View {
         }
     }
 
-    /// Sfondo della tab: capsula glass su 26+ (tint accent se attiva),
-    /// flat legacy sotto — mai entrambi (doppio sfondo = incrostazione).
-    @ViewBuilder
-    func tillerTabBackground(isActive: Bool) -> some View {
-        if #available(macOS 26.0, *) {
-            glassEffect(isActive ? .regular.tint(.accentColor) : .regular, in: .capsule)
-        } else {
-            background(
-                isActive ? Color.primary.opacity(0.12) : .clear,
-                in: RoundedRectangle(cornerRadius: 5)
-            )
-        }
-    }
 }
 
 /// GlassEffectContainer su 26+ (merge/morphing delle forme glass adiacenti),
