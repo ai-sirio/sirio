@@ -35,6 +35,7 @@
 - 💾 **Session persistence** — agent sessions survive an app restart (GRDB-backed)
 - 📊 **Provider usage tracking** — Claude / Codex / OpenCode / Ollama usage at a glance
 - 🔐 **macOS permissions page** — one-shot onboarding + Settings section to grant the TCC permissions agents inherit (notifications, screen recording, accessibility, full disk access, automation, local network)
+- **Auto-update** — toast in basso a destra quando esce una nuova release: Scarica, poi Aggiorna e riavvia (Sparkle 2, appcast firmato EdDSA su GitHub Releases).
 
 **Deliberately not doing:** diff viewer, embedded browser, remote SSH / mobile relay, scheduling — Tiller stays a focused terminal + agent hub, not an IDE.
 
