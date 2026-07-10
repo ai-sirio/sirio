@@ -6,7 +6,7 @@ import AppKit
 struct SidebarMaterialContainer: View {
     var body: some View {
         SidebarMaterialView()
-            .overlay(AppTheme.background.opacity(0.35))
+            .overlay(AppTheme.background.opacity(0.15))
     }
 }
 

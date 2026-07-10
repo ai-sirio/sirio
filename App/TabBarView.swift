@@ -42,8 +42,9 @@ struct TabBarView: View {
                     }
                 } label: {
                     Image(systemName: "plus")
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 4)
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
                 }
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
@@ -51,10 +52,14 @@ struct TabBarView: View {
                 .help("Nuova tab (⌘T)")
                 Spacer(minLength: 0)
             }
+            .font(.system(size: 13))
             .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .padding(.vertical, 3)
         }
-        .background(AppTheme.background)
+        .background(
+            SidebarMaterialContainer()
+                .ignoresSafeArea(edges: .top)
+        )
     }
 
     @ViewBuilder
@@ -94,14 +99,14 @@ struct TabBarView: View {
                 model.closeTab(tab.id, in: worktree)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 9, weight: .bold))
             }
             .buttonStyle(.plain)
             .opacity(isActive ? 0.9 : 0.65)
             .help("Chiudi tab (⌘W)")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 5)
         .tillerTabBackground(isActive: isActive)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {

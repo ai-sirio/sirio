@@ -11,6 +11,7 @@ struct ContentView: View {
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
     @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
+    @State private var sidebarWidth: CGFloat = 240
     private let menuProvider: TerminalContextMenuProvider
 
     private var showUsageBar: Bool {
@@ -90,6 +91,9 @@ struct ContentView: View {
                     SidebarMaterialContainer()
                         .ignoresSafeArea()
                 )
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                    sidebarWidth = $0
+                }
             VStack(spacing: 0) {
                 if let selected = model.selectedWorktree {
                     TabBarView(model: model, worktree: selected)
@@ -108,6 +112,15 @@ struct ContentView: View {
                 model.openMarkdownTab(fileURL: url, in: worktree)
                 return true
             }
+        }
+        // HSplitView draws an opaque dark divider with no styling API; cover
+        // it with the shared material so no seam shows between the columns.
+        .overlay(alignment: .leading) {
+            SidebarMaterialContainer()
+                .frame(width: 2)
+                .offset(x: sidebarWidth)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
         }
     }
 

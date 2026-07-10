@@ -53,7 +53,7 @@ struct UsageBarView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity)
-        .background(AppTheme.background)
+        .background(SidebarMaterialContainer())
     }
 
     private var isLoading: Bool {
