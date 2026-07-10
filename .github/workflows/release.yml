@@ -26,6 +26,11 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Unlock login keychain
+        env:
+          MAC_LOGIN_KEYCHAIN_PASSWORD: ${{ secrets.MAC_LOGIN_KEYCHAIN_PASSWORD }}
+        run: security unlock-keychain -p "$MAC_LOGIN_KEYCHAIN_PASSWORD" login.keychain-db
+
       - name: Run CI gate
         run: Scripts/ci.sh
 
@@ -93,5 +98,6 @@ jobs:
         if: always()
         run: |
           security delete-keychain ci.keychain || true
+          security lock-keychain login.keychain-db || true
           rm -f cert.p12
           rm -f AuthKey.p8
