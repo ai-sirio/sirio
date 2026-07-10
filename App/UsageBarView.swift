@@ -13,10 +13,17 @@ struct UsageBarView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if let worktree {
-                WorktreeContextSegment(worktree: worktree)
-                Divider().frame(height: 8)
+            Button {
+                Task { await store.refreshAll() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .imageScale(.small)
+                    .rotationEffect(.degrees(isLoading ? 360 : 0))
+                    .animation(isLoading ? .linear(duration: 1).repeatForever(autoreverses: false)
+                                         : .default, value: isLoading)
             }
+            .buttonStyle(.plain)
+            .help("Refresh usage")
             ClaudeUsageSegment(state: store.claude)
             if showCodexInBar {
                 ProviderUsageSegment(
@@ -37,17 +44,9 @@ struct UsageBarView: View {
                     unavailableTooltip: ollamaCloudTooltip)
             }
             Spacer()
-            Button {
-                Task { await store.refreshAll() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .imageScale(.small)
-                    .rotationEffect(.degrees(isLoading ? 360 : 0))
-                    .animation(isLoading ? .linear(duration: 1).repeatForever(autoreverses: false)
-                                         : .default, value: isLoading)
+            if let worktree {
+                WorktreeContextSegment(worktree: worktree)
             }
-            .buttonStyle(.plain)
-            .help("Refresh usage")
         }
         .font(.system(size: 10))
         .padding(.horizontal, 12)

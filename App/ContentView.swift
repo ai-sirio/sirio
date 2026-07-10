@@ -46,21 +46,6 @@ struct ContentView: View {
                     .accessibilityLabel("Sidebar")
                 }
 
-                ToolbarItem(placement: .principal) {
-                    if let worktree = model.selectedWorktree {
-                        HStack(spacing: 5) {
-                            Text(worktree.branch)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(AppTheme.title)
-                            if let project = model.projects.first(where: { $0.id == worktree.projectId }) {
-                                Text("⋅ \((project.displayName?.isEmpty == false ? project.displayName : nil) ?? project.name)")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(AppTheme.meta)
-                            }
-                        }
-                    }
-                }
-
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
                         model.splitCurrent(.horizontal)
