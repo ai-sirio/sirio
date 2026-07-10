@@ -69,6 +69,7 @@ public struct PtyTerminalPane: View {
     private let onScrollback: (@Sendable (UUID, Data) async -> Void)?
     private let onTitleChange: ((UUID, String) -> Void)?
     private let onContentSignal: ((UUID, String) -> Void)?
+    private let onOpenURL: ((UUID, String) -> Void)?
     private let onContextMenu: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])?
     @State private var runtime: PtyRuntime?
 
@@ -81,6 +82,7 @@ public struct PtyTerminalPane: View {
         onScrollback: (@Sendable (UUID, Data) async -> Void)? = nil,
         onTitleChange: ((UUID, String) -> Void)? = nil,
         onContentSignal: ((UUID, String) -> Void)? = nil,
+        onOpenURL: ((UUID, String) -> Void)? = nil,
         onContextMenu: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])? = nil
     ) {
         self.workingDirectory = workingDirectory
@@ -91,6 +93,7 @@ public struct PtyTerminalPane: View {
         self.onScrollback = onScrollback
         self.onTitleChange = onTitleChange
         self.onContentSignal = onContentSignal
+        self.onOpenURL = onOpenURL
         self.onContextMenu = onContextMenu
     }
 
@@ -110,8 +113,12 @@ public struct PtyTerminalPane: View {
                 PaneProxyRegistry.shared.register(paneId: paneId, proxy: rt.proxy)
                 state.configuration = TerminalSurfaceOptions(backend: .inMemory(rt.session))
                 rt.start()
+                TerminalOpenURLRouter.register(state) { [paneId, onOpenURL] url in
+                    onOpenURL?(paneId, url)
+                }
             }
             .onDisappear {
+                TerminalOpenURLRouter.unregister(state)
                 PaneProxyRegistry.shared.unregister(paneId: paneId)
                 runtime?.stop()
                 if let onScrollback, let rt = runtime {

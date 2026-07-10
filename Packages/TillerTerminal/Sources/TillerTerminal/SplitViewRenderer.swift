@@ -18,7 +18,8 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
         onClose: @Sendable (UUID, Data) async -> Void,
         command: (UUID) -> String?,
         onTitleChange: (UUID, String) -> Void,
-        onContentSignal: (UUID, String) -> Void
+        onContentSignal: (UUID, String) -> Void,
+        onOpenURL: (UUID, String) -> Void
     )?
     let menuProvider: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])?
     let onMenuAction: ((TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void)?
@@ -32,7 +33,8 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             onClose: @Sendable (UUID, Data) async -> Void,
             command: (UUID) -> String?,
             onTitleChange: (UUID, String) -> Void,
-            onContentSignal: (UUID, String) -> Void
+            onContentSignal: (UUID, String) -> Void,
+            onOpenURL: (UUID, String) -> Void
         )? = nil,
         menuProvider: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])? = nil,
         onMenuAction: ((TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void)? = nil
@@ -117,6 +119,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
                     onScrollback: paneContext?.onClose,
                     onTitleChange: paneContext?.onTitleChange,
                     onContentSignal: paneContext?.onContentSignal,
+                    onOpenURL: paneContext?.onOpenURL,
                     onContextMenu: menuProvider
                 )
             )

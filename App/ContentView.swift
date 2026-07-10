@@ -109,7 +109,8 @@ struct ContentView: View {
                                         },
                                         command: { model.paneCommand(paneId: $0) },
                                         onTitleChange: { id, title in model.handleTitleChange(paneId: id, title: title) },
-                                        onContentSignal: { id, tail in model.handleContentSignal(paneId: id, tailText: tail) }
+                                        onContentSignal: { id, tail in model.handleContentSignal(paneId: id, tailText: tail) },
+                                        onOpenURL: { _, url in model.handleTerminalOpenURL(url, in: worktree) }
                                     ),
                                     menuProvider: { paneId, proxy in
                                         menuProvider.items(for: paneId, proxy: proxy)
