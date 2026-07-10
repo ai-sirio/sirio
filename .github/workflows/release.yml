@@ -77,6 +77,24 @@ jobs:
           DMG_PATH="build/Tiller-${VERSION}.dmg"
           Scripts/build-dmg.sh build/export/Tiller.app Tiller "$DMG_PATH"
           echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+      - name: Generate appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          TAG_NAME: ${{ github.ref_name }}
+          DMG_PATH: ${{ steps.dmg.outputs.path }}
+        run: |
+          curl -fsSL -o sparkle-dist.tar.xz https://github.com/sparkle-project/Sparkle/releases/download/2.8.0/Sparkle-2.8.0.tar.xz
+          mkdir -p sparkle-dist
+          tar -xf sparkle-dist.tar.xz -C sparkle-dist
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > ed_key
+          mkdir -p build/appcast
+          cp "$DMG_PATH" build/appcast/
+          sparkle-dist/bin/generate_appcast \
+            --ed-key-file ed_key \
+            --download-url-prefix "https://github.com/e-palmisano/tiller/releases/download/${TAG_NAME}/" \
+            build/appcast
+          rm -f ed_key
+          test -f build/appcast/appcast.xml
 
       - name: Generate changelog
         env:
@@ -91,8 +109,10 @@ jobs:
         run: |
           gh release create "$TAG_NAME" \
             "$DMG_PATH" \
+            build/appcast/appcast.xml \
             --title "Tiller $TAG_NAME" \
             --notes-file changelog.md
+
 
       - name: Clean up keychain
         if: always()
@@ -101,3 +121,4 @@ jobs:
           security lock-keychain login.keychain-db || true
           rm -f cert.p12
           rm -f AuthKey.p8
+          rm -f ed_key
