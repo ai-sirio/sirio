@@ -6,6 +6,7 @@ import TillerControl
 /// General settings: app info plus the tillerctl wiring an agent needs to talk
 /// back to Tiller from a pane's shell. Moved from the former SettingsView.
 struct GeneralSettingsView: View {
+    var updater: UpdaterModel
     @State private var copied = false
     @AppStorage(AppSettings.resumeAgentSessionsKey) private var resumeAgentSessions = true
 
@@ -13,6 +14,16 @@ struct GeneralSettingsView: View {
         Form {
             Section("About") {
                 LabeledContent("Version", value: AppVersion.current)
+                LabeledContent {
+                    Button("Check for Updates") { updater.checkForUpdates() }
+                } label: {
+                    Text("Updates")
+                    if case .checking = updater.state {
+                        Text("Controllo in corso…")
+                    } else if case .upToDate = updater.state {
+                        Text("Sei aggiornato.")
+                    }
+                }
             }
 
             Section("Agents") {

@@ -4,7 +4,7 @@ import TillerCore
 /// Full-page in-window settings: back header + category sidebar + detail pane.
 struct SettingsSurface: View {
     var model: AppModel
-
+    var updater: UpdaterModel
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -64,7 +64,7 @@ struct SettingsSurface: View {
     private var detailPane: some View {
         switch model.settingsCategory {
         case .aiProviders: AIProvidersSettingsView(store: model.usage, accounts: model.agentAccounts)
-        case .general: GeneralSettingsView()
+        case .general: GeneralSettingsView(updater: updater)
         case .appearance: AppearanceSettingsView()
         case .permissions: PermissionsSettingsView()
         }
