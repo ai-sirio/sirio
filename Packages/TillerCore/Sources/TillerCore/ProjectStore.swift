@@ -191,14 +191,27 @@ public actor ProjectStore {
                 arguments: [worktreeId.uuidString]
             )
             for (idx, tab) in tabs.enumerated() {
-                guard case .terminal(let tree) = tab.content else { continue }
-                let treeJSON = String(decoding: try encoder.encode(tree), as: UTF8.self)
-                try TerminalTabRecord(
-                    id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
-                    title: tab.title, orderIdx: idx,
-                    isActive: tab.id == activeTabId,
-                    treeJSON: treeJSON, updatedAt: Date()
-                ).insert(db)
+                let record: TerminalTabRecord
+                switch tab.content {
+                case .terminal(let tree):
+                    let treeJSON = String(decoding: try encoder.encode(tree), as: UTF8.self)
+                    record = TerminalTabRecord(
+                        id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
+                        title: tab.title, orderIdx: idx,
+                        isActive: tab.id == activeTabId,
+                        treeJSON: treeJSON, updatedAt: Date()
+                    )
+                case .markdown(let fileURL):
+                    // treeJSON resta vuoto perché la colonna è notNull dalla v3.
+                    record = TerminalTabRecord(
+                        id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
+                        title: tab.title, orderIdx: idx,
+                        isActive: tab.id == activeTabId,
+                        treeJSON: "", updatedAt: Date(),
+                        kind: "markdown", filePath: fileURL.path
+                    )
+                }
+                try record.insert(db)
             }
         }
     }
@@ -214,13 +227,25 @@ public actor ProjectStore {
             var active: UUID?
             for record in records {
                 // ids/treeJSON scritti da questo store; righe non parsabili = corruzione esterna
-                guard let id = UUID(uuidString: record.id),
-                      let tree = try? decoder.decode(SplitTree.self, from: Data(record.treeJSON.utf8))
-                else {
+                guard let id = UUID(uuidString: record.id) else {
                     logger.warning("loadTabs: skipping corrupt TerminalTabRecord '\(record.id)'")
                     continue
                 }
-                tabs.append(WorkspaceTab(id: id, title: record.title, tree: tree))
+                switch record.kind {
+                case "markdown":
+                    guard let path = record.filePath else {
+                        logger.warning("loadTabs: markdown tab '\(record.id)' senza filePath — skip")
+                        continue
+                    }
+                    tabs.append(WorkspaceTab(id: id, title: record.title,
+                                             content: .markdown(fileURL: URL(fileURLWithPath: path))))
+                default:
+                    guard let tree = try? decoder.decode(SplitTree.self, from: Data(record.treeJSON.utf8)) else {
+                        logger.warning("loadTabs: skipping corrupt TerminalTabRecord '\(record.id)'")
+                        continue
+                    }
+                    tabs.append(WorkspaceTab(id: id, title: record.title, tree: tree))
+                }
                 if record.isActive { active = id }
             }
             return (tabs, active)

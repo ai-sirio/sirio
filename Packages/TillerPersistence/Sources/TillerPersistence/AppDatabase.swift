@@ -107,6 +107,12 @@ public final class AppDatabase: Sendable {
                 t.column("capturedAt", .datetime).notNull()
             }
         }
+        migrator.registerMigration("v7") { db in
+            try db.alter(table: "terminalTab") { t in
+                t.add(column: "kind", .text).notNull().defaults(to: "terminal")
+                t.add(column: "filePath", .text)
+            }
+        }
         return migrator
     }
 }
