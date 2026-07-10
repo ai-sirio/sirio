@@ -126,11 +126,11 @@ private struct FilterField: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
-                .font(AppFont.system(size: 11))
+                .font(.system(size: 11))
                 .foregroundStyle(AppTheme.meta)
             TextField("Filter", text: $text)
                 .textFieldStyle(.plain)
-                .font(AppFont.system(size: 12.5))
+                .font(.system(size: 12.5))
                 .foregroundStyle(AppTheme.title)
                 .focusEffectDisabled()
         }
@@ -168,12 +168,12 @@ private struct ProjectRow: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: model.isProjectExpanded(project) ? "chevron.down" : "chevron.right")
-                .font(AppFont.system(size: 10, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(AppTheme.meta)
                 .frame(width: 12)
             projectIcon(project)
             Text((project.displayName?.isEmpty == false ? project.displayName : nil) ?? project.name)
-                .font(AppFont.system(size: 13, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(AppTheme.title)
             Spacer(minLength: 4)
             if hovering {
@@ -181,7 +181,7 @@ private struct ProjectRow: View {
                     onSettings(project)
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(AppFont.system(size: 11))
+                        .font(.system(size: 11))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(.plain)
@@ -228,19 +228,19 @@ private func projectIcon(_ project: Project) -> some View {
         } else {
             Image(systemName: "folder.fill")
                 .foregroundStyle(projectColor(project))
-                .font(AppFont.system(size: 13))
+                .font(.system(size: 13))
         }
     case .icon:
         Image(systemName: project.iconValue ?? "folder.fill")
             .foregroundStyle(projectColor(project))
-            .font(AppFont.system(size: 13))
+            .font(.system(size: 13))
     case .emoji:
         if let emoji = project.iconValue, !emoji.isEmpty {
-            Text(emoji).font(AppFont.system(size: 13))
+            Text(emoji).font(.system(size: 13))
         } else {
             Image(systemName: "folder.fill")
                 .foregroundStyle(projectColor(project))
-                .font(AppFont.system(size: 13))
+                .font(.system(size: 13))
         }
     }
 }
@@ -268,13 +268,13 @@ private struct WorktreeRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(worktree.branch)
-                        .font(AppFont.system(size: 12.5))
+                        .font(.system(size: 12.5))
                         .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.title)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if worktree.isPrimary {
                         Text("primary")
-                            .font(AppFont.system(size: 9.5))
+                            .font(.system(size: 9.5))
                             .textCase(.uppercase)
                             .foregroundStyle(AppTheme.title)
                             .padding(.horizontal, 5)
@@ -284,7 +284,7 @@ private struct WorktreeRow: View {
                 }
                 if agentId != nil || !comment.isEmpty {
                     Text(subtitle(agentId: agentId, comment: comment, status: status))
-                        .font(AppFont.system(size: 11))
+                        .font(.system(size: 11))
                         .foregroundStyle(AppTheme.subtitle)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -300,7 +300,7 @@ private struct WorktreeRow: View {
 
             if !comment.isEmpty, let updated = worktree.commentUpdatedAt {
                 Text(Self.relativeAge(updated))
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11))
                     .foregroundStyle(AppTheme.meta)
             }
         }
@@ -358,10 +358,10 @@ private struct NewWorktreeButton: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "plus")
-                .font(AppFont.system(size: 11))
+                .font(.system(size: 11))
                 .frame(width: 18)
             Text("New Worktree\u{2026}")
-                .font(AppFont.system(size: 12))
+                .font(.system(size: 12))
             Spacer(minLength: 0)
         }
         .foregroundStyle(hovering ? AppTheme.title : AppTheme.subtitle)

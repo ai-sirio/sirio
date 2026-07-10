@@ -83,17 +83,17 @@ private struct IdentitySection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Identity").font(AppFont.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
+            Text("Identity").font(.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
             Text("How this project is labeled in the sidebar and tabs — doesn't rename the folder on disk.")
-                .font(AppFont.system(size: 12)).foregroundStyle(AppTheme.subtitle)
+                .font(.system(size: 12)).foregroundStyle(AppTheme.subtitle)
 
-            Text("Repository Type").font(AppFont.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
-            Text("Git").font(AppFont.system(size: 12)).foregroundStyle(AppTheme.meta)
+            Text("Repository Type").font(.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
+            Text("Git").font(.system(size: 12)).foregroundStyle(AppTheme.meta)
 
-            Text("Display Name").font(AppFont.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
+            Text("Display Name").font(.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
             TextField(project.name, text: displayNameBinding)
                 .textFieldStyle(.plain)
-                .font(AppFont.system(size: 13))
+                .font(.system(size: 13))
                 .padding(8)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
@@ -144,7 +144,7 @@ private struct RepoIconSection: View {
                 Image(systemName: project.iconValue ?? "folder.fill").foregroundStyle(resolvedColor)
             case .emoji:
                 if let emoji = project.iconValue, !emoji.isEmpty {
-                    Text(emoji).font(AppFont.system(size: 16))
+                    Text(emoji).font(.system(size: 16))
                 } else {
                     Image(systemName: "folder.fill").foregroundStyle(resolvedColor)
                 }
@@ -156,7 +156,7 @@ private struct RepoIconSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Text("Repo Icon").font(AppFont.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
+                Text("Repo Icon").font(.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
                 iconPreview
                 Spacer()
                 Button {
@@ -171,7 +171,7 @@ private struct RepoIconSection: View {
                 .foregroundStyle(AppTheme.subtitle)
             }
 
-            Text("Color").font(AppFont.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
+            Text("Color").font(.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
             HStack(spacing: 10) {
                 colorSwatch(fill: Color.gray.opacity(0.5), isSelected: project.colorHex == nil)
                     .onTapGesture {
@@ -239,7 +239,7 @@ private struct AvatarTabContent: View {
             .help(githubOwner == nil ? "No GitHub remote found" : "Use github.com/\(githubOwner ?? "").png")
 
             Text("Used by default — GitHub always provides one, even when the owner hasn't set a custom image.")
-                .font(AppFont.system(size: 11)).foregroundStyle(AppTheme.meta)
+                .font(.system(size: 11)).foregroundStyle(AppTheme.meta)
 
             Button {
                 uploadPNG()
@@ -262,10 +262,10 @@ private struct AvatarTabContent: View {
             }
 
             Text("PNG uploads must be 256KB or smaller.")
-                .font(AppFont.system(size: 11)).foregroundStyle(AppTheme.meta)
+                .font(.system(size: 11)).foregroundStyle(AppTheme.meta)
 
             if let errorMessage {
-                Text(errorMessage).font(AppFont.system(size: 11)).foregroundStyle(.red)
+                Text(errorMessage).font(.system(size: 11)).foregroundStyle(.red)
             }
         }
         .task {
@@ -374,7 +374,7 @@ private struct EmojiTabContent: View {
         HStack(spacing: 10) {
             TextField("🙂", text: $emojiText)
                 .textFieldStyle(.plain)
-                .font(AppFont.system(size: 20))
+                .font(.system(size: 20))
                 .frame(width: 44, height: 32)
                 .multilineTextAlignment(.center)
                 .background(
@@ -430,12 +430,12 @@ private struct WorktreeBaseSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Default Worktree Base").font(AppFont.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
+            Text("Default Worktree Base").font(.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
 
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(effectiveBase).font(AppFont.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
-                    Text(subtitle).font(AppFont.system(size: 11)).foregroundStyle(AppTheme.subtitle)
+                    Text(effectiveBase).font(.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
+                    Text(subtitle).font(.system(size: 11)).foregroundStyle(AppTheme.subtitle)
                 }
                 Spacer()
                 Button("Use Primary") {
@@ -456,7 +456,7 @@ private struct WorktreeBaseSection: View {
 
             ForEach(filteredBranches, id: \.self) { branch in
                 Text(branch)
-                    .font(AppFont.system(size: 12.5))
+                    .font(.system(size: 12.5))
                     .foregroundStyle(AppTheme.title)
                     .padding(.vertical, 4)
                     .padding(.horizontal, 8)
@@ -493,9 +493,9 @@ private struct WorktreeLocationSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Worktree Location").font(AppFont.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
+            Text("Worktree Location").font(.system(size: 15, weight: .bold)).foregroundStyle(AppTheme.title)
             Text("Parent folder for new worktrees. Empty uses the default: \(defaultLocation)")
-                .font(AppFont.system(size: 11)).foregroundStyle(AppTheme.subtitle)
+                .font(.system(size: 11)).foregroundStyle(AppTheme.subtitle)
 
             HStack {
                 TextField(defaultLocation, text: locationBinding)
