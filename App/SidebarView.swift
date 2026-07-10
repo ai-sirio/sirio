@@ -166,6 +166,8 @@ private struct TreeGuideLines: View {
     var throughLines: [CGFloat] = []
     /// x del connettore del proprio livello (├ / └); nil = nessun connettore.
     var elbowAt: CGFloat?
+    /// Lunghezza del tratto orizzontale del connettore verso la riga.
+    var branchLength: CGFloat = 7
     /// Ultima riga del livello: la verticale termina con raccordo curvo.
     var isLast = false
 
@@ -189,7 +191,7 @@ private struct TreeGuideLines: View {
                         path.addLine(to: CGPoint(x: x, y: geo.size.height))
                         path.move(to: CGPoint(x: x, y: midY))
                     }
-                    path.addLine(to: CGPoint(x: x + 7, y: midY))
+                    path.addLine(to: CGPoint(x: x + branchLength, y: midY))
                 }
             }
             .stroke(AppTheme.treeGuide, style: StrokeStyle(lineWidth: 1, lineCap: .round))
@@ -396,9 +398,9 @@ private struct WorktreeRow: View {
         .opacity(idle ? 0.5 : 1)
         .contentShape(Rectangle())
         .background(rowBackground)
-        .padding(.leading, 14)
+        .padding(.leading, 10)
         .padding(.vertical, 1)
-        .overlay(TreeGuideLines(elbowAt: 6))
+        .overlay(TreeGuideLines(elbowAt: 3))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture { model.selectedWorktree = worktree }
@@ -460,9 +462,9 @@ private struct NewWorktreeButton: View {
             RoundedRectangle(cornerRadius: 7)
                 .fill(hovering ? AppTheme.rowHover : Color.clear)
         )
-        .padding(.leading, 14)
+        .padding(.leading, 10)
         .padding(.vertical, 1)
-        .overlay(TreeGuideLines(elbowAt: 6, isLast: true))
+        .overlay(TreeGuideLines(elbowAt: 3, isLast: true))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
@@ -532,9 +534,9 @@ private struct TabRow: View {
         .padding(.horizontal, 9)
         .contentShape(Rectangle())
         .background(rowBackground)
-        .padding(.leading, 28)
+        .padding(.leading, 44)
         .padding(.vertical, 1)
-        .overlay(TreeGuideLines(throughLines: [6], elbowAt: 20, isLast: isLast))
+        .overlay(TreeGuideLines(throughLines: [3], elbowAt: 26, branchLength: 14, isLast: isLast))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(count: 2) {
