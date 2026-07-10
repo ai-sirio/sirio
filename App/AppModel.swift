@@ -9,6 +9,7 @@ import TillerAgents
 import AppKit
 import UserNotifications
 import OSLog
+import UniformTypeIdentifiers
 
 @MainActor
 @Observable
@@ -146,12 +147,19 @@ final class AppModel {
                 worktrees[project.id] = list
                 for worktree in list {
                     let loaded = try await store.loadTabs(of: worktree.id)
-                    guard !loaded.tabs.isEmpty else { continue }
-                    tabs[worktree.id] = loaded.tabs
-                    activeTabId[worktree.id] = loaded.activeTabId ?? loaded.tabs.first?.id
+                    // Tab markdown il cui file è sparito tra le sessioni: scartate in silenzio.
+                    let restoredTabs = loaded.tabs.filter { tab in
+                        guard let url = tab.markdownFileURL else { return true }
+                        return FileManager.default.fileExists(atPath: url.path)
+                    }
+                    guard !restoredTabs.isEmpty else { continue }
+                    tabs[worktree.id] = restoredTabs
+                    activeTabId[worktree.id] = loaded.activeTabId.flatMap { active in
+                        restoredTabs.contains { $0.id == active } ? active : nil
+                    } ?? restoredTabs.first?.id
                     await restoreAgentSessions(
                         for: worktree,
-                        paneIds: Set(loaded.tabs.flatMap { $0.leafIds })
+                        paneIds: Set(restoredTabs.flatMap { $0.leafIds })
                     )
                 }
             }
@@ -337,7 +345,9 @@ final class AppModel {
             projects.removeAll { $0.id == project.id }
             worktrees[project.id] = nil
             for worktree in projectWorktrees {
+                let tabsBeingRemoved = tabs[worktree.id] ?? []
                 tabs[worktree.id] = nil
+                for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
                 activeTabId[worktree.id] = nil
             }
             openWorktreeIds.removeAll { id in projectWorktrees.contains { $0.id == id } }
@@ -430,7 +440,9 @@ final class AppModel {
             // Remove DB row first so a git failure can't strand a DB row.
             try await store.removeWorktree(worktree.id)
             worktrees[worktree.projectId]?.removeAll { $0.id == worktree.id }
+            let tabsBeingRemoved = tabs[worktree.id] ?? []
             tabs[worktree.id] = nil
+            for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
             activeTabId[worktree.id] = nil
             openWorktreeIds.removeAll { $0 == worktree.id }
             if selectedWorktree?.id == worktree.id {
@@ -505,11 +517,15 @@ final class AppModel {
     /// dizionari pane). Ultima tab: ne crea subito una fresca con paneId
     /// NUOVO — riusare worktree.id riaggancerebbe il vecchio scrollback.
     func closeTab(_ tabId: UUID, in worktree: Worktree) {
+        if let doc = markdownDocuments[tabId], doc.isDirty {
+            guard resolveDirtyClose(doc) else { return }
+        }
         guard var list = tabs[worktree.id] else { return }
         if let closing = list.first(where: { $0.id == tabId }) {
             deleteAgentSessionRefs(paneIds: closing.leafIds)
         }
         list.removeAll { $0.id == tabId }
+        teardownMarkdownDocument(tabId: tabId)
         if list.isEmpty {
             list = [WorkspaceTab(
                 id: UUID(),
@@ -650,6 +666,110 @@ final class AppModel {
     // MARK: - Pane commands & agent spawning
 
     var paneCommands: [UUID: String] = [:]
+
+    // MARK: - Markdown editor
+
+    /// Documenti aperti, keyed su tab.id. Vivono qui (non nella view) perché
+    /// le view SwiftUI muoiono al cambio tab e perderebbero il buffer.
+    var markdownDocuments: [UUID: MarkdownDocument] = [:]
+
+    /// Funnel unico per tutti i canali di apertura (cmd+click, drop, ⌘O).
+    /// Dedup per fileURL: se il file è già aperto nel worktree attiva quella tab.
+    @discardableResult
+    func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> WorkspaceTab? {
+        let url = fileURL.standardizedFileURL
+        if let existing = tabs[worktree.id]?.first(where: {
+            $0.markdownFileURL?.standardizedFileURL == url
+        }) {
+            selectedWorktree = worktree
+            activeTabId[worktree.id] = existing.id
+            persistTabs(for: worktree.id)
+            return existing
+        }
+        do {
+            let doc = try MarkdownDocument(fileURL: url)
+            let tab = WorkspaceTab(id: UUID(), title: url.lastPathComponent,
+                                   content: .markdown(fileURL: url))
+            markdownDocuments[tab.id] = doc
+            selectedWorktree = worktree
+            tabs[worktree.id, default: []].append(tab)
+            activeTabId[worktree.id] = tab.id
+            persistTabs(for: worktree.id)
+            return tab
+        } catch {
+            lastError = "Apertura \(url.lastPathComponent) fallita: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Documento della tab; lo crea al volo per le tab ripristinate da sessione.
+    func markdownDocument(for tab: WorkspaceTab) -> MarkdownDocument? {
+        guard let url = tab.markdownFileURL else { return nil }
+        if let doc = markdownDocuments[tab.id] { return doc }
+        guard let doc = try? MarkdownDocument(fileURL: url) else { return nil }
+        markdownDocuments[tab.id] = doc
+        return doc
+    }
+
+    /// ⌘S: salva il documento della tab attiva, se è markdown. No-op altrimenti.
+    func saveActiveMarkdownDocument() {
+        guard let worktree = selectedWorktree,
+              let tab = activeTab(for: worktree.id),
+              let doc = markdownDocuments[tab.id] else { return }
+        do { try doc.save() }
+        catch { lastError = "Salvataggio \(doc.fileURL.lastPathComponent) fallito: \(error.localizedDescription)" }
+    }
+
+    /// Link attivato (cmd+click) in un pane del terminale: file markdown →
+    /// tab editor nel worktree del pane; tutto il resto → apertura di sistema.
+    func handleTerminalOpenURL(_ raw: String, in worktree: Worktree) {
+        if let fileURL = MarkdownFileLink.resolve(raw, worktreePath: worktree.path) {
+            openMarkdownTab(fileURL: fileURL, in: worktree)
+        } else if let url = URL(string: raw) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// File > Apri file… (⌘O): NSOpenPanel filtrato su markdown, nel worktree selezionato.
+    func openMarkdownFilePanel() {
+        guard let worktree = selectedWorktree else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = MarkdownFileLink.extensions
+            .compactMap { UTType(filenameExtension: $0) }
+        panel.directoryURL = URL(fileURLWithPath: worktree.path)
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openMarkdownTab(fileURL: url, in: worktree)
+    }
+
+    /// Alert modale per chiusura con modifiche non salvate.
+    /// true = procedere con la chiusura.
+    private func resolveDirtyClose(_ doc: MarkdownDocument) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Salvare le modifiche a \(doc.fileURL.lastPathComponent)?"
+        alert.informativeText = "Le modifiche andranno perse se non le salvi."
+        alert.addButton(withTitle: "Salva")
+        alert.addButton(withTitle: "Non salvare")
+        alert.addButton(withTitle: "Annulla")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            do { try doc.save(); return true }
+            catch {
+                lastError = "Salvataggio fallito: \(error.localizedDescription)"
+                return false
+            }
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func teardownMarkdownDocument(tabId: UUID) {
+        markdownDocuments[tabId]?.stopWatching()
+        markdownDocuments[tabId] = nil
+    }
     func paneCommand(paneId: UUID) -> String? { paneCommands[paneId] }
 
     /// Config-dir env override for the currently active account of the
