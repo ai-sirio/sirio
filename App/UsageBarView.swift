@@ -49,7 +49,7 @@ struct UsageBarView: View {
             .buttonStyle(.plain)
             .help("Refresh usage")
         }
-        .font(AppFont.system(size: 11))
+        .font(.system(size: 11))
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity)

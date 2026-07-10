@@ -33,7 +33,7 @@ struct AgentIcon: View {
                 ZStack {
                     Circle().fill(Self.color(for: agentId))
                     Text(String(agentId.prefix(1)).uppercased())
-                        .font(AppFont.system(size: size * 0.6, weight: .bold))
+                        .font(.system(size: size * 0.6, weight: .bold))
                         .foregroundStyle(.white)
                 }
             }

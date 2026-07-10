@@ -52,13 +52,13 @@ struct MarkdownEditorTabView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Text(document.fileURL.path)
-                .font(AppFont.system(size: 11))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if isHuge {
                 Text("File grande — preview manuale")
-                    .font(AppFont.system(size: 10))
+                    .font(.system(size: 10))
                     .foregroundStyle(.orange)
             }
             Spacer()
@@ -85,7 +85,7 @@ struct MarkdownEditorTabView: View {
             Button("Ricarica") { document.reloadFromDisk() }
             Button("Mantieni") { document.keepLocalBuffer() }
         }
-        .font(AppFont.system(size: 12))
+        .font(.system(size: 12))
         .padding(8)
         .background(.orange.opacity(0.15))
     }
@@ -96,7 +96,7 @@ struct MarkdownEditorTabView: View {
             Text("File eliminato su disco. ⌘S lo ricrea.")
             Spacer()
         }
-        .font(AppFont.system(size: 12))
+        .font(.system(size: 12))
         .padding(8)
         .background(.red.opacity(0.15))
     }
