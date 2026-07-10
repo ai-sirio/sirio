@@ -46,8 +46,18 @@ struct SidebarView: View {
 
                                 let tabs = model.tabs[worktree.id] ?? []
                                 ForEach(tabs) { tab in
+                                    let tabIsLast = tab.id == tabs.last?.id
                                     TabRow(model: model, worktree: worktree, tab: tab,
-                                           isLast: tab.id == tabs.last?.id)
+                                           isLast: tabIsLast)
+                                    if tab.terminalTree != nil, tab.leafIds.count > 1 {
+                                        let leafIds = tab.leafIds
+                                        ForEach(Array(leafIds.enumerated()), id: \.element) { index, paneId in
+                                            PaneRow(model: model, worktree: worktree, tab: tab,
+                                                    paneId: paneId, index: index,
+                                                    isLast: paneId == leafIds.last,
+                                                    tabIsLast: tabIsLast)
+                                        }
+                                    }
                                 }
                             }
 
@@ -482,6 +492,7 @@ private struct TabRow: View {
     let isLast: Bool
     @State private var hovering = false
     @State private var renaming = false
+    @State private var confirmingClose = false
     @State private var draftTitle = ""
     @FocusState private var renameFieldFocused: Bool
 
@@ -554,9 +565,24 @@ private struct TabRow: View {
                 renaming = true
                 renameFieldFocused = true
             }
-            Button("Chiudi") {
-                model.closeTab(tab.id, in: worktree)
+            if tab.terminalTree != nil {
+                if tab.leafIds.count == 1, let paneId = tab.leafIds.first {
+                    TerminalPaneMenu(model: model, paneId: paneId, confirmingClose: $confirmingClose)
+                } else {
+                    Divider()
+                    Button("Chiudi tab…", role: .destructive) { confirmingClose = true }
+                }
+            } else {
+                Button("Chiudi") {
+                    model.closeTab(tab.id, in: worktree)
+                }
             }
+        }
+        .alert("Chiudere il terminale?", isPresented: $confirmingClose) {
+            Button("Annulla", role: .cancel) {}
+            Button("Chiudi", role: .destructive) { model.closeTab(tab.id, in: worktree) }
+        } message: {
+            Text("Il processo in esecuzione verrà terminato.")
         }
     }
 
@@ -587,6 +613,93 @@ private struct TabRow: View {
         } else {
             Color.clear
         }
+    }
+}
+
+/// Nodo pane (4° livello): mostrato solo quando il tab terminale ha più di
+/// un pane. Etichetta = ultimo titolo PTY, fallback posizionale "Pane N".
+private struct PaneRow: View {
+    @Bindable var model: AppModel
+    let worktree: Worktree
+    let tab: WorkspaceTab
+    let paneId: UUID
+    let index: Int
+    /// Ultimo pane del tab: chiude la guida col raccordo curvo.
+    let isLast: Bool
+    /// Il tab padre è l'ultimo del worktree: la verticale di livello tab
+    /// (x 26) non prosegue oltre.
+    let tabIsLast: Bool
+    @State private var hovering = false
+    @State private var confirmingClose = false
+
+    var body: some View {
+        HStack(spacing: 7) {
+            icon
+                .frame(width: 14)
+            Text(model.paneTitles[paneId] ?? "Pane \(index + 1)")
+                .font(.system(size: 11.5))
+                .foregroundStyle(AppTheme.subtitle)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 4)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 9)
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(hovering ? AppTheme.rowHover : Color.clear)
+        )
+        .padding(.leading, 60)
+        .padding(.vertical, 1)
+        .overlay(TreeGuideLines(
+            throughLines: tabIsLast ? [3] : [3, 26],
+            elbowAt: 42, branchLength: 14, isLast: isLast
+        ))
+        .focusEffectDisabled()
+        .onHover { hovering = $0 }
+        .onTapGesture {
+            model.selectedWorktree = worktree
+            model.activateTab(tab.id, in: worktree.id)
+        }
+        .contextMenu {
+            TerminalPaneMenu(model: model, paneId: paneId, confirmingClose: $confirmingClose)
+        }
+        .alert("Chiudere il terminale?", isPresented: $confirmingClose) {
+            Button("Annulla", role: .cancel) {}
+            Button("Chiudi", role: .destructive) { model.closeTerminal(paneId: paneId) }
+        } message: {
+            Text("Il processo in esecuzione verrà terminato.")
+        }
+    }
+
+    @ViewBuilder private var icon: some View {
+        if let agentId = model.agentActivity.paneAgents[paneId] {
+            AgentIcon(agentId: agentId, size: 12)
+        } else {
+            Image(systemName: "terminal")
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.meta)
+        }
+    }
+}
+
+/// Voci di menu condivise per un pane terminale (PaneRow e TabRow mono-pane):
+/// split mirato, affianca (solo stesso worktree e fuori dal tab attivo),
+/// chiusura con conferma (il chiamante mostra l'alert).
+private struct TerminalPaneMenu: View {
+    @Bindable var model: AppModel
+    let paneId: UUID
+    @Binding var confirmingClose: Bool
+
+    var body: some View {
+        Button("Split orizzontale") { model.split(paneId: paneId, axis: .horizontal) }
+        Button("Split verticale") { model.split(paneId: paneId, axis: .vertical) }
+        if model.canAdoptPane(paneId) {
+            Button("Affianca al terminale corrente") { model.adoptPane(paneId) }
+        }
+        Divider()
+        Button("Chiudi terminale…", role: .destructive) { confirmingClose = true }
     }
 }
 
