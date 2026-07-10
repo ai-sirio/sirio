@@ -23,6 +23,8 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
     )?
     let menuProvider: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])?
     let onMenuAction: ((TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void)?
+    let paneCache: TerminalPaneCache?
+    let liveLeafIds: (() -> Set<UUID>)?
 
     public init(
         tree: SplitTree,
@@ -37,7 +39,9 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             onOpenURL: (UUID, String) -> Void
         )? = nil,
         menuProvider: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])? = nil,
-        onMenuAction: ((TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void)? = nil
+        onMenuAction: ((TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void)? = nil,
+        paneCache: TerminalPaneCache? = nil,
+        liveLeafIds: (() -> Set<UUID>)? = nil
     ) {
         self.tree = tree
         self.workingDirectory = workingDirectory
@@ -45,6 +49,8 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
         self.paneContext = paneContext
         self.menuProvider = menuProvider
         self.onMenuAction = onMenuAction
+        self.paneCache = paneCache
+        self.liveLeafIds = liveLeafIds
     }
 
     public final class Coordinator {
@@ -92,9 +98,30 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
         pruneCache(context.coordinator, keeping: Set(tree.leafIds))
     }
 
-    private func pruneCache(_ coordinator: Coordinator, keeping: Set<UUID>) {
-        for key in coordinator.leafControllers.keys where !keeping.contains(key) {
-            coordinator.leafControllers.removeValue(forKey: key)
+    /// Con cache condivisa il set "keeping" è il set dei pane vivi in TUTTI
+    /// i tab del worktree (liveLeafIds), non solo quelli di questo host: un
+    /// pane appena spostato in un altro tab non va scartato.
+    private func pruneCache(_ coordinator: Coordinator, keeping treeLeaves: Set<UUID>) {
+        let keeping = liveLeafIds.map { $0() } ?? treeLeaves
+        if let paneCache {
+            paneCache.prune(keeping: keeping)
+        } else {
+            for key in coordinator.leafControllers.keys where !keeping.contains(key) {
+                coordinator.leafControllers.removeValue(forKey: key)
+            }
+        }
+    }
+
+    private func cachedController(for id: UUID, _ coordinator: Coordinator) -> NSViewController? {
+        if let paneCache { return paneCache.controllers[id] }
+        return coordinator.leafControllers[id]
+    }
+
+    private func storeController(_ controller: NSViewController, for id: UUID, _ coordinator: Coordinator) {
+        if let paneCache {
+            paneCache.controllers[id] = controller
+        } else {
+            coordinator.leafControllers[id] = controller
         }
     }
 
@@ -108,7 +135,14 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
     private func node(_ tree: SplitTree, coordinator: Coordinator) -> NSViewController {
         switch tree {
         case .leaf(let id):
-            if let cached = coordinator.leafControllers[id] { return cached }
+            if let cached = cachedController(for: id, coordinator) {
+                // Adozione cross-host: stacca il controller dalla gerarchia
+                // del tab precedente prima di inserirlo qui (un VC ha un
+                // solo parent). No-op nei rebuild interni allo stesso host.
+                cached.removeFromParent()
+                cached.view.removeFromSuperview()
+                return cached
+            }
             let hosting = NSHostingController(
                 rootView: PtyTerminalPane(
                     workingDirectory: workingDirectory,
@@ -123,7 +157,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
                     onContextMenu: menuProvider
                 )
             )
-            coordinator.leafControllers[id] = hosting
+            storeController(hosting, for: id, coordinator)
             return hosting
         case .split(let axis, let first, let second):
             let split = NSSplitViewController()
