@@ -21,4 +21,7 @@ enum AppTheme {
     static let meta           = Color(red: 0.66, green: 0.68, blue: 0.77)
     static let primaryPillBg  = Color(red: 0.200, green: 0.204, blue: 0.239)
     static let filterFieldBg  = Color(red: 0.078, green: 0.082, blue: 0.106)
+    /// Guide dell'albero in sidebar: abbastanza chiare da leggersi sul
+    /// materiale traslucido, abbastanza tenui da non competere col testo.
+    static let treeGuide      = Color.white.opacity(0.14)
 }

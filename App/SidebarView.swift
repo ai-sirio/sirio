@@ -44,8 +44,10 @@ struct SidebarView: View {
                                         }
                                     }
 
-                                ForEach(model.tabs[worktree.id] ?? []) { tab in
-                                    TabRow(model: model, worktree: worktree, tab: tab)
+                                let tabs = model.tabs[worktree.id] ?? []
+                                ForEach(tabs) { tab in
+                                    TabRow(model: model, worktree: worktree, tab: tab,
+                                           isLast: tab.id == tabs.last?.id)
                                 }
                             }
 
@@ -152,6 +154,47 @@ private struct FilterField: View {
                         .stroke(AppTheme.hairline, lineWidth: 1)
                 )
         )
+    }
+}
+
+/// Linee guida dell'albero in sidebar, stile indent-guide da editor: verticali
+/// continue per i livelli antenati e raccordo curvo (└) sull'ultima riga di un
+/// livello. Disegnate nel gutter, prima del background delle righe, così non
+/// attraversano mai la pill di selezione/hover.
+private struct TreeGuideLines: View {
+    /// x delle verticali che attraversano l'intera riga (livelli antenati).
+    var throughLines: [CGFloat] = []
+    /// x del connettore del proprio livello (├ / └); nil = nessun connettore.
+    var elbowAt: CGFloat?
+    /// Ultima riga del livello: la verticale termina con raccordo curvo.
+    var isLast = false
+
+    var body: some View {
+        GeometryReader { geo in
+            Path { path in
+                let midY = geo.size.height / 2
+                for x in throughLines {
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: geo.size.height))
+                }
+                if let x = elbowAt {
+                    path.move(to: CGPoint(x: x, y: 0))
+                    if isLast {
+                        path.addLine(to: CGPoint(x: x, y: midY - 5))
+                        path.addQuadCurve(
+                            to: CGPoint(x: x + 5, y: midY),
+                            control: CGPoint(x: x, y: midY)
+                        )
+                    } else {
+                        path.addLine(to: CGPoint(x: x, y: geo.size.height))
+                        path.move(to: CGPoint(x: x, y: midY))
+                    }
+                    path.addLine(to: CGPoint(x: x + 7, y: midY))
+                }
+            }
+            .stroke(AppTheme.treeGuide, style: StrokeStyle(lineWidth: 1, lineCap: .round))
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -275,8 +318,11 @@ private struct WorktreeRow: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.meta)
                     Text(worktree.branch)
-                        .font(.system(size: 12.5))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.title)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -352,6 +398,7 @@ private struct WorktreeRow: View {
         .background(rowBackground)
         .padding(.leading, 14)
         .padding(.vertical, 1)
+        .overlay(TreeGuideLines(elbowAt: 6))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture { model.selectedWorktree = worktree }
@@ -415,6 +462,7 @@ private struct NewWorktreeButton: View {
         )
         .padding(.leading, 14)
         .padding(.vertical, 1)
+        .overlay(TreeGuideLines(elbowAt: 6, isLast: true))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
@@ -428,6 +476,8 @@ private struct TabRow: View {
     @Bindable var model: AppModel
     let worktree: Worktree
     let tab: WorkspaceTab
+    /// Ultima tab del proprio worktree: chiude la guida col raccordo curvo.
+    let isLast: Bool
     @State private var hovering = false
     @State private var renaming = false
     @State private var draftTitle = ""
@@ -484,6 +534,7 @@ private struct TabRow: View {
         .background(rowBackground)
         .padding(.leading, 28)
         .padding(.vertical, 1)
+        .overlay(TreeGuideLines(throughLines: [6], elbowAt: 20, isLast: isLast))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(count: 2) {
