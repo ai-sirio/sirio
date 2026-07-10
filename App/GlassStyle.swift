@@ -24,20 +24,4 @@ extension View {
             buttonStyle(.bordered)
         }
     }
-
-}
-
-/// GlassEffectContainer su 26+ (merge/morphing delle forme glass adiacenti),
-/// passthrough sotto.
-struct TillerGlassContainer<Content: View>: View {
-    var spacing: CGFloat = 12
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: spacing, content: content)
-        } else {
-            content()
-        }
-    }
 }
