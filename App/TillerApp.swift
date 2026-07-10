@@ -36,6 +36,10 @@ struct TillerApp: App {
                     .keyboardShortcut("t", modifiers: .command)
                 Button("Chiudi tab") { model.closeActiveTab() }
                     .keyboardShortcut("w", modifiers: .command)
+                Button("Salva") { model.saveActiveMarkdownDocument() }
+                    .keyboardShortcut("s", modifiers: .command)
+                Button("Apri file…") { model.openMarkdownFilePanel() }
+                    .keyboardShortcut("o", modifiers: .command)
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
