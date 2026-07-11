@@ -44,16 +44,14 @@ public enum AgentTitleIdentity {
             }
         }
 
-        // 4. Pi's braille spinner alone is ambiguous with Claude's — require
-        // the literal word "pi" alongside it too.
+        // 4. A braille spinner plus the literal word "pi" is Pi. The spinner
+        // ALONE identifies nothing: Claude and Codex 0.144+ both write the
+        // same "dots" cycle (⠋⠙⠹…) into their working titles, so it carries
+        // no identity — both are native binaries that Layer D's foreground-
+        // process scan recognizes by comm name instead.
         let hasBrailleSpinner = title.unicodeScalars.contains { brailleSpinnerRange.contains($0.value) }
         if hasBrailleSpinner && AgentNameBoundaryMatch.containsWord("pi", in: lower) {
             return "pi"
-        }
-
-        // 5. Any other braille spinner is Claude's working convention.
-        if hasBrailleSpinner {
-            return "claude"
         }
 
         return nil
