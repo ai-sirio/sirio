@@ -31,4 +31,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return .terminateLater
     }
+
+    /// Click sull'icona nel Dock con finestra nascosta da hide-on-close:
+    /// la finestra esiste ancora (orderOut), va solo riportata front.
+    /// Lasciare il default farebbe creare a SwiftUI una NUOVA finestra,
+    /// distruggendo quella nascosta — e con lei i PTY dei pane.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows: Bool
+    ) -> Bool {
+        guard !hasVisibleWindows,
+              let window = MainWindowRef.shared.window else { return true }
+        window.makeKeyAndOrderFront(nil)
+        return false
+    }
 }
