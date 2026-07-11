@@ -50,6 +50,45 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate, @unchecke
         }
     }
 
+    /// User-visible notification requested over the control socket
+    /// (tillerctl notify --title …). Unlike agent-status notifications,
+    /// each gets a unique identifier — they don't replace each other.
+    func postUser(title: String, subtitle: String?, body: String) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized ||
+                  settings.authorizationStatus == .provisional else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            if let subtitle { content.subtitle = subtitle }
+            content.body = body
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: "tiller.user.\(UUID().uuidString)",
+                content: content, trigger: nil
+            )
+            center.add(request) { _ in }
+        }
+    }
+
+    /// Delivered Tiller notifications still in Notification Center.
+    func deliveredNotifications() async -> [[String: String]] {
+        let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
+        let iso = ISO8601DateFormatter()
+        return delivered.map { n in
+            [
+                "title": n.request.content.title,
+                "subtitle": n.request.content.subtitle,
+                "body": n.request.content.body,
+                "date": iso.string(from: n.date),
+            ]
+        }
+    }
+
+    func clearDelivered() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+    }
+
     // MARK: - UNUserNotificationCenterDelegate
 
     /// Click sulla notifica (azione default) → estrae il paneId e lo passa a

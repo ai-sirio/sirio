@@ -15,6 +15,7 @@ struct Tillerctl: ParsableCommand {
             CurrentWorkspace.self, CloseWorkspace.self,
             NewSplit.self, ListPanels.self, ListPaneSurfaces.self, FocusPanel.self,
             Send.self, SendKey.self,
+            ListNotifications.self, ClearNotifications.self,
         ]
     )
 }
@@ -96,19 +97,45 @@ struct Panel: ParsableCommand {
 }
 
 struct Notify: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Agent-status update (--session/--status) or user notification (--title/--body)."
+    )
     @OptionGroup var socketOptions: SocketOptions
-    @Option var session: String
-    @Option var status: String   // running | needs-input | done | error
+    // Mode 1: agent status (used by agent hooks — do not change semantics).
+    @Option var session: String?
+    @Option var status: String?   // running | needs-input | done | error
     @Option(name: .customLong("agent-session"),
             help: "Agent-native session reference for restore.")
     var agentSession: String?
     @Flag(name: .customLong("stdin-json"),
           help: "Read a hook JSON payload from stdin and extract the agent session id.")
     var stdinJSON = false
+    // Mode 2: user-visible notification (cmux parity).
+    @Option var title: String?
+    @Option var subtitle: String?
+    @Option var body: String?
     // Agent hooks may append extra positional payload (e.g. Codex notify JSON) —
     // scanned for a session reference, otherwise ignored.
     @Argument(parsing: .allUnrecognized) var extra: [String] = []
+
+    func validate() throws {
+        do {
+            _ = try NotifyMode.resolve(session: session, status: status,
+                                       title: title, body: body)
+        } catch let error as NotifyModeError {
+            throw ValidationError(error.usageMessage)
+        }
+    }
+
     func run() throws {
+        if let title {
+            _ = try roundTripOrDie(
+                TillerctlRequestBuilder.notificationCreate(
+                    title: title, subtitle: subtitle, body: body ?? ""),
+                socket: socketOptions.socket)
+            return
+        }
+        // Agent-status mode: unchanged behavior.
         var ref = agentSession
         if ref == nil, stdinJSON {
             let data = FileHandle.standardInput.readDataToEndOfFile()
@@ -119,7 +146,8 @@ struct Notify: ParsableCommand {
         }
         let response = try ControlClient.roundTrip(
             socketPath: socketOptions.socket,
-            request: TillerctlRequestBuilder.notify(session: session, status: status, agentSession: ref)
+            request: TillerctlRequestBuilder.notify(
+                session: session!, status: status!, agentSession: ref)
         )
         guard response.ok else { throw ValidationError(response.error ?? "notify failed") }
     }
