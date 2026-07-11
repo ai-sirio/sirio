@@ -6,6 +6,7 @@ struct TillerApp: App {
     @State private var model = AppModel()
     @State private var updater = UpdaterModel()
     @AppStorage("sidebar.visible") private var sidebarVisible = true
+    @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
@@ -26,11 +27,12 @@ struct TillerApp: App {
     var body: some Scene {
         WindowGroup(id: "main") {
             ContentView(model: model, updater: updater)
-                .preferredColorScheme(.dark)
                 .onAppear {
                     appDelegate.model = model
                     updater.start()
+                    applyAppearance()
                 }
+                .onChange(of: appearanceRaw) { _, _ in applyAppearance() }
         }
         .commands {
             // Nel menu File PRIMA di Close: performKeyEquivalent trova
@@ -64,5 +66,10 @@ struct TillerApp: App {
             MenuBarStatusIcon(status: model.menuBarAggregateStatus)
         }
         .menuBarExtraStyle(.window)
+    }
+
+    private func applyAppearance() {
+        let appearance = AppAppearance(rawValue: appearanceRaw) ?? .system
+        NSApp.appearance = appearance.nsAppearance
     }
 }
