@@ -8,7 +8,7 @@ struct SidebarMaterialContainer: View {
     @ObserveInjection var inject
     var body: some View {
         SidebarMaterialView()
-            .overlay(AppTheme.chromeTint.opacity(0.25))
+            .overlay(AppTheme.chromeTint.opacity(0.12))
             .enableInjection()
     }
 }
