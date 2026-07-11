@@ -32,6 +32,14 @@ public actor PaneRegistry {
 
     public func isRegistered(paneId: UUID) -> Bool { entries[paneId] != nil }
 
+    /// PID of the pane's shell process, for foreground-process agent
+    /// identification (Layer D). Nil when the pane is gone or never spawned.
+    public func shellPid(paneId: UUID) -> pid_t? {
+        guard let entry = entries[paneId], entry.exitCode == nil else { return nil }
+        let pid = entry.pty.processId
+        return pid > 0 ? pid : nil
+    }
+
     public func write(paneId: UUID, data: Data) -> Bool {
         guard let entry = entries[paneId] else { return false }
         entry.pty.write(data)

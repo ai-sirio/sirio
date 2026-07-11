@@ -455,3 +455,73 @@ import Foundation
 
     #expect(model.lastHookUpdateAt[paneId] == t2)
 }
+
+// MARK: - Layer D: foreground-process identification
+
+@Test func processIdentifiedRegistersUnknownPaneAsRunning() {
+    let model = AgentActivityModel()
+    let paneId = UUID()
+
+    let t = model.processIdentified(paneId: paneId, agentId: "codex", now: Date())
+
+    #expect(t?.old == nil)
+    #expect(t?.new == .running)
+    #expect(model.paneAgents[paneId] == "codex")
+    #expect(model.agentStatus[paneId] == .running)
+    #expect(model.processOwnedPanes.contains(paneId))
+}
+
+@Test func processIdentifiedIgnoresAlreadyRegisteredPane() {
+    let model = AgentActivityModel()
+    let paneId = UUID()
+    model.agentSpawned(paneId: paneId, agentId: "codex", now: Date())
+
+    #expect(model.processIdentified(paneId: paneId, agentId: "codex", now: Date()) == nil)
+    #expect(model.processOwnedPanes.isEmpty)
+}
+
+@Test func processGoneClearsProcessOwnedPane() {
+    let model = AgentActivityModel()
+    let paneId = UUID()
+    model.processIdentified(paneId: paneId, agentId: "codex", now: Date())
+
+    model.processGone(paneId: paneId)
+
+    #expect(model.agentStatus[paneId] == nil)
+    #expect(model.paneAgents[paneId] == nil)
+    #expect(model.processOwnedPanes.isEmpty)
+}
+
+@Test func processGoneLeavesSpawnOwnedPanesAlone() {
+    let model = AgentActivityModel()
+    let paneId = UUID()
+    model.agentSpawned(paneId: paneId, agentId: "codex", now: Date())
+
+    model.processGone(paneId: paneId)
+
+    #expect(model.agentStatus[paneId] == .running)
+    #expect(model.paneAgents[paneId] == "codex")
+}
+
+@Test func titleChangeDoesNotClearProcessOwnedPane() {
+    // Codex never emits a title, so an unrelated shell title must not
+    // clear a process-identified codex pane (only processGone may).
+    let model = AgentActivityModel()
+    let paneId = UUID()
+    model.processIdentified(paneId: paneId, agentId: "codex", now: Date())
+
+    _ = model.handleTitleChange(paneId: paneId, title: "zsh", now: Date().addingTimeInterval(5))
+
+    #expect(model.paneAgents[paneId] == "codex")
+    #expect(model.agentStatus[paneId] == .running)
+}
+
+@Test func paneClosedClearsProcessOwnership() {
+    let model = AgentActivityModel()
+    let paneId = UUID()
+    model.processIdentified(paneId: paneId, agentId: "codex", now: Date())
+
+    model.paneClosed(paneId: paneId)
+
+    #expect(model.processOwnedPanes.isEmpty)
+}

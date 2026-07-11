@@ -18,7 +18,7 @@ public enum AgentTitleStatus {
         guard !title.isEmpty else { return nil }
         switch agentId {
         case "claude": return detectClaude(title)
-        case "pi": return detectPi(title)
+        case "pi", "omp": return detectPiFamily(title, agentId: agentId)
         default: return detectGeneric(title, agentId: agentId)
         }
     }
@@ -35,11 +35,12 @@ public enum AgentTitleStatus {
         return nil
     }
 
-    /// Pi sets a braille spinner while working; the same title minus the
-    /// spinner, still recognizable as Pi's, means idle.
-    private static func detectPi(_ title: String) -> AgentStatus? {
+    /// Pi (and its omp fork) sets a braille spinner while working; the same
+    /// title minus the spinner, still recognizable as the agent's (its π
+    /// glyph or literal name), means idle.
+    private static func detectPiFamily(_ title: String, agentId: String) -> AgentStatus? {
         if containsBrailleSpinner(title) { return .running }
-        guard title.localizedCaseInsensitiveContains("pi") else { return nil }
+        guard title.contains("π") || title.localizedCaseInsensitiveContains(agentId) else { return nil }
         return .needsInput
     }
 

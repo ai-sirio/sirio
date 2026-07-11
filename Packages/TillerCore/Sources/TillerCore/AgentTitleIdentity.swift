@@ -27,7 +27,14 @@ public enum AgentTitleIdentity {
             return "claude"
         }
 
-        // 2. Codex/OpenCode/omp announce their own name as literal text.
+        // 2. Pi and its omp fork brand titles with the π glyph; the separator
+        // distinguishes them: pi = "π - <cwd>", omp = "π: <cwd>" (captured
+        // live from both CLIs). Checked before the braille fallback so a
+        // working "⠋ π: …" title isn't misread as Claude's spinner.
+        if title.contains("π:") { return "omp" }
+        if title.contains("π") { return "pi" }
+
+        // 3. Codex/OpenCode/omp announce their own name as literal text.
         // Word-boundary match (not substring) so a bare cwd/branch title
         // like "opencode-experiment" or "~/codex-notes" doesn't identify.
         let lower = title.lowercased()
@@ -37,14 +44,14 @@ public enum AgentTitleIdentity {
             }
         }
 
-        // 3. Pi's braille spinner alone is ambiguous with Claude's — require
+        // 4. Pi's braille spinner alone is ambiguous with Claude's — require
         // the literal word "pi" alongside it too.
         let hasBrailleSpinner = title.unicodeScalars.contains { brailleSpinnerRange.contains($0.value) }
         if hasBrailleSpinner && AgentNameBoundaryMatch.containsWord("pi", in: lower) {
             return "pi"
         }
 
-        // 4. Any other braille spinner is Claude's working convention.
+        // 5. Any other braille spinner is Claude's working convention.
         if hasBrailleSpinner {
             return "claude"
         }

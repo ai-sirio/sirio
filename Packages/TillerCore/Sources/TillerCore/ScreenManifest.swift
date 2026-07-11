@@ -15,7 +15,7 @@ public enum ScreenManifest {
         guard !tailText.isEmpty else { return nil }
         switch agentId {
         case "claude": return detectClaude(tailText)
-        case "codex", "opencode", "pi", "ohmypi": return detectGenericPrompt(tailText)
+        case "codex", "opencode", "pi", "omp": return detectGenericPrompt(tailText)
         default: return nil
         }
     }

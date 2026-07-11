@@ -964,10 +964,37 @@ final class AppModel {
     }
 
     func handleContentSignal(paneId: UUID, tailText: String) {
-        guard let agentId = agentActivity.agentId(paneId: paneId),
-              let status = ScreenManifest.detect(tailText: tailText, agentId: agentId) else { return }
+        guard let agentId = agentActivity.agentId(paneId: paneId) else {
+            // Unregistered pane: probe the shell's children for an agent
+            // that emits no OSC title (Codex) — Layer D identification.
+            checkForegroundAgent(paneId: paneId)
+            return
+        }
+        if agentActivity.processOwnedPanes.contains(paneId) {
+            // Re-confirm the process is still alive; clears the badge when
+            // the agent exits back to the shell prompt.
+            checkForegroundAgent(paneId: paneId)
+        }
+        guard let status = ScreenManifest.detect(tailText: tailText, agentId: agentId) else { return }
         guard let t = agentActivity.applyContentSignal(paneId: paneId, status: status, now: Date()) else { return }
         notifyTransition(paneId: paneId, from: t.old, to: t.new)
+    }
+
+    /// Layer D driver: resolves the pane's shell child processes off-main
+    /// and registers (or clears) the pane's agent accordingly.
+    private func checkForegroundAgent(paneId: UUID) {
+        Task.detached {
+            guard let pid = await PaneRegistry.shared.shellPid(paneId: paneId) else { return }
+            let agentId = ForegroundProcessAgent.identify(shellPid: pid)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if let agentId {
+                    self.agentActivity.processIdentified(paneId: paneId, agentId: agentId, now: Date())
+                } else {
+                    self.agentActivity.processGone(paneId: paneId)
+                }
+            }
+        }
     }
 
     private func notifyTransition(paneId: UUID, from old: AgentStatus?, to new: AgentStatus) {

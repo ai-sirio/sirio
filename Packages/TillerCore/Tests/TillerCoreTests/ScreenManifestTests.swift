@@ -22,7 +22,7 @@ import Testing
 
 @Test func detectGenericAgentConfirmWordReturnsNeedsInput() {
     #expect(ScreenManifest.detect(tailText: "About to delete files. Proceed?", agentId: "pi") == .needsInput)
-    #expect(ScreenManifest.detect(tailText: "Continue? y/n", agentId: "ohmypi") == .needsInput)
+    #expect(ScreenManifest.detect(tailText: "Continue? y/n", agentId: "omp") == .needsInput)
 }
 
 @Test func detectReturnsNilForUnknownAgentId() {
