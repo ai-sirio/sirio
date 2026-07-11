@@ -8,7 +8,9 @@ import Inject
 /// this isolates "does the engine render/input correctly" from our PTY work.
 public struct ExecTerminalPane: View {
     @ObserveInjection var inject
-    @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.theme)
+    @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.current())
+    @AppStorage(AppSettings.terminalFontSizeKey)
+    private var terminalFontSize = AppSettings.defaultTerminalFontSize
 
     public init() {}
 
@@ -16,7 +18,14 @@ public struct ExecTerminalPane: View {
         TerminalSurfaceView(context: state)
             .onAppear {
                 state.configuration = TerminalSurfaceOptions(backend: .exec)
+                applyFontSize()
             }
+            .onChange(of: terminalFontSize) { _, _ in applyFontSize() }
             .enableInjection()
+    }
+
+    private func applyFontSize() {
+        let size = Float(AppSettings.clampTerminalFontSize(terminalFontSize))
+        state.setTheme(TillerTerminalTheme.theme(fontSize: size))
     }
 }
