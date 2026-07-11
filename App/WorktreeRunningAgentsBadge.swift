@@ -1,4 +1,5 @@
 import SwiftUI
+import Inject
 
 /// Trailing worktree-row indicator: one small per-agent icon for each
 /// distinct agent currently .running in the worktree. Purely additive to
@@ -6,11 +7,13 @@ import SwiftUI
 /// — this only ever shows agents in the .running state, not done/error/
 /// needs-input.
 struct WorktreeRunningAgentsBadge: View {
+    @ObserveInjection var inject
     let agentIds: [String]
 
     var body: some View {
         HStack(spacing: 3) {
             ForEach(agentIds, id: \.self) { AgentIcon(agentId: $0, size: 12) }
         }
+        .enableInjection()
     }
 }

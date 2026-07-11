@@ -1,10 +1,12 @@
 import SwiftUI
+import Inject
 
 /// Icon for an agent, visually matching Orca's marks: Claude and Codex are
 /// template assets tinted with Orca's colors; OpenCode, Pi and omp are drawn
 /// natively from the same vector coordinates Orca uses. Unknown agents fall
 /// back to a colored monogram circle.
 struct AgentIcon: View {
+    @ObserveInjection var inject
     let agentId: String
     var size: CGFloat = 14
 
@@ -39,6 +41,7 @@ struct AgentIcon: View {
             }
         }
         .frame(width: size, height: size)
+        .enableInjection()
     }
 
     /// Orca's Claude brand fill (#D97757).
@@ -59,6 +62,7 @@ struct AgentIcon: View {
 /// OpenCode mark (Orca's OpenCodeGoIcon, 240×300 viewBox): a square frame
 /// with the lower two thirds of the interior filled dark.
 private struct OpenCodeLogo: View {
+    @ObserveInjection var inject
     var body: some View {
         GeometryReader { geo in
             let s = min(geo.size.width / 240, geo.size.height / 300)
@@ -76,11 +80,13 @@ private struct OpenCodeLogo: View {
                 .fill(Color(red: 0x4B / 255.0, green: 0x46 / 255.0, blue: 0x46 / 255.0))
             }
         }
+        .enableInjection()
     }
 }
 
 /// Pi mark (Orca's PiIcon, 800×800 viewBox), even-odd fill for the counter.
 private struct PiLogo: View {
+    @ObserveInjection var inject
     var body: some View {
         GeometryReader { geo in
             let s = min(geo.size.width, geo.size.height) / 800
@@ -112,12 +118,14 @@ private struct PiLogo: View {
             }
             .fill(Color.primary, style: FillStyle(eoFill: true))
         }
+        .enableInjection()
     }
 }
 
 /// omp mark (omp.sh homepage glyph via Orca's OmpIcon, 64×64 viewBox) with
 /// its pink→purple→cyan gradient.
 private struct OmpLogo: View {
+    @ObserveInjection var inject
     var body: some View {
         GeometryReader { geo in
             let s = min(geo.size.width, geo.size.height) / 64
@@ -151,5 +159,6 @@ private struct OmpLogo: View {
                 endPoint: .bottomTrailing
             ))
         }
+        .enableInjection()
     }
 }

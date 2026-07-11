@@ -1,8 +1,10 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Full-page in-window settings: back header + category sidebar + detail pane.
 struct SettingsSurface: View {
+    @ObserveInjection var inject
     var model: AppModel
     var updater: UpdaterModel
     var body: some View {
@@ -17,6 +19,7 @@ struct SettingsSurface: View {
             }
         }
         .background(AppTheme.background)
+        .enableInjection()
     }
 
     private var header: some View {

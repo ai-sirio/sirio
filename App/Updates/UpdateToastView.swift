@@ -1,38 +1,43 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Toast in basso a destra per il ciclo di update. Visibile solo negli stati
 /// che chiedono un'azione; .checking e .upToDate vivono in Settings.
 struct UpdateToastView: View {
+    @ObserveInjection var inject
     var updater: UpdaterModel
 
     var body: some View {
-        switch updater.state {
-        case .available(let version):
-            toast(icon: "arrow.down.circle") {
-                Text("Tiller \(version) disponibile")
-                Button("Scarica") { updater.download() }
-                    .buttonStyle(.borderedProminent)
+        Group {
+            switch updater.state {
+            case .available(let version):
+                toast(icon: "arrow.down.circle") {
+                    Text("Tiller \(version) disponibile")
+                    Button("Scarica") { updater.download() }
+                        .buttonStyle(.borderedProminent)
+                }
+            case .downloading(let version, let progress):
+                toast(icon: "arrow.down.circle") {
+                    Text("Download di Tiller \(version)…")
+                    ProgressView(value: progress)
+                        .frame(width: 140)
+                }
+            case .readyToInstall(let version):
+                toast(icon: "checkmark.circle") {
+                    Text("Tiller \(version) pronto")
+                    Button("Aggiorna e riavvia") { updater.installAndRelaunch() }
+                        .buttonStyle(.borderedProminent)
+                }
+            case .error(let message):
+                toast(icon: "exclamationmark.triangle") {
+                    Text(message).lineLimit(2)
+                }
+            case .idle, .checking, .upToDate:
+                EmptyView()
             }
-        case .downloading(let version, let progress):
-            toast(icon: "arrow.down.circle") {
-                Text("Download di Tiller \(version)…")
-                ProgressView(value: progress)
-                    .frame(width: 140)
-            }
-        case .readyToInstall(let version):
-            toast(icon: "checkmark.circle") {
-                Text("Tiller \(version) pronto")
-                Button("Aggiorna e riavvia") { updater.installAndRelaunch() }
-                    .buttonStyle(.borderedProminent)
-            }
-        case .error(let message):
-            toast(icon: "exclamationmark.triangle") {
-                Text(message).lineLimit(2)
-            }
-        case .idle, .checking, .upToDate:
-            EmptyView()
         }
+        .enableInjection()
     }
 
     private func toast(icon: String, @ViewBuilder content: () -> some View) -> some View {

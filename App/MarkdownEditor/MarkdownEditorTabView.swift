@@ -1,11 +1,13 @@
 import SwiftUI
 import MarkdownUI
 import TillerCore
+import Inject
 
 /// Tab editor markdown: preview MarkdownUI (default) + modalità codice,
 /// toggle stile Orca in alto a destra. Banner per conflitti esterni e
 /// file cancellato.
 struct MarkdownEditorTabView: View {
+    @ObserveInjection var inject
     @Bindable var document: MarkdownDocument
     @State private var mode: EditorMode
     @State private var selection: TextSelection?
@@ -25,28 +27,31 @@ struct MarkdownEditorTabView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            if document.externalChangeConflict { conflictBanner }
-            if document.fileDeleted { deletedBanner }
-            if mode == .code {
-                MarkdownToolbar(document: document, selection: $selection)
-                Divider()
-                TextEditor(text: $document.text, selection: $selection)
-                    .font(.system(.body, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-            } else {
-                ScrollView {
-                    Markdown(document.text)
-                        .markdownTheme(.gitHub)
-                        .textSelection(.enabled)
-                        .padding(16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        Group {
+            VStack(spacing: 0) {
+                header
+                if document.externalChangeConflict { conflictBanner }
+                if document.fileDeleted { deletedBanner }
+                if mode == .code {
+                    MarkdownToolbar(document: document, selection: $selection)
+                    Divider()
+                    TextEditor(text: $document.text, selection: $selection)
+                        .font(.system(.body, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                } else {
+                    ScrollView {
+                        Markdown(document.text)
+                            .markdownTheme(.gitHub)
+                            .textSelection(.enabled)
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
+            .background(AppTheme.background)
         }
-        .background(AppTheme.background)
+        .enableInjection()
     }
 
     private var header: some View {

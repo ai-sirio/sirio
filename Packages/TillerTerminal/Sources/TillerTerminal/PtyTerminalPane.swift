@@ -4,6 +4,7 @@ import Foundation
 import os
 import TillerCore
 import GhosttyTerminal
+import Inject
 
 /// Proxy for operations on the terminal surface from the context menu.
 /// Holds a weak reference to the attached `TerminalSurface` once the
@@ -60,6 +61,7 @@ public final class TerminalSurfaceProxy: @unchecked Sendable {
 /// PTY output is fed back via `session.receive`. This is the architecture
 /// every Tiller terminal uses from Fase 1 on.
 public struct PtyTerminalPane: View {
+    @ObserveInjection var inject
     @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.theme)
     private let workingDirectory: String?
     private let command: String?
@@ -131,6 +133,7 @@ public struct PtyTerminalPane: View {
             .onChange(of: state.title) { _, newTitle in
                 onTitleChange?(paneId, newTitle)
             }
+            .enableInjection()
     }
 }
 
