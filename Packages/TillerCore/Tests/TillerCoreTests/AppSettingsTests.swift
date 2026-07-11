@@ -21,3 +21,34 @@ import Testing
 @Test func defaultRefreshIs300() {
     #expect(AppSettings.defaultRefreshSeconds == 300)
 }
+@Test func controlSocketDefaultsToEnabled() {
+    #expect(AppSettings.controlSocketEnabled(defaultsValue: nil, env: [:]) == true)
+}
+
+@Test func controlSocketRespectsStoredPreference() {
+    #expect(AppSettings.controlSocketEnabled(defaultsValue: false, env: [:]) == false)
+    #expect(AppSettings.controlSocketEnabled(defaultsValue: true, env: [:]) == true)
+}
+
+@Test func controlSocketEnvOverrideBeatsPreference() {
+    #expect(AppSettings.controlSocketEnabled(
+        defaultsValue: false, env: ["TILLER_SOCKET_ENABLE": "1"]) == true)
+    #expect(AppSettings.controlSocketEnabled(
+        defaultsValue: true, env: ["TILLER_SOCKET_ENABLE": "off"]) == false)
+}
+
+@Test func controlSocketAcceptsBooleanSpellings() {
+    for truthy in ["1", "true", "TRUE", "on", "On"] {
+        #expect(AppSettings.controlSocketEnabled(
+            defaultsValue: false, env: ["TILLER_SOCKET_ENABLE": truthy]) == true)
+    }
+    for falsy in ["0", "false", "off", "OFF"] {
+        #expect(AppSettings.controlSocketEnabled(
+            defaultsValue: true, env: ["TILLER_SOCKET_ENABLE": falsy]) == false)
+    }
+}
+
+@Test func controlSocketIgnoresGarbageEnvValue() {
+    #expect(AppSettings.controlSocketEnabled(
+        defaultsValue: false, env: ["TILLER_SOCKET_ENABLE": "maybe"]) == false)
+}
