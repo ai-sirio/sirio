@@ -273,3 +273,16 @@ struct ClearNotifications: ParsableCommand {
                                socket: socketOptions.socket)
     }
 }
+// MARK: - Session restore
+
+struct RestoreSession: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "restore-session",
+        abstract: "Re-apply the layout Tiller loaded at launch.")
+    @OptionGroup var socketOptions: SocketOptions
+    func run() throws {
+        let response = try roundTripOrDie(TillerctlRequestBuilder.sessionRestore(),
+                                          socket: socketOptions.socket)
+        print("restored \(response.result?["restored"] ?? "0") item(s)")
+    }
+}

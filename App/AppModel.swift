@@ -124,6 +124,14 @@ final class AppModel {
     var tabs: [UUID: [WorkspaceTab]] = [:]
     var activeTabId: [UUID: UUID] = [:]
     var lastError: String?
+    /// State as loaded at launch — the target of the manual
+    /// "Restore Previous Launch" action. In-memory only.
+    struct LaunchSnapshot {
+        let tabs: [UUID: [WorkspaceTab]]
+        let paneCommands: [UUID: String]
+        let openWorktreeIds: [UUID]
+    }
+    private(set) var launchSnapshot: LaunchSnapshot?
 
     private var store: ProjectStore?
     private var database: AppDatabase?
@@ -163,6 +171,10 @@ final class AppModel {
                     )
                 }
             }
+            launchSnapshot = LaunchSnapshot(
+                tabs: tabs, paneCommands: paneCommands,
+                openWorktreeIds: openWorktreeIds
+            )
             if AppSettings.controlSocketEnabled(
                 defaultsValue: UserDefaults.standard.object(forKey: AppSettings.controlSocketEnabledKey) as? Bool,
                 env: ProcessInfo.processInfo.environment
@@ -676,7 +688,7 @@ final class AppModel {
 
     /// Fire-and-forget: la persistenza tab non deve bloccare la UI; un
     /// fallimento lascia solo il layout non salvato (rimedio: prossima mutazione).
-    private func persistTabs(for worktreeId: UUID) {
+    func persistTabs(for worktreeId: UUID) {
         // Ogni mutazione tab passa di qui: il prune tiene la cache condivisa
         // allineata (un pane chiuso viene scartato → deinit → stop PTY).
         paneCaches[worktreeId]?.prune(keeping: liveLeafIds(for: worktreeId))

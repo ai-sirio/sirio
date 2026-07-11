@@ -16,6 +16,7 @@ struct Tillerctl: ParsableCommand {
             NewSplit.self, ListPanels.self, ListPaneSurfaces.self, FocusPanel.self,
             Send.self, SendKey.self,
             ListNotifications.self, ClearNotifications.self,
+            RestoreSession.self,
         ]
     )
 }
