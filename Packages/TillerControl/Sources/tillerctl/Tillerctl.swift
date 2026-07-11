@@ -13,6 +13,8 @@ struct Tillerctl: ParsableCommand {
             Ping.self, Capabilities.self, Identify.self,
             ListWorkspaces.self, NewWorkspace.self, SelectWorkspace.self,
             CurrentWorkspace.self, CloseWorkspace.self,
+            NewSplit.self, ListPanels.self, ListPaneSurfaces.self, FocusPanel.self,
+            Send.self, SendKey.self,
         ]
     )
 }

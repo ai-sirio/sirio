@@ -154,3 +154,96 @@ struct CloseWorkspace: ParsableCommand {
             socket: socketOptions.socket)
     }
 }
+
+
+// MARK: - Surface commands
+
+/// Explicit --surface wins; otherwise TILLER_PANE_ID (set inside every
+/// Tiller pane) is forwarded so a pane targets itself; otherwise the app
+/// resolves its active pane.
+func defaultSurface(_ explicit: String?) -> String? {
+    explicit ?? ProcessInfo.processInfo.environment["TILLER_PANE_ID"]
+}
+
+struct NewSplit: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "new-split", abstract: "Split the active pane.")
+    @OptionGroup var socketOptions: SocketOptions
+    @Argument(help: "left | right | up | down") var direction: String
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.surfaceSplit(direction: direction),
+            socket: socketOptions.socket)
+    }
+}
+
+struct ListPanels: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list-panels", abstract: "List panes of the current worktree.")
+    @OptionGroup var socketOptions: SocketOptions
+    @OptionGroup var jsonFlag: JSONFlag
+    func run() throws {
+        let response = try roundTripOrDie(TillerctlRequestBuilder.surfaceList(),
+                                          socket: socketOptions.socket)
+        printRows(response, key: "surfaces",
+                  columns: ["id", "tab", "title", "agent", "active"],
+                  asJSON: jsonFlag.json)
+    }
+}
+
+struct ListPaneSurfaces: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list-pane-surfaces", abstract: "List panes of the active tab.")
+    @OptionGroup var socketOptions: SocketOptions
+    @OptionGroup var jsonFlag: JSONFlag
+    func run() throws {
+        let response = try roundTripOrDie(TillerctlRequestBuilder.paneSurfaces(),
+                                          socket: socketOptions.socket)
+        printRows(response, key: "surfaces",
+                  columns: ["id", "tab", "title", "agent", "active"],
+                  asJSON: jsonFlag.json)
+    }
+}
+
+struct FocusPanel: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "focus-panel", abstract: "Focus a pane (switches worktree/tab).")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Pane UUID.") var panel: String
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.surfaceFocus(surface: panel),
+            socket: socketOptions.socket)
+    }
+}
+
+struct Send: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "send", abstract: "Send text to a pane (default: active pane).")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Target pane UUID (default: this pane, else active pane).")
+    var surface: String?
+    @Argument(help: "Text to send.") var text: String
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.surfaceSendText(text: text,
+                                                    surface: defaultSurface(surface)),
+            socket: socketOptions.socket)
+    }
+}
+
+struct SendKey: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "send-key", abstract: "Send a key press to a pane.")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Target pane UUID (default: this pane, else active pane).")
+    var surface: String?
+    @Argument(help: "enter | tab | escape | backspace | delete | up | down | left | right")
+    var key: String
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.surfaceSendKey(key: key,
+                                                   surface: defaultSurface(surface)),
+            socket: socketOptions.socket)
+    }
+}
