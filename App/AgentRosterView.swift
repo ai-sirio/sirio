@@ -42,12 +42,15 @@ struct AgentRosterView: View {
         model.projects.first(where: { $0.id == worktree.projectId })?.name ?? ""
     }
 
-    /// ponytail: visibility check via `NSApp.windows` rather than tracking
-    /// scene state ourselves — Tiller has exactly one `WindowGroup` and no
-    /// other window-producing scene, so this can't misfire on an unrelated
-    /// window. Revisit if a second window-producing scene is ever added.
+    /// Con hide-on-close la main window esiste sempre, solo nascosta: va
+    /// riportata front, non ricreata (ricrearla distruggerebbe i pane e
+    /// ucciderebbe gli agenti). `MainWindowRef` è il riferimento diretto —
+    /// una finestra ordered-out non è distinguibile via `isVisible` o
+    /// `canBecomeMain`. `openWindow` resta come fallback teorico.
     private func select(_ worktree: Worktree) {
-        if !NSApp.windows.contains(where: \.isVisible) {
+        if let window = MainWindowRef.shared.window {
+            window.makeKeyAndOrderFront(nil)
+        } else {
             openWindow(id: "main")
         }
         NSApp.activate(ignoringOtherApps: true)

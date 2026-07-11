@@ -14,6 +14,7 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
             window.titlebarAppearsTransparent = true
             window.isOpaque = false
             window.backgroundColor = .clear
+            window.installHideOnClose()
         }
         return view
     }
