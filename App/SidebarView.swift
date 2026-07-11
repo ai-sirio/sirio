@@ -524,6 +524,14 @@ private struct TabRow: View {
                     .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.subtitle)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    // Doppio click SOLO sul titolo: un riconoscitore count:2
+                    // sull'intera riga ritarderebbe/inghiottirebbe i click
+                    // sul bottone × (il gesto attende il secondo click).
+                    .onTapGesture(count: 2) {
+                        draftTitle = tab.title
+                        renaming = true
+                        renameFieldFocused = true
+                    }
                 if model.markdownDocuments[tab.id]?.isDirty == true {
                     Circle().fill(.secondary).frame(width: 5, height: 5)
                 }
@@ -552,11 +560,6 @@ private struct TabRow: View {
         .overlay(TreeGuideLines(throughLines: [3], elbowAt: 26, branchLength: 14, isLast: isLast))
         .focusEffectDisabled()
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2) {
-            draftTitle = tab.title
-            renaming = true
-            renameFieldFocused = true
-        }
         .onTapGesture {
             model.selectedWorktree = worktree
             model.activateTab(tab.id, in: worktree.id)
