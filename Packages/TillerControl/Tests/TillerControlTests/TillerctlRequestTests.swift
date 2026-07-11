@@ -47,3 +47,50 @@ import Testing
     #expect(request.method == "session.ref")
     #expect(request.params == ["session": "S-1", "ref": "ses_1"])
 }
+
+
+@Test func workspaceBuilders() {
+    #expect(TillerctlRequestBuilder.workspaceList().method == "workspace.list")
+    let create = TillerctlRequestBuilder.workspaceCreate(project: "P1", branch: nil)
+    #expect(create.method == "workspace.create")
+    #expect(create.params == ["project": "P1"])   // nil branch omitted
+    let createBr = TillerctlRequestBuilder.workspaceCreate(project: "P1", branch: "fix")
+    #expect(createBr.params == ["project": "P1", "branch": "fix"])
+    #expect(TillerctlRequestBuilder.workspaceSelect(workspace: "W")
+        .params == ["workspace": "W"])
+    #expect(TillerctlRequestBuilder.workspaceCurrent().method == "workspace.current")
+    #expect(TillerctlRequestBuilder.workspaceClose(workspace: "W")
+        .method == "workspace.close")
+}
+
+@Test func surfaceBuilders() {
+    #expect(TillerctlRequestBuilder.surfaceList().method == "surface.list")
+    #expect(TillerctlRequestBuilder.paneSurfaces().method == "pane.surfaces")
+    #expect(TillerctlRequestBuilder.surfaceFocus(surface: "S")
+        .params == ["surface": "S"])
+    #expect(TillerctlRequestBuilder.surfaceSplit(direction: "right")
+        .params == ["direction": "right"])
+    let send = TillerctlRequestBuilder.surfaceSendText(text: "ls\n", surface: nil)
+    #expect(send.method == "surface.send_text")
+    #expect(send.params == ["text": "ls\n"])      // nil surface omitted
+    let sendTo = TillerctlRequestBuilder.surfaceSendText(text: "x", surface: "S")
+    #expect(sendTo.params == ["text": "x", "surface": "S"])
+    let key = TillerctlRequestBuilder.surfaceSendKey(key: "enter", surface: nil)
+    #expect(key.method == "surface.send_key")
+    #expect(key.params == ["key": "enter"])
+}
+
+@Test func notificationAndSystemBuilders() {
+    let n = TillerctlRequestBuilder.notificationCreate(
+        title: "T", subtitle: nil, body: "B")
+    #expect(n.method == "notification.create")
+    #expect(n.params == ["title": "T", "body": "B"])   // nil subtitle omitted
+    #expect(TillerctlRequestBuilder.notificationList().method == "notification.list")
+    #expect(TillerctlRequestBuilder.notificationClear().method == "notification.clear")
+    #expect(TillerctlRequestBuilder.systemPing().method == "system.ping")
+    #expect(TillerctlRequestBuilder.systemCapabilities().method == "system.capabilities")
+    let id = TillerctlRequestBuilder.systemIdentify(worktree: "W", pane: nil)
+    #expect(id.method == "system.identify")
+    #expect(id.params == ["worktree": "W"])
+    #expect(TillerctlRequestBuilder.sessionRestore().method == "session.restore")
+}
