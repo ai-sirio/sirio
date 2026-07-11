@@ -2,7 +2,6 @@ import SwiftUI
 import TillerCore
 import TillerGit
 import AppKit
-import Inject
 
 private enum AddProjectStep {
     case menu
@@ -11,7 +10,6 @@ private enum AddProjectStep {
 }
 
 struct AddProjectSheet: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var step: AddProjectStep = .menu
@@ -30,7 +28,6 @@ struct AddProjectSheet: View {
             .frame(width: 460)
             .background(AppTheme.background)
         }
-        .enableInjection()
     }
 
     private var header: some View {
@@ -99,7 +96,6 @@ struct AddProjectSheet: View {
 }
 
 private struct AddProjectMenuRow: View {
-    @ObserveInjection var inject
     let icon: String
     let title: String
     let subtitle: String
@@ -131,12 +127,10 @@ private struct AddProjectMenuRow: View {
         )
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
-        .enableInjection()
     }
 }
 
 private struct LocationRow: View {
-    @ObserveInjection var inject
     let parentDir: String
     let derivedPath: String
     let onPick: () -> Void
@@ -155,7 +149,6 @@ private struct LocationRow: View {
         .background(RoundedRectangle(cornerRadius: 7).fill(AppTheme.primaryPillBg))
         .contentShape(Rectangle())
         .onTapGesture(perform: onPick)
-        .enableInjection()
     }
 }
 
@@ -169,7 +162,6 @@ private func pickFolder() -> String? {
 }
 
 struct CloneFromURLView: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let onDone: () -> Void
 
@@ -220,7 +212,6 @@ struct CloneFromURLView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .enableInjection()
     }
 
     private func startClone() {
@@ -240,7 +231,6 @@ struct CloneFromURLView: View {
 }
 
 struct CreateNewProjectView: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let onDone: () -> Void
 
@@ -286,7 +276,6 @@ struct CreateNewProjectView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .enableInjection()
     }
 
     private func startCreate() {

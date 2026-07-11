@@ -1,11 +1,9 @@
 import SwiftUI
 import TillerCore
-import Inject
 
 /// Menu-bar glyph reflecting the aggregate agent status across all
 /// active-agent worktrees. Spins while any worktree is `.running`.
 struct MenuBarStatusIcon: View {
-    @ObserveInjection var inject
     let status: AgentStatus?
 
     @State private var isSpinning = false
@@ -24,6 +22,5 @@ struct MenuBarStatusIcon: View {
             )
             .onAppear { isSpinning = status == .running }
             .onChange(of: status) { _, newStatus in isSpinning = newStatus == .running }
-            .enableInjection()
     }
 }

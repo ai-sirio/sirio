@@ -2,8 +2,9 @@ import SwiftUI
 import AppKit
 
 /// Makes the titlebar transparent and lets split-view backgrounds extend under
-/// it. The window itself stays on `AppTheme.background`; the sidebar supplies
-/// its own full-height navy-tinted material through its native column.
+/// it. The window is non-opaque so the chrome material at reduced opacity
+/// (`SidebarMaterialContainer.backgroundOpacity`) lets the desktop show
+/// through; the terminal pane stays covered by the opaque `AppTheme.background`.
 private struct WindowChromeConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -11,7 +12,8 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
             guard let window = view.window else { return }
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
-            window.backgroundColor = NSColor(AppTheme.background)
+            window.isOpaque = false
+            window.backgroundColor = .clear
         }
         return view
     }

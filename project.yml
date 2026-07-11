@@ -30,22 +30,11 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.8.0
-  Inject:
-    url: https://github.com/krzysztofzablocki/Inject
-    from: 1.6.0
 targets:
   Tiller:
     type: application
     platform: macOS
     sources: [App]
-    settings:
-      configs:
-        Debug:
-          OTHER_LDFLAGS: [-Xlinker, -interposable]
-          # Required by InjectionNext on Xcode 16.3+ (this project builds
-          # with Xcode 26.6) so it can replay the exact frontend invocation
-          # when recompiling a single file for hot reload.
-          EMIT_FRONTEND_COMMAND_LINES: YES
     dependencies:
       - package: TillerCore
       - package: TillerTerminal
@@ -55,7 +44,6 @@ targets:
       - package: MarkdownUI
       - package: TillerGit
       - package: Sparkle
-      - package: Inject
     info:
       path: App/Info.plist
       properties:

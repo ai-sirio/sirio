@@ -1,13 +1,11 @@
 import SwiftUI
 import MarkdownUI
 import TillerCore
-import Inject
 
 /// Tab editor markdown: preview MarkdownUI (default) + modalità codice,
 /// toggle stile Orca in alto a destra. Banner per conflitti esterni e
 /// file cancellato.
 struct MarkdownEditorTabView: View {
-    @ObserveInjection var inject
     @Bindable var document: MarkdownDocument
     @State private var mode: EditorMode
     @State private var selection: TextSelection?
@@ -51,7 +49,6 @@ struct MarkdownEditorTabView: View {
             }
             .background(AppTheme.background)
         }
-        .enableInjection()
     }
 
     private var header: some View {

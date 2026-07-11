@@ -1,6 +1,5 @@
 #!/bin/bash
 # Dev build+launch loop: xcodegen generate -> xcodebuild Debug -> relaunch.
-# Companion to InjectionNext (proxy mode) for hot reload without Xcode.app open.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
