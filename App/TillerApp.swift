@@ -48,6 +48,12 @@ struct TillerApp: App {
                 Button("Apri file…") { model.openMarkdownFilePanel() }
                     .keyboardShortcut("o", modifiers: .command)
             }
+            CommandMenu("History") {
+                Button("Restore Previous Launch") {
+                    _ = model.restoreLaunchSnapshot()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)

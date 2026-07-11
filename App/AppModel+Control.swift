@@ -20,7 +20,43 @@ extension AppModel {
         "surface.list", "pane.surfaces", "surface.focus", "surface.split",
         "surface.send_text", "surface.send_key",
         "notification.create", "notification.list", "notification.clear",
+        "session.restore",
     ]
+
+    /// Re-apply the launch snapshot: remount worktree hosts and add back
+    /// tabs the user closed since launch. Existing state is left untouched
+    /// (idempotent). Re-added agent panes get their resume command back;
+    /// scrollback reattaches via loadScrollback on remount (records are
+    /// never deleted on close). Returns re-added tabs + remounted worktrees.
+    func restoreLaunchSnapshot() -> Int {
+        guard let snapshot = launchSnapshot else { return 0 }
+        var restored = 0
+        // Worktrees first: a restored tab is invisible while its terminal
+        // host is unmounted.
+        for worktreeId in snapshot.openWorktreeIds
+        where worktree(byId: worktreeId) != nil && !openWorktreeIds.contains(worktreeId) {
+            openWorktreeIds.append(worktreeId)
+            restored += 1
+        }
+        for (worktreeId, snapshotTabs) in snapshot.tabs {
+            guard worktree(byId: worktreeId) != nil else { continue }
+            let currentIds = Set((tabs[worktreeId] ?? []).map(\.id))
+            var added = 0
+            for tab in snapshotTabs where !currentIds.contains(tab.id) {
+                tabs[worktreeId, default: []].append(tab)
+                added += 1
+                for paneId in tab.leafIds {
+                    if let command = snapshot.paneCommands[paneId] {
+                        paneCommands[paneId] = command
+                        watchExit(paneId: paneId)
+                    }
+                }
+            }
+            if added > 0 { persistTabs(for: worktreeId) }
+            restored += added
+        }
+        return restored
+    }
 
     /// Resolve a worktree from a UUID string or absolute path — same dual
     /// selector the legacy worktree.set method accepts.
@@ -193,6 +229,10 @@ extension AppModel {
         case "notification.clear":
             clearDeliveredNotifications()
             return .success(id: request.id)
+
+        case "session.restore":
+            let restored = restoreLaunchSnapshot()
+            return .success(id: request.id, result: ["restored": String(restored)])
 
         default:
             return .failure(id: request.id, error: "unknown method \(request.method)")
