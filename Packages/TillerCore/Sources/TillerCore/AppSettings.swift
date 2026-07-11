@@ -14,4 +14,18 @@ public enum AppSettings {
     /// UserDefaults key for the "resume agent sessions on launch" toggle.
     /// Missing value means enabled (default true).
     public static let resumeAgentSessionsKey = "resumeAgentSessions"
+
+    /// UserDefaults key for the app appearance (AppAppearance rawValue).
+    /// Missing value means `.system`.
+    public static let appearanceThemeKey = "appearance.theme"
+
+    /// UserDefaults key for the terminal font size in points.
+    public static let terminalFontSizeKey = "appearance.terminalFontSize"
+    public static let defaultTerminalFontSize = 13
+    public static let terminalFontSizeRange: ClosedRange<Int> = 9...24
+
+    /// Clamp a stored terminal font size into the allowed range.
+    public static func clampTerminalFontSize(_ size: Int) -> Int {
+        min(max(size, terminalFontSizeRange.lowerBound), terminalFontSizeRange.upperBound)
+    }
 }
