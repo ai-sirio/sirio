@@ -163,7 +163,12 @@ final class AppModel {
                     )
                 }
             }
-            startControlServer()
+            if AppSettings.controlSocketEnabled(
+                defaultsValue: UserDefaults.standard.object(forKey: AppSettings.controlSocketEnabledKey) as? Bool,
+                env: ProcessInfo.processInfo.environment
+            ) {
+                startControlServer()
+            }
             UNUserNotificationCenter.current().delegate = notifier
             notifier.onActivatePane = { [weak self] id in self?.focusPane(paneId: id) }
             usage.start()
@@ -191,6 +196,16 @@ final class AppModel {
         }
         do { try server.start(); controlServer = server }
         catch { lastError = "Control server failed to start: \(error)" }
+    }
+    /// Live toggle from Settings. Stopping kills the listener — agent hooks
+    /// (Layer A) stop reporting until re-enabled.
+    func setControlSocketEnabled(_ enabled: Bool) {
+        if enabled {
+            startControlServer()
+        } else {
+            controlServer?.stop()
+            controlServer = nil
+        }
     }
 
     /// Dispatch an incoming control request. MainActor-isolated; called via
