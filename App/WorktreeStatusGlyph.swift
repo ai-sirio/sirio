@@ -44,3 +44,15 @@ struct WorktreeStatusGlyph: View {
         .help(status?.humanLabel ?? "")
     }
 }
+
+#Preview {
+    VStack(alignment: .leading, spacing: 8) {
+        WorktreeStatusGlyph(status: nil, agentId: nil)
+        WorktreeStatusGlyph(status: .running, agentId: "claude")
+        WorktreeStatusGlyph(status: .running, agentId: "codex")
+        WorktreeStatusGlyph(status: .needsInput, agentId: nil)
+        WorktreeStatusGlyph(status: .done, agentId: nil)
+        WorktreeStatusGlyph(status: .error, agentId: nil)
+    }
+    .padding()
+}

@@ -115,6 +115,18 @@ private struct PiLogo: View {
     }
 }
 
+#Preview {
+    HStack(spacing: 12) {
+        AgentIcon(agentId: "claude", size: 20)
+        AgentIcon(agentId: "codex", size: 20)
+        AgentIcon(agentId: "opencode", size: 20)
+        AgentIcon(agentId: "pi", size: 20)
+        AgentIcon(agentId: "omp", size: 20)
+        AgentIcon(agentId: "custom", size: 20)
+    }
+    .padding()
+}
+
 /// omp mark (omp.sh homepage glyph via Orca's OmpIcon, 64×64 viewBox) with
 /// its pink→purple→cyan gradient.
 private struct OmpLogo: View {

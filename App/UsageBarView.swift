@@ -7,6 +7,7 @@ import TillerCore
 struct UsageBarView: View {
     let store: UsageStore
     let worktree: Worktree?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("usage.codex.showInBar") private var showCodexInBar = true
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
     @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
@@ -18,11 +19,11 @@ struct UsageBarView: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .imageScale(.small)
-                    .rotationEffect(.degrees(isLoading ? 360 : 0))
-                    .animation(isLoading ? .linear(duration: 1).repeatForever(autoreverses: false)
+                    .rotationEffect(.degrees(isLoading && !reduceMotion ? 360 : 0))
+                    .animation(isLoading && !reduceMotion ? .linear(duration: 1).repeatForever(autoreverses: false)
                                          : .default, value: isLoading)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(HoverIconButtonStyle())
             .help("Refresh usage")
             ClaudeUsageSegment(state: store.claude)
             if showCodexInBar {

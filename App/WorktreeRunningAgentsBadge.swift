@@ -14,3 +14,12 @@ struct WorktreeRunningAgentsBadge: View {
         }
     }
 }
+
+#Preview {
+    VStack(spacing: 8) {
+        WorktreeRunningAgentsBadge(agentIds: ["claude"])
+        WorktreeRunningAgentsBadge(agentIds: ["claude", "codex"])
+        WorktreeRunningAgentsBadge(agentIds: ["claude", "codex", "opencode"])
+    }
+    .padding()
+}

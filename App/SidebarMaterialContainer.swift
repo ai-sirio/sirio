@@ -7,8 +7,8 @@ struct SidebarMaterialContainer: View {
     /// Chrome translucency: < 1 lets the raw desktop show through the blur.
     /// Requires the non-opaque window set up in `WindowChromeConfigurator`.
     static let backgroundOpacity = 0.9
-    /// Indigo tint for the sidebar/tab bar/usage bar material (opencode-style).
-    static let tintOpacity = 0.25
+    /// Indigo tint for the sidebar/tab bar/usage bar material
+    static let tintOpacity = 0.30
 
     var body: some View {
         SidebarMaterialView()
@@ -27,4 +27,9 @@ private struct SidebarMaterialView: NSViewRepresentable {
     }
 
     func updateNSView(_: NSVisualEffectView, context: Context) {}
+}
+
+#Preview {
+    SidebarMaterialContainer()
+        .frame(width: 240, height: 400)
 }

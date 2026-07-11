@@ -62,3 +62,29 @@ enum AppTheme {
         })
     }
 }
+
+/// Hover feedback for the small chrome icon buttons (close tab, settings,
+/// refresh): a rounded backplate that reads on any backdrop — including an
+/// already-hovered sidebar row — plus a slight press scale for instant
+/// touch-down response.
+struct HoverIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HoverIconLabel(configuration: configuration)
+    }
+
+    private struct HoverIconLabel: View {
+        let configuration: ButtonStyle.Configuration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.primary.opacity(hovering ? 0.1 : 0))
+                )
+                .scaleEffect(configuration.isPressed ? 0.92 : 1)
+                .onHover { hovering = $0 }
+        }
+    }
+}

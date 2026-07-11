@@ -35,6 +35,13 @@ targets:
     type: application
     platform: macOS
     sources: [App]
+    settings:
+      configs:
+        Debug:
+          # Required for Xcode Previews. The "Embed tillerctl" postbuild script
+          # explicitly signs Tiller.debug.dylib before re-signing the bundle,
+          # so the bundle seal stays valid.
+          ENABLE_DEBUG_DYLIB: YES
     dependencies:
       - package: TillerCore
       - package: TillerTerminal
@@ -66,6 +73,9 @@ targets:
           cp "$SRCROOT/Packages/TillerControl/.build/$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')/tillerctl" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/tillerctl"
           if [ "$CODE_SIGNING_ALLOWED" != "NO" ] && [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
             codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/tillerctl"
+            for DYLIB in "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/"*.dylib; do
+              [ -f "$DYLIB" ] && codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$DYLIB"
+            done
             codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$WRAPPER_NAME"
           fi
         basedOnDependencyAnalysis: false

@@ -32,3 +32,12 @@ struct RunningDots: View {
         .onAppear { animating = true }
     }
 }
+
+#Preview {
+    HStack(spacing: 16) {
+        RunningDots(color: .orange)
+        RunningDots(color: .green)
+        RunningDots(color: .blue)
+    }
+    .padding()
+}
