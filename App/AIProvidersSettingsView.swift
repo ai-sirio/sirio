@@ -1,11 +1,13 @@
 import SwiftUI
 import TillerCore
 import TillerPersistence
+import Inject
 
 /// AI provider accounts: status, bar visibility, and refresh for all four
 /// tracked providers (Claude, Codex: zero-config; OpenCode Go, Ollama
 /// Cloud: cookie configured via Keychain).
 struct AIProvidersSettingsView: View {
+    @ObserveInjection var inject
     let store: UsageStore
     let accounts: AgentAccountStore?
 
@@ -217,6 +219,7 @@ struct AIProvidersSettingsView: View {
         .onChange(of: workspaceIdOverride) { _, _ in
             Task { await store.refreshOpencodeGo() }
         }
+        .enableInjection()
     }
 
     private var statusText: String {
@@ -305,6 +308,7 @@ struct AIProvidersSettingsView: View {
 /// the Claude Code and Codex sections above — same shape, different
 /// callbacks per provider.
 private struct AgentAccountsBlock: View {
+    @ObserveInjection var inject
     let title: String
     let accounts: [AgentAccountRecord]
     let activeId: String?
@@ -342,19 +346,22 @@ private struct AgentAccountsBlock: View {
                 }
             }
 
-            row(label: "System default", subtitle: "Use your current CLI login on this device.",
-                isActive: activeId == nil, showActions: false,
-                onSelect: { onSelect(nil) }, onReAuthenticate: {}, onRemove: {})
+            Group {
+                row(label: "System default", subtitle: "Use your current CLI login on this device.",
+                    isActive: activeId == nil, showActions: false,
+                    onSelect: { onSelect(nil) }, onReAuthenticate: {}, onRemove: {})
 
-            ForEach(accounts, id: \.id) { account in
-                row(label: account.label, subtitle: account.orgName,
-                    isActive: activeId == account.id, showActions: true,
-                    onSelect: { onSelect(account.id) },
-                    onReAuthenticate: { onReAuthenticate(account) },
-                    onRemove: { onRemove(account) })
+                ForEach(accounts, id: \.id) { account in
+                    row(label: account.label, subtitle: account.orgName,
+                        isActive: activeId == account.id, showActions: true,
+                        onSelect: { onSelect(account.id) },
+                        onReAuthenticate: { onReAuthenticate(account) },
+                        onRemove: { onRemove(account) })
+                }
             }
         }
         .padding(.vertical, 4)
+        .enableInjection()
     }
 
     @ViewBuilder

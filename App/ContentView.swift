@@ -2,8 +2,10 @@ import SwiftUI
 import TillerCore
 import TillerTerminal
 import TillerControl
+import Inject
 
 struct ContentView: View {
+    @ObserveInjection var inject
     var model: AppModel
     var updater: UpdaterModel
     @AppStorage("usage.claude.showInBar") private var showClaudeInBar = true
@@ -27,10 +29,13 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            switch model.route {
-            case .workspace: workspaceView
-            case .settings: SettingsSurface(model: model, updater: updater)
+            Group {
+                switch model.route {
+                case .workspace: workspaceView
+                case .settings: SettingsSurface(model: model, updater: updater)
+                }
             }
+            .enableInjection()
         }
         .frame(minWidth: 900, minHeight: 560)
         .configuresWindowChrome()

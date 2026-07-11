@@ -1,12 +1,15 @@
 import SwiftUI
 import AppKit
+import Inject
 
 /// One native dark-glass surface, lightly tinted toward Tiller's navy palette.
 /// Blends behind the window so the desktop shows through, like native sidebars.
 struct SidebarMaterialContainer: View {
+    @ObserveInjection var inject
     var body: some View {
         SidebarMaterialView()
             .overlay(AppTheme.chromeTint.opacity(0.25))
+            .enableInjection()
     }
 }
 

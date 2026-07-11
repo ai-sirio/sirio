@@ -1,10 +1,12 @@
 // Tiller/App/RunningDots.swift
 import SwiftUI
+import Inject
 
 /// Three dots that sweep in sequence — each fades .28 → 1 and lifts slightly,
 /// staggered so the highlight travels left→right and loops forever. Marks a
 /// running agent; tinted by the agent's color. Honors Reduce Motion.
 struct RunningDots: View {
+    @ObserveInjection var inject
     var color: Color
     var dotSize: CGFloat = 4
 
@@ -30,5 +32,6 @@ struct RunningDots: View {
             }
         }
         .onAppear { animating = true }
+        .enableInjection()
     }
 }

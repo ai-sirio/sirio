@@ -2,8 +2,10 @@ import SwiftUI
 import TillerCore
 import TillerAgents
 import AppKit
+import Inject
 
 struct SidebarView: View {
+    @ObserveInjection var inject
     @Bindable var model: AppModel
     @State private var newBranchName = ""
     @State private var branchPromptProject: Project?
@@ -12,119 +14,122 @@ struct SidebarView: View {
     @State private var showAddProjectSheet = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            FilterField(text: $filterText)
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+        Group {
+            VStack(spacing: 0) {
+                FilterField(text: $filterText)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(filteredProjects) { project in
-                        ProjectRow(model: model, project: project, onSettings: { settingsProject = $0 })
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filteredProjects) { project in
+                            ProjectRow(model: model, project: project, onSettings: { settingsProject = $0 })
 
-                        if model.isProjectExpanded(project) {
-                            ForEach(AttentionSort.sorted(model.worktrees[project.id] ?? [], statusOf: model.statusForWorktree)) { worktree in
-                                WorktreeRow(model: model, worktree: worktree)
-                                    .contextMenu {
-                                        Button("Nuovo Terminale") {
-                                            model.newShellTab(in: worktree)
-                                        }
-                                        ForEach(AgentCatalog.all, id: \.id) { adapter in
-                                            Button("New \(adapter.displayName) Panel") {
-                                                Task { await model.spawnAgent(adapter, in: worktree) }
+                            if model.isProjectExpanded(project) {
+                                ForEach(AttentionSort.sorted(model.worktrees[project.id] ?? [], statusOf: model.statusForWorktree)) { worktree in
+                                    WorktreeRow(model: model, worktree: worktree)
+                                        .contextMenu {
+                                            Button("Nuovo Terminale") {
+                                                model.newShellTab(in: worktree)
+                                            }
+                                            ForEach(AgentCatalog.all, id: \.id) { adapter in
+                                                Button("New \(adapter.displayName) Panel") {
+                                                    Task { await model.spawnAgent(adapter, in: worktree) }
+                                                }
+                                            }
+                                            Divider()
+                                            Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {
+                                                Task { await model.setPrimary(worktree) }
+                                            }
+                                            Button("Remove Worktree", role: .destructive) {
+                                                Task { await model.removeWorktree(worktree) }
                                             }
                                         }
-                                        Divider()
-                                        Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {
-                                            Task { await model.setPrimary(worktree) }
-                                        }
-                                        Button("Remove Worktree", role: .destructive) {
-                                            Task { await model.removeWorktree(worktree) }
-                                        }
-                                    }
 
-                                let tabs = model.tabs[worktree.id] ?? []
-                                ForEach(tabs) { tab in
-                                    let tabIsLast = tab.id == tabs.last?.id
-                                    TabRow(model: model, worktree: worktree, tab: tab,
-                                           isLast: tabIsLast)
-                                    if tab.terminalTree != nil, tab.leafIds.count > 1 {
-                                        let leafIds = tab.leafIds
-                                        ForEach(Array(leafIds.enumerated()), id: \.element) { index, paneId in
-                                            PaneRow(model: model, worktree: worktree, tab: tab,
-                                                    paneId: paneId, index: index,
-                                                    isLast: paneId == leafIds.last,
-                                                    tabIsLast: tabIsLast)
+                                    let tabs = model.tabs[worktree.id] ?? []
+                                    ForEach(tabs) { tab in
+                                        let tabIsLast = tab.id == tabs.last?.id
+                                        TabRow(model: model, worktree: worktree, tab: tab,
+                                               isLast: tabIsLast)
+                                        if tab.terminalTree != nil, tab.leafIds.count > 1 {
+                                            let leafIds = tab.leafIds
+                                            ForEach(Array(leafIds.enumerated()), id: \.element) { index, paneId in
+                                                PaneRow(model: model, worktree: worktree, tab: tab,
+                                                        paneId: paneId, index: index,
+                                                        isLast: paneId == leafIds.last,
+                                                        tabIsLast: tabIsLast)
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            NewWorktreeButton { branchPromptProject = project }
+                                NewWorktreeButton { branchPromptProject = project }
+                            }
                         }
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                    .animation(.easeInOut(duration: 0.18), value: model.expandedProjectIds)
+                    .animation(.easeInOut(duration: 0.18), value: model.worktrees.mapValues { $0.map(\.id) })
+                    .animation(.easeInOut(duration: 0.18), value: model.tabs.mapValues { $0.map(\.id) })
                 }
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-                .animation(.easeInOut(duration: 0.18), value: model.expandedProjectIds)
-                .animation(.easeInOut(duration: 0.18), value: model.worktrees.mapValues { $0.map(\.id) })
-                .animation(.easeInOut(duration: 0.18), value: model.tabs.mapValues { $0.map(\.id) })
-            }
-            .scrollContentBackground(.hidden)
+                .scrollContentBackground(.hidden)
 
-            Divider().overlay(AppTheme.hairline)
-            HStack {
-                Button {
-                    model.openSettings()
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .buttonStyle(.plain)
-                Button {
-                    let readme = URL(fileURLWithPath: "/Users/enzopiopalmisano/orca/projects/orca-mac/README.md")
-                    if FileManager.default.fileExists(atPath: readme.path) {
-                        NSWorkspace.shared.open(readme)
+                Divider().overlay(AppTheme.hairline)
+                HStack {
+                    Button {
+                        model.openSettings()
+                    } label: {
+                        Image(systemName: "gearshape")
                     }
+                    .buttonStyle(.plain)
+                    Button {
+                        let readme = URL(fileURLWithPath: "/Users/enzopiopalmisano/orca/projects/orca-mac/README.md")
+                        if FileManager.default.fileExists(atPath: readme.path) {
+                            NSWorkspace.shared.open(readme)
+                        }
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+                .foregroundStyle(AppTheme.subtitle)
+                .padding(8)
+            }
+            .toolbar {
+                Button {
+                    showAddProjectSheet = true
                 } label: {
-                    Image(systemName: "questionmark.circle")
+                    Label("Add Project", systemImage: "plus")
                 }
-                .buttonStyle(.plain)
-                Spacer()
             }
-            .foregroundStyle(AppTheme.subtitle)
-            .padding(8)
-        }
-        .toolbar {
-            Button {
-                showAddProjectSheet = true
-            } label: {
-                Label("Add Project", systemImage: "plus")
-            }
-        }
-        .alert(
-            "New worktree in \(branchPromptProject?.name ?? "")",
-            isPresented: .init(
-                get: { branchPromptProject != nil },
-                set: { if !$0 { branchPromptProject = nil } }
-            )
-        ) {
-            TextField("branch-name", text: $newBranchName)
-            Button("Create") {
-                if let project = branchPromptProject, !newBranchName.isEmpty {
-                    let branch = newBranchName
-                    Task { await model.addWorktree(project: project, branch: branch) }
+            .alert(
+                "New worktree in \(branchPromptProject?.name ?? "")",
+                isPresented: .init(
+                    get: { branchPromptProject != nil },
+                    set: { if !$0 { branchPromptProject = nil } }
+                )
+            ) {
+                TextField("branch-name", text: $newBranchName)
+                Button("Create") {
+                    if let project = branchPromptProject, !newBranchName.isEmpty {
+                        let branch = newBranchName
+                        Task { await model.addWorktree(project: project, branch: branch) }
+                    }
+                    newBranchName = ""
                 }
-                newBranchName = ""
+                Button("Cancel", role: .cancel) { newBranchName = "" }
             }
-            Button("Cancel", role: .cancel) { newBranchName = "" }
+            .sheet(item: $settingsProject) { project in
+                ProjectSettingsSheet(model: model, project: project)
+            }
+            .sheet(isPresented: $showAddProjectSheet) {
+                AddProjectSheet(model: model)
+            }
         }
-        .sheet(item: $settingsProject) { project in
-            ProjectSettingsSheet(model: model, project: project)
-        }
-        .sheet(isPresented: $showAddProjectSheet) {
-            AddProjectSheet(model: model)
-        }
+        .enableInjection()
     }
 
     private var filteredProjects: [Project] {
@@ -141,6 +146,7 @@ struct SidebarView: View {
 /// Flat filter box matching the mockup — replaces `.searchable`, whose native
 /// rounded pill and blue focus ring clash with the sidebar's flat chrome.
 private struct FilterField: View {
+    @ObserveInjection var inject
     @Binding var text: String
 
     var body: some View {
@@ -164,6 +170,7 @@ private struct FilterField: View {
                         .stroke(AppTheme.hairline, lineWidth: 1)
                 )
         )
+        .enableInjection()
     }
 }
 
@@ -172,6 +179,7 @@ private struct FilterField: View {
 /// livello. Disegnate nel gutter, prima del background delle righe, così non
 /// attraversano mai la pill di selezione/hover.
 private struct TreeGuideLines: View {
+    @ObserveInjection var inject
     /// x delle verticali che attraversano l'intera riga (livelli antenati).
     var throughLines: [CGFloat] = []
     /// x del connettore del proprio livello (├ / └); nil = nessun connettore.
@@ -207,6 +215,7 @@ private struct TreeGuideLines: View {
             .stroke(AppTheme.treeGuide, style: StrokeStyle(lineWidth: 1, lineCap: .round))
         }
         .allowsHitTesting(false)
+        .enableInjection()
     }
 }
 
@@ -223,6 +232,7 @@ private func projectColor(_ project: Project) -> Color {
 /// Header di progetto in sidebar: toggle espansione, selezione, icona colorata
 /// e badge aggregato dello stato agenti quando il progetto è collassato.
 private struct ProjectRow: View {
+    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
     let onSettings: (Project) -> Void
@@ -272,6 +282,7 @@ private struct ProjectRow: View {
                 Task { await model.removeProject(project) }
             }
         }
+        .enableInjection()
     }
 }
 
@@ -313,6 +324,7 @@ private func projectIcon(_ project: Project) -> some View {
 /// optional secondary line (agent + comment), and a trailing relative age.
 /// Draws its own selection/hover background — no `List` underneath.
 private struct WorktreeRow: View {
+    @ObserveInjection var inject
     @Bindable var model: AppModel
     let worktree: Worktree
     @State private var hovering = false
@@ -414,6 +426,7 @@ private struct WorktreeRow: View {
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture { model.selectedWorktree = worktree }
+        .enableInjection()
     }
 
     @ViewBuilder private var rowBackground: some View {
@@ -452,6 +465,7 @@ private struct WorktreeRow: View {
 
 /// Indented "New Worktree…" affordance shown under an expanded project.
 private struct NewWorktreeButton: View {
+    @ObserveInjection var inject
     let action: () -> Void
     @State private var hovering = false
 
@@ -478,6 +492,7 @@ private struct NewWorktreeButton: View {
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
+        .enableInjection()
     }
 }
 
@@ -485,6 +500,7 @@ private struct NewWorktreeButton: View {
 /// titolo, dirty dot per markdown, × in hover, rename inline su doppio click.
 /// Indentato sotto la WorktreeRow del proprio worktree.
 private struct TabRow: View {
+    @ObserveInjection var inject
     @Bindable var model: AppModel
     let worktree: Worktree
     let tab: WorkspaceTab
@@ -584,6 +600,7 @@ private struct TabRow: View {
         } message: {
             Text("Il processo in esecuzione verrà terminato.")
         }
+        .enableInjection()
     }
 
     @ViewBuilder private var icon: some View {
@@ -619,6 +636,7 @@ private struct TabRow: View {
 /// Nodo pane (4° livello): mostrato solo quando il tab terminale ha più di
 /// un pane. Etichetta = ultimo titolo PTY, fallback posizionale "Pane N".
 private struct PaneRow: View {
+    @ObserveInjection var inject
     @Bindable var model: AppModel
     let worktree: Worktree
     let tab: WorkspaceTab
@@ -671,6 +689,7 @@ private struct PaneRow: View {
         } message: {
             Text("Il processo in esecuzione verrà terminato.")
         }
+        .enableInjection()
     }
 
     @ViewBuilder private var icon: some View {
@@ -688,18 +707,22 @@ private struct PaneRow: View {
 /// split mirato, affianca (solo stesso worktree e fuori dal tab attivo),
 /// chiusura con conferma (il chiamante mostra l'alert).
 private struct TerminalPaneMenu: View {
+    @ObserveInjection var inject
     @Bindable var model: AppModel
     let paneId: UUID
     @Binding var confirmingClose: Bool
 
     var body: some View {
-        Button("Split orizzontale") { model.split(paneId: paneId, axis: .horizontal) }
-        Button("Split verticale") { model.split(paneId: paneId, axis: .vertical) }
-        if model.canAdoptPane(paneId) {
-            Button("Affianca al terminale corrente") { model.adoptPane(paneId) }
+        Group {
+            Button("Split orizzontale") { model.split(paneId: paneId, axis: .horizontal) }
+            Button("Split verticale") { model.split(paneId: paneId, axis: .vertical) }
+            if model.canAdoptPane(paneId) {
+                Button("Affianca al terminale corrente") { model.adoptPane(paneId) }
+            }
+            Divider()
+            Button("Chiudi terminale…", role: .destructive) { confirmingClose = true }
         }
-        Divider()
-        Button("Chiudi terminale…", role: .destructive) { confirmingClose = true }
+        .enableInjection()
     }
 }
 
@@ -731,6 +754,7 @@ extension Color {
 /// tinto per stato. Nessun Liquid Glass — la sidebar è renderizzata piatta
 /// per combaciare col mockup.
 private struct StatusBadge: View {
+    @ObserveInjection var inject
     let status: AgentStatus
 
     var body: some View {
@@ -738,5 +762,6 @@ private struct StatusBadge: View {
             .fill(status.badgeColor)
             .frame(width: 7, height: 7)
             .help(status.rawValue)
+            .enableInjection()
     }
 }
