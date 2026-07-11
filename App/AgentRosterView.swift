@@ -1,14 +1,12 @@
 import SwiftUI
 import AppKit
 import TillerCore
-import Inject
 
 /// Menu-bar popover content: one row per worktree with an active agent,
 /// sorted by the same urgency rule as the sidebar. Selecting a row reopens
 /// the window if it was closed, activates the app, and jumps straight to
 /// that worktree's worst-status tab.
 struct AgentRosterView: View {
-    @ObserveInjection var inject
     let model: AppModel
 
     @Environment(\.openWindow) private var openWindow
@@ -38,7 +36,6 @@ struct AgentRosterView: View {
                 .padding(8)
         }
         .frame(minWidth: 260)
-        .enableInjection()
     }
 
     private func projectName(for worktree: Worktree) -> String {
@@ -63,7 +60,6 @@ struct AgentRosterView: View {
 }
 
 private struct RosterRow: View {
-    @ObserveInjection var inject
     let worktree: Worktree
     let projectName: String
     let status: AgentStatus?
@@ -88,6 +84,5 @@ private struct RosterRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .enableInjection()
     }
 }

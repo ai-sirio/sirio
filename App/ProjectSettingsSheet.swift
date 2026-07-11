@@ -4,12 +4,10 @@ import TillerGit
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
-import Inject
 
 /// Sheet for editing a single project's sidebar identity, icon, and worktree
 /// defaults. Opened from the gear icon on `ProjectRow`.
 struct ProjectSettingsSheet: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
     @Environment(\.dismiss) private var dismiss
@@ -50,7 +48,6 @@ struct ProjectSettingsSheet: View {
         } message: {
             Text("This removes the project and all its worktrees from Tiller. Files on disk are not deleted.")
         }
-        .enableInjection()
     }
 
     private var header: some View {
@@ -71,7 +68,6 @@ struct ProjectSettingsSheet: View {
 }
 
 private struct IdentitySection: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
 
@@ -105,12 +101,10 @@ private struct IdentitySection: View {
                         .overlay(RoundedRectangle(cornerRadius: 6).stroke(AppTheme.hairline, lineWidth: 1))
                 )
         }
-        .enableInjection()
     }
 }
 
 private struct RepoIconSection: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
 
@@ -213,7 +207,6 @@ private struct RepoIconSection: View {
             case .emoji: EmojiTabContent(model: model, project: project)
             }
         }
-        .enableInjection()
     }
 
     private func colorSwatch(fill: Color, isSelected: Bool) -> some View {
@@ -226,7 +219,6 @@ private struct RepoIconSection: View {
 }
 
 private struct AvatarTabContent: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
 
@@ -279,7 +271,6 @@ private struct AvatarTabContent: View {
         .task {
             githubOwner = await GitRemote.githubOwner(repoPath: project.rootPath)
         }
-        .enableInjection()
     }
 
     private func fetchGitHubAvatar() {
@@ -341,7 +332,6 @@ private struct AvatarTabContent: View {
 }
 
 private struct IconTabContent: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
 
@@ -372,12 +362,10 @@ private struct IconTabContent: View {
                 .buttonStyle(.plain)
             }
         }
-        .enableInjection()
     }
 }
 
 private struct EmojiTabContent: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
     @State private var emojiText: String = ""
@@ -410,12 +398,10 @@ private struct EmojiTabContent: View {
             .foregroundStyle(AppTheme.subtitle)
         }
         .onAppear { emojiText = project.iconValue ?? "" }
-        .enableInjection()
     }
 }
 
 private struct WorktreeBaseSection: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
 
@@ -484,12 +470,10 @@ private struct WorktreeBaseSection: View {
         .task {
             branches = (try? await GitBranches.list(repoPath: project.rootPath)) ?? []
         }
-        .enableInjection()
     }
 }
 
 private struct WorktreeLocationSection: View {
-    @ObserveInjection var inject
     @Bindable var model: AppModel
     let project: Project
 
@@ -526,7 +510,6 @@ private struct WorktreeLocationSection: View {
                     .buttonStyle(.plain)
             }
         }
-        .enableInjection()
     }
 
     private func choose() {

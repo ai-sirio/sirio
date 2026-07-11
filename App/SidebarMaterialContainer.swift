@@ -1,15 +1,19 @@
 import SwiftUI
 import AppKit
-import Inject
 
-/// One native glass surface, lightly tinted toward Tiller's navy palette.
+/// One native glass surface for the chrome (sidebar, titlebar, usage bar).
 /// Blends behind the window so the desktop shows through, like native sidebars.
 struct SidebarMaterialContainer: View {
-    @ObserveInjection var inject
+    /// Chrome translucency: < 1 lets the raw desktop show through the blur.
+    /// Requires the non-opaque window set up in `WindowChromeConfigurator`.
+    static let backgroundOpacity = 0.9
+    /// Indigo tint for the sidebar/tab bar/usage bar material (opencode-style).
+    static let tintOpacity = 0.25
+
     var body: some View {
         SidebarMaterialView()
-            .overlay(AppTheme.chromeTint.opacity(0.12))
-            .enableInjection()
+            .overlay(AppTheme.chromeTint.opacity(Self.tintOpacity))
+            .opacity(Self.backgroundOpacity)
     }
 }
 
