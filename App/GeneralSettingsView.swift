@@ -7,8 +7,10 @@ import TillerControl
 /// back to Tiller from a pane's shell. Moved from the former SettingsView.
 struct GeneralSettingsView: View {
     var updater: UpdaterModel
+    var model: AppModel
     @State private var copied = false
     @AppStorage(AppSettings.resumeAgentSessionsKey) private var resumeAgentSessions = true
+    @AppStorage(AppSettings.controlSocketEnabledKey) private var controlSocketEnabled = true
 
     var body: some View {
         Form {
@@ -33,6 +35,13 @@ struct GeneralSettingsView: View {
                 }
             }
             Section("tillerctl") {
+                Toggle(isOn: $controlSocketEnabled) {
+                    Text("Enable control socket")
+                    Text("Required by tillerctl and by agent lifecycle hooks — disabling it degrades agent status badges to title/process detection only.")
+                }
+                .onChange(of: controlSocketEnabled) { _, enabled in
+                    model.setControlSocketEnabled(enabled)
+                }
                 LabeledContent("Bundled binary", value: tillerctlBundledPath)
                 LabeledContent("Control socket", value: ControlSocket.defaultPath())
                 LabeledContent {

@@ -64,7 +64,7 @@ struct SettingsSurface: View {
     private var detailPane: some View {
         switch model.settingsCategory {
         case .aiProviders: AIProvidersSettingsView(store: model.usage, accounts: model.agentAccounts)
-        case .general: GeneralSettingsView(updater: updater)
+        case .general: GeneralSettingsView(updater: updater, model: model)
         case .appearance: AppearanceSettingsView()
         case .permissions: PermissionsSettingsView()
         }
