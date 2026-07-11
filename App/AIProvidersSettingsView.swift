@@ -113,6 +113,7 @@ struct AIProvidersSettingsView: View {
                     LabeledContent("Last read", value: updated.formatted(date: .omitted, time: .shortened))
                 }
                 SecureField("Session cookie", text: $opencodeGoCookieInput)
+                    .textFieldStyle(.roundedBorder)
                 Text("Paste either the raw token value (e.g. Fe26.2**...) or the full cookie header (e.g. auth=Fe26.2**...). Find it in your browser's DevTools → Network → any opencode.ai request → Cookie header. OpenCode Go auth is web-based and shared across Windows and WSL terminals.")
                     .font(.caption)
                     .foregroundStyle(AppTheme.subtitle)
@@ -142,6 +143,7 @@ struct AIProvidersSettingsView: View {
                     }
                 }
                 TextField("Workspace ID override", text: $workspaceIdOverride)
+                    .textFieldStyle(.roundedBorder)
                 Text("Find this in the URL after logging into opencode.ai (e.g. opencode.ai/workspace/wrk_.../go).")
                     .font(.caption)
                     .foregroundStyle(AppTheme.subtitle)
@@ -170,6 +172,7 @@ struct AIProvidersSettingsView: View {
                     LabeledContent("Last read", value: updated.formatted(date: .omitted, time: .shortened))
                 }
                 SecureField("Session cookie", text: $ollamaCloudCookieInput)
+                    .textFieldStyle(.roundedBorder)
                 Text("Paste the raw token value or the full cookie header from ollama.com. Find it in your browser's DevTools → Network → any ollama.com request → Cookie header.")
                     .font(.caption)
                     .foregroundStyle(AppTheme.subtitle)
