@@ -7,7 +7,11 @@ struct Tillerctl: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tillerctl",
         abstract: "Control a running Tiller.app over its unix socket.",
-        subcommands: [Panel.self, Notify.self, SessionRef.self, Worktree.self]
+        subcommands: [
+            Panel.self, Notify.self, SessionRef.self, Worktree.self,
+            // cmux-parity flat commands
+            Ping.self, Capabilities.self, Identify.self,
+        ]
     )
 }
 

@@ -303,7 +303,7 @@ final class AppModel {
             }
 
         default:
-            return .failure(id: request.id, error: "unknown method \(request.method)")
+            return await handleCmuxControl(request)
         }
     }
 
