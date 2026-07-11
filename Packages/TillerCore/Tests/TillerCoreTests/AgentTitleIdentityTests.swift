@@ -10,8 +10,12 @@ import Testing
     #expect(AgentTitleIdentity.identify(title: ". Fix login bug") == "claude")
 }
 
-@Test func bareBrailleSpinnerIdentifiesClaude() {
-    #expect(AgentTitleIdentity.identify(title: "\u{280B} Fix login bug") == "claude")
+@Test func bareBrailleSpinnerDoesNotIdentify() {
+    // Codex 0.144+ writes the same "dots" braille cycle (⠋⠙⠹…) into its
+    // terminal title while working, so a bare spinner no longer implies
+    // Claude. Both are native binaries caught by Layer D process
+    // identification instead.
+    #expect(AgentTitleIdentity.identify(title: "\u{280B} Fix login bug") == nil)
 }
 
 @Test func codexNameTokenIdentifiesCodex() {
