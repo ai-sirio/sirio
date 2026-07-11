@@ -6,3 +6,8 @@ build/
 .tokensave/
 .superpowers/
 .serena/
+.agents/
+.opencode/
+.pi/
+.claude/
+skills-lock.json
