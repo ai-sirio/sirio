@@ -1,16 +1,34 @@
 import SwiftUI
+import TillerCore
 import Inject
 
-/// Placeholder — theme/color settings arrive once there is something to
-/// configure (see Phase 2A spec Roadmap).
+/// Appearance settings: app theme (system/light/dark) and terminal font
+/// size. Writes preferences only — TillerApp applies the theme, terminal
+/// panes pick up the font size live.
 struct AppearanceSettingsView: View {
     @ObserveInjection var inject
+    @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
+    @AppStorage(AppSettings.terminalFontSizeKey) private var terminalFontSize = AppSettings.defaultTerminalFontSize
+
     var body: some View {
-        ContentUnavailableView(
-            "Appearance",
-            systemImage: "paintbrush",
-            description: Text("Theme options coming soon.")
-        )
+        Form {
+            Section("Theme") {
+                Picker("Appearance", selection: $appearanceRaw) {
+                    ForEach(AppAppearance.allCases, id: \.rawValue) { appearance in
+                        Text(appearance.title).tag(appearance.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            Section("Terminal") {
+                Stepper(value: $terminalFontSize, in: AppSettings.terminalFontSizeRange) {
+                    Text("Font size")
+                    Text("\(terminalFontSize) pt")
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .enableInjection()
     }
 }
