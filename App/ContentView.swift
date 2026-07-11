@@ -121,6 +121,7 @@ struct ContentView: View {
             // material extends under it so the titlebar matches the sidebar.
             .background(AppTheme.background, ignoresSafeAreaEdges: [])
             .background(SidebarMaterialContainer().ignoresSafeArea(edges: .top))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
                       let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }

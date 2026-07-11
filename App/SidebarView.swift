@@ -81,7 +81,7 @@ struct SidebarView: View {
                     } label: {
                         Image(systemName: "gearshape")
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(HoverIconButtonStyle())
                     Button {
                         let readme = URL(fileURLWithPath: "/Users/enzopiopalmisano/orca/projects/orca-mac/README.md")
                         if FileManager.default.fileExists(atPath: readme.path) {
@@ -249,7 +249,7 @@ private struct ProjectRow: View {
                         .font(.system(size: 11))
                         .foregroundStyle(AppTheme.meta)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(HoverIconButtonStyle())
             }
             if !model.isProjectExpanded(project), let status = model.statusForProject(project) {
                 StatusBadge(status: status)
@@ -547,7 +547,7 @@ private struct TabRow: View {
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(AppTheme.meta)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(HoverIconButtonStyle())
                 .help("Chiudi tab (⌘W)")
             }
         }
