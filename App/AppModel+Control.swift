@@ -14,7 +14,26 @@ extension AppModel {
         "panel.create", "panel.write", "panel.read", "panel.wait",
         "notify", "session.ref", "worktree.set",
         "system.ping", "system.capabilities", "system.identify",
+        "workspace.list", "workspace.create", "workspace.select",
+        "workspace.current", "workspace.close",
     ]
+
+    /// Resolve a worktree from a UUID string or absolute path — same dual
+    /// selector the legacy worktree.set method accepts.
+    func resolveWorktree(_ selector: String) -> Worktree? {
+        if let uuid = UUID(uuidString: selector) {
+            return worktrees.values.flatMap { $0 }.first { $0.id == uuid }
+        }
+        return worktrees.values.flatMap { $0 }.first { $0.path == selector }
+    }
+
+    /// Default branch name for workspace.create when --branch is omitted.
+    static func generatedBranchName(now: Date = Date()) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        return "wt-\(fmt.string(from: now))"
+    }
 
     func handleCmuxControl(_ request: ControlRequest) async -> ControlResponse {
         switch request.method {
@@ -29,6 +48,65 @@ extension AppModel {
 
         case "system.identify":
             return identify(request)
+
+        case "workspace.list":
+            return .success(id: request.id, result: [
+                "workspaces": ControlRows.encode(ControlListing.workspaceRows(
+                    projects: projects, worktrees: worktrees,
+                    selectedWorktreeId: selectedWorktree?.id))
+            ])
+
+        case "workspace.current":
+            guard let wt = selectedWorktree else {
+                return .failure(id: request.id, error: "no workspace selected")
+            }
+            return .success(id: request.id, result: [
+                "id": wt.id.uuidString, "branch": wt.branch, "path": wt.path,
+                "project": projects.first { $0.id == wt.projectId }?.name ?? "",
+            ])
+
+        case "workspace.select":
+            guard let selector = request.params["workspace"] else {
+                return .failure(id: request.id, error: "missing workspace")
+            }
+            guard let wt = resolveWorktree(selector) else {
+                return .failure(id: request.id, error: "unknown workspace \(selector)")
+            }
+            selectedWorktree = wt
+            NSApp.activate(ignoringOtherApps: false)
+            return .success(id: request.id, result: ["id": wt.id.uuidString])
+
+        case "workspace.close":
+            guard let selector = request.params["workspace"] else {
+                return .failure(id: request.id, error: "missing workspace")
+            }
+            guard let wt = resolveWorktree(selector) else {
+                return .failure(id: request.id, error: "unknown workspace \(selector)")
+            }
+            // Unmount the terminal host: PTYs terminate via onDisappear.
+            // The worktree itself stays in the sidebar.
+            openWorktreeIds.removeAll { $0 == wt.id }
+            if selectedWorktree?.id == wt.id { selectedWorktree = nil }
+            return .success(id: request.id)
+
+        case "workspace.create":
+            guard let projectSelector = request.params["project"] else {
+                return .failure(id: request.id, error: "missing project")
+            }
+            guard let project = projects.first(where: {
+                $0.id.uuidString == projectSelector || $0.name == projectSelector
+            }) else {
+                return .failure(id: request.id, error: "unknown project \(projectSelector)")
+            }
+            let branch = request.params["branch"] ?? Self.generatedBranchName()
+            let before = Set((worktrees[project.id] ?? []).map(\.id))
+            await addWorktree(project: project, branch: branch)
+            guard let created = (worktrees[project.id] ?? []).first(where: { !before.contains($0.id) }) else {
+                return .failure(id: request.id, error: lastError ?? "workspace.create failed")
+            }
+            return .success(id: request.id, result: [
+                "id": created.id.uuidString, "branch": created.branch, "path": created.path,
+            ])
 
         default:
             return .failure(id: request.id, error: "unknown method \(request.method)")

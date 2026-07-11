@@ -85,3 +85,72 @@ struct Identify: ParsableCommand {
                     asJSON: jsonFlag.json)
     }
 }
+
+
+// MARK: - Workspace commands
+
+struct ListWorkspaces: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list-workspaces", abstract: "List all worktrees.")
+    @OptionGroup var socketOptions: SocketOptions
+    @OptionGroup var jsonFlag: JSONFlag
+    func run() throws {
+        let response = try roundTripOrDie(TillerctlRequestBuilder.workspaceList(),
+                                          socket: socketOptions.socket)
+        printRows(response, key: "workspaces",
+                  columns: ["id", "project", "branch", "path", "selected"],
+                  asJSON: jsonFlag.json)
+    }
+}
+
+struct NewWorkspace: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "new-workspace", abstract: "Create a worktree in a project.")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Project UUID or name.") var project: String
+    @Option(help: "Branch name (default: generated).") var branch: String?
+    func run() throws {
+        let response = try roundTripOrDie(
+            TillerctlRequestBuilder.workspaceCreate(project: project, branch: branch),
+            socket: socketOptions.socket)
+        print(response.result?["id"] ?? "")
+    }
+}
+
+struct SelectWorkspace: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "select-workspace", abstract: "Select a worktree in the sidebar.")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Worktree UUID or absolute path.") var workspace: String
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.workspaceSelect(workspace: workspace),
+            socket: socketOptions.socket)
+    }
+}
+
+struct CurrentWorkspace: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "current-workspace", abstract: "Show the selected worktree.")
+    @OptionGroup var socketOptions: SocketOptions
+    @OptionGroup var jsonFlag: JSONFlag
+    func run() throws {
+        let response = try roundTripOrDie(TillerctlRequestBuilder.workspaceCurrent(),
+                                          socket: socketOptions.socket)
+        printResult(response, columns: ["project", "branch", "path", "id"],
+                    asJSON: jsonFlag.json)
+    }
+}
+
+struct CloseWorkspace: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "close-workspace",
+        abstract: "Unmount a worktree's terminals (worktree stays in sidebar).")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Worktree UUID or absolute path.") var workspace: String
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.workspaceClose(workspace: workspace),
+            socket: socketOptions.socket)
+    }
+}

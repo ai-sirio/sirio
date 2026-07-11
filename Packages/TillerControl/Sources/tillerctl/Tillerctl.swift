@@ -11,6 +11,8 @@ struct Tillerctl: ParsableCommand {
             Panel.self, Notify.self, SessionRef.self, Worktree.self,
             // cmux-parity flat commands
             Ping.self, Capabilities.self, Identify.self,
+            ListWorkspaces.self, NewWorkspace.self, SelectWorkspace.self,
+            CurrentWorkspace.self, CloseWorkspace.self,
         ]
     )
 }
