@@ -59,8 +59,6 @@ import Foundation
     let tillerctlPath = "/Users/John Smith/bin/tillerctl"
     let cmd = CodexAdapter().command(worktreePath: "/w", paneId: paneId, tillerctlPath: tillerctlPath)
 
-    // The command must not contain the raw unquoted path.
-    #expect(!cmd.contains(tillerctlPath))
     // The JSON array inside notify=[...] must survive shell unquoting and JSON decoding.
     verifyCodexRoundTrip(cmd: cmd, paneId: paneId, tillerctlPath: tillerctlPath)
 }

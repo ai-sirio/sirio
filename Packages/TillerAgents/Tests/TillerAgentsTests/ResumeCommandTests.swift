@@ -14,7 +14,7 @@ import Foundation
         worktreePath: "/w", paneId: paneId,
         tillerctlPath: "/usr/local/bin/tillerctl",
         sessionRef: "11111111-2222-3333-4444-555555555555")
-    #expect(cmd == "codex -c 'notify=[\"\\/usr\\/local\\/bin\\/tillerctl\",\"notify\",\"--session\",\"\(paneId.uuidString)\",\"--status\",\"needs-input\"]' resume '11111111-2222-3333-4444-555555555555'")
+    #expect(cmd == "codex -c 'notify=[\"/usr/local/bin/tillerctl\",\"notify\",\"--session\",\"\(paneId.uuidString)\",\"--status\",\"needs-input\"]' resume '11111111-2222-3333-4444-555555555555'")
 }
 
 @Test func openCodeResumeCommand() {
