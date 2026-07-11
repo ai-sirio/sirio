@@ -62,7 +62,9 @@ public final class TerminalSurfaceProxy: @unchecked Sendable {
 /// every Tiller terminal uses from Fase 1 on.
 public struct PtyTerminalPane: View {
     @ObserveInjection var inject
-    @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.theme)
+    @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.current())
+    @AppStorage(AppSettings.terminalFontSizeKey)
+    private var terminalFontSize = AppSettings.defaultTerminalFontSize
     private let workingDirectory: String?
     private let command: String?
     private let paneId: UUID
@@ -133,7 +135,14 @@ public struct PtyTerminalPane: View {
             .onChange(of: state.title) { _, newTitle in
                 onTitleChange?(paneId, newTitle)
             }
+            .onAppear { applyFontSize() }
+            .onChange(of: terminalFontSize) { _, _ in applyFontSize() }
             .enableInjection()
+    }
+
+    private func applyFontSize() {
+        let size = Float(AppSettings.clampTerminalFontSize(terminalFontSize))
+        state.setTheme(TillerTerminalTheme.theme(fontSize: size))
     }
 }
 
