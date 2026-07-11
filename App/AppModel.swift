@@ -1021,6 +1021,19 @@ final class AppModel {
         notifier.post(payload)
     }
 
+
+    // Control-socket bridges to the private notifier.
+    func postUserNotification(title: String, subtitle: String?, body: String) {
+        Task { await notifier.ensureAuthorization() }
+        notifier.postUser(title: title, subtitle: subtitle, body: body)
+    }
+
+    func deliveredNotificationRows() async -> [[String: String]] {
+        await notifier.deliveredNotifications()
+    }
+
+    func clearDeliveredNotifications() { notifier.clearDelivered() }
+
     private func isSelectedWorktreeContaining(paneId: UUID) -> Bool {
         guard let sel = selectedWorktree else { return false }
         return (tabs[sel.id] ?? []).contains { $0.leafIds.contains(paneId) }

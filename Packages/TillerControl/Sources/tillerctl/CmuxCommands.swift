@@ -247,3 +247,29 @@ struct SendKey: ParsableCommand {
             socket: socketOptions.socket)
     }
 }
+
+
+// MARK: - Notification commands
+
+struct ListNotifications: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list-notifications", abstract: "List delivered notifications.")
+    @OptionGroup var socketOptions: SocketOptions
+    @OptionGroup var jsonFlag: JSONFlag
+    func run() throws {
+        let response = try roundTripOrDie(TillerctlRequestBuilder.notificationList(),
+                                          socket: socketOptions.socket)
+        printRows(response, key: "notifications",
+                  columns: ["date", "title", "subtitle", "body"], asJSON: jsonFlag.json)
+    }
+}
+
+struct ClearNotifications: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear-notifications", abstract: "Clear delivered notifications.")
+    @OptionGroup var socketOptions: SocketOptions
+    func run() throws {
+        _ = try roundTripOrDie(TillerctlRequestBuilder.notificationClear(),
+                               socket: socketOptions.socket)
+    }
+}

@@ -19,6 +19,7 @@ extension AppModel {
         "workspace.current", "workspace.close",
         "surface.list", "pane.surfaces", "surface.focus", "surface.split",
         "surface.send_text", "surface.send_key",
+        "notification.create", "notification.list", "notification.clear",
     ]
 
     /// Resolve a worktree from a UUID string or absolute path — same dual
@@ -177,6 +178,21 @@ extension AppModel {
             let wrote = await PaneRegistry.shared.write(paneId: paneId, data: key.bytes)
             return wrote ? .success(id: request.id)
                          : .failure(id: request.id, error: "unknown surface")
+
+        case "notification.create":
+            guard let title = request.params["title"], let body = request.params["body"] else {
+                return .failure(id: request.id, error: "missing title/body")
+            }
+            postUserNotification(title: title, subtitle: request.params["subtitle"], body: body)
+            return .success(id: request.id)
+
+        case "notification.list":
+            let rows = await deliveredNotificationRows()
+            return .success(id: request.id, result: ["notifications": ControlRows.encode(rows)])
+
+        case "notification.clear":
+            clearDeliveredNotifications()
+            return .success(id: request.id)
 
         default:
             return .failure(id: request.id, error: "unknown method \(request.method)")
