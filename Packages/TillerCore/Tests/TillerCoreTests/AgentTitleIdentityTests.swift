@@ -30,6 +30,23 @@ import Testing
     #expect(AgentTitleIdentity.identify(title: "\u{280B} Pi") == "pi")
 }
 
+@Test func piGlyphTitleIdentifiesPi() {
+    // Pi's real OSC title convention: "π - <cwd>" (captured live).
+    #expect(AgentTitleIdentity.identify(title: "π - tiller") == "pi")
+    #expect(AgentTitleIdentity.identify(title: "π") == "pi")
+}
+
+@Test func ompGlyphTitleIdentifiesOmp() {
+    // omp (pi fork) titles itself "π: <cwd>" — colon separator is the
+    // only mark distinguishing it from pi's "π - <cwd>" (captured live).
+    #expect(AgentTitleIdentity.identify(title: "π: tiller") == "omp")
+}
+
+@Test func piGlyphWithSpinnerKeepsForkDistinction() {
+    #expect(AgentTitleIdentity.identify(title: "\u{280B} π - tiller") == "pi")
+    #expect(AgentTitleIdentity.identify(title: "\u{280B} π: tiller") == "omp")
+}
+
 @Test func piNameWithoutSpinnerDoesNotIdentify() {
     // No spinner present — bare "pi" text alone is too ambiguous with a
     // branch/cwd name (e.g. "pi-notes") to safely claim identity.

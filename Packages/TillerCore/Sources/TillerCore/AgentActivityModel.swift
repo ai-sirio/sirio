@@ -41,6 +41,11 @@ public final class AgentActivityModel {
     /// title stops matching any agent.
     public var titleOwnedPanes: Set<UUID> = []
 
+    /// Panes whose `paneAgents` entry was backfilled by foreground-process
+    /// identification (Layer D). Cleared only by `processGone` — never by a
+    /// title mismatch, because these agents may emit no title at all (Codex).
+    public var processOwnedPanes: Set<UUID> = []
+
     public init() {}
 
     // MARK: - Layer A: explicit hook push
@@ -163,6 +168,35 @@ public final class AgentActivityModel {
         return AgentTransition(paneId: paneId, old: old, new: status)
     }
 
+    // MARK: - Layer D: foreground-process identification
+
+    /// Register a pane whose shell has a live foreground agent process
+    /// (Layer D) — the only signal that catches agents which never emit an
+    /// OSC title (Codex). Ignores panes that are already registered by any
+    /// other layer: process evidence only says "alive", so it must never
+    /// downgrade a richer status.
+    ///
+    /// Replaces: nothing pre-existing — new evidence source.
+    /// Layer: D (process-derived).
+    @discardableResult
+    public func processIdentified(paneId: UUID, agentId: String, now: Date) -> AgentTransition? {
+        guard paneAgents[paneId] == nil else { return nil }
+        paneAgents[paneId] = agentId
+        agentStatus[paneId] = .running
+        processOwnedPanes.insert(paneId)
+        return AgentTransition(paneId: paneId, old: nil, new: .running)
+    }
+
+    /// The foreground agent process disappeared: the pane is back to a
+    /// plain shell. Clears process-owned panes only — spawn- and
+    /// title-owned panes have their own exit/clearing paths.
+    public func processGone(paneId: UUID) {
+        guard processOwnedPanes.contains(paneId) else { return }
+        agentStatus[paneId] = nil
+        paneAgents[paneId] = nil
+        processOwnedPanes.remove(paneId)
+    }
+
     // MARK: - Pane closed
 
     /// Remove all state for a closed pane. Called when a terminal pane's
@@ -174,6 +208,7 @@ public final class AgentActivityModel {
         lastHookUpdateAt[paneId] = nil
         paneAgents[paneId] = nil
         titleOwnedPanes.remove(paneId)
+        processOwnedPanes.remove(paneId)
     }
 
     // MARK: - Queries

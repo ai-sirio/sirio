@@ -30,6 +30,20 @@ import Testing
     #expect(AgentTitleStatus.detect(title: "zsh", agentId: "pi") == nil)
 }
 
+@Test func piGlyphTitleWithoutSpinnerIsNeedsInput() {
+    // Pi's real idle title is "π - <cwd>" — no ASCII "pi" anywhere.
+    #expect(AgentTitleStatus.detect(title: "π - tiller", agentId: "pi") == .needsInput)
+}
+
+@Test func ompGlyphTitleFollowsPiConventions() {
+    // omp is a pi fork sharing the π-glyph title convention ("π: <cwd>");
+    // routing it through detectGeneric (which needs the literal "omp")
+    // would instantly clear title-owned omp panes.
+    #expect(AgentTitleStatus.detect(title: "π: tiller", agentId: "omp") == .needsInput)
+    #expect(AgentTitleStatus.detect(title: "\u{280B} π: tiller", agentId: "omp") == .running)
+    #expect(AgentTitleStatus.detect(title: "zsh", agentId: "omp") == nil)
+}
+
 @Test func genericWorkingKeywordIsRunning() {
     #expect(AgentTitleStatus.detect(title: "codex - thinking", agentId: "codex") == .running)
     #expect(AgentTitleStatus.detect(title: "opencode running", agentId: "opencode") == .running)
