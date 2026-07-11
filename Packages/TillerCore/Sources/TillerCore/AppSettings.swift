@@ -15,6 +15,24 @@ public enum AppSettings {
     /// Missing value means enabled (default true).
     public static let resumeAgentSessionsKey = "resumeAgentSessions"
 
+    /// UserDefaults key for the control-socket toggle. Missing value means
+    /// enabled (default true) — disabling it also disables agent hooks.
+    public static let controlSocketEnabledKey = "controlSocket.enabled"
+
+    /// Resolve whether the control socket should start.
+    /// TILLER_SOCKET_ENABLE (1/0, true/false, on/off — case-insensitive)
+    /// overrides the stored preference; anything else falls through.
+    public static func controlSocketEnabled(defaultsValue: Bool?, env: [String: String]) -> Bool {
+        if let raw = env["TILLER_SOCKET_ENABLE"] {
+            switch raw.lowercased() {
+            case "1", "true", "on": return true
+            case "0", "false", "off": return false
+            default: break
+            }
+        }
+        return defaultsValue ?? true
+    }
+
     /// UserDefaults key for the app appearance (AppAppearance rawValue).
     /// Missing value means `.system`.
     public static let appearanceThemeKey = "appearance.theme"
