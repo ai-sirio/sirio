@@ -56,4 +56,52 @@ public enum TillerctlRequestBuilder {
             params: ["worktree": worktree, "comment": comment]
         )
     }
+
+
+    // MARK: - cmux-parity methods
+
+    private static func request(_ method: String, _ params: [String: String?] = [:]) -> ControlRequest {
+        ControlRequest(id: UUID().uuidString, method: method,
+                       params: params.compactMapValues { $0 })
+    }
+
+    public static func workspaceList() -> ControlRequest { request("workspace.list") }
+    public static func workspaceCreate(project: String, branch: String?) -> ControlRequest {
+        request("workspace.create", ["project": project, "branch": branch])
+    }
+    public static func workspaceSelect(workspace: String) -> ControlRequest {
+        request("workspace.select", ["workspace": workspace])
+    }
+    public static func workspaceCurrent() -> ControlRequest { request("workspace.current") }
+    public static func workspaceClose(workspace: String) -> ControlRequest {
+        request("workspace.close", ["workspace": workspace])
+    }
+
+    public static func surfaceList() -> ControlRequest { request("surface.list") }
+    public static func paneSurfaces() -> ControlRequest { request("pane.surfaces") }
+    public static func surfaceFocus(surface: String) -> ControlRequest {
+        request("surface.focus", ["surface": surface])
+    }
+    public static func surfaceSplit(direction: String) -> ControlRequest {
+        request("surface.split", ["direction": direction])
+    }
+    public static func surfaceSendText(text: String, surface: String?) -> ControlRequest {
+        request("surface.send_text", ["text": text, "surface": surface])
+    }
+    public static func surfaceSendKey(key: String, surface: String?) -> ControlRequest {
+        request("surface.send_key", ["key": key, "surface": surface])
+    }
+
+    public static func notificationCreate(title: String, subtitle: String?, body: String) -> ControlRequest {
+        request("notification.create", ["title": title, "subtitle": subtitle, "body": body])
+    }
+    public static func notificationList() -> ControlRequest { request("notification.list") }
+    public static func notificationClear() -> ControlRequest { request("notification.clear") }
+
+    public static func systemPing() -> ControlRequest { request("system.ping") }
+    public static func systemCapabilities() -> ControlRequest { request("system.capabilities") }
+    public static func systemIdentify(worktree: String?, pane: String?) -> ControlRequest {
+        request("system.identify", ["worktree": worktree, "pane": pane])
+    }
+    public static func sessionRestore() -> ControlRequest { request("session.restore") }
 }
