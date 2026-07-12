@@ -56,6 +56,16 @@ struct GeneralSettingsView: View {
                     Text("Symlinks tillerctl into /usr/local/bin so agents in any shell can reach it.")
                 }
             }
+            Section("Agent Skill") {
+                LabeledContent {
+                    Button("Install Skill") {
+                        AgentSkillInstaller.openTerminalAndInstall()
+                    }
+                } label: {
+                    Text("tillerctl skill")
+                    Text("Installa una skill che insegna a Claude Code, Codex e OpenCode come usare tillerctl per orchestrare pane e worktree.")
+                }
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
