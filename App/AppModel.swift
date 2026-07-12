@@ -122,6 +122,19 @@ final class AppModel {
 
     private var controlServer: ControlServer?
     var tabs: [UUID: [WorkspaceTab]] = [:]
+    /// Projects whose root currently contains a `.git` entry. Derived at
+    /// runtime (bootstrap, add, in-app git init) — never persisted, so an
+    /// external `git init` is picked up on the next launch.
+    var gitProjectIds: Set<UUID> = []
+
+    func isGitProject(_ project: Project) -> Bool { gitProjectIds.contains(project.id) }
+    func isGitProject(id: UUID) -> Bool { gitProjectIds.contains(id) }
+
+    private func refreshGitDetection() {
+        gitProjectIds = Set(
+            projects.filter { GitRepoDetection.isGitRepository(path: $0.rootPath) }.map(\.id)
+        )
+    }
     var activeTabId: [UUID: UUID] = [:]
     var lastError: String?
     /// State as loaded at launch — the target of the manual
@@ -171,6 +184,7 @@ final class AppModel {
                     )
                 }
             }
+            refreshGitDetection()
             launchSnapshot = LaunchSnapshot(
                 tabs: tabs, paneCommands: paneCommands,
                 openWorktreeIds: openWorktreeIds
@@ -324,12 +338,18 @@ final class AppModel {
         do {
             let project = try await store.addProject(name: url.lastPathComponent, rootPath: url.path)
             // The repo's main checkout is itself the first "worktree" entry.
-            let branch = (try? await GitWorktrees.list(repoPath: url.path).first?.branch) ?? nil
+            // Non-git folders skip the git shell-out and keep the "main"
+            // placeholder; the UI ignores it while the project is non-git.
+            let isGit = GitRepoDetection.isGitRepository(path: url.path)
+            let branch = isGit
+                ? ((try? await GitWorktrees.list(repoPath: url.path).first?.branch) ?? nil)
+                : nil
             let main = try await store.addWorktree(
                 projectId: project.id, branch: branch ?? "main", path: url.path
             )
             projects.append(project)
             worktrees[project.id] = [main]
+            refreshGitDetection()
         } catch {
             lastError = "Add project failed: \(error)"
         }
@@ -361,6 +381,32 @@ final class AppModel {
             throw error
         }
         await addProject(at: URL(fileURLWithPath: path))
+    }
+    /// Add-flow path: user chose "Inizializza git" for a non-git folder.
+    /// Throws so the sheet can alert without adding the project.
+    func initGitAndAddProject(at url: URL) async throws {
+        _ = try await GitRunner.run(["init"], in: url.path)
+        await addProject(at: url)
+    }
+
+    /// Context-menu path: converts an already-added non-git project.
+    func initializeGitRepository(for project: Project) async {
+        guard let store else { return }
+        do {
+            _ = try await GitRunner.run(["init"], in: project.rootPath)
+            // Respect a non-"main" init.defaultBranch: re-read the real
+            // branch and fix the placeholder stored at add time.
+            if let branch = try? await GitWorktrees.list(repoPath: project.rootPath).first?.branch,
+               let main = (worktrees[project.id] ?? []).first(where: { $0.path == project.rootPath }),
+               main.branch != branch {
+                try await store.setWorktreeBranch(main.id, branch: branch)
+                worktrees[project.id] = try await store.worktrees(of: project.id)
+                resyncSelection(projectId: project.id)
+            }
+            refreshGitDetection()
+        } catch {
+            lastError = "Git init failed: \(error)"
+        }
     }
 
     func removeProject(_ project: Project) async {
