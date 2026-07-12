@@ -175,13 +175,20 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
     }
 }
 
-/// Default NSSplitView draws a near-invisible 1pt hairline; this widens and
-/// darkens it so the boundary between panes reads clearly.
+/// Default NSSplitView draws a near-invisible 1pt hairline; this widens the
+/// hit target to Apple's standard thick-divider width and fills it with an
+/// explicit, appearance-adaptive color instead of `separatorColor` — that
+/// semantic tone is calibrated for default system backgrounds and reads as
+/// nearly invisible against this app's custom near-black terminal surface.
 private final class VisibleDividerSplitView: NSSplitView {
-    override var dividerThickness: CGFloat { 3 }
+    override var dividerThickness: CGFloat { 6 }
 
     override func drawDivider(in rect: NSRect) {
-        NSColor.separatorColor.setFill()
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(srgbRed: 0.30, green: 0.31, blue: 0.35, alpha: 1)
+                : NSColor(srgbRed: 0.72, green: 0.73, blue: 0.77, alpha: 1)
+        }.setFill()
         rect.fill()
     }
 }
