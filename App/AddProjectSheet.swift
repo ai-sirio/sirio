@@ -13,6 +13,7 @@ struct AddProjectSheet: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var step: AddProjectStep = .menu
+    @State private var errorMessage: String?
 
     var body: some View {
         Group {
@@ -27,6 +28,14 @@ struct AddProjectSheet: View {
             .padding(20)
             .frame(width: 460)
             .background(AppTheme.background)
+        }
+        .alert(
+            "Git init failed",
+            isPresented: .init(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
         }
     }
 
@@ -86,11 +95,40 @@ struct AddProjectSheet: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a git repository folder"
+        panel.message = "Choose a project folder"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task {
-            await model.addProject(at: url)
-            dismiss()
+        if GitRepoDetection.isGitRepository(path: url.path) {
+            Task {
+                await model.addProject(at: url)
+                dismiss()
+            }
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Questa cartella non è un repository git"
+        alert.informativeText =
+            "Vuoi inizializzare un repository git in \(url.path)? "
+            + "Senza git il progetto non avrà worktree né branch."
+        alert.addButton(withTitle: "Inizializza git")
+        alert.addButton(withTitle: "Aggiungi senza git")
+        alert.addButton(withTitle: "Annulla")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            Task {
+                do {
+                    try await model.initGitAndAddProject(at: url)
+                    dismiss()
+                } catch {
+                    errorMessage = "\(error)"
+                }
+            }
+        case .alertSecondButtonReturn:
+            Task {
+                await model.addProject(at: url)
+                dismiss()
+            }
+        default:
+            break
         }
     }
 }
