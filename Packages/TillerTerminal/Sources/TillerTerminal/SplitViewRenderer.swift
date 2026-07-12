@@ -160,7 +160,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             storeController(hosting, for: id, coordinator)
             return hosting
         case .split(let axis, let first, let second):
-            let split = NSSplitViewController()
+            let split = EqualSplitViewController()
             split.splitView.isVertical = (axis == .horizontal)
             let a = NSSplitViewItem(viewController: node(first, coordinator: coordinator))
             let b = NSSplitViewItem(viewController: node(second, coordinator: coordinator))
@@ -170,6 +170,42 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             split.addSplitViewItem(b)
             return split
         }
+    }
+}
+
+/// Default NSSplitView draws a near-invisible 1pt hairline; this widens and
+/// darkens it so the boundary between panes reads clearly.
+private final class VisibleDividerSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 3 }
+
+    override func drawDivider(in rect: NSRect) {
+        NSColor.separatorColor.setFill()
+        rect.fill()
+    }
+}
+
+/// AppKit gives a freshly split NSSplitViewController no 50/50 guarantee:
+/// with no size hints, the divider lands wherever the items' fitting sizes
+/// put it, which for a newly-added terminal pane is ~0 — leaving the
+/// pre-existing pane with nearly all the space. Force an even split once,
+/// on the first layout pass after the view has real bounds; further drags
+/// by the user are left alone.
+private final class EqualSplitViewController: NSSplitViewController {
+    private var didSetInitialPosition = false
+
+    override func loadView() {
+        splitView = VisibleDividerSplitView()
+        view = splitView
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard !didSetInitialPosition,
+              splitView.bounds.width > 0,
+              splitView.bounds.height > 0 else { return }
+        didSetInitialPosition = true
+        let total = splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
+        splitView.setPosition((total - splitView.dividerThickness) / 2, ofDividerAt: 0)
     }
 }
 
