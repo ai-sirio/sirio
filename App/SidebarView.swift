@@ -62,7 +62,9 @@ struct SidebarView: View {
                                     }
                                 }
 
-                                NewWorktreeButton { branchPromptProject = project }
+                                if model.isGitProject(project) {
+                                    NewWorktreeButton { branchPromptProject = project }
+                                }
                             }
                         }
                     }
@@ -270,6 +272,12 @@ private struct ProjectRow: View {
             model.toggleProjectExpanded(project)
         }
         .contextMenu {
+            if !model.isGitProject(project) {
+                Button("Inizializza repository git") {
+                    Task { await model.initializeGitRepository(for: project) }
+                }
+                Divider()
+            }
             Button("Remove Project", role: .destructive) {
                 Task { await model.removeProject(project) }
             }
@@ -326,21 +334,22 @@ private struct WorktreeRow: View {
         let agentId = model.agentIdForWorktree(worktree)
         let comment = worktree.comment ?? ""
         let idle = status == nil && agentId == nil
+        let isGit = model.isGitProject(id: worktree.projectId)
 
         HStack(alignment: .center, spacing: 9) {
             WorktreeStatusGlyph(status: status, agentId: agentId)
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.branch")
+                    Image(systemName: isGit ? "arrow.triangle.branch" : "folder")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.meta)
-                    Text(worktree.branch)
+                    Text(isGit ? worktree.branch : (worktree.path as NSString).lastPathComponent)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.title)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    if worktree.isPrimary {
+                    if worktree.isPrimary && isGit {
                         Text("primary")
                             .font(.system(size: 9.5))
                             .textCase(.uppercase)
