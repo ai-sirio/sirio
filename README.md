@@ -20,6 +20,9 @@
   <a href="https://github.com/e-palmisano/tiller"><img src="https://img.shields.io/github/stars/e-palmisano/tiller?style=flat-square&logo=github&label=stars&color=4c71f2" alt="GitHub stars" /></a>
   <a href="https://www.linkedin.com/in/enzo-palmisano-b16363147/"><img src="https://img.shields.io/badge/LinkedIn-Enzo_Palmisano-0077B5?style=flat-square&logo=linkedin" alt="LinkedIn" /></a>
 </p>
+<p align="center">
+  <img src="assets/readme-hero.png" width="960" alt="Tiller running with a project sidebar and an active terminal pane" />
+</p>
 
 ---
 
