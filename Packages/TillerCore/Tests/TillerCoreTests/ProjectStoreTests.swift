@@ -179,3 +179,12 @@ import TillerPersistence
     #expect(reloaded?.iconValue == nil)
     #expect(reloaded?.avatarImage == pngBytes)
 }
+
+
+@Test func setWorktreeBranchUpdatesRow() async throws {
+    let store = ProjectStore(database: try AppDatabase.inMemory())
+    let p = try await store.addProject(name: "demo", rootPath: "/tmp/demo")
+    let w = try await store.addWorktree(projectId: p.id, branch: "main", path: "/tmp/demo")
+    try await store.setWorktreeBranch(w.id, branch: "master")
+    #expect(try await store.worktrees(of: p.id).first?.branch == "master")
+}
