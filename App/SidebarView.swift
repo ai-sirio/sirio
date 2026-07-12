@@ -708,8 +708,8 @@ private struct TerminalPaneMenu: View {
 
     var body: some View {
         Group {
-            Button("Split orizzontale") { model.split(paneId: paneId, axis: .horizontal) }
-            Button("Split verticale") { model.split(paneId: paneId, axis: .vertical) }
+            Button("Split orizzontale") { model.split(paneId: paneId, axis: .vertical) }
+            Button("Split verticale") { model.split(paneId: paneId, axis: .horizontal) }
             if model.canAdoptPane(paneId) {
                 Button("Affianca al terminale corrente") { model.adoptPane(paneId) }
             }

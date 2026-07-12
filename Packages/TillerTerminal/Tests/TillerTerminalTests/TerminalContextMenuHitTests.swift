@@ -29,4 +29,29 @@ struct TerminalContextMenuHitTests {
 
         #expect(hit == nil)
     }
+
+    /// Regression: production always supplies a worktree-shared paneCache
+    /// (TerminalSplitHost stores leaf controllers there instead of in
+    /// coordinator.leafControllers), so the handler must prefer it — else
+    /// hit testing always misses and the context menu never appears.
+    @Test func controllersPrefersPaneCacheOverCoordinatorWhenBothPresent() {
+        let coordinator = TerminalSplitHost.Coordinator()
+        let cache = TerminalPaneCache()
+        let cachedId = UUID()
+        cache.controllers[cachedId] = NSViewController()
+
+        let resolved = TerminalContextMenuHandler.controllers(coordinator: coordinator, paneCache: cache)
+
+        #expect(resolved[cachedId] != nil)
+    }
+
+    @Test func controllersFallsBackToCoordinatorWhenNoPaneCache() {
+        let coordinator = TerminalSplitHost.Coordinator()
+        let id = UUID()
+        coordinator.leafControllers[id] = NSViewController()
+
+        let resolved = TerminalContextMenuHandler.controllers(coordinator: coordinator, paneCache: nil)
+
+        #expect(resolved[id] != nil)
+    }
 }
