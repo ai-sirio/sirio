@@ -162,7 +162,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             storeController(hosting, for: id, coordinator)
             return hosting
         case .split(let axis, let first, let second):
-            let split = NSSplitViewController()
+            let split = EqualSplitViewController()
             split.splitView.isVertical = (axis == .horizontal)
             let a = NSSplitViewItem(viewController: node(first, coordinator: coordinator))
             let b = NSSplitViewItem(viewController: node(second, coordinator: coordinator))
@@ -172,6 +172,24 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             split.addSplitViewItem(b)
             return split
         }
+    }
+}
+
+/// NSSplitViewController leaves the divider wherever AppKit's default
+/// layout puts it, which for hosting-controller-wrapped views with no
+/// meaningful intrinsic size collapses the newer pane to its
+/// minimumThickness at the trailing/bottom edge instead of a 50/50 split.
+/// Force an even split once, the first time the view has real bounds.
+final class EqualSplitViewController: NSSplitViewController {
+    private var didSetInitialPosition = false
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard !didSetInitialPosition else { return }
+        let size = splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
+        guard size > 0 else { return }
+        didSetInitialPosition = true
+        splitView.setPosition(size / 2, ofDividerAt: 0)
     }
 }
 
