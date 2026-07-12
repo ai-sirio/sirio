@@ -8,6 +8,7 @@ import GhosttyTerminal
 @MainActor
 final class TerminalContextMenuHandler {
     private weak var coordinator: TerminalSplitHost.Coordinator?
+    private let paneCache: TerminalPaneCache?
     private let provider: (UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem]
     private let onAction: (TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void
     private weak var hostView: NSView?
@@ -15,10 +16,12 @@ final class TerminalContextMenuHandler {
 
     init(
         coordinator: TerminalSplitHost.Coordinator,
+        paneCache: TerminalPaneCache?,
         provider: @escaping (UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem],
         onAction: @escaping (TerminalContextMenuAction, UUID, TerminalSurfaceProxy) -> Void
     ) {
         self.coordinator = coordinator
+        self.paneCache = paneCache
         self.provider = provider
         self.onAction = onAction
     }
@@ -44,13 +47,24 @@ final class TerminalContextMenuHandler {
         }
     }
 
-    private func paneId(for event: NSEvent, hostView: NSView) -> UUID? {
+    func paneId(for event: NSEvent, hostView: NSView) -> UUID? {
         guard hostView.window != nil else { return nil }
         let pointInWindow = event.locationInWindow
         let pointInHost = hostView.convert(pointInWindow, from: nil)
         guard let hitView = hostView.hitTest(pointInHost) else { return nil }
-        guard let coordinator else { return nil }
-        return Self.paneId(forHit: hitView, in: coordinator.leafControllers)
+        return Self.paneId(forHit: hitView, in: Self.controllers(coordinator: coordinator, paneCache: paneCache))
+    }
+
+    /// Leaf controllers live in `paneCache.controllers` when a worktree-shared
+    /// cache is in play (the default in production — see TerminalPaneCache),
+    /// and in `coordinator.leafControllers` only when no cache was supplied.
+    /// Must mirror TerminalSplitHost.cachedController's precedence, or hit
+    /// testing here silently misses every pane and the menu never shows.
+    static func controllers(
+        coordinator: TerminalSplitHost.Coordinator?,
+        paneCache: TerminalPaneCache?
+    ) -> [UUID: NSViewController] {
+        paneCache?.controllers ?? coordinator?.leafControllers ?? [:]
     }
 
     /// Resolves which pane owns a hit view. The hit view is the deepest view

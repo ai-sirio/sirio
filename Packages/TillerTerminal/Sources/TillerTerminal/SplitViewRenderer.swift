@@ -68,6 +68,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
         if let menuProvider {
             let handler = TerminalContextMenuHandler(
                 coordinator: context.coordinator,
+                paneCache: paneCache,
                 provider: menuProvider,
                 onAction: onMenuAction ?? { _, _, _ in }
             )
@@ -89,6 +90,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
         if let menuProvider = menuProvider {
             let handler = TerminalContextMenuHandler(
                 coordinator: context.coordinator,
+                paneCache: paneCache,
                 provider: menuProvider,
                 onAction: onMenuAction ?? { _, _, _ in }
             )
