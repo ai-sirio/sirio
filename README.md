@@ -43,6 +43,16 @@
 **Deliberately not doing:** diff viewer, embedded browser, remote SSH / mobile relay, scheduling — Tiller stays a focused terminal + agent hub, not an IDE.
 
 ---
+## Supported Agents
+<p>
+  <a href="https://docs.anthropic.com/claude/docs/claude-code"><kbd><img src="https://www.google.com/s2/favicons?domain=docs.anthropic.com&sz=64" alt="Claude Code logo" width="16" valign="middle" /> Claude Code</kbd></a>&nbsp;
+  <a href="https://github.com/openai/codex"><kbd><img src="https://www.google.com/s2/favicons?domain=openai.com&sz=64" alt="Codex logo" width="16" valign="middle" /> Codex</kbd></a>&nbsp;
+  <a href="https://opencode.ai/docs/cli/"><kbd><img src="https://www.google.com/s2/favicons?domain=opencode.ai&sz=64" alt="OpenCode logo" width="16" valign="middle" /> OpenCode</kbd></a>&nbsp;
+  <a href="https://pi.dev"><kbd><img src="https://www.google.com/s2/favicons?domain=pi.dev&sz=64" alt="Pi logo" width="16" valign="middle" /> Pi</kbd></a>&nbsp;
+  <a href="https://omp.sh"><kbd><img src="https://www.google.com/s2/favicons?domain=omp.sh&sz=64" alt="Oh-My-Pi logo" width="16" valign="middle" /> Oh-My-Pi</kbd></a>
+</p>
+
+---
 
 ## Install
 
