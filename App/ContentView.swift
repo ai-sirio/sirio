@@ -97,14 +97,22 @@ struct ContentView: View {
     // renders as an inset floating glass card with no opt-out; owning the split
     // lets the sidebar run edge-to-edge for the full window height.
     private var workspaceView: some View {
+        // HSplitView (NSSplitView) clips each pane to its own bounds, so a
+        // material background nested inside a pane can't ignoresSafeArea()
+        // past that clip to reach under the transparent titlebar/toolbar.
+        // Painting the material as the outermost layer, behind the whole
+        // split view, lets it extend there unclipped.
+        ZStack {
+            SidebarMaterialContainer().ignoresSafeArea()
+            splitContent
+        }
+    }
+
+    private var splitContent: some View {
         HSplitView {
             if sidebarVisible {
                 SidebarView(model: model)
                     .frame(minWidth: 200, idealWidth: 240, maxWidth: 400, maxHeight: .infinity)
-                    .background(
-                        SidebarMaterialContainer()
-                            .ignoresSafeArea()
-                    )
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                         sidebarWidth = $0
                     }
@@ -117,10 +125,10 @@ struct ContentView: View {
                 }
             }
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-            // Opaque terminal surface only below the titlebar; the sidebar
-            // material extends under it so the titlebar matches the sidebar.
+            // Opaque terminal surface only below the titlebar; the shared
+            // material behind the whole ZStack shows through above it, so
+            // the titlebar matches the sidebar.
             .background(AppTheme.background, ignoresSafeAreaEdges: [])
-            .background(SidebarMaterialContainer().ignoresSafeArea(edges: .top))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
