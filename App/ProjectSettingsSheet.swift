@@ -28,10 +28,12 @@ struct ProjectSettingsSheet: View {
                 IdentitySection(model: model, project: currentProject)
                 Divider().overlay(AppTheme.hairline)
                 RepoIconSection(model: model, project: currentProject)
-                Divider().overlay(AppTheme.hairline)
-                WorktreeBaseSection(model: model, project: currentProject)
-                Divider().overlay(AppTheme.hairline)
-                WorktreeLocationSection(model: model, project: currentProject)
+                if model.isGitProject(currentProject) {
+                    Divider().overlay(AppTheme.hairline)
+                    WorktreeBaseSection(model: model, project: currentProject)
+                    Divider().overlay(AppTheme.hairline)
+                    WorktreeLocationSection(model: model, project: currentProject)
+                }
             }
             .padding(20)
         }
@@ -88,7 +90,8 @@ private struct IdentitySection: View {
                 .font(.system(size: 12)).foregroundStyle(AppTheme.subtitle)
 
             Text("Repository Type").font(.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
-            Text("Git").font(.system(size: 12)).foregroundStyle(AppTheme.meta)
+            Text(model.isGitProject(project) ? "Git" : "Folder")
+                .font(.system(size: 12)).foregroundStyle(AppTheme.meta)
 
             Text("Display Name").font(.system(size: 13, weight: .semibold)).foregroundStyle(AppTheme.title)
             TextField(project.name, text: displayNameBinding)

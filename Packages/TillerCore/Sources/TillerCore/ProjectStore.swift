@@ -148,6 +148,18 @@ public actor ProjectStore {
             )
         }
     }
+
+
+    /// Fixes the main-checkout row after an in-app `git init`, whose real
+    /// default branch may differ from the "main" fallback stored at add time.
+    public func setWorktreeBranch(_ id: UUID, branch: String) throws {
+        try database.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET branch = ? WHERE id = ?",
+                arguments: [branch, id.uuidString]
+            )
+        }
+    }
  
     /// Primary is exclusive within a project: setting true clears siblings.
     public func setWorktreePrimary(_ id: UUID, isPrimary: Bool) throws {
