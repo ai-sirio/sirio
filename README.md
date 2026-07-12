@@ -56,6 +56,22 @@
 
 ---
 
+## Agent Orchestration
+
+Agents running inside Tiller can drive it back — over the same control socket `tillerctl` uses for scripted `list-workspaces` / `send` / `notify`:
+
+- **Zero-config for Claude Code** — every Claude Code pane gets a `tiller` skill written automatically to `.claude/skills/tiller/SKILL.md` on setup. It already knows how to dispatch a worker panel, run a command in it, wait for exit, read the output back, report its own status, and leave a progress comment on the worktree — no install step, gated on `$TILLER_ENV=1` so it only activates inside a real Tiller pane.
+- **Installable for Claude Code, Codex, and OpenCode** — Settings → *Install tillerctl skill* runs [`npx skills add e-palmisano/tiller --skill tillerctl-cli`](https://github.com/vercel-labs/skills), adding the full `tillerctl` command surface (workspaces, panes, `send`/`send-key`, notifications, session restore) to any of those three CLIs.
+
+```bash
+# from inside a Tiller pane: spawn a worker panel, run the repo's CI gate, and read the result back
+PANEL=$(tillerctl panel create --worktree "$TILLER_WORKTREE_ID" --cmd "Scripts/ci.sh")
+tillerctl panel wait --id "$PANEL" --timeout-ms 900000 && echo BUILD_OK || echo BUILD_FAILED
+tillerctl panel read --id "$PANEL" | tail -40
+```
+
+---
+
 ## Install
 
 Tiller doesn't ship prebuilt binaries yet — build it from source (see below). It's a small SPM monorepo, first build takes a couple of minutes.
