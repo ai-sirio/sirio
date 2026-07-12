@@ -53,7 +53,7 @@ struct Panel: ParsableCommand {
         @Option var input: String
         @Flag(help: "Append newline (send Enter).") var enter = false
         func run() throws {
-            let payload = enter ? input + "\n" : input
+            let payload = enter ? input + "\r" : input
             let response = try ControlClient.roundTrip(
                 socketPath: socketOptions.socket,
                 request: TillerctlRequestBuilder.panelWrite(id: id, input: payload)
