@@ -138,6 +138,9 @@ extension AppModel {
             }) else {
                 return .failure(id: request.id, error: "unknown project \(projectSelector)")
             }
+            guard isGitProject(project) else {
+                return .failure(id: request.id, error: "project is not a git repository")
+            }
             let branch = request.params["branch"] ?? Self.generatedBranchName()
             let before = Set((worktrees[project.id] ?? []).map(\.id))
             await addWorktree(project: project, branch: branch)
