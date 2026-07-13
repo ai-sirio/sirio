@@ -47,7 +47,48 @@ tillerctl list-panels                                # panes of the current work
 tillerctl list-pane-surfaces                          # panes of the active tab only
 tillerctl new-split <left|right|up|down>              # split the active pane
 tillerctl focus-panel --panel <uuid>                  # bring a pane to the foreground
+tillerctl close-panel [--surface <uuid>]              # close a pane (default: your own)
 ```
+
+**To spawn a helper agent, split `right` or `left` beside the pane that's
+currently running your task** — that's a vertical divider (side-by-side
+panes), not a stacked `up`/`down` split:
+
+```bash
+tillerctl new-split right
+```
+
+`new-split` always targets the *active* pane, so run it from the pane the
+task is running in (or `focus-panel` there first).
+
+### Launching an agent CLI in the new pane
+
+```bash
+tillerctl send --surface <uuid> "claude 'do the thing'"
+tillerctl send-key --surface <uuid> enter
+```
+
+Any of these CLIs can be launched the same way:
+
+| Agent | Command |
+|-------|---------|
+| Claude Code | `claude` |
+| Oh-My-Pi | `omp` |
+| Pi | `pi` |
+| Codex | `codex` |
+
+### Closing the pane when the task is done
+
+Once the spawned agent's task is finished (poll with `tillerctl send`/read
+its output, or wait for a notification), close its pane so it doesn't linger:
+
+```bash
+tillerctl close-panel --surface <uuid>
+```
+
+A spawned agent can also close its own pane when it finishes — run
+`tillerctl close-panel` (no `--surface`) from inside its own pane, since it
+defaults to `$TILLER_PANE_ID`.
 
 ### Sending input
 

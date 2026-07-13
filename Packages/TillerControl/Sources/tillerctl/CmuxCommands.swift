@@ -217,6 +217,20 @@ struct FocusPanel: ParsableCommand {
     }
 }
 
+struct ClosePanel: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "close-panel",
+        abstract: "Close a pane (default: your own).")
+    @OptionGroup var socketOptions: SocketOptions
+    @Option(help: "Target pane UUID (default: this pane, else active pane).")
+    var surface: String?
+    func run() throws {
+        _ = try roundTripOrDie(
+            TillerctlRequestBuilder.surfaceClose(surface: defaultSurface(surface)),
+            socket: socketOptions.socket)
+    }
+}
+
 struct Send: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "send", abstract: "Send text to a pane (default: active pane).")

@@ -91,6 +91,9 @@ public enum TillerctlRequestBuilder {
     public static func surfaceSendKey(key: String, surface: String?) -> ControlRequest {
         request("surface.send_key", ["key": key, "surface": surface])
     }
+    public static func surfaceClose(surface: String?) -> ControlRequest {
+        request("surface.close", ["surface": surface])
+    }
 
     public static func notificationCreate(title: String, subtitle: String?, body: String) -> ControlRequest {
         request("notification.create", ["title": title, "subtitle": subtitle, "body": body])
