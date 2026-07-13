@@ -26,6 +26,7 @@ final class AppModel {
     var selectedWorktree: Worktree? {
         didSet {
             selectedProjectId = selectedWorktree?.projectId
+            UserDefaults.standard.set(selectedWorktree?.id.uuidString, forKey: AppSettings.selectedWorktreeIdKey)
             guard let worktree = selectedWorktree else { return }
             if !openWorktreeIds.contains(worktree.id) { openWorktreeIds.append(worktree.id) }
             ensureTabs(for: worktree)
@@ -34,8 +35,13 @@ final class AppModel {
 
     /// Worktrees whose terminal hosts stay mounted (PTYs alive) across
     /// selection changes. Removal unmounts the host, which fires
-    /// onDisappear and terminates its panes.
-    var openWorktreeIds: [UUID] = []
+    /// onDisappear and terminates its panes. Persisted so bootstrap() can
+    /// reopen the same worktrees after a quit/relaunch.
+    var openWorktreeIds: [UUID] = [] {
+        didSet {
+            UserDefaults.standard.set(openWorktreeIds.map(\.uuidString), forKey: AppSettings.openWorktreeIdsKey)
+        }
+    }
 
     func worktree(byId id: UUID) -> Worktree? {
         worktrees.values.flatMap { $0 }.first { $0.id == id }
@@ -183,6 +189,16 @@ final class AppModel {
                         paneIds: Set(restoredTabs.flatMap { $0.leafIds })
                     )
                 }
+            }
+            let storedOpenIds = (UserDefaults.standard.stringArray(forKey: AppSettings.openWorktreeIdsKey) ?? [])
+                .compactMap(UUID.init)
+            openWorktreeIds = storedOpenIds.filter { !(tabs[$0] ?? []).isEmpty }
+            let storedSelectedId = UserDefaults.standard.string(forKey: AppSettings.selectedWorktreeIdKey)
+                .flatMap(UUID.init)
+            if let storedSelectedId, openWorktreeIds.contains(storedSelectedId) {
+                selectedWorktree = worktree(byId: storedSelectedId)
+            } else {
+                selectedWorktree = openWorktreeIds.first.flatMap { worktree(byId: $0) }
             }
             refreshGitDetection()
             launchSnapshot = LaunchSnapshot(
