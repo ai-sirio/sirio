@@ -37,6 +37,15 @@ public enum AppSettings {
     /// Missing value means `.system`.
     public static let appearanceThemeKey = "appearance.theme"
 
+    /// UserDefaults key for the worktree ids whose terminal hosts were
+    /// mounted at last quit, restored on next launch. Stored as an array
+    /// of UUID strings.
+    public static let openWorktreeIdsKey = "session.openWorktreeIds"
+
+    /// UserDefaults key for the previously selected worktree id, restored
+    /// alongside openWorktreeIdsKey on launch.
+    public static let selectedWorktreeIdKey = "session.selectedWorktreeId"
+
     /// UserDefaults key for the terminal font size in points.
     public static let terminalFontSizeKey = "appearance.terminalFontSize"
     public static let defaultTerminalFontSize = 13
