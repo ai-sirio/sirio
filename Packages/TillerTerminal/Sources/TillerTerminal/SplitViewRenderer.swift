@@ -81,6 +81,12 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
     public func updateNSViewController(_ controller: NSViewController, context: Context) {
         guard context.coordinator.lastTree != tree else { return }
         context.coordinator.lastTree = tree
+        // node(_:) detaches every cached leaf it reuses (removeFromSuperview),
+        // which auto-resigns first responder if that leaf currently holds it
+        // — even when the leaf never actually changes host. Capture it here
+        // so it can be restored once the rebuild settles.
+        let window = controller.view.window
+        let priorFirstResponder = window?.firstResponder as? NSView
         // Structure changed: rebuild the container hierarchy. Leaves are
         // pulled from the cache, so their PTYs keep running.
         let newRoot = build(tree, coordinator: context.coordinator)
@@ -98,6 +104,18 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             handler.install(on: container.view)
         }
         pruneCache(context.coordinator, keeping: Set(tree.leafIds))
+        Self.restoreFocusIfNeeded(previousFirstResponder: priorFirstResponder, window: window)
+    }
+
+    /// Re-focuses `previousFirstResponder` if the tree rebuild's detach/
+    /// reattach cycle silently bumped it off the responder chain. No-op if
+    /// it was never focused, was actually removed (not re-added anywhere),
+    /// or something else already legitimately took focus during the rebuild.
+    static func restoreFocusIfNeeded(previousFirstResponder: NSView?, window: NSWindow?) {
+        guard let previousFirstResponder, let window,
+              previousFirstResponder.window === window,
+              window.firstResponder !== previousFirstResponder else { return }
+        window.makeFirstResponder(previousFirstResponder)
     }
 
     /// Con cache condivisa il set "keeping" è il set dei pane vivi in TUTTI
@@ -140,7 +158,11 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
             if let cached = cachedController(for: id, coordinator) {
                 // Adozione cross-host: stacca il controller dalla gerarchia
                 // del tab precedente prima di inserirlo qui (un VC ha un
-                // solo parent). No-op nei rebuild interni allo stesso host.
+                // solo parent). Anche nei rebuild interni allo stesso host
+                // (es. split di un pane) questo detach/reattach avviene
+                // comunque, e se `cached.view` aveva il focus AppKit lo
+                // resigna automaticamente — updateNSViewController lo
+                // ripristina via restoreFocusIfNeeded.
                 cached.removeFromParent()
                 cached.view.removeFromSuperview()
                 return cached
