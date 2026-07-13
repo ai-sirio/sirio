@@ -30,7 +30,29 @@ final class AppModel {
             guard let worktree = selectedWorktree else { return }
             if !openWorktreeIds.contains(worktree.id) { openWorktreeIds.append(worktree.id) }
             ensureTabs(for: worktree)
+            evictIdleWorktreesIfNeeded()
         }
+    }
+
+    /// Unmounts idle, non-selected worktrees down to the user-configured
+    /// cap (off by default — see AppSettings.maxMountedWorktreesKey). No-op
+    /// unless the user opted in, since unmounting terminates a worktree's
+    /// PTYs.
+    private func evictIdleWorktreesIfNeeded() {
+        let cap = UserDefaults.standard.integer(forKey: AppSettings.maxMountedWorktreesKey)
+        let evicted = WorktreeMountPolicy.idsToEvict(
+            openWorktreeIds: openWorktreeIds,
+            selectedWorktreeId: selectedWorktree?.id,
+            cap: cap,
+            status: { [weak self] id in
+                self?.worktree(byId: id).flatMap { self?.statusForWorktree($0) } ?? nil
+            },
+            hasUnsavedWork: { [weak self] id in
+                (self?.tabs[id] ?? []).contains { self?.markdownDocuments[$0.id]?.isDirty == true }
+            }
+        )
+        guard !evicted.isEmpty else { return }
+        openWorktreeIds.removeAll { evicted.contains($0) }
     }
 
     /// Worktrees whose terminal hosts stay mounted (PTYs alive) across

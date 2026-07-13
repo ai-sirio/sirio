@@ -9,12 +9,20 @@ import TillerCore
 /// alabaster preset. Font size is injected into both configurations.
 enum TillerTerminalTheme {
     static func theme(fontSize: Float) -> TerminalTheme {
-        TerminalTheme(
+        // Ghostty's surface scrollback defaults to 10MB/pane; Tiller keeps
+        // many worktrees' panes mounted at once (openWorktreeIds), so that
+        // multiplies fast. Matched to ScrollbackBuffer's own 256KB cap
+        // (TillerTerminal/ScrollbackBuffer.swift) — no point the live view
+        // holding more than what gets persisted across restarts.
+        let scrollbackLimit = TerminalConfigCommand.custom(key: "scrollback-limit", value: "262144")
+        return TerminalTheme(
             light: TerminalConfiguration.alabaster
-                .appending(.fontSize(fontSize)),
+                .appending(.fontSize(fontSize))
+                .appending(scrollbackLimit),
             dark: TerminalConfiguration.afterglow
                 .appending(.background(AppSurfaceColor.terminalHex))
                 .appending(.fontSize(fontSize))
+                .appending(scrollbackLimit)
         )
     }
 

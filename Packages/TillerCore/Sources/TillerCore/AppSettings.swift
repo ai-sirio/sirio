@@ -46,6 +46,12 @@ public enum AppSettings {
     /// alongside openWorktreeIdsKey on launch.
     public static let selectedWorktreeIdKey = "session.selectedWorktreeId"
 
+    /// UserDefaults key for the max number of worktree terminal hosts kept
+    /// mounted (PTYs alive) at once, oldest-idle evicted first via
+    /// WorktreeMountPolicy. Missing/0 means unlimited — current behavior,
+    /// opt-in only since eviction terminates a worktree's PTYs.
+    public static let maxMountedWorktreesKey = "session.maxMountedWorktrees"
+
     /// UserDefaults key for the terminal font size in points.
     public static let terminalFontSizeKey = "appearance.terminalFontSize"
     public static let defaultTerminalFontSize = 13
