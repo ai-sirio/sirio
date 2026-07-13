@@ -64,20 +64,22 @@ public final class PtyProcess: @unchecked Sendable {
         guard masterFD < 0 else { throw PtyError.alreadySpawned }
         var size = winsize(ws_row: initialRows, ws_col: initialCols, ws_xpixel: 0, ws_ypixel: 0)
         var master: Int32 = -1
+        // Built before fork(): strdup/Array/String allocate, and allocating
+        // in the child after fork() can deadlock on a malloc lock inherited
+        // mid-acquire from another thread in this (multithreaded) process.
+        var argv: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { strdup($0) }
+        argv.append(nil)
+        var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup($0) }
+        envp.append(nil)
         let pid = forkpty(&master, nil, nil, &size)
         if pid < 0 { throw PtyError.forkFailed(errno) }
         if pid == 0 {
-            // chdir must be the first statement in the child — chdir is
-            // async-signal-safe, so it's safe here.
+            // Child: exec immediately — nothing async-signal-unsafe between
+            // fork and exec (Foundation/ObjC calls here can deadlock).
+            // chdir is async-signal-safe.
             if let dir = workingDirectory {
                 dir.withCString { _ = chdir($0) }
             }
-            // Child: exec immediately — nothing async-signal-unsafe between
-            // fork and exec (Foundation/ObjC calls here can deadlock).
-            var argv: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { strdup($0) }
-            argv.append(nil)
-            var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup($0) }
-            envp.append(nil)
             execve(executable, argv, envp)
             _exit(127)
         }

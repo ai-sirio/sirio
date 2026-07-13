@@ -88,6 +88,35 @@ actor OutputCollector {
     func append(_ data: Data) { text += String(decoding: data, as: UTF8.self) }
 }
 
+@Test func manyConcurrentSpawnsDoNotDeadlock() async throws {
+    // Regression guard: building argv/envp via strdup *after* fork() can
+    // deadlock a child on an inherited malloc lock in a multithreaded
+    // process. Many concurrent forkpty() calls reproduce the malloc
+    // contention that exposes the race.
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        for _ in 0..<30 {
+            group.addTask {
+                let collected = OutputCollector()
+                let pty = PtyProcess { data in Task { await collected.append(data) } }
+                try pty.spawn(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "printf tiller-pty-ok"],
+                    environment: ["PATH=/usr/bin:/bin"],
+                    initialCols: 80,
+                    initialRows: 24
+                )
+                for _ in 0..<40 {
+                    if await collected.text.contains("tiller-pty-ok") { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                #expect(await collected.text.contains("tiller-pty-ok"))
+                pty.terminate()
+            }
+        }
+        try await group.waitForAll()
+    }
+}
+
 @Test func onExitReportsExitCode() async throws {
     let pty = PtyProcess { _ in }
     let exitCode = await withCheckedContinuation { (cont: CheckedContinuation<Int32, Never>) in
