@@ -278,6 +278,10 @@ private struct ProjectRow: View {
                 }
                 Divider()
             }
+            Button("Show in Finder") {
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: project.rootPath)
+            }
+            Divider()
             Button("Remove Project", role: .destructive) {
                 Task { await model.removeProject(project) }
             }
