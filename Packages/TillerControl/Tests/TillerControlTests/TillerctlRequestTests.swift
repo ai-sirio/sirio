@@ -78,6 +78,10 @@ import Testing
     let key = TillerctlRequestBuilder.surfaceSendKey(key: "enter", surface: nil)
     #expect(key.method == "surface.send_key")
     #expect(key.params == ["key": "enter"])
+    let close = TillerctlRequestBuilder.surfaceClose(surface: nil)
+    #expect(close.method == "surface.close")
+    #expect(close.params == [:])      // nil surface omitted
+    #expect(TillerctlRequestBuilder.surfaceClose(surface: "S").params == ["surface": "S"])
 }
 
 @Test func notificationAndSystemBuilders() {

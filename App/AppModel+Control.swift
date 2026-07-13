@@ -18,7 +18,7 @@ extension AppModel {
         "workspace.list", "workspace.create", "workspace.select",
         "workspace.current", "workspace.close",
         "surface.list", "pane.surfaces", "surface.focus", "surface.split",
-        "surface.send_text", "surface.send_key",
+        "surface.send_text", "surface.send_key", "surface.close",
         "notification.create", "notification.list", "notification.clear",
         "session.restore",
     ]
@@ -217,6 +217,13 @@ extension AppModel {
             let wrote = await PaneRegistry.shared.write(paneId: paneId, data: key.bytes)
             return wrote ? .success(id: request.id)
                          : .failure(id: request.id, error: "unknown surface")
+
+        case "surface.close":
+            guard let paneId = resolveTargetPane(request.params["surface"]) else {
+                return .failure(id: request.id, error: "no target surface")
+            }
+            closeTerminal(paneId: paneId)
+            return .success(id: request.id)
 
         case "notification.create":
             guard let title = request.params["title"], let body = request.params["body"] else {

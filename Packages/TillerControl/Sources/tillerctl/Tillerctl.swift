@@ -14,7 +14,7 @@ struct Tillerctl: ParsableCommand {
             ListWorkspaces.self, NewWorkspace.self, SelectWorkspace.self,
             CurrentWorkspace.self, CloseWorkspace.self,
             NewSplit.self, ListPanels.self, ListPaneSurfaces.self, FocusPanel.self,
-            Send.self, SendKey.self,
+            Send.self, SendKey.self, ClosePanel.self,
             ListNotifications.self, ClearNotifications.self,
             RestoreSession.self,
         ]
