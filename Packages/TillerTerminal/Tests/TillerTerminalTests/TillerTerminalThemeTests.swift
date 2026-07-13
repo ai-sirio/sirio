@@ -6,10 +6,14 @@ import TillerCore
 
 @Test func themeAppliesFontSizeToBothConfigurations() {
     let theme = TillerTerminalTheme.theme(fontSize: 14)
-    #expect(theme.light == TerminalConfiguration.alabaster.appending(.fontSize(14)))
+    let scrollbackLimit = TerminalConfigCommand.custom(key: "scrollback-limit", value: "262144")
+    #expect(theme.light == TerminalConfiguration.alabaster
+        .appending(.fontSize(14))
+        .appending(scrollbackLimit))
     #expect(theme.dark == TerminalConfiguration.afterglow
         .appending(.background(AppSurfaceColor.terminalHex))
-        .appending(.fontSize(14)))
+        .appending(.fontSize(14))
+        .appending(scrollbackLimit))
 }
 
 @Test func themeDiffersByFontSize() {

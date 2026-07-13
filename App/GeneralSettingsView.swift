@@ -11,6 +11,7 @@ struct GeneralSettingsView: View {
     @State private var copied = false
     @AppStorage(AppSettings.resumeAgentSessionsKey) private var resumeAgentSessions = true
     @AppStorage(AppSettings.controlSocketEnabledKey) private var controlSocketEnabled = true
+    @AppStorage(AppSettings.maxMountedWorktreesKey) private var maxMountedWorktrees = 0
 
     var body: some View {
         Form {
@@ -32,6 +33,18 @@ struct GeneralSettingsView: View {
                 Toggle(isOn: $resumeAgentSessions) {
                     Text("Resume agent sessions on launch")
                     Text("Relaunch supported agents with their previous conversation after Tiller restarts.")
+                }
+            }
+            Section("Performance") {
+                Toggle(isOn: Binding(
+                    get: { maxMountedWorktrees > 0 },
+                    set: { maxMountedWorktrees = $0 ? 6 : 0 }
+                )) {
+                    Text("Limit mounted worktrees")
+                    Text("Frees terminal RAM by unmounting idle worktrees beyond this count. Never touches the selected worktree, one with a running or waiting agent, or one with unsaved tabs.")
+                }
+                if maxMountedWorktrees > 0 {
+                    Stepper("Keep \(maxMountedWorktrees) mounted", value: $maxMountedWorktrees, in: 2...50)
                 }
             }
             Section("tillerctl") {
