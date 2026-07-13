@@ -27,10 +27,13 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            Group {
-                switch model.route {
-                case .workspace: workspaceView
-                case .settings: SettingsSurface(model: model, updater: updater)
+            ZStack {
+                workspaceView
+                    .opacity(model.route == .workspace ? 1 : 0)
+                    .allowsHitTesting(model.route == .workspace)
+                    .accessibilityHidden(model.route != .workspace)
+                if model.route == .settings {
+                    SettingsSurface(model: model, updater: updater)
                 }
             }
         }
