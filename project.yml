@@ -56,10 +56,10 @@ targets:
       properties:
         NSHighResolutionCapable: true
         LSMinimumSystemVersion: "15.0"
-        CFBundleShortVersionString: "0.4.2"
+        CFBundleShortVersionString: "0.4.3"
         # Sparkle confronta sparkle:version = build version: deve crescere a
         # ogni release. Regola: identica a CFBundleShortVersionString.
-        CFBundleVersion: "0.4.2"
+        CFBundleVersion: "0.4.3"
         SUFeedURL: https://github.com/e-palmisano/tiller/releases/latest/download/appcast.xml
         SUPublicEDKey: "vAZjNGZzdhdoPR+awpWhypVQoP9ttVzFOSSm9pV/Wio="
         SUEnableAutomaticChecks: true
