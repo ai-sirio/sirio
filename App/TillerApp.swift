@@ -6,6 +6,8 @@ struct TillerApp: App {
     @State private var model = AppModel()
     @State private var updater = UpdaterModel()
     @AppStorage("sidebar.visible") private var sidebarVisible = true
+    @AppStorage(AppSettings.rightPanelVisibleKey)
+    private var rightPanelVisible = AppSettings.defaultRightPanelVisible
     @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -63,6 +65,12 @@ struct TillerApp: App {
                     sidebarVisible.toggle()
                 }
                 .keyboardShortcut("s", modifiers: [.control, .command])
+                Button(rightPanelVisible
+                       ? "Nascondi pannello destro"
+                       : "Mostra pannello destro") {
+                    rightPanelVisible.toggle()
+                }
+                .keyboardShortcut("i", modifiers: [.control, .command])
             }
         }
 
