@@ -82,6 +82,10 @@ public enum FileTreeLoader {
         guard !components.contains("..") else {
             throw FileTreeError.pathOutsideRoot(relativePath)
         }
+        let rootValues = try root.resourceValues(forKeys: [.isSymbolicLinkKey])
+        if rootValues.isSymbolicLink == true {
+            throw FileTreeError.pathOutsideRoot(relativePath)
+        }
 
         var traversed = root
         for component in components where !component.isEmpty && component != "." {
