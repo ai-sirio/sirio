@@ -65,6 +65,17 @@ enum AppTheme {
     static let gitConflict = dynamic(
         light: NSColor(srgbRed: 0.62, green: 0.12, blue: 0.16, alpha: 1),
         dark: NSColor(srgbRed: 0.90, green: 0.58, blue: 0.60, alpha: 1))
+    static let diffAddition = gitStaged
+    static let diffAdditionBackground = dynamic(
+        light: NSColor(srgbRed: 0.88, green: 0.96, blue: 0.90, alpha: 1),
+        dark: NSColor(srgbRed: 0.08, green: 0.24, blue: 0.14, alpha: 1))
+    static let diffDeletion = gitConflict
+    static let diffDeletionBackground = dynamic(
+        light: NSColor(srgbRed: 0.98, green: 0.89, blue: 0.90, alpha: 1),
+        dark: NSColor(srgbRed: 0.27, green: 0.08, blue: 0.10, alpha: 1))
+    static let diffHunkBackground = dynamic(
+        light: NSColor(srgbRed: 0.88, green: 0.92, blue: 0.98, alpha: 1),
+        dark: NSColor(srgbRed: 0.10, green: 0.17, blue: 0.28, alpha: 1))
 
     /// Resolves at draw time against the view's effective appearance — the
     /// same mechanism behind Apple's semantic colors.
