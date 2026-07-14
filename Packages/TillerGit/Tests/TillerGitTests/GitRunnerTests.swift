@@ -75,3 +75,68 @@ private final class LineCollector: @unchecked Sendable {
         )
     }
 }
+@Test func runCapturedTreatsEmptyOutputAsZeroLines() async throws {
+    let repository = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+
+    let result = try await GitRunner.runCaptured(
+        ["-c", "alias.raw=!printf ''", "raw"],
+        in: repository.path,
+        limits: GitOutputLimits(maxBytes: 32, maxLines: 0)
+    )
+
+    #expect(result.stdout.isEmpty)
+}
+
+@Test func runCapturedAcceptsLfTerminatedOutputAtLineLimit() async throws {
+    let repository = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+
+    let result = try await GitRunner.runCaptured(
+        ["-c", "alias.raw=!printf 'one\\n'", "raw"],
+        in: repository.path,
+        limits: GitOutputLimits(maxBytes: 32, maxLines: 1)
+    )
+
+    #expect(result.stdout == Data("one\n".utf8))
+}
+
+@Test func runCapturedAcceptsUnterminatedOutputAtLineLimit() async throws {
+    let repository = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+
+    let result = try await GitRunner.runCaptured(
+        ["-c", "alias.raw=!printf one", "raw"],
+        in: repository.path,
+        limits: GitOutputLimits(maxBytes: 32, maxLines: 1)
+    )
+
+    #expect(result.stdout == Data("one".utf8))
+}
+
+@Test func runCapturedRejectsUnterminatedOutputAtZeroLineLimit() async throws {
+    let repository = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+
+    await #expect(throws: GitError.outputTooLarge(maxBytes: 32, maxLines: 0)) {
+        _ = try await GitRunner.runCaptured(
+            ["-c", "alias.raw=!printf one", "raw"],
+            in: repository.path,
+            limits: GitOutputLimits(maxBytes: 32, maxLines: 0)
+        )
+    }
+}
+
+@Test func runCapturedDrainsHighStderrWhileCapturingStdout() async throws {
+    let repository = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repository) }
+    try runGitForTest(
+        ["config", "alias.noisy", "!printf '%131072s' x >&2; printf stdout"],
+        in: repository
+    )
+
+    let result = try await GitRunner.runCaptured(["noisy"], in: repository.path)
+
+    #expect(result.stdoutString.contains("stdout"))
+    #expect(result.stderr.utf8.count >= 131072)
+}
