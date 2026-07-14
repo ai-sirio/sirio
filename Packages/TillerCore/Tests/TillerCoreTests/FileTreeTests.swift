@@ -88,3 +88,15 @@ private func makeTreeRoot() throws -> URL {
         _ = try FileTreeLoader.children(at: "../outside", rootURL: root)
     }
 }
+
+
+@Test func fileTreeSortUsesRelativePathToBreakLocalizedNameTies() {
+    let nodes = [
+        FileTreeNode(relativePath: "z/same", name: "same", kind: .file),
+        FileTreeNode(relativePath: "a/same", name: "same", kind: .file)
+    ]
+
+    let sorted = FileTreeLoader.sortedNodes(nodes)
+
+    #expect(sorted.map(\.relativePath) == ["a/same", "z/same"])
+}
