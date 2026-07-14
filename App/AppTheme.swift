@@ -53,6 +53,18 @@ enum AppTheme {
     static let treeGuide = dynamic(
         light: NSColor.black.withAlphaComponent(0.12),
         dark: NSColor.white.withAlphaComponent(0.14))
+    static let gitStaged = dynamic(
+        light: NSColor(srgbRed: 0.08, green: 0.42, blue: 0.20, alpha: 1),
+        dark: NSColor(srgbRed: 0.55, green: 0.82, blue: 0.63, alpha: 1))
+    static let gitModified = dynamic(
+        light: NSColor(srgbRed: 0.58, green: 0.35, blue: 0.05, alpha: 1),
+        dark: NSColor(srgbRed: 0.91, green: 0.69, blue: 0.36, alpha: 1))
+    static let gitUntracked = dynamic(
+        light: NSColor(srgbRed: 0.08, green: 0.36, blue: 0.60, alpha: 1),
+        dark: NSColor(srgbRed: 0.43, green: 0.68, blue: 0.91, alpha: 1))
+    static let gitConflict = dynamic(
+        light: NSColor(srgbRed: 0.62, green: 0.12, blue: 0.16, alpha: 1),
+        dark: NSColor(srgbRed: 0.90, green: 0.58, blue: 0.60, alpha: 1))
 
     /// Resolves at draw time against the view's effective appearance — the
     /// same mechanism behind Apple's semantic colors.
