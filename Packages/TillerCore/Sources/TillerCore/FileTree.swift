@@ -47,7 +47,7 @@ public enum FileTreeLoader {
         let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
         guard values.isDirectory == true else { throw FileTreeError.notDirectory(relativePath) }
 
-        return try FileManager.default.contentsOfDirectory(
+        let nodes = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
             options: []
@@ -68,9 +68,26 @@ public enum FileTreeLoader {
                 : relativePath + "/" + child.lastPathComponent
             return FileTreeNode(relativePath: childRelative, name: child.lastPathComponent, kind: kind)
         }
-        .sorted { lhs, rhs in
-            if lhs.kind.isDirectory != rhs.kind.isDirectory { return lhs.kind.isDirectory }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+
+        return sortedNodes(nodes)
+    }
+
+
+    internal static func sortedNodes(_ nodes: [FileTreeNode]) -> [FileTreeNode] {
+        nodes.sorted { lhs, rhs in
+            if lhs.kind.isDirectory != rhs.kind.isDirectory {
+                return lhs.kind.isDirectory
+            }
+
+            let localizedComparison = lhs.name.localizedStandardCompare(rhs.name)
+            if localizedComparison != .orderedSame {
+                return localizedComparison == .orderedAscending
+            }
+
+            if lhs.name != rhs.name {
+                return lhs.name.utf8.lexicographicallyPrecedes(rhs.name.utf8)
+            }
+            return lhs.relativePath.utf8.lexicographicallyPrecedes(rhs.relativePath.utf8)
         }
     }
 
