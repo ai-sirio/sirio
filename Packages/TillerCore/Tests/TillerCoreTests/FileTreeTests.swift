@@ -43,16 +43,40 @@ private func makeTreeRoot() throws -> URL {
     #expect(node.kind == .symbolicLink)
     #expect(!node.kind.isDirectory)
 }
-@Test func fileTreeRejectsTraversalThroughDirectorySymlink() throws {
+@Test func fileTreeRejectsTraversalThroughNestedDirectorySymlink() throws {
     let root = try makeTreeRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let target = root.appendingPathComponent("Target", isDirectory: true)
     let link = root.appendingPathComponent("Target Link")
-    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    let subdirectory = target.appendingPathComponent("subdir", isDirectory: true)
+    try FileManager.default.createDirectory(at: subdirectory, withIntermediateDirectories: true)
+    try "file".write(
+        to: subdirectory.appendingPathComponent("file.txt"),
+        atomically: true,
+        encoding: .utf8)
     try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
 
-    #expect(throws: FileTreeError.pathOutsideRoot("Target Link")) {
-        _ = try FileTreeLoader.children(at: "Target Link", rootURL: root)
+    #expect(throws: FileTreeError.pathOutsideRoot("Target Link/subdir")) {
+        _ = try FileTreeLoader.children(at: "Target Link/subdir", rootURL: root)
+    }
+}
+
+@Test func fileTreeRejectsSymlinkRootURL() throws {
+    let root = try makeTreeRoot()
+    let target = try makeTreeRoot()
+    defer {
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: target)
+    }
+    let rootLink = root.appendingPathComponent("root-link")
+    try "file".write(
+        to: target.appendingPathComponent("file.txt"),
+        atomically: true,
+        encoding: .utf8)
+    try FileManager.default.createSymbolicLink(at: rootLink, withDestinationURL: target)
+
+    #expect(throws: FileTreeError.pathOutsideRoot("")) {
+        _ = try FileTreeLoader.children(at: "", rootURL: rootLink)
     }
 }
 
