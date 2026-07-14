@@ -3,6 +3,12 @@ import TillerCore
 import TillerTerminal
 import TillerControl
 
+private struct RightPanelContext: Hashable {
+    let worktreeId: UUID?
+    let gitProject: Bool
+    let visible: Bool
+}
+
 struct ContentView: View {
     var model: AppModel
     var updater: UpdaterModel
@@ -13,10 +19,25 @@ struct ContentView: View {
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
     @AppStorage("sidebar.visible") private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 240
+    @AppStorage(AppSettings.rightPanelVisibleKey)
+    private var rightPanelVisible = AppSettings.defaultRightPanelVisible
+    @AppStorage(AppSettings.rightPanelWidthKey)
+    private var rightPanelWidth = AppSettings.defaultRightPanelWidth
+    @AppStorage(AppSettings.rightPanelModeKey)
+    private var rightPanelModeRaw = RightPanelMode.files.rawValue
+    @State private var rightPanelModel = RightPanelModel()
     private let menuProvider: TerminalContextMenuProvider
 
     private var showUsageBar: Bool {
         showClaudeInBar || showCodexInBar || showOpencodeGoInBar || showOllamaCloudInBar
+    }
+
+    private var rightPanelContext: RightPanelContext {
+        let worktree = model.selectedWorktree
+        return RightPanelContext(
+            worktreeId: worktree?.id,
+            gitProject: worktree.map { model.isGitProject(id: $0.projectId) } ?? false,
+            visible: rightPanelVisible)
     }
 
     init(model: AppModel, updater: UpdaterModel) {
@@ -38,6 +59,16 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 560)
+        .task(id: rightPanelContext) {
+            guard rightPanelVisible else {
+                rightPanelModel.deactivate()
+                return
+            }
+            await rightPanelModel.activate(
+                worktree: model.selectedWorktree,
+                isGitRepository: rightPanelContext.gitProject)
+        }
+        .onDisappear { rightPanelModel.deactivate() }
         .configuresWindowChrome()
         .toolbar {
             if model.route == .workspace {
@@ -52,6 +83,16 @@ struct ContentView: View {
                 }
 
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        rightPanelVisible.toggle()
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                    }
+                    .help(rightPanelVisible
+                          ? "Nascondi pannello destro (⌃⌘I)"
+                          : "Mostra pannello destro (⌃⌘I)")
+                    .accessibilityLabel("Pannello destro")
+
                     Button {
                         model.splitCurrent(.horizontal)
                     } label: {
@@ -139,6 +180,22 @@ struct ContentView: View {
                 model.openMarkdownTab(fileURL: url, in: worktree)
                 return true
             }
+            if rightPanelVisible {
+                RightPanelView(
+                    appModel: model,
+                    panelModel: rightPanelModel,
+                    modeRaw: $rightPanelModeRaw,
+                    isGitRepository: rightPanelContext.gitProject,
+                    onClose: { rightPanelVisible = false })
+                .frame(
+                    minWidth: CGFloat(AppSettings.rightPanelWidthRange.lowerBound),
+                    idealWidth: CGFloat(AppSettings.clampRightPanelWidth(rightPanelWidth)),
+                    maxWidth: CGFloat(AppSettings.rightPanelWidthRange.upperBound),
+                    maxHeight: .infinity)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+                    rightPanelWidth = AppSettings.clampRightPanelWidth(Double(width))
+                }
+            }
         }
         // HSplitView draws an opaque dark divider with no styling API; cover
         // it with the shared material so no seam shows between the columns.
@@ -151,7 +208,17 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay(alignment: .trailing) {
+            if rightPanelVisible {
+                SidebarMaterialContainer()
+                    .frame(width: 2)
+                    .offset(x: -CGFloat(rightPanelWidth))
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+        }
         .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
+        .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
     }
 
     @ViewBuilder
