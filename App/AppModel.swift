@@ -185,16 +185,24 @@ final class AppModel {
             let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("Tiller", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            refreshTillerctlShim()
             let db = try AppDatabase(path: dir.appendingPathComponent("tiller.sqlite").path)
             let store = ProjectStore(database: db)
             self.store = store
             self.database = db
             self.agentAccounts = AgentAccountStore(database: db)
             projects = try await store.loadAll()
+            let ctl = tillerctlPath()
             for project in projects {
                 let list = try await store.worktrees(of: project.id)
                 worktrees[project.id] = list
                 for worktree in list {
+                    // Repair hook configs frozen on a tillerctl path that no
+                    // longer exists (pre-shim builds, cleaned DerivedData).
+                    ClaudeHookMigrator.migrateFile(
+                        atPath: worktree.path + "/.claude/settings.local.json",
+                        tillerctlPath: ctl
+                    )
                     let loaded = try await store.loadTabs(of: worktree.id)
                     // Tab markdown il cui file è sparito tra le sessioni: scartate in silenzio.
                     let restoredTabs = loaded.tabs.filter { tab in
@@ -1162,7 +1170,24 @@ final class AppModel {
     }
 
     /// tillerctl ships next to the app binary in DEBUG dev loops; fall back to PATH.
+    /// Re-points the stable shim at this build's bundled tillerctl so hook
+    /// configs embedding the shim path survive app updates and dev↔installed
+    /// switches. Must run before anything calls tillerctlPath().
+    func refreshTillerctlShim() {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/tillerctl").path
+        guard FileManager.default.fileExists(atPath: bundled) else { return }
+        do {
+            try TillerctlShim.install(target: bundled, shimPath: TillerctlShim.defaultShimPath())
+        } catch {
+            sessionRestoreLogger.warning("tillerctl shim install failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     func tillerctlPath() -> String {
+        // fileExists follows symlinks: a dangling shim falls through.
+        let shim = TillerctlShim.defaultShimPath()
+        if FileManager.default.fileExists(atPath: shim) { return shim }
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/tillerctl").path
         if FileManager.default.fileExists(atPath: bundled) { return bundled }
