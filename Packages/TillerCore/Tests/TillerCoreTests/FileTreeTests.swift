@@ -43,6 +43,18 @@ private func makeTreeRoot() throws -> URL {
     #expect(node.kind == .symbolicLink)
     #expect(!node.kind.isDirectory)
 }
+@Test func fileTreeRejectsTraversalThroughDirectorySymlink() throws {
+    let root = try makeTreeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let target = root.appendingPathComponent("Target", isDirectory: true)
+    let link = root.appendingPathComponent("Target Link")
+    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+    #expect(throws: FileTreeError.pathOutsideRoot("Target Link")) {
+        _ = try FileTreeLoader.children(at: "Target Link", rootURL: root)
+    }
+}
 
 @Test func fileTreeRejectsTraversalOutsideRoot() throws {
     let root = try makeTreeRoot()

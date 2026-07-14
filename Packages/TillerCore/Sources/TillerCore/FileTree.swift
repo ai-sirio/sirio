@@ -82,6 +82,16 @@ public enum FileTreeLoader {
         guard !components.contains("..") else {
             throw FileTreeError.pathOutsideRoot(relativePath)
         }
+
+        var traversed = root
+        for component in components where !component.isEmpty && component != "." {
+            traversed.appendPathComponent(String(component), isDirectory: true)
+            let values = try traversed.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if values.isSymbolicLink == true {
+                throw FileTreeError.pathOutsideRoot(relativePath)
+            }
+        }
+
         let candidate = relativePath.isEmpty
             ? root
             : root.appendingPathComponent(relativePath, isDirectory: true).standardizedFileURL
