@@ -75,8 +75,12 @@ private final class CapturedOutputState: @unchecked Sendable {
         let newLines = data.reduce(into: 0) { count, byte in
             if byte == 0x0A { count += 1 }
         }
+        let candidateHasOutput = !output.isEmpty || !data.isEmpty
+        let candidateEndsWithLF = (data.last ?? output.last) == 0x0A
+        let candidateLineCount = lineCount + newLines
+            + (candidateHasOutput && !candidateEndsWithLF ? 1 : 0)
         if let limits,
-           output.count + data.count > limits.maxBytes || lineCount + newLines > limits.maxLines {
+           output.count + data.count > limits.maxBytes || candidateLineCount > limits.maxLines {
             exceeded = true
             return true
         }
