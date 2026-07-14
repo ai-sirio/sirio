@@ -52,3 +52,15 @@ import Testing
     #expect(AppSettings.controlSocketEnabled(
         defaultsValue: false, env: ["TILLER_SOCKET_ENABLE": "maybe"]) == false)
 }
+
+@Test func rightPanelDefaultsAreStable() {
+    #expect(AppSettings.defaultRightPanelVisible == false)
+    #expect(AppSettings.defaultRightPanelWidth == 360)
+    #expect(AppSettings.rightPanelWidthRange == 280...600)
+}
+
+@Test func rightPanelWidthClampsToSupportedRange() {
+    #expect(AppSettings.clampRightPanelWidth(120) == 280)
+    #expect(AppSettings.clampRightPanelWidth(420) == 420)
+    #expect(AppSettings.clampRightPanelWidth(900) == 600)
+}

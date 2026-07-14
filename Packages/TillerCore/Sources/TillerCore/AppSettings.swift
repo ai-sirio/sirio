@@ -61,4 +61,15 @@ public enum AppSettings {
     public static func clampTerminalFontSize(_ size: Int) -> Int {
         min(max(size, terminalFontSizeRange.lowerBound), terminalFontSizeRange.upperBound)
     }
+    public static let rightPanelVisibleKey = "rightPanel.visible"
+    public static let rightPanelWidthKey = "rightPanel.width"
+    public static let rightPanelModeKey = "rightPanel.mode"
+
+    public static let defaultRightPanelVisible = false
+    public static let defaultRightPanelWidth = 360.0
+    public static let rightPanelWidthRange: ClosedRange<Double> = 280...600
+
+    public static func clampRightPanelWidth(_ width: Double) -> Double {
+        min(max(width, rightPanelWidthRange.lowerBound), rightPanelWidthRange.upperBound)
+    }
 }
