@@ -6,6 +6,7 @@ App/Info.plist
 build/
 .tokensave/
 .superpowers/
+.worktrees/
 .serena/
 .agents/
 .opencode/
