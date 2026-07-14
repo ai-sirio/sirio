@@ -155,3 +155,222 @@ import Testing
         #expect(try await GitStatus.load(in: repo.path).entries.first?.isConflicted == true)
     }
 }
+@Test func stageMultipleEntriesLeavesUnselectedEntryUnstaged() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    for (name, contents) in [("stage-a.txt", "a\n"), ("stage-b.txt", "b\n"),
+                             ("keep.txt", "keep\n")] {
+        try contents.write(
+            to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let selected = try #require(snapshot.untracked.filter {
+        ["stage-a.txt", "stage-b.txt"].contains($0.path.value)
+    }.count == 2
+        ? snapshot.untracked.filter {
+            ["stage-a.txt", "stage-b.txt"].contains($0.path.value)
+        }
+        : nil)
+
+    try await GitActions.stage(selected, in: repo.path)
+
+    let after = try await GitStatus.load(in: repo.path)
+    #expect(Set(after.staged.map(\.path.value)) == ["stage-a.txt", "stage-b.txt"])
+    #expect(after.untracked.map(\.path.value) == ["keep.txt"])
+}
+@Test func unstageMultipleEntriesIncludingRenameLeavesUnselectedStaged() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    try runGitForTest(["mv", "file.txt", "renamed.txt"], in: repo)
+    for (name, contents) in [("ordinary.txt", "ordinary\n"), ("keep-staged.txt", "keep\n")] {
+        try contents.write(
+            to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    try runGitForTest(["add", "--", "ordinary.txt", "keep-staged.txt"], in: repo)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let rename = try #require(snapshot.staged.first { $0.path.value == "renamed.txt" })
+    let ordinary = try #require(snapshot.staged.first { $0.path.value == "ordinary.txt" })
+
+    try await GitActions.unstage([rename, ordinary], in: repo.path)
+
+    let after = try await GitStatus.load(in: repo.path)
+    #expect(after.staged.map(\.path.value) == ["keep-staged.txt"])
+    #expect(after.untracked.map(\.path.value).contains("renamed.txt"))
+    #expect(after.untracked.map(\.path.value).contains("ordinary.txt"))
+    #expect(try String(contentsOf: repo.appendingPathComponent("renamed.txt"),
+                      encoding: .utf8) == "one\n")
+}
+
+@Test func discardChangesMultipleEntriesLeavesUnselectedChange() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    for (name, contents) in [("discard-a.txt", "a\n"), ("discard-b.txt", "b\n"),
+                             ("keep.txt", "keep\n")] {
+        try contents.write(
+            to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    try runGitForTest(["add", "--", "discard-a.txt", "discard-b.txt", "keep.txt"], in: repo)
+    try runGitForTest(["commit", "-m", "tracked fixtures"], in: repo)
+    for (name, contents) in [("discard-a.txt", "changed-a\n"),
+                             ("discard-b.txt", "changed-b\n"), ("keep.txt", "changed-keep\n")] {
+        try contents.write(
+            to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let selected = try #require(snapshot.changes.filter {
+        ["discard-a.txt", "discard-b.txt"].contains($0.path.value)
+    }.count == 2
+        ? snapshot.changes.filter {
+            ["discard-a.txt", "discard-b.txt"].contains($0.path.value)
+        }
+        : nil)
+
+    try await GitActions.discardChanges(selected, in: repo.path)
+
+    #expect(try String(contentsOf: repo.appendingPathComponent("discard-a.txt"),
+                      encoding: .utf8) == "a\n")
+    #expect(try String(contentsOf: repo.appendingPathComponent("discard-b.txt"),
+                      encoding: .utf8) == "b\n")
+    #expect(try String(contentsOf: repo.appendingPathComponent("keep.txt"),
+                      encoding: .utf8) == "changed-keep\n")
+    #expect((try await GitStatus.load(in: repo.path)).changes.map(\.path.value) == ["keep.txt"])
+}
+
+@Test func discardUntrackedMultipleEntriesLeavesUnselectedEntry() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    for (name, contents) in [("remove-a.txt", "a\n"), ("remove-b.txt", "b\n"),
+                             ("keep.txt", "keep\n")] {
+        try contents.write(
+            to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let selected = try #require(snapshot.untracked.filter {
+        ["remove-a.txt", "remove-b.txt"].contains($0.path.value)
+    }.count == 2
+        ? snapshot.untracked.filter {
+            ["remove-a.txt", "remove-b.txt"].contains($0.path.value)
+        }
+        : nil)
+
+    try await GitActions.discardUntracked(selected, in: repo.path)
+
+    #expect(!FileManager.default.fileExists(atPath: repo.appendingPathComponent("remove-a.txt").path))
+    #expect(!FileManager.default.fileExists(atPath: repo.appendingPathComponent("remove-b.txt").path))
+    #expect(FileManager.default.fileExists(atPath: repo.appendingPathComponent("keep.txt").path))
+}
+@Test func stageTreatsMetacharacterPathAsLiteral() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    try "literal\n".write(
+        to: repo.appendingPathComponent("*"), atomically: true, encoding: .utf8)
+    try "keep\n".write(
+        to: repo.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.untracked.first { $0.path.value == "*" })
+
+    try await GitActions.stage([entry], in: repo.path)
+
+    let after = try await GitStatus.load(in: repo.path)
+    #expect(after.staged.map(\.path.value) == ["*"])
+    #expect(after.untracked.map(\.path.value) == ["keep.txt"])
+}
+
+@Test func unstageTreatsMetacharacterPathAsLiteral() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    try "literal\n".write(
+        to: repo.appendingPathComponent("*"), atomically: true, encoding: .utf8)
+    try "keep\n".write(
+        to: repo.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+    try runGitForTest(["add", "--", "*", "keep.txt"], in: repo)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.staged.first { $0.path.value == "*" })
+
+    try await GitActions.unstage([entry], in: repo.path)
+
+    let after = try await GitStatus.load(in: repo.path)
+    #expect(after.untracked.map(\.path.value) == ["*"])
+    #expect(after.staged.map(\.path.value) == ["keep.txt"])
+}
+
+@Test func discardChangesTreatsMetacharacterPathAsLiteral() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    for (name, contents) in [("*", "literal\n"), ("keep.txt", "keep\n")] {
+        try contents.write(
+            to: repo.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+    try runGitForTest(["add", "--", "*", "keep.txt"], in: repo)
+    try runGitForTest(["commit", "-m", "literal fixtures"], in: repo)
+    try "changed-literal\n".write(
+        to: repo.appendingPathComponent("*"), atomically: true, encoding: .utf8)
+    try "changed-keep\n".write(
+        to: repo.appendingPathComponent("keep.txt"), atomically: true, encoding: .utf8)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.changes.first { $0.path.value == "*" })
+
+    try await GitActions.discardChanges([entry], in: repo.path)
+
+    #expect(try String(contentsOf: repo.appendingPathComponent("*"), encoding: .utf8)
+            == "literal\n")
+    #expect(try String(contentsOf: repo.appendingPathComponent("keep.txt"), encoding: .utf8)
+            == "changed-keep\n")
+}
+@Test func stageRejectsEntryFromStaleSnapshot() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let file = repo.appendingPathComponent("stale-stage.txt")
+    try "stale\n".write(to: file, atomically: true, encoding: .utf8)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.untracked.first { $0.path.value == "stale-stage.txt" })
+    try runGitForTest(["add", "--", "stale-stage.txt"], in: repo)
+
+    await #expect(throws: GitActionError.invalidEntry(
+        "Selected entries are not present in the current status.")) {
+        try await GitActions.stage([entry], in: repo.path)
+    }
+
+    #expect(try await GitStatus.load(in: repo.path).staged.map(\.path.value)
+            == ["stale-stage.txt"])
+}
+
+@Test func unstageRejectsEntryFromStaleSnapshot() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let file = repo.appendingPathComponent("stale-unstage.txt")
+    try "stale\n".write(to: file, atomically: true, encoding: .utf8)
+    try runGitForTest(["add", "--", "stale-unstage.txt"], in: repo)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.staged.first { $0.path.value == "stale-unstage.txt" })
+    try runGitForTest(["reset", "HEAD", "--", "stale-unstage.txt"], in: repo)
+
+    await #expect(throws: GitActionError.invalidEntry(
+        "Selected entries are not present in the current status.")) {
+        try await GitActions.unstage([entry], in: repo.path)
+    }
+
+    #expect(try await GitStatus.load(in: repo.path).untracked.map(\.path.value)
+            == ["stale-unstage.txt"])
+}
+
+@Test func discardChangesRejectsEntryFromStaleSnapshot() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let file = repo.appendingPathComponent("stale-discard.txt")
+    try "original\n".write(to: file, atomically: true, encoding: .utf8)
+    try runGitForTest(["add", "--", "stale-discard.txt"], in: repo)
+    try runGitForTest(["commit", "-m", "stale fixture"], in: repo)
+    try "changed\n".write(to: file, atomically: true, encoding: .utf8)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.changes.first { $0.path.value == "stale-discard.txt" })
+    try runGitForTest(["restore", "--worktree", "--", "stale-discard.txt"], in: repo)
+
+    await #expect(throws: GitActionError.invalidEntry(
+        "Selected entries are not present in the current status.")) {
+        try await GitActions.discardChanges([entry], in: repo.path)
+    }
+
+    #expect(try String(contentsOf: file, encoding: .utf8) == "original\n")
+    #expect((try await GitStatus.load(in: repo.path)).isClean)
+}
