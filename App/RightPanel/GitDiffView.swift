@@ -62,10 +62,10 @@ struct GitDiffView: View {
                     ContentUnavailableView(
                         "Binary diff unavailable", systemImage: "doc.richtext")
                 } else {
-                    ScrollView([.vertical, .horizontal]) {
+                    ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(diff.lines) { line in
-                                UnifiedDiffRow(line: line)
+                            ForEach(panelModel.diffRows) { row in
+                                SideBySideDiffRow(row: row)
                             }
                         }
                     }
@@ -133,48 +133,56 @@ struct GitDiffView: View {
     }
 }
 
-private struct UnifiedDiffRow: View {
-    let line: GitDiffLine
+private struct SideBySideDiffRow: View {
+    let row: GitDiffSideBySideRow
 
     var body: some View {
-        HStack(spacing: 0) {
-            Text(line.oldLineNumber.map(String.init) ?? "")
+        if row.isHunk {
+            Text(row.left?.text ?? "")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(AppTheme.subtitle)
+                .padding(.vertical, 1)
+                .padding(.leading, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppTheme.diffHunkBackground)
+        } else {
+            HStack(alignment: .top, spacing: 0) {
+                half(row.left, number: row.left?.oldLineNumber)
+                Divider()
+                half(row.right, number: row.right?.newLineNumber)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func half(_ line: GitDiffLine?, number: Int?) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Text(number.map(String.init) ?? "")
                 .frame(width: 38, alignment: .trailing)
-            Text(line.newLineNumber.map(String.init) ?? "")
-                .frame(width: 38, alignment: .trailing)
-            Text(marker).frame(width: 18)
-            Text(line.text).textSelection(.enabled)
-            Spacer(minLength: 8)
+                .foregroundStyle(AppTheme.meta)
+            Text(line?.text ?? " ")
+                .textSelection(.enabled)
+                .foregroundStyle(foreground(for: line))
+                .padding(.leading, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.system(size: 11, design: .monospaced))
-        .foregroundStyle(foreground)
         .padding(.vertical, 1)
-        .background(background)
+        .background(background(for: line))
     }
 
-    private var marker: String {
-        switch line.kind {
-        case .addition: "+"
-        case .deletion: "-"
-        case .context: " "
-        case .hunk: "@@"
-        case .metadata: ""
-        }
-    }
-
-    private var foreground: Color {
-        switch line.kind {
+    private func foreground(for line: GitDiffLine?) -> Color {
+        switch line?.kind {
         case .addition: AppTheme.diffAddition
         case .deletion: AppTheme.diffDeletion
         default: AppTheme.subtitle
         }
     }
 
-    private var background: Color {
-        switch line.kind {
+    private func background(for line: GitDiffLine?) -> Color {
+        switch line?.kind {
         case .addition: AppTheme.diffAdditionBackground
         case .deletion: AppTheme.diffDeletionBackground
-        case .hunk: AppTheme.diffHunkBackground
         default: .clear
         }
     }
