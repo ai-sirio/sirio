@@ -54,3 +54,10 @@ import Foundation
 
     #expect(Set(targets.map(\.paneId)) == Set([p1, p2]))
 }
+
+@Test func flushTargetsEmptyTabListYieldsNothing() {
+    let wt = UUID()
+    let tabs = [wt: [WorkspaceTab]()]
+    let targets = scrollbackFlushTargets(tabs: tabs)
+    #expect(targets.isEmpty)
+}
