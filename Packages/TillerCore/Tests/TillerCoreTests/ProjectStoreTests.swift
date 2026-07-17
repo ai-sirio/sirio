@@ -188,3 +188,14 @@ import TillerPersistence
     try await store.setWorktreeBranch(w.id, branch: "master")
     #expect(try await store.worktrees(of: p.id).first?.branch == "master")
 }
+
+@Test func saveAndLoadEmptyTabList() async throws {
+    let db = try AppDatabase.inMemory()
+    let store = ProjectStore(database: db)
+    let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
+    let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
+    try await store.saveTabs(worktreeId: worktree.id, tabs: [], activeTabId: nil)
+    let loaded = try await store.loadTabs(of: worktree.id)
+    #expect(loaded.tabs.isEmpty)
+    #expect(loaded.activeTabId == nil)
+}

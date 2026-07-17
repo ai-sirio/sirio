@@ -118,3 +118,16 @@ import Foundation
     )
     #expect(evicted == [a])
 }
+
+@Test func evictsFirstIdleWorktreeWhenOverCap() {
+    let a = UUID()
+    let b = UUID()
+    let evicted = WorktreeMountPolicy.idsToEvict(
+        openWorktreeIds: [a, b],
+        selectedWorktreeId: nil,
+        cap: 1,
+        status: { _ in nil },
+        hasUnsavedWork: { _ in false }
+    )
+    #expect(evicted == [a])
+}
