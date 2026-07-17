@@ -17,8 +17,10 @@ final class RightPanelModel {
     private(set) var expandedDirectories: Set<String> = []
     private(set) var directoryErrors: [String: String] = [:]
     private(set) var status = GitStatusSnapshot.empty
+    private(set) var statusByPath: [String: GitStatusEntry] = [:]
     private(set) var selectedDiffPath: GitPath?
     private(set) var diff: GitFileDiff?
+    private(set) var diffRows: [GitDiffSideBySideRow] = []
     private(set) var filesLoading = false
     private(set) var gitLoading = false
     private(set) var diffLoading = false
@@ -81,8 +83,10 @@ final class RightPanelModel {
         expandedDirectories = []
         directoryErrors = [:]
         status = .empty
+        statusByPath = [:]
         selectedDiffPath = nil
         diff = nil
+        diffRows = []
         filesLoading = false
         gitLoading = false
         diffLoading = false
@@ -258,12 +262,16 @@ extension RightPanelModel {
 
     private func apply(_ snapshot: GitStatusSnapshot) {
         status = snapshot
+        statusByPath = Dictionary(
+            snapshot.entries.map { ($0.path.value, $0) },
+            uniquingKeysWith: { first, _ in first })
         if let selectedDiffPath,
            snapshot.entries.contains(where: { $0.path == selectedDiffPath }) {
             return
         }
         selectedDiffPath = snapshot.entries.first?.path
         diff = nil
+        diffRows = []
         diffError = nil
     }
 
@@ -276,10 +284,12 @@ extension RightPanelModel {
             let loaded = try await GitDiff.load(entry: entry, in: worktree.path)
             guard token == generation, selectedDiffPath == entry.path else { return }
             diff = loaded
+            diffRows = GitDiffSideBySide.rows(from: loaded.lines)
             diffError = nil
         } catch {
             guard token == generation, selectedDiffPath == entry.path else { return }
             diff = nil
+            diffRows = []
             diffError = error.localizedDescription
         }
     }
