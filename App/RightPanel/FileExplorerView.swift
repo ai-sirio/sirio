@@ -79,9 +79,7 @@ struct FileExplorerView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
-            if let entry = panelModel.status.entries.first(where: {
-                $0.path.value == node.relativePath
-            }) {
+            if let entry = panelModel.statusByPath[node.relativePath] {
                 Text(statusSymbol(entry))
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(statusColor(entry))
@@ -94,13 +92,16 @@ struct FileExplorerView: View {
         .contentShape(Rectangle())
         .background(selected ? AppTheme.selectionFill : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
-        .onTapGesture { selectedPath = node.relativePath; treeFocused = true }
+        // Double-tap must be attached before single-tap or it never fires.
         .onTapGesture(count: 2) {
             selectedPath = node.relativePath
+            if !node.kind.isDirectory { open(node) }
+        }
+        .onTapGesture {
+            selectedPath = node.relativePath
+            treeFocused = true
             if node.kind.isDirectory {
                 Task { await panelModel.toggleDirectory(node.relativePath) }
-            } else {
-                open(node)
             }
         }
         .contextMenu {
