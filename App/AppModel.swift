@@ -634,8 +634,9 @@ final class AppModel {
     }
 
     /// Rimuove la tab (l'host smonta → onClose salva scrollback e pulisce i
-    /// dizionari pane). Ultima tab: ne crea subito una fresca con paneId
-    /// NUOVO — riusare worktree.id riaggancerebbe il vecchio scrollback.
+    /// dizionari pane). When the tab list becomes empty the worktree shows
+    /// the empty-state view; the user creates a new tab via ⌘T or the
+    /// sidebar "+" menu.
     func closeTab(_ tabId: UUID, in worktree: Worktree) {
         if let doc = markdownDocuments[tabId], doc.isDirty {
             guard resolveDirtyClose(doc) else { return }
@@ -646,13 +647,8 @@ final class AppModel {
         }
         list.removeAll { $0.id == tabId }
         teardownMarkdownDocument(tabId: tabId)
-        if list.isEmpty {
-            list = [WorkspaceTab(
-                id: UUID(),
-                title: WorkspaceTab.nextShellTitle(existing: []),
-                tree: .leaf(id: UUID())
-            )]
-        }
+        // Allow empty tab list — the worktree can have zero tabs.
+        // The user creates a new tab via ⌘T or the sidebar "+" menu.
         tabs[worktree.id] = list
         if !list.contains(where: { $0.id == activeTabId[worktree.id] }) {
             activeTabId[worktree.id] = list.last?.id

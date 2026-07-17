@@ -230,6 +230,9 @@ struct ContentView: View {
                     systemImage: "terminal",
                     description: Text("Add a project, then select a worktree.")
                 )
+            } else if let worktree = model.selectedWorktree,
+                      (model.tabs[worktree.id] ?? []).isEmpty {
+                EmptyWorktreeView(onNewTerminal: { model.newShellTabInSelected() })
             }
             ForEach(model.openWorktreeIds, id: \.self) { worktreeId in
                 if let worktree = model.worktree(byId: worktreeId) {
