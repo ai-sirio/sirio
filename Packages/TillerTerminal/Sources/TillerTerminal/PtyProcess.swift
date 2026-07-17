@@ -36,6 +36,9 @@ public final class PtyProcess: @unchecked Sendable {
     private let onOutput: @Sendable (Data) -> Void
     private var readSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "tiller.pty.read")
+    /// Reusable read buffer — safe because the DispatchSourceRead handler
+    /// runs on the serial `queue`, so reads never overlap.
+    private var readBuffer = [UInt8](repeating: 0, count: 64 * 1024)
 
     public init(onOutput: @escaping @Sendable (Data) -> Void) {
         self.onOutput = onOutput
@@ -158,10 +161,12 @@ public final class PtyProcess: @unchecked Sendable {
             guard let self, self.masterFD >= 0 else { return }
             let sid = SignpostMetrics.makeSignpostID()
             let state = SignpostMetrics.beginInterval("ptyIngest", id: sid)
-            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-            let n = read(self.masterFD, &buffer, buffer.count)
+            let fd = self.masterFD
+            let n = self.readBuffer.withUnsafeMutableBytes { raw in
+                read(fd, raw.baseAddress, raw.count)
+            }
             if n > 0 {
-                self.onOutput(Data(buffer[0..<n]))
+                self.onOutput(Data(self.readBuffer[0..<n]))
                 SignpostMetrics.endInterval("ptyIngest", state, message: "bytes: \(n)")
             } else {
                 SignpostMetrics.endInterval("ptyIngest", state, message: "eof")
