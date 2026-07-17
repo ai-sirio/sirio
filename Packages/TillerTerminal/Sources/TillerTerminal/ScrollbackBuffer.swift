@@ -1,31 +1,75 @@
 import Foundation
 
-/// Ring-ish byte buffer: appends raw PTY output and keeps only the last
-/// `capacity` bytes. Raw VT stream replay is imperfect (a TUI mid-frame
-/// restores oddly) but is the right 1a tradeoff for shell scrollback.
+/// Fixed-capacity byte ring buffer: appends raw PTY output and keeps only
+/// the last `capacity` bytes. Uses explicit `head` + `count` semantics into
+/// a fixed `storage` array, avoiding `Data.removeFirst()` O(n) shifts.
+///
+/// Thread safety: actor isolation (all methods are async).
 public actor ScrollbackBuffer {
-    private var storage = Data()
+    private var storage: Data
     private let capacity: Int
+    private var head: Int = 0
+    private var count: Int = 0
 
     public init(capacity: Int = 256 * 1024) {
         self.capacity = capacity
+        self.storage = Data(count: capacity)
     }
 
     public func append(_ data: Data) {
+        guard capacity > 0, !data.isEmpty else { return }
         let sid = SignpostMetrics.makeSignpostID()
         let state = SignpostMetrics.beginInterval("scrollbackAppend", id: sid)
-        storage.append(data)
-        if storage.count > capacity {
-            storage.removeFirst(storage.count - capacity)
+        defer { SignpostMetrics.endInterval("scrollbackAppend", state, message: "bytes: \(data.count)") }
+        if data.count >= capacity {
+            // Data larger than capacity: keep only the last `capacity` bytes.
+            let offset = data.count - capacity
+            data.withUnsafeBytes { src in
+                storage.withUnsafeMutableBytes { dst in
+                    dst.copyBytes(from: UnsafeRawBufferPointer(rebasing: src[offset...]))
+                }
+            }
+            head = 0
+            count = capacity
+            return
         }
-        SignpostMetrics.endInterval("scrollbackAppend", state, message: "bytes: \(data.count)")
+        // Normal case: copy into ring.
+        for byte in data {
+            let idx = (head + count) % capacity
+            storage[idx] = byte
+            if count < capacity {
+                count += 1
+            } else {
+                head = (head + 1) % capacity
+            }
+        }
     }
 
     public func snapshot() -> Data {
         let sid = SignpostMetrics.makeSignpostID()
         let state = SignpostMetrics.beginInterval("scrollbackSnapshot", id: sid)
-        let result = storage
-        SignpostMetrics.endInterval("scrollbackSnapshot", state, message: "bytes: \(result.count)")
-        return result
+        defer { SignpostMetrics.endInterval("scrollbackSnapshot", state, message: "bytes: \(count)") }
+        guard count > 0 else { return Data() }
+        if head + count <= capacity {
+            return Data(storage[head..<head + count])
+        }
+        let first = storage[head..<capacity]
+        let second = storage[0..<(head + count) % capacity]
+        return first + second
+    }
+
+    /// Returns the last `maxBytes` bytes as a single `Data` in logical
+    /// oldest-to-newest order within the returned window, or fewer if the
+    /// buffer contains less data.
+    public func tail(_ maxBytes: Int) -> Data {
+        guard count > 0, maxBytes > 0 else { return Data() }
+        let n = min(maxBytes, count)
+        let start = (head + count - n) % capacity
+        if start + n <= capacity {
+            return Data(storage[start..<start + n])
+        }
+        let first = storage[start..<capacity]
+        let second = storage[0..<(start + n) % capacity]
+        return first + second
     }
 }
