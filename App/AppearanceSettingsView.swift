@@ -7,6 +7,7 @@ import TillerCore
 struct AppearanceSettingsView: View {
     @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
     @AppStorage(AppSettings.terminalFontSizeKey) private var terminalFontSize = AppSettings.defaultTerminalFontSize
+    @AppStorage(AppSettings.fileIconThemeKey) private var fileIconThemeRaw = FileIconTheme.sfSymbols.rawValue
 
     var body: some View {
         Form {
@@ -23,6 +24,14 @@ struct AppearanceSettingsView: View {
                     Text("Font size")
                     Text("\(terminalFontSize) pt")
                 }
+            }
+            Section("Files") {
+                Picker("File icons", selection: $fileIconThemeRaw) {
+                    ForEach(FileIconTheme.allCases, id: \.rawValue) { theme in
+                        Text(theme.title).tag(theme.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
             }
         }
         .formStyle(.grouped)

@@ -61,6 +61,10 @@ public enum AppSettings {
     public static let defaultTerminalFontSize = 13
     public static let terminalFontSizeRange: ClosedRange<Int> = 9...24
 
+    /// Icon theme for the Files explorer in the right panel. Stores a
+    /// FileIconTheme raw value; default is sfSymbols.
+    public static let fileIconThemeKey = "appearance.fileIconTheme"
+
     /// Clamp a stored terminal font size into the allowed range.
     public static func clampTerminalFontSize(_ size: Int) -> Int {
         min(max(size, terminalFontSizeRange.lowerBound), terminalFontSizeRange.upperBound)
