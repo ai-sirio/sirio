@@ -1,6 +1,7 @@
 import SwiftUI
 import TillerCore
 import TillerAgents
+import TillerTerminal
 import AppKit
 
 struct SidebarView: View {
@@ -12,7 +13,10 @@ struct SidebarView: View {
     @State private var showAddProjectSheet = false
 
     var body: some View {
-        Group {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("sidebarBody", id: sid)
+        defer { SignpostMetrics.endInterval("sidebarBody", state) }
+        return Group {
             VStack(spacing: 0) {
                 FilterField(text: $filterText)
                     .padding(.horizontal, 8)

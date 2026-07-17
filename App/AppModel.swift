@@ -25,6 +25,9 @@ final class AppModel {
 
     var selectedWorktree: Worktree? {
         didSet {
+            let sid = SignpostMetrics.makeSignpostID()
+            let state = SignpostMetrics.beginInterval("worktreeSwitch", id: sid)
+            defer { SignpostMetrics.endInterval("worktreeSwitch", state) }
             selectedProjectId = selectedWorktree?.projectId
             UserDefaults.standard.set(selectedWorktree?.id.uuidString, forKey: AppSettings.selectedWorktreeIdKey)
             guard let worktree = selectedWorktree else { return }
