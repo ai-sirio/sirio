@@ -19,6 +19,9 @@ public enum FileIconKey: Sendable, Hashable, CaseIterable {
     // Fallbacks
     case file, symlink
 
+    /// Returns the logical icon key for a file from its name: exact-name table
+    /// first (Dockerfile, .gitignore, …), then case-insensitive extension lookup;
+    /// unknown names fall back to `.file`.
     public static func key(forFileName name: String) -> FileIconKey {
         let lower = name.lowercased()
         if let exact = exactFileNames[lower] { return exact }
@@ -27,6 +30,8 @@ public enum FileIconKey: Sendable, Hashable, CaseIterable {
         return fileExtensions[ext] ?? .file
     }
 
+    /// Returns the logical icon key for a directory from its name
+    /// (case-insensitive); unknown names fall back to `.folder`.
     public static func key(forDirectoryName name: String) -> FileIconKey {
         directoryNames[name.lowercased()] ?? .folder
     }

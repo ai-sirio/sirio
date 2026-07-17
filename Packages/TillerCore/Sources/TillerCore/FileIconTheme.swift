@@ -20,6 +20,10 @@ public enum FileIconTheme: String, CaseIterable, Sendable {
         }
     }
 
+    /// Resolves a key to a renderable ref for this theme. Material keys without
+    /// a bundled asset fall back to the SF Symbols mapping, so a ref is never
+    /// missing; `.symlink` intentionally resolves to the system "link" symbol
+    /// in every theme.
     public func iconRef(for key: FileIconKey) -> FileIconRef {
         switch self {
         case .sfSymbols:
