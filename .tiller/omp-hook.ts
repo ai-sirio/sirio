@@ -2,7 +2,7 @@
 // reports the omp session identity for restore.
 export default function (pi) {
     const notify = (status, extra = []) => {
-        void pi.exec("/Users/enzopiopalmisano/orca/workspaces/tiller/fix-update/DerivedData/Build/Products/Debug/Tiller.app/Contents/MacOS/tillerctl", ["notify", "--session", "38404539-364A-4506-9EE5-BD9B5102D6DC", "--status", status, ...extra]);
+        void pi.exec("/Users/enzopiopalmisano/Library/Application Support/Tiller/bin/tillerctl", ["notify", "--session", "B6B97CBB-4C30-493A-9721-0C9D40E2AB1F", "--status", status, ...extra]);
     };
     pi.on("session_start", async (payload) => {
         const id = payload?.session?.id ?? payload?.sessionId ?? payload?.session?.file ?? "";
