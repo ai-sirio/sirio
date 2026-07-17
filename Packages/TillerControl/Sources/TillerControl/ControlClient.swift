@@ -22,14 +22,15 @@ public enum ControlClient {
     /// - Parameters:
     ///   - socketPath: Path to the unix domain socket.
     ///   - request: The request to send.
-    ///   - timeoutSeconds: Receive timeout for `SO_RCVTIMEO`.
+    ///   - timeoutSeconds: Receive timeout for `SO_RCVTIMEO`; `nil` disables the deadline.
     /// - Returns: The decoded response.
     public static func roundTrip(
         socketPath: String,
         request: ControlRequest,
-        timeoutSeconds: Int = 3600
+        timeoutSeconds: Int? = 3600
     ) throws -> ControlResponse {
-        let sunPathCapacity = MemoryLayout<sockaddr_un>.size - MemoryLayout.offset(of: \sockaddr_un.sun_path)!
+        let sunPathCapacity = MemoryLayout<sockaddr_un>.size
+            - MemoryLayout.offset(of: \sockaddr_un.sun_path)!
         guard socketPath.utf8CString.count <= sunPathCapacity else {
             throw ControlClientError.connectFailed("socket path too long: \(socketPath)")
         }
@@ -39,15 +40,24 @@ public enum ControlClient {
         }
         defer { close(fd) }
 
-        // SO_RCVTIMEO so panel wait can block long but not forever.
-        var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
-        let rcvOptRet = withUnsafePointer(to: &tv) {
-            $0.withMemoryRebound(to: timeval.self, capacity: 1) { tvp in
-                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, tvp, socklen_t(MemoryLayout<timeval>.size))
+        if let timeoutSeconds {
+            var tv = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+            let rcvOptRet = withUnsafePointer(to: &tv) {
+                $0.withMemoryRebound(to: timeval.self, capacity: 1) { tvp in
+                    setsockopt(
+                        fd,
+                        SOL_SOCKET,
+                        SO_RCVTIMEO,
+                        tvp,
+                        socklen_t(MemoryLayout<timeval>.size)
+                    )
+                }
             }
-        }
-        guard rcvOptRet == 0 else {
-            throw ControlClientError.connectFailed("setsockopt SO_RCVTIMEO: \(errnoDescription)")
+            guard rcvOptRet == 0 else {
+                throw ControlClientError.connectFailed(
+                    "setsockopt SO_RCVTIMEO: \(errnoDescription)"
+                )
+            }
         }
 
         try connectSocket(fd: fd, socketPath: socketPath)
