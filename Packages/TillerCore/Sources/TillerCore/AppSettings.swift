@@ -52,6 +52,10 @@ public enum AppSettings {
     /// opt-in only since eviction terminates a worktree's PTYs.
     public static let maxMountedWorktreesKey = "session.maxMountedWorktrees"
 
+    /// UserDefaults key for the os_signpost metrics gate. Default: off.
+    /// Enable via `defaults write dev.tiller debug.signpostMetrics -bool YES`.
+    public static let signpostMetricsKey = "debug.signpostMetrics"
+
     /// UserDefaults key for the terminal font size in points.
     public static let terminalFontSizeKey = "appearance.terminalFontSize"
     public static let defaultTerminalFontSize = 13

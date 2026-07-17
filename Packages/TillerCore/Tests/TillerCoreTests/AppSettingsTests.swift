@@ -64,3 +64,7 @@ import Testing
     #expect(AppSettings.clampRightPanelWidth(420) == 420)
     #expect(AppSettings.clampRightPanelWidth(900) == 600)
 }
+
+@Test func signpostMetricsKeyIsCorrect() {
+    #expect(AppSettings.signpostMetricsKey == "debug.signpostMetrics")
+}
