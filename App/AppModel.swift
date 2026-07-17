@@ -29,7 +29,9 @@ final class AppModel {
             UserDefaults.standard.set(selectedWorktree?.id.uuidString, forKey: AppSettings.selectedWorktreeIdKey)
             guard let worktree = selectedWorktree else { return }
             if !openWorktreeIds.contains(worktree.id) { openWorktreeIds.append(worktree.id) }
-            ensureTabs(for: worktree)
+            // The worktree mounts with zero tabs. The user opens a tab
+            // explicitly via ⌘T or the sidebar "+" menu.
+            // ensureTabs(for:) is available for other callers if needed.
             evictIdleWorktreesIfNeeded()
         }
     }
