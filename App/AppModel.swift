@@ -211,7 +211,6 @@ final class AppModel {
                         guard let url = tab.markdownFileURL else { return true }
                         return FileManager.default.fileExists(atPath: url.path)
                     }
-                    guard !restoredTabs.isEmpty else { continue }
                     tabs[worktree.id] = restoredTabs
                     activeTabId[worktree.id] = loaded.activeTabId.flatMap { active in
                         restoredTabs.contains { $0.id == active } ? active : nil
@@ -224,7 +223,9 @@ final class AppModel {
             }
             let storedOpenIds = (UserDefaults.standard.stringArray(forKey: AppSettings.openWorktreeIdsKey) ?? [])
                 .compactMap(UUID.init)
-            openWorktreeIds = storedOpenIds.filter { !(tabs[$0] ?? []).isEmpty }
+            openWorktreeIds = storedOpenIds.filter { id in
+                worktree(byId: id) != nil
+            }
             let storedSelectedId = UserDefaults.standard.string(forKey: AppSettings.selectedWorktreeIdKey)
                 .flatMap(UUID.init)
             if let storedSelectedId, openWorktreeIds.contains(storedSelectedId) {
@@ -598,15 +599,8 @@ final class AppModel {
         selectedWorktree = worktrees[projectId]?.first { $0.id == selected.id }
     }
     func ensureTabs(for worktree: Worktree) {
-        guard tabs[worktree.id, default: []].isEmpty else { return }
-        let tab = WorkspaceTab(
-            id: UUID(),
-            title: WorkspaceTab.nextShellTitle(existing: []),
-            tree: .leaf(id: worktree.id)
-        )
-        tabs[worktree.id] = [tab]
-        activeTabId[worktree.id] = tab.id
-        persistTabs(for: worktree.id)
+        // No-op: empty worktrees are valid. Tabs are created explicitly
+        // via newShellTab, spawnAgent, or the panel.create control command.
     }
 
     func activeTab(for worktreeId: UUID) -> WorkspaceTab? {
