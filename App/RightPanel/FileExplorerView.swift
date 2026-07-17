@@ -50,6 +50,7 @@ struct FileExplorerView: View {
                     .padding(.vertical, 4)
                 }
                 .focusable()
+                .focusEffectDisabled()
                 .focused($treeFocused)
                 .onKeyPress(.downArrow) { moveSelection(1); return .handled }
                 .onKeyPress(.upArrow) { moveSelection(-1); return .handled }

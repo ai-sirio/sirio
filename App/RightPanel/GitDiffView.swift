@@ -62,11 +62,7 @@ struct GitDiffView: View {
                     ContentUnavailableView(
                         "Binary diff unavailable", systemImage: "doc.richtext")
                 } else {
-                    VStack(spacing: 0) {
-                        DiffPane(rows: panelModel.diffRows, side: .old)
-                        Divider()
-                        DiffPane(rows: panelModel.diffRows, side: .new)
-                    }
+                    UnifiedDiffPane(lines: diff.lines)
                 }
                 actionBar
             }
@@ -131,28 +127,26 @@ struct GitDiffView: View {
     }
 }
 
-private enum DiffSide {
-    case old, new
-}
-
-private struct DiffPane: View {
-    let rows: [GitDiffSideBySideRow]
-    let side: DiffSide
+private struct UnifiedDiffPane: View {
+    let lines: [GitDiffLine]
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(rows) { row in
-                    if row.isHunk {
-                        Text(row.left?.text ?? "")
+                ForEach(lines) { line in
+                    switch line.kind {
+                    case .metadata:
+                        EmptyView()
+                    case .hunk:
+                        Text(line.text)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(AppTheme.subtitle)
                             .padding(.vertical, 1)
                             .padding(.leading, 8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(AppTheme.diffHunkBackground)
-                    } else {
-                        lineRow(side == .old ? row.left : row.right)
+                    default:
+                        lineRow(line)
                     }
                 }
             }
@@ -161,13 +155,15 @@ private struct DiffPane: View {
         .frame(maxHeight: .infinity)
     }
 
-    private func lineRow(_ line: GitDiffLine?) -> some View {
-        let number = side == .old ? line?.oldLineNumber : line?.newLineNumber
-        return HStack(alignment: .top, spacing: 0) {
-            Text(number.map(String.init) ?? "")
+    private func lineRow(_ line: GitDiffLine) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Text(line.oldLineNumber.map(String.init) ?? "")
                 .frame(width: 38, alignment: .trailing)
                 .foregroundStyle(AppTheme.meta)
-            Text(line?.text ?? " ")
+            Text(line.newLineNumber.map(String.init) ?? "")
+                .frame(width: 38, alignment: .trailing)
+                .foregroundStyle(AppTheme.meta)
+            Text(line.text)
                 .textSelection(.enabled)
                 .foregroundStyle(foreground(for: line))
                 .padding(.leading, 6)
@@ -178,16 +174,16 @@ private struct DiffPane: View {
         .background(background(for: line))
     }
 
-    private func foreground(for line: GitDiffLine?) -> Color {
-        switch line?.kind {
+    private func foreground(for line: GitDiffLine) -> Color {
+        switch line.kind {
         case .addition: AppTheme.diffAddition
         case .deletion: AppTheme.diffDeletion
         default: AppTheme.subtitle
         }
     }
 
-    private func background(for line: GitDiffLine?) -> Color {
-        switch line?.kind {
+    private func background(for line: GitDiffLine) -> Color {
+        switch line.kind {
         case .addition: AppTheme.diffAdditionBackground
         case .deletion: AppTheme.diffDeletionBackground
         default: .clear
