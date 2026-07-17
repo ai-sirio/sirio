@@ -219,8 +219,12 @@ final class PtyRuntime: @unchecked Sendable {
     private func emitContentSignal() async {
         let sid = SignpostMetrics.makeSignpostID()
         let state = SignpostMetrics.beginInterval("contentSignal", id: sid)
-        let data = await scrollback.snapshot()
-        let text = stripANSI(String(decoding: data, as: UTF8.self))
+        let tailData = await scrollback.tail(10 * 1024)
+        guard !tailData.isEmpty else {
+            SignpostMetrics.endInterval("contentSignal", state, message: "empty")
+            return
+        }
+        let text = stripANSI(String(decoding: tailData, as: UTF8.self))
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let tail = lines.suffix(40).joined(separator: "\n")
         guard !tail.isEmpty else {
