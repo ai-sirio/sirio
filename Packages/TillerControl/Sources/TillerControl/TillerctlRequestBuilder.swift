@@ -11,12 +11,31 @@ public enum TillerctlRequestBuilder {
         return ControlRequest(id: UUID().uuidString, method: "panel.create", params: params)
     }
 
+    /// Build a panel.split request.
+    public static func panelSplit(
+        from: String, direction: String, cmd: String?
+    ) -> ControlRequest {
+        var params = ["from": from, "direction": direction]
+        if let cmd { params["cmd"] = cmd }
+        return request("panel.split", params)
+    }
+
+    /// Build a panel.list request.
+    public static func panelList(worktree: String) -> ControlRequest {
+        request("panel.list", ["worktree": worktree])
+    }
+
     /// Build a panel.write request.
     /// - Parameters:
     ///   - id: The panel identifier.
-    ///   - input: Text to send. Caller appends "\n" for an Enter keystroke.
+    ///   - input: Text to send. Caller appends "\r" for an Enter keystroke.
     public static func panelWrite(id: String, input: String) -> ControlRequest {
         ControlRequest(id: UUID().uuidString, method: "panel.write", params: ["id": id, "input": input])
+    }
+
+    /// Build a panel.key request.
+    public static func panelKey(id: String, key: String) -> ControlRequest {
+        request("panel.key", ["id": id, "key": key])
     }
 
     /// Build a panel.read request.
@@ -32,6 +51,16 @@ public enum TillerctlRequestBuilder {
         var params = ["id": id]
         if let timeoutMs { params["timeoutMs"] = String(timeoutMs) }
         return ControlRequest(id: UUID().uuidString, method: "panel.wait", params: params)
+    }
+
+    /// Build a panel.focus request.
+    public static func panelFocus(id: String) -> ControlRequest {
+        request("panel.focus", ["id": id])
+    }
+
+    /// Build a panel.close request.
+    public static func panelClose(id: String) -> ControlRequest {
+        request("panel.close", ["id": id])
     }
 
     /// Build a notify request. `agentSession` is included only when non-empty.
