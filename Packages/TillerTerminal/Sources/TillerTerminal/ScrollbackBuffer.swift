@@ -12,11 +12,20 @@ public actor ScrollbackBuffer {
     }
 
     public func append(_ data: Data) {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("scrollbackAppend", id: sid)
         storage.append(data)
         if storage.count > capacity {
             storage.removeFirst(storage.count - capacity)
         }
+        SignpostMetrics.endInterval("scrollbackAppend", state, message: "bytes: \(data.count)")
     }
 
-    public func snapshot() -> Data { storage }
+    public func snapshot() -> Data {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("scrollbackSnapshot", id: sid)
+        let result = storage
+        SignpostMetrics.endInterval("scrollbackSnapshot", state, message: "bytes: \(result.count)")
+        return result
+    }
 }

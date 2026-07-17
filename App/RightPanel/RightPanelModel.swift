@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import TillerCore
 import TillerGit
+import TillerTerminal
 
 struct FileExplorerRow: Identifiable, Equatable {
     let node: FileTreeNode
@@ -199,6 +200,9 @@ extension RightPanelModel {
     private func refresh(
         changedPaths: [String], token: Int, forceAllLoadedDirectories: Bool
     ) async {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("panelRefresh", id: sid)
+        defer { SignpostMetrics.endInterval("panelRefresh", state) }
         guard token == generation, let rootURL, let worktree else { return }
         let loadedKeys = childrenByDirectory.keys.filter { key in
             if forceAllLoadedDirectories || changedPaths.isEmpty { return true }

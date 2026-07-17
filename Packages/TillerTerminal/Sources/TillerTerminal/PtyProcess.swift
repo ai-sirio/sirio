@@ -156,11 +156,15 @@ public final class PtyProcess: @unchecked Sendable {
         let source = DispatchSource.makeReadSource(fileDescriptor: masterFD, queue: queue)
         source.setEventHandler { [weak self] in
             guard let self, self.masterFD >= 0 else { return }
+            let sid = SignpostMetrics.makeSignpostID()
+            let state = SignpostMetrics.beginInterval("ptyIngest", id: sid)
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
             let n = read(self.masterFD, &buffer, buffer.count)
             if n > 0 {
                 self.onOutput(Data(buffer[0..<n]))
+                SignpostMetrics.endInterval("ptyIngest", state, message: "bytes: \(n)")
             } else {
+                SignpostMetrics.endInterval("ptyIngest", state, message: "eof")
                 self.stopReadLoop()
                 self.reapChildWithRetry()
             }

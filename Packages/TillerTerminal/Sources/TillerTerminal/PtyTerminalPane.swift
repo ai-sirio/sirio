@@ -217,12 +217,18 @@ final class PtyRuntime: @unchecked Sendable {
     }
 
     private func emitContentSignal() async {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("contentSignal", id: sid)
         let data = await scrollback.snapshot()
         let text = stripANSI(String(decoding: data, as: UTF8.self))
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let tail = lines.suffix(40).joined(separator: "\n")
-        guard !tail.isEmpty else { return }
+        guard !tail.isEmpty else {
+            SignpostMetrics.endInterval("contentSignal", state, message: "empty")
+            return
+        }
         onContentSignal?(paneId, tail)
+        SignpostMetrics.endInterval("contentSignal", state, message: "matched")
     }
 
     func updateSurface(_ surface: TerminalSurface?) {
