@@ -62,12 +62,10 @@ struct GitDiffView: View {
                     ContentUnavailableView(
                         "Binary diff unavailable", systemImage: "doc.richtext")
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(panelModel.diffRows) { row in
-                                SideBySideDiffRow(row: row)
-                            }
-                        }
+                    VStack(spacing: 0) {
+                        DiffPane(rows: panelModel.diffRows, side: .old)
+                        Divider()
+                        DiffPane(rows: panelModel.diffRows, side: .new)
                     }
                 }
                 actionBar
@@ -133,30 +131,39 @@ struct GitDiffView: View {
     }
 }
 
-private struct SideBySideDiffRow: View {
-    let row: GitDiffSideBySideRow
+private enum DiffSide {
+    case old, new
+}
+
+private struct DiffPane: View {
+    let rows: [GitDiffSideBySideRow]
+    let side: DiffSide
 
     var body: some View {
-        if row.isHunk {
-            Text(row.left?.text ?? "")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(AppTheme.subtitle)
-                .padding(.vertical, 1)
-                .padding(.leading, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(AppTheme.diffHunkBackground)
-        } else {
-            HStack(alignment: .top, spacing: 0) {
-                half(row.left, number: row.left?.oldLineNumber)
-                Divider()
-                half(row.right, number: row.right?.newLineNumber)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(rows) { row in
+                    if row.isHunk {
+                        Text(row.left?.text ?? "")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(AppTheme.subtitle)
+                            .padding(.vertical, 1)
+                            .padding(.leading, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppTheme.diffHunkBackground)
+                    } else {
+                        lineRow(side == .old ? row.left : row.right)
+                    }
+                }
             }
-            .fixedSize(horizontal: false, vertical: true)
+            .padding(.vertical, 4)
         }
+        .frame(maxHeight: .infinity)
     }
 
-    private func half(_ line: GitDiffLine?, number: Int?) -> some View {
-        HStack(alignment: .top, spacing: 0) {
+    private func lineRow(_ line: GitDiffLine?) -> some View {
+        let number = side == .old ? line?.oldLineNumber : line?.newLineNumber
+        return HStack(alignment: .top, spacing: 0) {
             Text(number.map(String.init) ?? "")
                 .frame(width: 38, alignment: .trailing)
                 .foregroundStyle(AppTheme.meta)
