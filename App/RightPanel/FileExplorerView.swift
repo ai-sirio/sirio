@@ -9,6 +9,11 @@ struct FileExplorerView: View {
     let worktree: Worktree
     @State private var selectedPath: String?
     @FocusState private var treeFocused: Bool
+    @AppStorage(AppSettings.fileIconThemeKey) private var fileIconThemeRaw = FileIconTheme.sfSymbols.rawValue
+
+    private var iconTheme: FileIconTheme {
+        FileIconTheme(rawValue: fileIconThemeRaw) ?? .sfSymbols
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -72,8 +77,7 @@ struct FileExplorerView: View {
             } else {
                 Color.clear.frame(width: 10, height: 1)
             }
-            Image(systemName: icon(for: node))
-                .foregroundStyle(node.kind.isDirectory ? AppTheme.meta : AppTheme.subtitle)
+            iconView(for: node)
                 .frame(width: 14)
             Text(node.name)
                 .font(.system(size: 12))
@@ -165,11 +169,25 @@ struct FileExplorerView: View {
         NSPasteboard.general.setString(node.url(relativeTo: root).path, forType: .string)
     }
 
-    private func icon(for node: FileTreeNode) -> String {
+    @ViewBuilder
+    private func iconView(for node: FileTreeNode) -> some View {
+        switch iconTheme.iconRef(for: iconKey(for: node)) {
+        case .system(let name):
+            Image(systemName: name)
+                .foregroundStyle(node.kind.isDirectory ? AppTheme.meta : AppTheme.subtitle)
+        case .asset(let name):
+            Image(name)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 14, height: 14)
+        }
+    }
+
+    private func iconKey(for node: FileTreeNode) -> FileIconKey {
         switch node.kind {
-        case .directory: "folder"
-        case .symbolicLink: "link"
-        case .file: "doc"
+        case .directory: FileIconKey.key(forDirectoryName: node.name)
+        case .symbolicLink: .symlink
+        case .file: FileIconKey.key(forFileName: node.name)
         }
     }
 
