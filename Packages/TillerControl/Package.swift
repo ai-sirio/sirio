@@ -18,9 +18,17 @@ let package = Package(
             name: "tillerctl",
             dependencies: [
                 "TillerControl",
+                .product(name: "TillerCore", package: "TillerCore"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
-        .testTarget(name: "TillerControlTests", dependencies: ["TillerControl"]),
+        .testTarget(
+            name: "TillerControlTests",
+            dependencies: [
+                "TillerControl",
+                "tillerctl",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]
+        ),
     ]
 )
