@@ -27,6 +27,13 @@ struct TabBarView: View {
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                         contentWidth = $0
                     }
+                    .dropDestination(for: TabDragPayload.self) { payloads, _ in
+                        // Drop nello spazio vuoto dopo l'ultima tab → in coda.
+                        guard let payload = payloads.first,
+                              payload.worktreeId == worktree.id else { return false }
+                        model.moveTab(payload.tabId, before: nil, in: worktree.id)
+                        return true
+                    }
                 }
                 .onChange(of: model.activeTabId[worktree.id]) { _, newValue in
                     guard let id = newValue else { return }
@@ -87,6 +94,7 @@ struct TabBarItem: View {
     @State private var renaming = false
     @State private var draftTitle = ""
     @FocusState private var renameFieldFocused: Bool
+    @State private var dropTargeted = false
 
     private var isActive: Bool {
         model.activeTab(for: worktree.id)?.id == tab.id
@@ -188,5 +196,20 @@ struct TabBarItem: View {
             Button("Chiudi a destra") { model.closeTabsToRight(of: tab.id, in: worktree) }
                 .disabled(model.tabs[worktree.id]?.last?.id == tab.id)
     }
+        .draggable(TabDragPayload(tabId: tab.id, worktreeId: worktree.id))
+        .dropDestination(for: TabDragPayload.self) { payloads, _ in
+            guard let payload = payloads.first,
+                  payload.worktreeId == worktree.id,
+                  payload.tabId != tab.id else { return false }
+            model.moveTab(payload.tabId, before: tab.id, in: worktree.id)
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .overlay(alignment: .leading) {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(AppTheme.selectionRing)
+                    .frame(width: 2)
+            }
+        }
 }
 }

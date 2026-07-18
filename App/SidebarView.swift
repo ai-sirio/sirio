@@ -500,6 +500,7 @@ private struct TabRow: View {
     @State private var confirmingClose = false
     @State private var draftTitle = ""
     @FocusState private var renameFieldFocused: Bool
+    @State private var dropTargeted = false
 
     private var isSelected: Bool {
         model.selectedWorktree?.id == worktree.id
@@ -584,6 +585,22 @@ private struct TabRow: View {
                 Button("Chiudi") {
                     model.closeTab(tab.id, in: worktree)
                 }
+            }
+        }
+        .draggable(TabDragPayload(tabId: tab.id, worktreeId: worktree.id))
+        .dropDestination(for: TabDragPayload.self) { payloads, _ in
+            guard let payload = payloads.first,
+                  payload.worktreeId == worktree.id,
+                  payload.tabId != tab.id else { return false }
+            model.moveTab(payload.tabId, before: tab.id, in: worktree.id)
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .overlay(alignment: .top) {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(AppTheme.selectionRing)
+                    .frame(height: 2)
+                    .padding(.leading, 44)
             }
         }
         .alert("Chiudere il terminale?", isPresented: $confirmingClose) {
