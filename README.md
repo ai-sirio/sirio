@@ -58,17 +58,37 @@
 
 ## Agent Orchestration
 
-Agents running inside Tiller can drive it back — over the same control socket `tillerctl` uses for scripted `list-workspaces` / `send` / `notify`:
+Tiller automatically provisions [`skills/tiller/SKILL.md`](skills/tiller/SKILL.md) inside every launched worktree for all five Tiller harnesses: Claude Code, Codex, OpenCode, Pi, and Oh-My-Pi. No manual install is needed in those worktrees.
 
-- **Zero-config for Claude Code** — every Claude Code pane gets a `tiller` skill written automatically to `.claude/skills/tiller/SKILL.md` on setup. It already knows how to dispatch a worker panel, run a command in it, wait for exit, read the output back, report its own status, and leave a progress comment on the worktree — no install step, gated on `$TILLER_ENV=1` so it only activates inside a real Tiller pane.
-- **Installable for Claude Code, Codex, and OpenCode** — Settings → *Install tillerctl skill* runs [`npx skills add e-palmisano/tiller --skill tillerctl-cli`](https://github.com/vercel-labs/skills), adding the full `tillerctl` command surface (workspaces, panes, `send`/`send-key`, notifications, session restore) to any of those three CLIs.
+For supported Skills CLI agents outside a launched Tiller worktree, install the public package with:
 
 ```bash
-# from inside a Tiller pane: spawn a worker panel, run the repo's CI gate, and read the result back
-PANEL=$(tillerctl panel create --worktree "$TILLER_WORKTREE_ID" --cmd "Scripts/ci.sh")
-tillerctl panel wait --id "$PANEL" --timeout-ms 900000 && echo BUILD_OK || echo BUILD_FAILED
-tillerctl panel read --id "$PANEL" | tail -40
+npx skills add e-palmisano/tiller --skill tiller -a claude-code,codex,opencode,pi -y
 ```
+
+`tillerctl panel` returns panel UUIDs. Capture them and address every operation explicitly with `--id`; use `--from` only to identify the UUID of the panel being split.
+
+```bash
+WORKER=$(tillerctl panel create --cmd 'claude')
+PEER=$(tillerctl panel split right --from "$TILLER_PANE_ID" --cmd 'codex')
+
+tillerctl panel write --id "$WORKER" --input 'Implement the parser change' --enter
+tillerctl panel wait --id "$WORKER"
+tillerctl panel read --id "$WORKER"
+tillerctl panel close --id "$WORKER"
+```
+
+The nine panel subcommands are:
+
+- `create` — create a panel and return its UUID.
+- `split` — split an existing panel identified by `--from` and return the new UUID.
+- `list` — list panel UUIDs and their state.
+- `write` — write text to a panel UUID.
+- `key` — send a key to a panel UUID.
+- `read` — read a panel UUID's output.
+- `wait` — wait for a panel UUID to exit.
+- `focus` — focus a panel UUID.
+- `close` — close a panel UUID.
 
 ---
 
