@@ -30,4 +30,17 @@ import Testing
         #expect(AgentLaunchSpec.forAgent(id: "pi") == nil)
         #expect(AgentLaunchSpec.forAgent(id: "omp") == nil)
     }
+
+    @Test func launchEnvironmentStripsNestedClaudeMarkers() {
+        let env = AgentLaunchSpec.launchEnvironment(base: [
+            "PATH": "/usr/bin",
+            "CLAUDECODE": "1",
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+            "HOME": "/Users/x",
+        ])
+        #expect(env["CLAUDECODE"] == nil)
+        #expect(env["CLAUDE_CODE_ENTRYPOINT"] == nil)
+        #expect(env["PATH"] == "/usr/bin")
+        #expect(env["HOME"] == "/Users/x")
+    }
 }
