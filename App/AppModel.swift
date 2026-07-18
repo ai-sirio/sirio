@@ -1017,7 +1017,12 @@ final class AppModel {
             }
             let hc = tillerctlPath()
             do {
-                try adapter.prepare(worktreePath: worktree.path, paneId: ref.paneId, tillerctlPath: hc)
+                try adapter.prepare(
+                    worktreePath: worktree.path,
+                    paneId: ref.paneId,
+                    tillerctlPath: hc,
+                    skillMarkdown: try TillerSkillResource.markdown.get()
+                )
             } catch {
                 sessionRestoreLogger.warning("restore: prepare failed for pane \(ref.paneId.uuidString, privacy: .public): \(String(describing: error), privacy: .public) — falling back to fresh shell")
                 continue
@@ -1040,7 +1045,12 @@ final class AppModel {
         do {
             let hc = tillerctlPath()
             let paneId = UUID()
-            try adapter.prepare(worktreePath: worktree.path, paneId: paneId, tillerctlPath: hc)
+            try adapter.prepare(
+                worktreePath: worktree.path,
+                paneId: paneId,
+                tillerctlPath: hc,
+                skillMarkdown: try TillerSkillResource.markdown.get()
+            )
             var command = adapter.command(worktreePath: worktree.path, paneId: paneId, tillerctlPath: hc)
             if let override = configDirOverride(forAgentId: adapter.id) {
                 command = "\(override.envKey)=\(Self.shellQuote(override.path)) \(command)"

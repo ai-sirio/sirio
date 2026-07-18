@@ -2,12 +2,12 @@ import Testing
 import Foundation
 @testable import TillerAgents
 
-@Test func codexPrepareIsNoOpNeverTouchesFiles() throws {
+@Test func codexPrepareOnlyProvisionsWorktreeSkill() throws {
     let dir = NSTemporaryDirectory() + "tiller-agents-\(UUID().uuidString.prefix(8))"
     try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(atPath: dir) }
-    try CodexAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: "/x/tillerctl")
-    #expect(try FileManager.default.contentsOfDirectory(atPath: dir).isEmpty)
+    try CodexAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: "/x/tillerctl", skillMarkdown: try repositorySkill())
+    #expect(try FileManager.default.contentsOfDirectory(atPath: dir) == [".agents"])
 }
 
 @Test func codexCommandCarriesNotifyOverride() {

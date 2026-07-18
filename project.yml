@@ -34,7 +34,10 @@ targets:
   Tiller:
     type: application
     platform: macOS
-    sources: [App]
+    sources:
+      - path: App
+      - path: skills/tiller/SKILL.md
+        buildPhase: resources
     settings:
       configs:
         Debug:

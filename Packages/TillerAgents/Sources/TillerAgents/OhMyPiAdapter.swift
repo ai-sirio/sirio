@@ -11,7 +11,11 @@ public struct OhMyPiAdapter: AgentAdapter {
 
     public init() {}
 
-    public func prepare(worktreePath: String, paneId: UUID, tillerctlPath: String) throws {
+    public func prepare(
+        worktreePath: String,
+        paneId: UUID,
+        tillerctlPath: String
+    ) throws {
         let dir = URL(fileURLWithPath: worktreePath).appendingPathComponent(".tiller")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let hook = """

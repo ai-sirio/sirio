@@ -10,10 +10,10 @@ import Foundation
 
     let paneId = UUID()
     let adapter = OpenCodeAdapter()
-    try adapter.prepare(worktreePath: dir.path, paneId: paneId, tillerctlPath: "/usr/local/bin/tillerctl")
+    try adapter.prepare(worktreePath: dir.path, paneId: paneId, tillerctlPath: "/usr/local/bin/tillerctl", skillMarkdown: try repositorySkill())
 
-    // Only .opencode/ appears in the worktree; nothing else, nothing global.
-    #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [".opencode"])
+    // Skill provisioning precedes the existing worktree-local plugin.
+    #expect(Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)) == [".agents", ".opencode"])
     let plugin = try String(
         contentsOf: dir.appendingPathComponent(".opencode/plugin/tiller-session.js"),
         encoding: .utf8)
@@ -25,16 +25,16 @@ import Foundation
     #expect(adapter.hasNativeHooks == false)
 }
 
-@Test func piPrepareWritesNothingAndCommandIsBare() throws {
+@Test func piPrepareOnlyProvisionsSkillAndCommandIsBare() throws {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
 
     let adapter = PiAdapter()
-    try adapter.prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: "/usr/local/bin/tillerctl")
+    try adapter.prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: "/usr/local/bin/tillerctl", skillMarkdown: try repositorySkill())
 
-    #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [".agents"])
     #expect(adapter.command(worktreePath: dir.path, paneId: UUID(), tillerctlPath: "/usr/local/bin/tillerctl") == "pi")
     #expect(adapter.hasNativeHooks == false)
 }
@@ -50,10 +50,10 @@ import Foundation
     defer { try? FileManager.default.removeItem(at: dir) }
 
     let paneId = UUID()
-    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: paneId, tillerctlPath: "/usr/local/bin/tillerctl")
+    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: paneId, tillerctlPath: "/usr/local/bin/tillerctl", skillMarkdown: try repositorySkill())
 
-    // Only .tiller/ appears in the worktree; nothing else, nothing global.
-    #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [".tiller"])
+    // Skill provisioning precedes the existing worktree-local hook.
+    #expect(Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)) == [".agents", ".tiller"])
     let hook = try String(contentsOf: dir.appendingPathComponent(".tiller/omp-hook.ts"), encoding: .utf8)
     #expect(hook.contains(jsonStringLiteral("/usr/local/bin/tillerctl")))
     #expect(hook.contains(paneId.uuidString))
@@ -75,7 +75,7 @@ import Foundation
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: dir) }
 
-    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: "/x")
+    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: "/x", skillMarkdown: try repositorySkill())
     let hook = try String(contentsOf: dir.appendingPathComponent(".tiller/omp-hook.ts"), encoding: .utf8)
     #expect(hook.contains(#"pi.on("session_start""#))
     #expect(hook.contains("--agent-session"))
