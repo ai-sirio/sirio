@@ -247,17 +247,96 @@ struct AppModelControlTests {
         #expect(window.firstResponder === focusView)
     }
 
+    @Test func focusFailsWhenPaneNeverAttaches() async {
+        let activation = ActivationCounter()
+        let model = makeModel(timeoutMs: 20, activation: activation)
+        let worktree = makeWorktree(path: "/tmp/focus-unattached")
+        let paneId = UUID()
+        let tab = WorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
+        model.worktrees = [worktree.projectId: [worktree]]
+        model.tabs[worktree.id] = [tab]
+
+        let result = await model.handleControl(request(
+            "panel.focus", ["id": paneId.uuidString]
+        ))
+
+        #expect(result.ok == false)
+        #expect(model.selectedWorktree?.id == worktree.id)
+        #expect(model.activeTabId[worktree.id] == tab.id)
+        #expect(activation.count == 1)
+    }
+
+    @Test func createFailsAndRollsBackWhenPersistenceFails() async {
+        let registry = PaneRegistry()
+        let paneId = UUID()
+        let model = makeModel(
+            registry: registry,
+            paneId: paneId,
+            controlTabPersister: { _, _, _ in throw ControlPersistenceFailure.failed }
+        )
+        let worktree = makeWorktree(path: "/tmp/persist-failure")
+        model.worktrees = [worktree.projectId: [worktree]]
+
+        let task = Task { await model.handleControl(self.request(
+            "panel.create", ["worktree": worktree.id.uuidString]
+        )) }
+        try? await Task.sleep(for: .milliseconds(20))
+        await registry.register(
+            paneId: paneId, pty: PtyProcess { _ in }, scrollback: ScrollbackBuffer()
+        )
+        let result = await task.value
+
+        #expect(result.ok == false)
+        #expect(model.tabContaining(paneId: paneId) == nil)
+        #expect(model.openWorktreeIds.contains(worktree.id) == false)
+        #expect(await registry.isRegistered(paneId: paneId) == false)
+    }
+
+    @Test func createResponseWaitsForOrderedPersistence() async {
+        let registry = PaneRegistry()
+        let paneId = UUID()
+        let gate = PersistenceGate()
+        let response = ResponseBox()
+        let model = makeModel(
+            registry: registry,
+            paneId: paneId,
+            controlTabPersister: { _, _, _ in await gate.wait() }
+        )
+        let worktree = makeWorktree(path: "/tmp/persist-order")
+        model.worktrees = [worktree.projectId: [worktree]]
+
+        let task = Task {
+            let value = await model.handleControl(self.request(
+                "panel.create", ["worktree": worktree.id.uuidString]
+            ))
+            await response.set(value)
+            return value
+        }
+        try? await Task.sleep(for: .milliseconds(20))
+        await registry.register(
+            paneId: paneId, pty: PtyProcess { _ in }, scrollback: ScrollbackBuffer()
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+
+        #expect(await gate.started)
+        #expect(await response.value == nil)
+        await gate.release()
+        #expect(await task.value.ok)
+    }
+
     private func makeModel(
         registry: PaneRegistry = PaneRegistry(),
         paneId: UUID = UUID(),
         timeoutMs: Int = 100,
-        activation: ActivationCounter = ActivationCounter()
+        activation: ActivationCounter = ActivationCounter(),
+        controlTabPersister: AppModel.ControlTabPersister? = nil
     ) -> AppModel {
         AppModel(
             paneRegistry: registry,
             registrationTimeoutMs: timeoutMs,
             paneIdGenerator: { paneId },
-            activateApplication: { activation.count += 1 }
+            activateApplication: { activation.count += 1 },
+            controlTabPersister: controlTabPersister
         )
     }
 
@@ -290,4 +369,21 @@ private final class AppModelFocusableView: NSView {
 private actor ResponseBox {
     private(set) var value: ControlResponse?
     func set(_ value: ControlResponse) { self.value = value }
+}
+
+private enum ControlPersistenceFailure: Error { case failed }
+
+private actor PersistenceGate {
+    private(set) var started = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        started = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
