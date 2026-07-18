@@ -30,4 +30,15 @@ public struct AgentLaunchSpec: Sendable, Equatable {
     public static func openCode() -> AgentLaunchSpec {
         AgentLaunchSpec(executable: "/bin/zsh", arguments: ["-lc", "exec opencode acp"])
     }
+
+    /// Launch spec for an AgentCatalog id, or nil when the agent has no ACP
+    /// support yet. This is the single source of truth Plan 3's UI uses to
+    /// build the "Chat" menu (v1: Claude Code and OpenCode).
+    public static func forAgent(id: String) -> AgentLaunchSpec? {
+        switch id {
+        case "claude": claudeCode()
+        case "opencode": openCode()
+        default: nil
+        }
+    }
 }

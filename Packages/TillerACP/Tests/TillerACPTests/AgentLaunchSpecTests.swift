@@ -22,4 +22,12 @@ import Testing
         #expect(spec.executable == "/bin/zsh")
         #expect(spec.arguments == ["-lc", "exec opencode acp"])
     }
+
+    @Test func forAgentMapsSupportedIdsAndRejectsOthers() {
+        #expect(AgentLaunchSpec.forAgent(id: "claude") == .claudeCode())
+        #expect(AgentLaunchSpec.forAgent(id: "opencode") == .openCode())
+        #expect(AgentLaunchSpec.forAgent(id: "codex") == nil)
+        #expect(AgentLaunchSpec.forAgent(id: "pi") == nil)
+        #expect(AgentLaunchSpec.forAgent(id: "omp") == nil)
+    }
 }
