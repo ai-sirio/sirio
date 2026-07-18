@@ -106,23 +106,6 @@ public enum TillerctlRequestBuilder {
         request("workspace.close", ["workspace": workspace])
     }
 
-    public static func surfaceList() -> ControlRequest { request("surface.list") }
-    public static func paneSurfaces() -> ControlRequest { request("pane.surfaces") }
-    public static func surfaceFocus(surface: String) -> ControlRequest {
-        request("surface.focus", ["surface": surface])
-    }
-    public static func surfaceSplit(direction: String) -> ControlRequest {
-        request("surface.split", ["direction": direction])
-    }
-    public static func surfaceSendText(text: String, surface: String?) -> ControlRequest {
-        request("surface.send_text", ["text": text, "surface": surface])
-    }
-    public static func surfaceSendKey(key: String, surface: String?) -> ControlRequest {
-        request("surface.send_key", ["key": key, "surface": surface])
-    }
-    public static func surfaceClose(surface: String?) -> ControlRequest {
-        request("surface.close", ["surface": surface])
-    }
 
     public static func notificationCreate(title: String, subtitle: String?, body: String) -> ControlRequest {
         request("notification.create", ["title": title, "subtitle": subtitle, "body": body])

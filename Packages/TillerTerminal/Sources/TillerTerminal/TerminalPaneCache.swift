@@ -18,4 +18,20 @@ public final class TerminalPaneCache {
             controllers.removeValue(forKey: key)
         }
     }
+
+
+    @discardableResult
+    public func focus(paneId: UUID) -> Bool {
+        guard let controller = controllers[paneId],
+              let window = controller.view.window,
+              let candidate = focusCandidate(in: controller.view) else { return false }
+        return window.makeFirstResponder(candidate)
+    }
+
+    private func focusCandidate(in view: NSView) -> NSView? {
+        for subview in view.subviews.reversed() {
+            if let candidate = focusCandidate(in: subview) { return candidate }
+        }
+        return view.acceptsFirstResponder ? view : nil
+    }
 }

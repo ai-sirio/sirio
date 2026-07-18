@@ -154,6 +154,38 @@ final class AppModel {
     private let notifier = AgentNotifier()
 
     private var controlServer: ControlServer?
+    private let paneRegistry: PaneRegistry
+    private let registrationTimeoutMs: Int
+    private let paneIdGenerator: @MainActor () -> UUID
+    private let activateApplication: @MainActor () -> Void
+
+    private struct ControlMountLease {
+        let worktreeId: UUID
+    }
+
+    private struct ControlMountState {
+        var leaseCount: Int
+        let addedByControl: Bool
+        var keepMounted: Bool
+    }
+
+    private var controlMountStates: [UUID: ControlMountState] = [:]
+    private var tabPersistenceTasks: [UUID: Task<Void, Never>] = [:]
+
+    init(
+        paneRegistry: PaneRegistry = .shared,
+        registrationTimeoutMs: Int = 5_000,
+        paneIdGenerator: @escaping @MainActor () -> UUID = { UUID() },
+        activateApplication: @escaping @MainActor () -> Void = {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
+    ) {
+        self.paneRegistry = paneRegistry
+        self.registrationTimeoutMs = registrationTimeoutMs
+        self.paneIdGenerator = paneIdGenerator
+        self.activateApplication = activateApplication
+    }
     var tabs: [UUID: [WorkspaceTab]] = [:]
     /// Projects whose root currently contains a `.git` entry. Derived at
     /// runtime (bootstrap, add, in-app git init) — never persisted, so an
@@ -291,61 +323,179 @@ final class AppModel {
     func handleControl(_ request: ControlRequest) async -> ControlResponse {
         switch request.method {
         case "panel.create":
-            guard let worktreeIdString = request.params["worktree"],
-                  let worktreeId = UUID(uuidString: worktreeIdString),
-                  let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == worktreeId })
-            else {
+            guard let selector = request.params["worktree"],
+                  let worktree = resolveWorktree(selector) else {
                 return .failure(id: request.id, error: "unknown worktree")
             }
-            let paneId = UUID()
-            if let cmd = request.params["cmd"] { paneCommands[paneId] = cmd }
+            let paneId = paneIdGenerator()
+            if let command = request.params["cmd"] { paneCommands[paneId] = command }
+            let mountLease = acquireControlMount(for: worktree.id)
             let title = request.params["cmd"]?
                 .split(separator: " ").first.map(String.init) ?? "Panel"
-            selectedWorktree = worktree
-            openTab(paneId: paneId, title: title, in: worktree)
-            NSApp.activate(ignoringOtherApps: false)
-            for _ in 0..<100 {
-                if await PaneRegistry.shared.isRegistered(paneId: paneId) {
-                    return .success(id: request.id, result: ["panelId": paneId.uuidString])
-                }
-                try? await Task.sleep(for: .milliseconds(50))
+            let tab = openTab(paneId: paneId, title: title, in: worktree, activate: false)
+
+            guard await paneRegistry.waitUntilRegistered(
+                paneId: paneId, timeoutMs: registrationTimeoutMs
+            ) else {
+                await paneRegistry.cancelRegistration(paneId: paneId)
+                rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                paneCommands[paneId] = nil
+                releaseControlMount(mountLease, success: false)
+                return .failure(id: request.id, error: "panel did not register before timeout")
             }
-            return .failure(id: request.id, error: "panel did not start (worktree not visible?)")
+            guard tabContaining(paneId: paneId) != nil else {
+                await paneRegistry.cancelRegistration(paneId: paneId)
+                paneCommands[paneId] = nil
+                releaseControlMount(mountLease, success: false)
+                return .failure(id: request.id, error: "panel was closed before registration completed")
+            }
+            releaseControlMount(mountLease, success: true)
+            return .success(id: request.id, result: ["id": paneId.uuidString])
+
+        case "panel.split":
+            guard let sourceId = request.params["from"].flatMap(UUID.init(uuidString:)),
+                  let source = tabContaining(paneId: sourceId) else {
+                return .failure(id: request.id, error: "unknown source panel")
+            }
+            let axis: SplitAxis
+            let placement: SplitPlacement
+            switch request.params["direction"] {
+            case "left": axis = .horizontal; placement = .before
+            case "right": axis = .horizontal; placement = .after
+            case "up": axis = .vertical; placement = .before
+            case "down": axis = .vertical; placement = .after
+            default:
+                return .failure(
+                    id: request.id, error: "invalid direction (left|right|up|down)"
+                )
+            }
+            let paneId = paneIdGenerator()
+            if let command = request.params["cmd"] { paneCommands[paneId] = command }
+            let mountLease = acquireControlMount(for: source.worktree.id)
+            guard split(
+                paneId: sourceId, axis: axis, newPaneId: paneId, placement: placement
+            ) else {
+                await paneRegistry.cancelRegistration(paneId: paneId)
+                paneCommands[paneId] = nil
+                releaseControlMount(mountLease, success: false)
+                return .failure(id: request.id, error: "source panel disappeared")
+            }
+
+            guard await paneRegistry.waitUntilRegistered(
+                paneId: paneId, timeoutMs: registrationTimeoutMs
+            ) else {
+                await paneRegistry.cancelRegistration(paneId: paneId)
+                rollbackCreatedLeaf(paneId)
+                paneCommands[paneId] = nil
+                releaseControlMount(mountLease, success: false)
+                return .failure(id: request.id, error: "panel did not register before timeout")
+            }
+            guard tabContaining(paneId: paneId) != nil else {
+                await paneRegistry.cancelRegistration(paneId: paneId)
+                paneCommands[paneId] = nil
+                releaseControlMount(mountLease, success: false)
+                return .failure(id: request.id, error: "panel was closed before registration completed")
+            }
+            releaseControlMount(mountLease, success: true)
+            return .success(id: request.id, result: ["id": paneId.uuidString])
+
+        case "panel.list":
+            guard let selector = request.params["worktree"],
+                  let worktree = resolveWorktree(selector) else {
+                return .failure(id: request.id, error: "unknown worktree")
+            }
+            let rows = ControlListing.paneRows(
+                tabs: tabs[worktree.id] ?? [],
+                activeTabId: activeTabId[worktree.id],
+                agentIdForPane: { self.agentActivity.paneAgents[$0] },
+                titleForPane: { self.paneTitles[$0] }
+            )
+            return .success(
+                id: request.id, result: ["panels": ControlRows.encode(rows)]
+            )
 
         case "panel.write":
-            guard let paneId = UUID(uuidString: request.params["id"] ?? ""),
+            guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
                   let input = request.params["input"] else {
-                return .failure(id: request.id, error: "missing id/input")
+                return .failure(id: request.id, error: "missing/invalid id or input")
             }
-            let ok = await PaneRegistry.shared.write(paneId: paneId, data: Data(input.utf8))
-            return ok ? .success(id: request.id) : .failure(id: request.id, error: "unknown panel")
+            let wrote = await paneRegistry.write(
+                paneId: paneId, data: Data(input.utf8)
+            )
+            return wrote ? .success(id: request.id)
+                         : .failure(id: request.id, error: "unknown panel")
+
+        case "panel.key":
+            guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)) else {
+                return .failure(id: request.id, error: "missing/invalid id")
+            }
+            guard let key = request.params["key"].flatMap(TerminalKey.init(rawValue:)) else {
+                let names = TerminalKey.allCases.map(\.rawValue).joined(separator: "|")
+                return .failure(id: request.id, error: "invalid key (\(names))")
+            }
+            let wrote = await paneRegistry.write(paneId: paneId, data: key.bytes)
+            return wrote ? .success(id: request.id)
+                         : .failure(id: request.id, error: "unknown panel")
 
         case "panel.read":
-            guard let paneId = UUID(uuidString: request.params["id"] ?? "") else {
-                return .failure(id: request.id, error: "missing id")
+            guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)) else {
+                return .failure(id: request.id, error: "missing/invalid id")
             }
-            guard let data = await PaneRegistry.shared.snapshot(paneId: paneId) else {
+            guard let data = await paneRegistry.snapshot(paneId: paneId) else {
                 return .failure(id: request.id, error: "unknown panel")
             }
-            return .success(id: request.id, result: ["output": data.base64EncodedString()])
+            return .success(
+                id: request.id, result: ["output": data.base64EncodedString()]
+            )
 
         case "panel.wait":
-            guard let paneId = UUID(uuidString: request.params["id"] ?? "") else {
-                return .failure(id: request.id, error: "missing id")
+            guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)) else {
+                return .failure(id: request.id, error: "missing/invalid id")
             }
-            let timeoutMs = request.params["timeoutMs"].flatMap(Int.init)
-            guard let code = await PaneRegistry.shared.waitExit(paneId: paneId, timeoutMs: timeoutMs) else {
+            let timeoutMs: Int?
+            if let rawTimeout = request.params["timeoutMs"] {
+                guard let parsed = Int(rawTimeout), parsed >= 0 else {
+                    return .failure(id: request.id, error: "invalid timeoutMs")
+                }
+                timeoutMs = parsed
+            } else {
+                timeoutMs = nil
+            }
+            guard let code = await paneRegistry.waitExit(
+                paneId: paneId, timeoutMs: timeoutMs
+            ) else {
                 return .failure(id: request.id, error: "unknown panel or timeout")
             }
-            return .success(id: request.id, result: ["exitCode": String(code)])
+            return .success(
+                id: request.id, result: ["exitCode": String(code)]
+            )
+
+        case "panel.focus":
+            guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
+                  focusPane(paneId: paneId) else {
+                return .failure(id: request.id, error: "unknown panel")
+            }
+            return .success(id: request.id)
+
+        case "panel.close":
+            guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
+                  tabContaining(paneId: paneId) != nil else {
+                return .failure(id: request.id, error: "unknown panel")
+            }
+            await paneRegistry.cancelRegistration(paneId: paneId)
+            closeTerminal(paneId: paneId)
+            paneCommands[paneId] = nil
+            return .success(id: request.id)
 
         case "notify":
             guard let sessionId = UUID(uuidString: request.params["session"] ?? ""),
                   let status = AgentStatus(rawValue: request.params["status"] ?? "") else {
                 return .failure(id: request.id, error: "missing/invalid session/status")
             }
-            let t = agentActivity.notify(paneId: sessionId, status: status, now: Date())
-            notifyTransition(paneId: sessionId, from: t.old, to: t.new)
+            let transition = agentActivity.notify(
+                paneId: sessionId, status: status, now: Date()
+            )
+            notifyTransition(paneId: sessionId, from: transition.old, to: transition.new)
             if let ref = request.params["agentSession"], !ref.isEmpty {
                 saveAgentSessionRef(paneId: sessionId, sessionRef: ref)
             }
@@ -370,7 +520,9 @@ final class AppModel {
             } else {
                 target = try? await store.worktree(byPath: selector)
             }
-            guard let target else { return .failure(id: request.id, error: "unknown worktree") }
+            guard let target else {
+                return .failure(id: request.id, error: "unknown worktree")
+            }
             do {
                 try await store.setWorktreeComment(target.id, comment: comment)
                 worktrees[target.projectId] = try await store.worktrees(of: target.projectId)
@@ -614,10 +766,15 @@ final class AppModel {
     /// Apre una nuova tab con un singolo pane e la attiva. Punto unico usato
     /// da shell manuali, spawnAgent e panel.create.
     @discardableResult
-    func openTab(paneId: UUID, title: String, in worktree: Worktree) -> WorkspaceTab {
+    func openTab(
+        paneId: UUID,
+        title: String,
+        in worktree: Worktree,
+        activate: Bool = true
+    ) -> WorkspaceTab {
         let tab = WorkspaceTab(id: UUID(), title: title, tree: .leaf(id: paneId))
         tabs[worktree.id, default: []].append(tab)
-        activeTabId[worktree.id] = tab.id
+        if activate { activeTabId[worktree.id] = tab.id }
         persistTabs(for: worktree.id)
         return tab
     }
@@ -691,12 +848,83 @@ final class AppModel {
     }
 
     /// Splits the tab containing the given pane along the requested axis.
-    func split(paneId: UUID, axis: SplitAxis) {
-        guard let tuple = tabContaining(paneId: paneId) else { return }
-        let idx = tuple.index
-        guard let tree = tuple.tab.terminalTree else { return }
-        tabs[tuple.worktree.id]?[idx].content = .terminal(tree.splitting(leaf: paneId, axis: axis, newLeaf: UUID()))
+    @discardableResult
+    func split(
+        paneId: UUID,
+        axis: SplitAxis,
+        newPaneId: UUID = UUID(),
+        placement: SplitPlacement = .after
+    ) -> Bool {
+        guard let tuple = tabContaining(paneId: paneId),
+              let tree = tuple.tab.terminalTree,
+              tree.leafIds.contains(paneId) else { return false }
+        tabs[tuple.worktree.id]?[tuple.index].content = .terminal(
+            tree.splitting(
+                leaf: paneId, axis: axis, newLeaf: newPaneId, placement: placement
+            )
+        )
         persistTabs(for: tuple.worktree.id)
+        return true
+    }
+
+
+    private func acquireControlMount(for worktreeId: UUID) -> ControlMountLease {
+        if var state = controlMountStates[worktreeId] {
+            state.leaseCount += 1
+            controlMountStates[worktreeId] = state
+        } else {
+            let alreadyMounted = openWorktreeIds.contains(worktreeId)
+            controlMountStates[worktreeId] = ControlMountState(
+                leaseCount: 1,
+                addedByControl: !alreadyMounted,
+                keepMounted: false
+            )
+            if !alreadyMounted { openWorktreeIds.append(worktreeId) }
+        }
+        return ControlMountLease(worktreeId: worktreeId)
+    }
+
+    private func releaseControlMount(_ lease: ControlMountLease, success: Bool) {
+        guard var state = controlMountStates[lease.worktreeId] else { return }
+        state.keepMounted = state.keepMounted || success || selectedWorktree?.id == lease.worktreeId
+        state.leaseCount -= 1
+        guard state.leaseCount == 0 else {
+            controlMountStates[lease.worktreeId] = state
+            return
+        }
+        controlMountStates[lease.worktreeId] = nil
+        if state.addedByControl && !state.keepMounted {
+            openWorktreeIds.removeAll { $0 == lease.worktreeId }
+        }
+    }
+
+    private func rollbackCreatedPane(_ paneId: UUID, tabId: UUID, in worktreeId: UUID) {
+        guard let index = tabs[worktreeId]?.firstIndex(where: { $0.id == tabId }),
+              let tree = tabs[worktreeId]?[index].terminalTree,
+              tree.leafIds.contains(paneId) else { return }
+        if let remaining = tree.removing(leaf: paneId) {
+            tabs[worktreeId]?[index].content = .terminal(remaining)
+        } else {
+            tabs[worktreeId]?.remove(at: index)
+            if activeTabId[worktreeId] == tabId {
+                activeTabId[worktreeId] = tabs[worktreeId]?.last?.id
+            }
+        }
+        persistTabs(for: worktreeId)
+    }
+
+    private func rollbackCreatedLeaf(_ paneId: UUID) {
+        guard let target = tabContaining(paneId: paneId),
+              let tree = target.tab.terminalTree else { return }
+        if let remaining = tree.removing(leaf: paneId) {
+            tabs[target.worktree.id]?[target.index].content = .terminal(remaining)
+        } else {
+            tabs[target.worktree.id]?.remove(at: target.index)
+            if activeTabId[target.worktree.id] == target.tab.id {
+                activeTabId[target.worktree.id] = tabs[target.worktree.id]?.last?.id
+            }
+        }
+        persistTabs(for: target.worktree.id)
     }
 
     /// Chiude il pane rimuovendolo dallo split; il pane vicino riprende lo
@@ -776,13 +1004,17 @@ final class AppModel {
     /// Fire-and-forget: la persistenza tab non deve bloccare la UI; un
     /// fallimento lascia solo il layout non salvato (rimedio: prossima mutazione).
     func persistTabs(for worktreeId: UUID) {
-        // Ogni mutazione tab passa di qui: il prune tiene la cache condivisa
-        // allineata (un pane chiuso viene scartato → deinit → stop PTY).
         paneCaches[worktreeId]?.prune(keeping: liveLeafIds(for: worktreeId))
         guard let store else { return }
         let list = tabs[worktreeId] ?? []
         let active = activeTabId[worktreeId]
-        Task { try? await store.saveTabs(worktreeId: worktreeId, tabs: list, activeTabId: active) }
+        let previous = tabPersistenceTasks[worktreeId]
+        tabPersistenceTasks[worktreeId] = Task {
+            _ = await previous?.value
+            try? await store.saveTabs(
+                worktreeId: worktreeId, tabs: list, activeTabId: active
+            )
+        }
     }
 
     // MARK: - Scrollback persistence
@@ -1167,11 +1399,14 @@ final class AppModel {
         )
     }
 
-    private func focusPane(paneId: UUID) {
-        guard let worktree = worktreeContaining(paneId: paneId) else { return }
-        selectedWorktree = worktree
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    @discardableResult
+    private func focusPane(paneId: UUID) -> Bool {
+        guard let target = tabContaining(paneId: paneId) else { return false }
+        selectedWorktree = target.worktree
+        activateTab(target.tab.id, in: target.worktree.id)
+        _ = paneCache(for: target.worktree.id).focus(paneId: paneId)
+        activateApplication()
+        return true
     }
 
     /// tillerctl ships next to the app binary in DEBUG dev loops; fall back to PATH.
