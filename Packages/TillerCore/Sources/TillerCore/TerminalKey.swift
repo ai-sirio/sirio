@@ -1,6 +1,6 @@
 import Foundation
 
-/// Symbolic key names accepted by `send-key`, resolved to the byte
+/// Symbolic key names accepted by `tillerctl panel key`, resolved to the byte
 /// sequences a PTY expects. Names travel over the socket; bytes are
 /// resolved app-side at write time.
 public enum TerminalKey: String, CaseIterable, Sendable {

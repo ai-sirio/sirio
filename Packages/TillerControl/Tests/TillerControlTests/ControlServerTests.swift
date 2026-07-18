@@ -2,6 +2,28 @@ import Testing
 import Foundation
 @testable import TillerControl
 
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
+    }
+}
+
 @Test func echoRoundTripOverUnixSocket() throws {
     let path = NSTemporaryDirectory() + "tiller-test-\(UUID().uuidString.prefix(8)).sock"
     let server = ControlServer(socketPath: path) { request in
@@ -14,6 +36,71 @@ import Foundation
         request: ControlRequest(id: "t1", method: "ping", params: ["msg": "ciao"])
     )
     #expect(response.ok && response.result?["echo"] == "ciao")
+}
+
+@Test func optionalReceiveTimeoutNilAllowsDelayedResponse() async throws {
+    let path = NSTemporaryDirectory() + "tiller-test-\(UUID().uuidString.prefix(8)).sock"
+    let requestReceived = AsyncGate()
+    let releaseResponse = AsyncGate()
+    let server = ControlServer(socketPath: path) { request in
+        await requestReceived.open()
+        await releaseResponse.wait()
+        return .success(id: request.id, result: ["status": "released"])
+    }
+    try server.start()
+    defer { server.stop() }
+
+    let client = Task.detached {
+        try ControlClient.roundTrip(
+            socketPath: path,
+            request: ControlRequest(id: "no-deadline", method: "wait", params: [:]),
+            timeoutSeconds: nil
+        )
+    }
+    await requestReceived.wait()
+    await releaseResponse.open()
+
+    let response = try await client.value
+    #expect(response.ok)
+    #expect(response.result?["status"] == "released")
+}
+
+@Test func optionalReceiveTimeoutFiniteDeadlineFailsBeforeResponse() async throws {
+    let path = NSTemporaryDirectory() + "tiller-test-\(UUID().uuidString.prefix(8)).sock"
+    let requestReceived = AsyncGate()
+    let releaseResponse = AsyncGate()
+    let server = ControlServer(socketPath: path) { request in
+        await requestReceived.open()
+        await releaseResponse.wait()
+        return .success(id: request.id)
+    }
+    try server.start()
+    defer { server.stop() }
+
+    let client = Task.detached {
+        try ControlClient.roundTrip(
+            socketPath: path,
+            request: ControlRequest(id: "deadline", method: "wait", params: [:]),
+            timeoutSeconds: 1
+        )
+    }
+    await requestReceived.wait()
+
+    do {
+        _ = try await client.value
+        Issue.record("Expected the receive deadline to expire before the response was released")
+    } catch let error as ControlClientError {
+        guard case .io(let detail) = error else {
+            Issue.record("Unexpected control client error: \(error)")
+            await releaseResponse.open()
+            return
+        }
+        #expect(detail.contains("read:"))
+    } catch {
+        Issue.record("Unexpected receive-timeout error: \(error)")
+    }
+
+    await releaseResponse.open()
 }
 
 @Test func socketFileHasOwnerOnlyPermissions() throws {

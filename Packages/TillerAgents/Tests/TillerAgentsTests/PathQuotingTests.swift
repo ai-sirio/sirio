@@ -10,7 +10,7 @@ import Foundation
     defer { try? FileManager.default.removeItem(atPath: dir) }
 
     let tillerctlPath = "/Users/John Smith/bin/tillerctl"
-    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: tillerctlPath)
+    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: tillerctlPath, skillMarkdown: try repositorySkill())
 
     let data = try Data(contentsOf: URL(fileURLWithPath: dir + "/.claude/settings.local.json"))
     let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -26,7 +26,7 @@ import Foundation
     defer { try? FileManager.default.removeItem(atPath: dir) }
 
     let tillerctlPath = "/Users/O'Brien/bin/tillerctl"
-    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: tillerctlPath)
+    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: tillerctlPath, skillMarkdown: try repositorySkill())
 
     let data = try Data(contentsOf: URL(fileURLWithPath: dir + "/.claude/settings.local.json"))
     let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -42,7 +42,7 @@ import Foundation
     defer { try? FileManager.default.removeItem(atPath: dir) }
 
     let tillerctlPath = #"/Users/John"Smith/bin/tillerctl"#
-    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: tillerctlPath)
+    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: tillerctlPath, skillMarkdown: try repositorySkill())
 
     let data = try Data(contentsOf: URL(fileURLWithPath: dir + "/.claude/settings.local.json"))
     let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -120,7 +120,7 @@ private func verifyCodexRoundTrip(cmd: String, paneId: UUID, tillerctlPath: Stri
     defer { try? FileManager.default.removeItem(at: dir) }
 
     let tillerctlPath = "/Users/John Smith/bin/tillerctl"
-    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: tillerctlPath)
+    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: tillerctlPath, skillMarkdown: try repositorySkill())
 
     let hook = try String(contentsOf: dir.appendingPathComponent(".tiller/omp-hook.ts"), encoding: .utf8)
     #expect(hook.contains(jsonStringLiteral(tillerctlPath)))
@@ -133,7 +133,7 @@ private func verifyCodexRoundTrip(cmd: String, paneId: UUID, tillerctlPath: Stri
     defer { try? FileManager.default.removeItem(at: dir) }
 
     let tillerctlPath = "/Users/O'Brien/bin/tillerctl"
-    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: tillerctlPath)
+    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: tillerctlPath, skillMarkdown: try repositorySkill())
 
     let hook = try String(contentsOf: dir.appendingPathComponent(".tiller/omp-hook.ts"), encoding: .utf8)
     #expect(hook.contains(jsonStringLiteral(tillerctlPath)))
@@ -146,7 +146,7 @@ private func verifyCodexRoundTrip(cmd: String, paneId: UUID, tillerctlPath: Stri
     defer { try? FileManager.default.removeItem(at: dir) }
 
     let tillerctlPath = #"/Users/John"Smith/bin/tillerctl"#
-    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: tillerctlPath)
+    try OhMyPiAdapter().prepare(worktreePath: dir.path, paneId: UUID(), tillerctlPath: tillerctlPath, skillMarkdown: try repositorySkill())
 
     let hook = try String(contentsOf: dir.appendingPathComponent(".tiller/omp-hook.ts"), encoding: .utf8)
     #expect(hook.contains(jsonStringLiteral(tillerctlPath)))

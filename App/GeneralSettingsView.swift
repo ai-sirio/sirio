@@ -75,8 +75,8 @@ struct GeneralSettingsView: View {
                         AgentSkillInstaller.openTerminalAndInstall()
                     }
                 } label: {
-                    Text("tillerctl skill")
-                    Text("Installa una skill che insegna a Claude Code, Codex e OpenCode come usare tillerctl per orchestrare pane e worktree.")
+                    Text("tiller skill")
+                    Text("Installed automatically inside launched worktrees for all five Tiller harnesses. This button installs the public package for supported Skills CLI agents.")
                 }
             }
         }
