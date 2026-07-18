@@ -22,6 +22,8 @@ final class ChatController {
     private(set) var state: ChatState = .idle
     private(set) var modes: SessionModeState?
     private(set) var models: SessionModelState?
+    /// OpenCode-only reasoning-effort select; nil for agents without it.
+    private(set) var effortOption: SessionConfigOption?
     private(set) var didResume = false
     private(set) var queued: [String] = []
     /// Transcript from a previous run shown read-only when the agent could
@@ -97,6 +99,7 @@ final class ChatController {
                 cwd: worktreePath, resumeSessionId: record?.acpSessionId)
             modes = handle.modes
             models = handle.models
+            effortOption = handle.configOptions.first { $0.id == "effort" }
             didResume = handle.didResume
             if handle.didResume, let record {
                 // Replay rebuilds the live transcript; drop the local copy.
@@ -202,6 +205,24 @@ final class ChatController {
         models?.currentModelId = modelId
         do { try await session?.setModel(modelId) } catch {
             if let previous { models?.currentModelId = previous }
+            promptError = Self.describePromptError(error)
+        }
+    }
+
+    /// OpenCode echoes the whole updated option list back; use it to resync
+    /// effort (and model, which the same payload carries) after the set.
+    func setEffort(_ value: String) async {
+        let previous = effortOption?.currentValue
+        effortOption?.currentValue = value
+        do {
+            guard let updated = try await session?.setConfigOption(
+                id: "effort", value: value) else { return }
+            effortOption = updated.first { $0.id == "effort" } ?? effortOption
+            if let syncedModels = SessionModelState(configOptions: updated) {
+                models = syncedModels
+            }
+        } catch {
+            effortOption?.currentValue = previous
             promptError = Self.describePromptError(error)
         }
     }

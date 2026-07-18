@@ -72,6 +72,7 @@ struct ChatComposerView: View {
         HStack(spacing: 8) {
             modePill
             agentPill
+            effortPill
             Spacer()
             Button {
                 attachImage()
@@ -192,6 +193,45 @@ struct ChatComposerView: View {
             return "\(model.name) — \(description)"
         }
         return model.name
+    }
+
+    /// Reasoning-effort select ("MED" pill); only agents that expose it
+    /// (OpenCode) get the pill.
+    @ViewBuilder
+    private var effortPill: some View {
+        if let effort = controller.effortOption,
+           let choices = effort.options, !choices.isEmpty {
+            Menu {
+                ForEach(choices, id: \.value) { choice in
+                    Button {
+                        Task { await controller.setEffort(choice.value) }
+                    } label: {
+                        if choice.value == effort.currentValue {
+                            Label(choice.name, systemImage: "checkmark")
+                        } else {
+                            Text(choice.name)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(effortLabel(effort))
+                        .font(.caption2.weight(.semibold))
+                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .modifier(PillBackground())
+            .help(effort.name ?? "Effort")
+        }
+    }
+
+    private func effortLabel(_ effort: SessionConfigOption) -> String {
+        guard let current = effort.currentValue else { return "—" }
+        let name = effort.options?.first { $0.value == current }?.name ?? current
+        return name.uppercased()
     }
 
     private var agentDisplayName: String {

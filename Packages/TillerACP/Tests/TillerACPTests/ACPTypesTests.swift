@@ -67,6 +67,10 @@ import Foundation
                 == ["openai/gpt-5.4", "openai/gpt-5.6-luna"])
         #expect(result.resolvedModels?.availableModels.map(\.name)
                 == ["OpenAI/GPT-5.4", "OpenAI/GPT-5.6 Luna"])
+        let effort = result.configOptions?.first { $0.id == "effort" }
+        #expect(effort?.name == "Effort")
+        #expect(effort?.currentValue == "medium")
+        #expect(effort?.options?.map(\.value) == ["medium"])
     }
 
     @Test func resolvedModelsIsNilWithoutModelData() throws {
