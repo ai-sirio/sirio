@@ -285,6 +285,8 @@ struct ContentView: View {
                                         description: Text(tab.markdownFileURL?.path ?? "")
                                     )
                                 }
+                            case .chat:
+                                EmptyView()
                             }
                         }
                         .opacity(isVisible ? 1 : 0)

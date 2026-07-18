@@ -14,7 +14,7 @@
 		1A529420B5030FAC4937506B /* AgentSkillInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B25C0EB88CB059E939346F /* AgentSkillInstaller.swift */; };
 		239F75AA5FFE783526C382CD /* GeneralSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 252DB14ADB73CFC185CA54D9 /* GeneralSettingsView.swift */; };
 		250881E7C94F2893D17090F5 /* TillerSkillResource.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3CB01E518F8CD7DC085D5C0 /* TillerSkillResource.swift */; };
-		2679D679A6A77462EE1860EC /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A4CA6EAB10E9F2FCB375761 /* Sparkle */; };
+		2679D679A6A77462EE1860EC /* TillerGit in Frameworks */ = {isa = PBXBuildFile; productRef = 4D97F96516DB1AF9CEC67128 /* TillerGit */; };
 		2FFAA26E907C5F783A758A7D /* AIProvidersSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E02B8B0BAC9D266F3E2893C6 /* AIProvidersSettingsView.swift */; };
 		31213898B6E63011C844618F /* HideOnCloseWindowDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 526AD5B187E48B97E58C72C4 /* HideOnCloseWindowDelegate.swift */; };
 		39AE727AD01F0280D8BA0B8B /* AppRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */; };
@@ -32,8 +32,10 @@
 		60AC9616A07D0093FFCE6E46 /* AgentMenuIconCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 440886206B85A90DD5467FE6 /* AgentMenuIconCache.swift */; };
 		614368A068530D558CDE3D41 /* PermissionsOnboardingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 150990AF30F26D11CD77AD24 /* PermissionsOnboardingSheet.swift */; };
 		66BF97EA5D657DEDCB4A268D /* AddProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57203478CAD5658B46BACB4C /* AddProjectSheet.swift */; };
+		67FB529584389E037E1941C7 /* ChatController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E46DF390E43B7EA1794BB7 /* ChatController.swift */; };
 		6B7D18F4593A18BB823D5904 /* WindowChromeConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */; };
 		6C3B119F8CCC258257B30A09 /* ForegroundProcessAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */; };
+		6C5099F2710CFBEDF77DD19A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A4CA6EAB10E9F2FCB375761 /* Sparkle */; };
 		71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */; };
 		73A38617B2049BD55B5D772B /* SystemPermissionProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04B70914CB8B69AABCCE4C40 /* SystemPermissionProbe.swift */; };
 		76B712FC6C4121A72F3FCA1E /* RightPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7F5ABE295C5749A082FD8FA /* RightPanelView.swift */; };
@@ -51,7 +53,7 @@
 		AFB018A382E93E4115418A67 /* UsageBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0C9843AF412998E675F96E /* UsageBarView.swift */; };
 		B1258A82727276A21A471066 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8B09A03733A33C9FDC925A05 /* Assets.xcassets */; };
 		B2C211EE47612CFD347E018E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 362949AA885756BAA5340B1C /* ContentView.swift */; };
-		B49CC8272880E168790F64F5 /* TillerGit in Frameworks */ = {isa = PBXBuildFile; productRef = 4D97F96516DB1AF9CEC67128 /* TillerGit */; };
+		B49CC8272880E168790F64F5 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = AEBE46F4501BDA0084835FD4 /* MarkdownUI */; };
 		B7327A247202A9098E8F2C77 /* spokes-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 64880FCA0680E0D6E7A1DFC4 /* spokes-1024.png */; };
 		BEC2DDCA8BA2831CA1ECFF95 /* RightPanelModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 844693D2B1409A3195820CDE /* RightPanelModel.swift */; };
 		C03FBAC9486C5494F80AC8EB /* EmptyWorktreeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF4B6A5097F21E65740EB222 /* EmptyWorktreeView.swift */; };
@@ -62,7 +64,7 @@
 		CCAA5C3EC06736BD09F338CD /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56231D9700C4BE8BA92FCB02 /* AppModel.swift */; };
 		CE3124078D172C6FAFAD4631 /* PermissionsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C537030635E47A24B2D468E1 /* PermissionsSettingsView.swift */; };
 		E2CD60F7FBEF6BFBA1AF4867 /* AgentRosterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7F8AC528E2F79471B04996C /* AgentRosterView.swift */; };
-		E75EB552B60E70C8DB389A9D /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = AEBE46F4501BDA0084835FD4 /* MarkdownUI */; };
+		E75EB552B60E70C8DB389A9D /* TillerACP in Frameworks */ = {isa = PBXBuildFile; productRef = 16BBA668B2730B232FAD7DF4 /* TillerACP */; };
 		E8EC832481BE1F2530BCE3D1 /* UpdateToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8F974FE5B8920C407DE1EB /* UpdateToastView.swift */; };
 		EAECD88E66ABD96509FA8CCC /* RunningDots.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE99F2EBC89020C876AA77E7 /* RunningDots.swift */; };
 		EB829689692FD812FCD4A11E /* TillerControl in Frameworks */ = {isa = PBXBuildFile; productRef = E3F92D201B4C341333BF9FF8 /* TillerControl */; };
@@ -116,6 +118,7 @@
 		64880FCA0680E0D6E7A1DFC4 /* spokes-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "spokes-1024.png"; sourceTree = "<group>"; };
 		66D18AD8984B39142C8D80EC /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		67334A794B95BBFBA6C2255E /* TillerAgents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerAgents; path = Packages/TillerAgents; sourceTree = SOURCE_ROOT; };
+		6ACCC88E1D2338FB9158DE59 /* TillerACP */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerACP; path = Packages/TillerACP; sourceTree = SOURCE_ROOT; };
 		6ED264D1B3306C90BC890ECE /* MenuBarStatusIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarStatusIcon.swift; sourceTree = "<group>"; };
 		6FA9BFA1A8C9B14562E393FD /* ProjectSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectSettingsSheet.swift; sourceTree = "<group>"; };
 		754ED987A43572FB14EBB2FD /* RightPanelMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelMode.swift; sourceTree = "<group>"; };
@@ -139,6 +142,7 @@
 		BE99F2EBC89020C876AA77E7 /* RunningDots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningDots.swift; sourceTree = "<group>"; };
 		BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRoute.swift; sourceTree = "<group>"; };
 		C537030635E47A24B2D468E1 /* PermissionsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsSettingsView.swift; sourceTree = "<group>"; };
+		D1E46DF390E43B7EA1794BB7 /* ChatController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatController.swift; sourceTree = "<group>"; };
 		D2BA4247A916A8C34143444D /* icon-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-1024.png"; sourceTree = "<group>"; };
 		D3CB01E518F8CD7DC085D5C0 /* TillerSkillResource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerSkillResource.swift; sourceTree = "<group>"; };
 		D804AADA29051BF13CAA1B3C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -165,9 +169,10 @@
 				50C86763ACB027DBD925D42F /* TillerPersistence in Frameworks */,
 				EB829689692FD812FCD4A11E /* TillerControl in Frameworks */,
 				842C39BA681065F69B196900 /* TillerAgents in Frameworks */,
-				E75EB552B60E70C8DB389A9D /* MarkdownUI in Frameworks */,
-				B49CC8272880E168790F64F5 /* TillerGit in Frameworks */,
-				2679D679A6A77462EE1860EC /* Sparkle in Frameworks */,
+				E75EB552B60E70C8DB389A9D /* TillerACP in Frameworks */,
+				B49CC8272880E168790F64F5 /* MarkdownUI in Frameworks */,
+				2679D679A6A77462EE1860EC /* TillerGit in Frameworks */,
+				6C5099F2710CFBEDF77DD19A /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -186,6 +191,7 @@
 		2CF4E8921BEAE1805AEF7860 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
+				6ACCC88E1D2338FB9158DE59 /* TillerACP */,
 				67334A794B95BBFBA6C2255E /* TillerAgents */,
 				61AFD75A225D957FBD64864D /* TillerControl */,
 				DD706B2311D697019AA6F947 /* TillerCore */,
@@ -237,6 +243,14 @@
 			path = skills/tiller;
 			sourceTree = "<group>";
 		};
+		6AE84D5A8B781C271F951395 /* Chat */ = {
+			isa = PBXGroup;
+			children = (
+				D1E46DF390E43B7EA1794BB7 /* ChatController.swift */,
+			);
+			path = Chat;
+			sourceTree = "<group>";
+		};
 		89A6FDF53519730CBA8C8F04 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -280,6 +294,7 @@
 				4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */,
 				84F98EF0C9277586AF581624 /* WorktreeRunningAgentsBadge.swift */,
 				BD047B77D2E168922ADC710C /* WorktreeStatusGlyph.swift */,
+				6AE84D5A8B781C271F951395 /* Chat */,
 				F1722747321DC8C28EBE7BB2 /* IconLayers */,
 				97055AC569D9FF3C713553CD /* MarkdownEditor */,
 				44D9C11ED04D2A095A056217 /* Permissions */,
@@ -351,6 +366,7 @@
 				1F3A30808F2FA158DD84EA0F /* TillerPersistence */,
 				E3F92D201B4C341333BF9FF8 /* TillerControl */,
 				56F2759B5316866B25363AF7 /* TillerAgents */,
+				16BBA668B2730B232FAD7DF4 /* TillerACP */,
 				AEBE46F4501BDA0084835FD4 /* MarkdownUI */,
 				4D97F96516DB1AF9CEC67128 /* TillerGit */,
 				0A4CA6EAB10E9F2FCB375761 /* Sparkle */,
@@ -408,6 +424,7 @@
 			packageReferences = (
 				C87D2DBF567CD19E6901448E /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
 				3CEAC77FDABB48F5CE209EE1 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				1C620FE4634397047C4668A3 /* XCLocalSwiftPackageReference "Packages/TillerACP" */,
 				ADF43F16F6203E0277D95E19 /* XCLocalSwiftPackageReference "Packages/TillerAgents" */,
 				17783D9CAA7F6C0536C6D6F7 /* XCLocalSwiftPackageReference "Packages/TillerControl" */,
 				0F73D1F415879423E0C1D762 /* XCLocalSwiftPackageReference "Packages/TillerCore" */,
@@ -484,6 +501,7 @@
 				39AE727AD01F0280D8BA0B8B /* AppRoute.swift in Sources */,
 				EBEC08157A1EBB7DB44A3F5F /* AppTheme.swift in Sources */,
 				71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */,
+				67FB529584389E037E1941C7 /* ChatController.swift in Sources */,
 				55B1AEC8546E6623C5C4B2C6 /* CodexUsageFetcher.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
 				C03FBAC9486C5494F80AC8EB /* EmptyWorktreeView.swift in Sources */,
@@ -775,6 +793,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/TillerControl;
 		};
+		1C620FE4634397047C4668A3 /* XCLocalSwiftPackageReference "Packages/TillerACP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/TillerACP;
+		};
 		4867338F4AFC2217CE52C544 /* XCLocalSwiftPackageReference "Packages/TillerTerminal" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/TillerTerminal;
@@ -817,6 +839,10 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 3CEAC77FDABB48F5CE209EE1 /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		16BBA668B2730B232FAD7DF4 /* TillerACP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = TillerACP;
 		};
 		1F3A30808F2FA158DD84EA0F /* TillerPersistence */ = {
 			isa = XCSwiftPackageProductDependency;
