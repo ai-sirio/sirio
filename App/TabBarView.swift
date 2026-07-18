@@ -52,6 +52,9 @@ struct TabBarItem: View {
     let worktree: Worktree
     let tab: WorkspaceTab
     @State private var hovering = false
+    @State private var renaming = false
+    @State private var draftTitle = ""
+    @FocusState private var renameFieldFocused: Bool
 
     private var isActive: Bool {
         model.activeTab(for: worktree.id)?.id == tab.id
@@ -71,11 +74,31 @@ struct TabBarItem: View {
             WorkspaceTabIcon(model: model, tab: tab)
                 .frame(width: 14)
 
-            Text(tab.title)
-                .font(.system(size: 12))
-                .foregroundStyle(isActive ? AppTheme.titleSelected : AppTheme.subtitle)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if renaming {
+                TextField("", text: $draftTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .frame(width: 120)
+                    .focused($renameFieldFocused)
+                    .onSubmit {
+                        model.renameTab(tab.id, in: worktree.id, to: draftTitle)
+                        renaming = false
+                    }
+                    .onExitCommand { renaming = false }
+            } else {
+                Text(tab.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isActive ? AppTheme.titleSelected : AppTheme.subtitle)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    // Doppio click SOLO sul titolo (stesso pattern di TabRow):
+                    // un count:2 sull'intera riga inghiottirebbe i click sulla ×.
+                    .onTapGesture(count: 2) {
+                        draftTitle = tab.title
+                        renaming = true
+                        renameFieldFocused = true
+                    }
+            }
 
             if model.markdownDocuments[tab.id]?.isDirty == true {
                 Circle().fill(.secondary).frame(width: 5, height: 5)
@@ -120,5 +143,18 @@ struct TabBarItem: View {
         }
         .onHover { hovering = $0 }
         .onTapGesture { model.activateTab(tab.id, in: worktree.id) }
+        .contextMenu {
+            Button("Rinomina") {
+                draftTitle = tab.title
+                renaming = true
+                renameFieldFocused = true
+            }
+            Divider()
+            Button("Chiudi") { model.closeTab(tab.id, in: worktree) }
+            Button("Chiudi altre") { model.closeOtherTabs(tab.id, in: worktree) }
+                .disabled((model.tabs[worktree.id]?.count ?? 0) <= 1)
+            Button("Chiudi a destra") { model.closeTabsToRight(of: tab.id, in: worktree) }
+                .disabled(model.tabs[worktree.id]?.last?.id == tab.id)
     }
+}
 }

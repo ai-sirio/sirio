@@ -917,6 +917,22 @@ final class AppModel {
         tabs[worktreeId] = moved
         persistTabs(for: worktreeId)
     }
+    /// Chiude tutte le tab del worktree tranne quella indicata. Passa dal
+    /// percorso closeTab singolo: le conferme markdown-dirty appaiono una
+    /// alla volta e un annulla lascia la tab aperta.
+    func closeOtherTabs(_ tabId: UUID, in worktree: Worktree) {
+        let ids = (tabs[worktree.id] ?? []).map(\.id).filter { $0 != tabId }
+        for id in ids { closeTab(id, in: worktree) }
+    }
+
+    /// Chiude le tab a destra di quella indicata (stesso percorso singolo).
+    func closeTabsToRight(of tabId: UUID, in worktree: Worktree) {
+        guard let list = tabs[worktree.id],
+              let index = list.firstIndex(where: { $0.id == tabId }) else { return }
+        for id in list.suffix(from: index + 1).map(\.id) {
+            closeTab(id, in: worktree)
+        }
+    }
 
     /// ⌘n: attiva la tab n del worktree selezionato (9 = ultima). Out of
     /// range = no-op.
