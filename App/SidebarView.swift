@@ -41,6 +41,12 @@ struct SidebarView: View {
                                                 }
                                             }
                                             Divider()
+                                            ForEach(AppModel.acpAgents(), id: \.id) { adapter in
+                                                Button("Chat · \(adapter.displayName)") {
+                                                    model.openChatTab(agentId: adapter.id, in: worktree)
+                                                }
+                                            }
+                                            Divider()
                                             Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {
                                                 Task { await model.setPrimary(worktree) }
                                             }
@@ -401,6 +407,15 @@ private struct WorktreeRow: View {
                             }
                         }
                     }
+                    Divider()
+                    ForEach(AppModel.acpAgents(), id: \.id) { adapter in
+                        Button {
+                            model.openChatTab(agentId: adapter.id, in: worktree)
+                        } label: {
+                            Label("Chat · \(adapter.displayName)",
+                                  systemImage: "bubble.left.and.text.bubble.right")
+                        }
+                    }
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11))
@@ -613,6 +628,8 @@ private struct TabRow: View {
             Image(systemName: "doc.text")
                 .font(.system(size: 10))
                 .foregroundStyle(AppTheme.meta)
+        } else if let agentId = tab.chatAgentId {
+            AgentIcon(agentId: agentId, size: 12)
         } else if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
             AgentIcon(agentId: agentId, size: 12)
         } else {
