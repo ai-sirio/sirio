@@ -32,6 +32,14 @@ struct ChatPaneView: View {
             default:
                 EmptyView()
             }
+            if let promptError = controller.promptError {
+                banner(
+                    "Errore nel turno",
+                    detail: promptError,
+                    actionTitle: "OK") {
+                    controller.promptError = nil
+                }
+            }
             TranscriptView(controller: controller, worktree: worktree,
                            appModel: appModel)
             Divider()

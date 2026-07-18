@@ -41,4 +41,17 @@ public struct AgentLaunchSpec: Sendable, Equatable {
         default: nil
         }
     }
+
+    /// Environment for the adapter process. Strips the markers Claude Code
+    /// sets in its own shells: when Tiller is launched from such a shell the
+    /// child inherits them and the Claude Agent SDK inside claude-code-acp
+    /// refuses to run ("Query closed before response received").
+    public static func launchEnvironment(
+        base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var environment = base
+        environment.removeValue(forKey: "CLAUDECODE")
+        environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
+        return environment
+    }
 }

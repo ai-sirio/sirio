@@ -26,6 +26,9 @@ final class ChatController {
     /// Transcript from a previous run shown read-only when the agent could
     /// not resume; emptied when session/load replay rebuilds the reducer.
     private(set) var restored: [TranscriptItem] = []
+    /// Error from the last prompt turn, shown as a dismissable banner. The
+    /// turn would otherwise fail silently (e.g. OpenCode model/auth errors).
+    var promptError: String?
     private var reducer = TranscriptReducer()
     var onStatusChange: ((AgentStatus) -> Void)?
 
@@ -73,6 +76,7 @@ final class ChatController {
         let transport = ProcessTransport(
             executable: spec.executable, arguments: spec.arguments,
             cwd: worktreePath,
+            environment: AgentLaunchSpec.launchEnvironment(),
             onStderrLine: { line in
                 NSLog("[chat:\(spec.arguments.last ?? "?")] %@", line)
             })
@@ -153,6 +157,7 @@ final class ChatController {
         guard !blocks.isEmpty else { return }
         reducer.userPrompted(blocks)
         state = .prompting
+        promptError = nil
         onStatusChange?(.running)
         Task { [weak self] in
             guard let self, let session = self.session else { return }
@@ -163,6 +168,8 @@ final class ChatController {
                 self.reducer.turnEnded(.cancelled)
                 if self.isDisconnectedError(error) {
                     self.state = .disconnected(message: "\(error)")
+                } else {
+                    self.promptError = Self.describePromptError(error)
                 }
             }
             self.persist()
@@ -224,6 +231,17 @@ final class ChatController {
     private func isDisconnectedError(_ error: Error) -> Bool {
         if case ACPClientError.transportClosed = error { return true }
         return false
+    }
+
+    private static func describePromptError(_ error: Error) -> String {
+        if case ACPClientError.agentError(let rpcError) = error {
+            var text = rpcError.message
+            if let details = rpcError.data?["details"]?.stringValue {
+                text += " — \(details)"
+            }
+            return text
+        }
+        return "\(error)"
     }
 
     // MARK: - Persistence
