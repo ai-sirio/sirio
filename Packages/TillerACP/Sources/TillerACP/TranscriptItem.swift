@@ -68,6 +68,7 @@ public enum TranscriptItem: Sendable, Equatable, Codable, Identifiable {
     case thought(id: String, text: String)
     case toolCall(ToolCallItem)
     case plan(id: String, entries: [PlanEntry])
+    case turnDivider(id: String, at: Date)
 
     public var id: String {
         switch self {
@@ -76,6 +77,7 @@ public enum TranscriptItem: Sendable, Equatable, Codable, Identifiable {
         case .thought(let id, _): id
         case .toolCall(let item): item.id
         case .plan(let id, _): id
+        case .turnDivider(let id, _): id
         }
     }
 }

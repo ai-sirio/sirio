@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import TillerACP
 
@@ -31,11 +32,29 @@ import Testing
         reducer.turnEnded(.endTurn)
         reducer.userPrompted([.text("again")])
         reducer.apply(.agentMessageChunk(.text("second")))
-        #expect(reducer.items.count == 3)
-        guard case .agentMessage(_, let text, _) = reducer.items[2] else {
+        // first agent message, turn divider, user message, second agent message
+        #expect(reducer.items.count == 4)
+        guard case .agentMessage(_, let text, _) = reducer.items[3] else {
             Issue.record("expected second agentMessage"); return
         }
         #expect(text == "second")
+    }
+
+    @Test func turnEndAppendsTimestampedDivider() {
+        var reducer = TranscriptReducer()
+        let stamp = Date(timeIntervalSince1970: 1_000)
+        reducer.apply(.agentMessageChunk(.text("done")))
+        reducer.turnEnded(.endTurn, at: stamp)
+        guard case .turnDivider(_, let at) = reducer.items[1] else {
+            Issue.record("expected turnDivider"); return
+        }
+        #expect(at == stamp)
+    }
+
+    @Test func turnEndOnEmptyTranscriptAddsNoDivider() {
+        var reducer = TranscriptReducer()
+        reducer.turnEnded(.cancelled)
+        #expect(reducer.items.isEmpty)
     }
 
     @Test func thoughtsAccumulateSeparatelyFromMessages() {
