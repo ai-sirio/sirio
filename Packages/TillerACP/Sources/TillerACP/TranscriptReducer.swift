@@ -37,14 +37,18 @@ public struct TranscriptReducer: Sendable, Equatable {
     }
 
     /// Marks the turn finished; open streams complete, pending permissions
-    /// attached to tool calls resolve as cancelled.
-    public mutating func turnEnded(_ reason: StopReason) {
+    /// attached to tool calls resolve as cancelled, and a timestamped divider
+    /// closes the turn (rendered as the "— 11:56 PM —" separator).
+    public mutating func turnEnded(_ reason: StopReason, at date: Date = Date()) {
         closeOpenStreams()
         for index in items.indices {
             guard case .toolCall(var item) = items[index],
                   item.permission?.isPending == true else { continue }
             item.permission?.resolution = .cancelled
             items[index] = .toolCall(item)
+        }
+        if !items.isEmpty {
+            items.append(.turnDivider(id: makeId("divider"), at: date))
         }
     }
 

@@ -1,10 +1,12 @@
 import SwiftUI
 import AppKit
 import TillerACP
+import TillerAgents
 
-/// Message input: multiline text (⏎ send, ⇧⏎ newline), @-mention
-/// autocomplete over worktree files, slash commands from the agent, image
-/// attachment from pasteboard/file picker, mode selector, send/stop.
+/// Message input styled as a floating rounded card: text on top, control row
+/// below (mode pill with status dot, agent pill, attach, circular send).
+/// "/" opens a slash-command popup fed by the agent's advertised commands;
+/// "@" keeps the file-mention autocomplete. ⏎ send, ⇧⏎ newline.
 struct ChatComposerView: View {
     let controller: ChatController
     let worktreePath: String
@@ -19,22 +21,39 @@ struct ChatComposerView: View {
     private var canInteract: Bool {
         (controller.state == .ready || isPrompting) && !controller.hasPendingPermission
     }
+    private var canSend: Bool {
+        canInteract && !(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                         && mentionPaths.isEmpty && images.isEmpty)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !slashCandidates.isEmpty {
+                slashPopup
+            }
             if let query = mentionQuery, !mentionCandidates.isEmpty {
                 mentionPopup(query: query)
             }
-            attachmentChips
             queuedList
+            card
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Card
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            attachmentChips
             editor
             controlBar
         }
-        .padding(10)
-        .background(.bar)
+        .padding(12)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14)
+            .strokeBorder(.separator.opacity(0.5), lineWidth: 1))
     }
-
-    // MARK: - Subviews
 
     private var editor: some View {
         TextField(controller.hasPendingPermission
@@ -50,37 +69,39 @@ struct ChatComposerView: View {
     }
 
     private var controlBar: some View {
-        HStack(spacing: 10) {
-            modeSelector
+        HStack(spacing: 8) {
+            modePill
+            agentPill
+            Spacer()
             Button {
                 attachImage()
             } label: {
-                Image(systemName: "photo.badge.plus")
+                Image(systemName: "paperclip")
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .help("Allega immagine (appunti o file)")
             .disabled(!canInteract)
-            slashCommandsMenu
-            Spacer()
             if isPrompting {
-                Button {
-                    Task { await controller.cancelTurn() }
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .keyboardShortcut(.escape, modifiers: [])
+                stopButton
+            } else {
+                sendButton
             }
-            Button("Invia", action: sendCurrent)
-                .keyboardShortcut(.return, modifiers: [])
-                .disabled(!canInteract ||
-                          text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                          && mentionPaths.isEmpty && images.isEmpty)
         }
-        .controlSize(.small)
+    }
+
+    // MARK: - Pills
+
+    private var statusDotColor: Color {
+        switch controller.state {
+        case .ready: .green
+        case .prompting: .orange
+        default: .secondary.opacity(0.5)
+        }
     }
 
     @ViewBuilder
-    private var modeSelector: some View {
+    private var modePill: some View {
         if let modes = controller.modes, !modes.availableModes.isEmpty {
             Menu {
                 ForEach(modes.availableModes, id: \.id) { mode in
@@ -89,31 +110,123 @@ struct ChatComposerView: View {
                     }
                 }
             } label: {
-                let current = modes.availableModes
-                    .first { $0.id == controller.currentModeId }?.name
-                Text(current ?? "Modalità")
-                    .font(.caption)
+                HStack(spacing: 5) {
+                    Circle().fill(statusDotColor).frame(width: 6, height: 6)
+                    Text(currentModeName).font(.caption)
+                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                }
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             .fixedSize()
+            .modifier(PillBackground())
+        } else {
+            HStack(spacing: 5) {
+                Circle().fill(statusDotColor).frame(width: 6, height: 6)
+                Text(stateLabel).font(.caption)
+            }
+            .modifier(PillBackground())
         }
     }
 
-    @ViewBuilder
-    private var slashCommandsMenu: some View {
-        if !controller.availableCommands.isEmpty {
-            Menu {
-                ForEach(controller.availableCommands, id: \.name) { command in
-                    Button("/\(command.name)") {
-                        text = "/\(command.name) "
-                    }
-                    .help(command.description)
-                }
-            } label: {
-                Image(systemName: "slash.circle")
-            }
-            .fixedSize()
+    private var currentModeName: String {
+        controller.modes?.availableModes
+            .first { $0.id == controller.currentModeId }?.name ?? "Modalità"
+    }
+
+    private var stateLabel: String {
+        switch controller.state {
+        case .ready: "pronto"
+        case .prompting: "al lavoro"
+        case .connecting: "connessione…"
+        default: "offline"
         }
     }
+
+    private var agentPill: some View {
+        HStack(spacing: 5) {
+            AgentIcon(agentId: controller.agentId, size: 11)
+            Text(agentDisplayName).font(.caption)
+        }
+        .modifier(PillBackground())
+    }
+
+    private var agentDisplayName: String {
+        AgentCatalog.all.first { $0.id == controller.agentId }?.displayName
+            ?? controller.agentId
+    }
+
+    // MARK: - Send / stop
+
+    private var sendButton: some View {
+        Button(action: sendCurrent) {
+            Image(systemName: "arrow.up")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(canSend ? Color.white : Color.secondary)
+                .frame(width: 26, height: 26)
+                .background(canSend ? AnyShapeStyle(Color.accentColor)
+                                    : AnyShapeStyle(.quaternary),
+                            in: Circle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.return, modifiers: [])
+        .disabled(!canSend)
+    }
+
+    private var stopButton: some View {
+        Button {
+            Task { await controller.cancelTurn() }
+        } label: {
+            Image(systemName: "stop.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(Color.red.opacity(0.8), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.escape, modifiers: [])
+        .help("Interrompi il turno")
+    }
+
+    // MARK: - Slash commands
+
+    /// Active while the draft is a single "/token": query is what follows the
+    /// slash, matched as a case-insensitive prefix of the command names.
+    private var slashCandidates: [AvailableCommand] {
+        guard text.hasPrefix("/"), !text.contains(where: \.isWhitespace),
+              canInteract else { return [] }
+        let query = text.dropFirst().lowercased()
+        let all = controller.availableCommands
+        guard !query.isEmpty else { return Array(all.prefix(10)) }
+        return Array(all.filter { $0.name.lowercased().hasPrefix(query) }.prefix(10))
+    }
+
+    private var slashPopup: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(slashCandidates, id: \.name) { command in
+                Button {
+                    text = "/\(command.name) "
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("/\(command.name)")
+                            .font(.caption.weight(.semibold))
+                        Text(command.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+            }
+        }
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Attachments / queue
 
     @ViewBuilder
     private var attachmentChips: some View {
@@ -173,7 +286,7 @@ struct ChatComposerView: View {
             }
         }
         .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Actions
@@ -238,5 +351,14 @@ struct ChatComposerView: View {
         let mime = url.pathExtension.lowercased() == "png" ? "image/png" : "image/jpeg"
         images.append(ImageAttachment(mimeType: mime,
                                       base64Data: data.base64EncodedString()))
+    }
+}
+
+/// Capsule chrome shared by the composer's mode/agent pills.
+private struct PillBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(.quaternary.opacity(0.6), in: Capsule())
     }
 }

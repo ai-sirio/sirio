@@ -83,6 +83,7 @@ extension TranscriptItem {
         case .thought: "thought"
         case .toolCall: "toolCall"
         case .plan: "plan"
+        case .turnDivider: "turnDivider"
         }
     }
 }
