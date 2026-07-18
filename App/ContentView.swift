@@ -162,6 +162,10 @@ struct ContentView: View {
                     }
             }
             VStack(spacing: 0) {
+                if let worktree = model.selectedWorktree {
+                    TabBarView(model: model, worktree: worktree)
+                    Divider()
+                }
                 terminalStack
                 if showUsageBar {
                     Divider()
