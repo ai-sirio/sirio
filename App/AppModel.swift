@@ -6,6 +6,7 @@ import TillerGit
 import TillerTerminal
 import TillerControl
 import TillerAgents
+import TillerACP
 import AppKit
 import UserNotifications
 import OSLog
@@ -104,7 +105,7 @@ final class AppModel {
     /// Highest-priority agent status among all panes in a worktree's tree.
     /// Priority: error > needs-input > running > done. Returns nil if no agent panes.
     func statusForWorktree(_ worktree: Worktree) -> AgentStatus? {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.activityPaneIds }
         return agentActivity.statusForWorktree(paneIds: paneIds)
     }
 
@@ -148,7 +149,7 @@ final class AppModel {
     /// AgentCatalog.all for stable left-to-right icon order in the
     /// worktree row's trailing running-agents badge.
     func runningAgentIds(for worktree: Worktree) -> [String] {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.activityPaneIds }
         return agentActivity.runningAgentIds(paneIds: paneIds, catalogIds: AgentCatalog.all.map(\.id))
     }
     private let notifier = AgentNotifier()
@@ -236,6 +237,7 @@ final class AppModel {
             self.store = store
             self.database = db
             self.agentAccounts = AgentAccountStore(database: db)
+            self.chatStore = ChatSessionStore(database: db)
             projects = try await store.loadAll()
             let ctl = tillerctlPath()
             for project in projects {
@@ -692,7 +694,10 @@ final class AppModel {
             for worktree in projectWorktrees {
                 let tabsBeingRemoved = tabs[worktree.id] ?? []
                 tabs[worktree.id] = nil
-                for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
+                for tab in tabsBeingRemoved {
+                    teardownMarkdownDocument(tabId: tab.id)
+                    teardownChatController(tabId: tab.id)
+                }
                 activeTabId[worktree.id] = nil
             }
             openWorktreeIds.removeAll { id in projectWorktrees.contains { $0.id == id } }
@@ -788,7 +793,10 @@ final class AppModel {
             let tabsBeingRemoved = tabs[worktree.id] ?? []
             tabs[worktree.id] = nil
             paneCaches[worktree.id] = nil
-            for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
+            for tab in tabsBeingRemoved {
+                teardownMarkdownDocument(tabId: tab.id)
+                teardownChatController(tabId: tab.id)
+            }
             activeTabId[worktree.id] = nil
             openWorktreeIds.removeAll { $0 == worktree.id }
             if selectedWorktree?.id == worktree.id {
@@ -872,6 +880,7 @@ final class AppModel {
         }
         list.removeAll { $0.id == tabId }
         teardownMarkdownDocument(tabId: tabId)
+        teardownChatController(tabId: tabId)
         // Allow empty tab list — the worktree can have zero tabs.
         // The user creates a new tab via ⌘T or the sidebar "+" menu.
         tabs[worktree.id] = list
@@ -1217,6 +1226,60 @@ final class AppModel {
     /// Documenti aperti, keyed su tab.id. Vivono qui (non nella view) perché
     /// le view SwiftUI muoiono al cambio tab e perderebbero il buffer.
     var markdownDocuments: [UUID: MarkdownDocument] = [:]
+    var chatControllers: [UUID: ChatController] = [:]
+    var chatStore: ChatSessionStore?
+
+    /// Adapters that can host a chat pane (have an ACP launch spec).
+    static func acpAgents() -> [any AgentAdapter] {
+        AgentCatalog.all.filter { AgentLaunchSpec.forAgent(id: $0.id) != nil }
+    }
+
+    @discardableResult
+    func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
+        guard AgentLaunchSpec.forAgent(id: agentId) != nil else { return nil }
+        let title = AgentCatalog.all.first { $0.id == agentId }?.displayName ?? agentId
+        let tab = WorkspaceTab(id: UUID(), title: title,
+                               content: .chat(agentId: agentId))
+        selectedWorktree = worktree
+        tabs[worktree.id, default: []].append(tab)
+        activeTabId[worktree.id] = tab.id
+        agentActivity.agentSpawned(paneId: tab.id, agentId: agentId, now: Date())
+        persistTabs(for: worktree.id)
+        return tab
+    }
+
+    /// Lazily builds the controller for a (restored) chat tab, mirroring
+    /// markdownDocument(for:).
+    func chatController(for tab: WorkspaceTab, in worktree: Worktree) -> ChatController? {
+        guard let agentId = tab.chatAgentId else { return nil }
+        if let controller = chatControllers[tab.id] { return controller }
+        let controller = ChatController(
+            tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
+            worktreePath: worktree.path, store: chatStore)
+        controller.onStatusChange = { [weak self] status in
+            guard let self else { return }
+            let transition = self.agentActivity.notify(
+                paneId: tab.id, status: status, now: Date())
+            self.notifyTransition(paneId: tab.id,
+                                  from: transition.old, to: transition.new)
+        }
+        chatControllers[tab.id] = controller
+        return controller
+    }
+
+    func teardownChatController(tabId: UUID) {
+        guard let controller = chatControllers[tabId] else { return }
+        chatControllers[tabId] = nil
+        agentActivity.paneClosed(paneId: tabId)
+        Task { await controller.stop() }
+    }
+
+    /// Best-effort transcript flush on app quit.
+    func flushChatControllers() {
+        for controller in chatControllers.values {
+            Task { await controller.stop() }
+        }
+    }
 
     /// Funnel unico per tutti i canali di apertura (cmd+click, drop, ⌘O).
     /// Dedup per fileURL: se il file è già aperto nel worktree attiva quella tab.
@@ -1512,7 +1575,7 @@ final class AppModel {
 
     private func worktreeContaining(paneId: UUID) -> Worktree? {
         worktrees.values.flatMap { $0 }.first { wt in
-            (tabs[wt.id] ?? []).contains { $0.leafIds.contains(paneId) }
+            (tabs[wt.id] ?? []).contains { $0.activityPaneIds.contains(paneId) }
         }
     }
 

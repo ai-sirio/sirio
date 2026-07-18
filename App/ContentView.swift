@@ -286,7 +286,13 @@ struct ContentView: View {
                                     )
                                 }
                             case .chat:
-                                EmptyView()
+                                if let controller = model.chatController(for: tab, in: worktree) {
+                                    ChatPaneView(controller: controller, worktree: worktree,
+                                                 appModel: model)
+                                } else {
+                                    ContentUnavailableView("Agente non disponibile",
+                                                           systemImage: "bubble.left")
+                                }
                             }
                         }
                         .opacity(isVisible ? 1 : 0)

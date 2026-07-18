@@ -5,7 +5,11 @@ import TillerCore
 /// prima che il processo termini. `.terminateLater` è l'unico meccanismo
 /// AppKit che fa attendere un lavoro async (actor snapshot + write GRDB).
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var model: AppModel?
+    weak var model: AppModel?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model?.flushChatControllers()
+    }
 
     /// Deadline oltre il quale si risponde comunque al quit, anche se il flush
     /// non è finito. Serve al relaunch "Esci e riapri" dei permessi TCC: il
