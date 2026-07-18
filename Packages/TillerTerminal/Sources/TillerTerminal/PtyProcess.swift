@@ -151,7 +151,7 @@ public final class PtyProcess: @unchecked Sendable {
         if processId > 0 { kill(processId, SIGTERM) }
         queue.async { [weak self] in
             self?.stopReadLoop()
-            self?.reapChild()
+            self?.reapChildWithRetry()
         }
     }
 
