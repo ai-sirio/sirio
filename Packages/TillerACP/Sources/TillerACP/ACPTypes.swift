@@ -136,7 +136,7 @@ public struct SessionModelState: Sendable, Equatable, Codable {
     /// OpenCode doesn't send the standard `models` field; its `session/new`
     /// carries a `configOptions` select with id "model" instead. Map it to the
     /// standard shape so the rest of the app sees one model API.
-    init?(configOptions: [SessionConfigOption]) {
+    public init?(configOptions: [SessionConfigOption]) {
         guard let option = configOptions.first(where: { $0.id == "model" }),
               let current = option.currentValue,
               let choices = option.options, !choices.isEmpty else { return nil }
@@ -152,10 +152,32 @@ public struct SessionConfigOption: Sendable, Equatable, Codable {
     public struct Choice: Sendable, Equatable, Codable {
         public var value: String
         public var name: String
+        public init(value: String, name: String) {
+            self.value = value
+            self.name = name
+        }
     }
     public var id: String
+    public var name: String?
     public var currentValue: String?
     public var options: [Choice]?
+}
+
+/// `session/set_config_option` (OpenCode extension); the result echoes the
+/// full updated `configOptions` list.
+public struct SetConfigOptionParams: Sendable, Equatable, Codable {
+    public var sessionId: String
+    public var configId: String
+    public var value: String
+    public init(sessionId: String, configId: String, value: String) {
+        self.sessionId = sessionId
+        self.configId = configId
+        self.value = value
+    }
+}
+
+public struct SetConfigOptionResult: Sendable, Equatable, Codable {
+    public var configOptions: [SessionConfigOption]?
 }
 
 public struct NewSessionResult: Sendable, Equatable, Codable {

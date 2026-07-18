@@ -7,6 +7,8 @@ public struct SessionHandle: Sendable, Equatable {
     public var agentCapabilities: AgentCapabilities
     public var modes: SessionModeState?
     public var models: SessionModelState?
+    /// OpenCode's non-model tunables (effort, …); empty for standard agents.
+    public var configOptions: [SessionConfigOption]
     public var didResume: Bool
 }
 
@@ -85,6 +87,7 @@ public actor ACPSession {
             return SessionHandle(sessionId: resumeSessionId,
                                  agentCapabilities: initialize.agentCapabilities,
                                  modes: loaded.modes, models: loaded.resolvedModels,
+                                 configOptions: loaded.configOptions ?? [],
                                  didResume: true)
         }
 
@@ -94,6 +97,7 @@ public actor ACPSession {
         return SessionHandle(sessionId: created.sessionId,
                              agentCapabilities: initialize.agentCapabilities,
                              modes: created.modes, models: created.resolvedModels,
+                             configOptions: created.configOptions ?? [],
                              didResume: false)
     }
 
@@ -124,6 +128,18 @@ public actor ACPSession {
             "session/set_model",
             params: SetModelParams(sessionId: sessionId, modelId: modelId),
             as: JSONValue.self)
+    }
+
+    /// OpenCode extension; returns the agent's updated option list (nil when
+    /// the agent echoes nothing back).
+    public func setConfigOption(id: String, value: String) async throws
+        -> [SessionConfigOption]? {
+        guard let sessionId else { throw ACPSessionError.notConnected }
+        let result = try await client.request(
+            "session/set_config_option",
+            params: SetConfigOptionParams(sessionId: sessionId, configId: id, value: value),
+            as: SetConfigOptionResult.self)
+        return result.configOptions
     }
 
     public func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
