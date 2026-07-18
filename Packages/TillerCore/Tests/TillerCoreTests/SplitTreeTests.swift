@@ -51,3 +51,29 @@ import Foundation
         #expect(decoded == tree)
     }
 }
+
+@Test func splittingBeforePlacesNewLeafFirst() {
+    let existing = UUID(), new = UUID()
+    let tree = SplitTree.leaf(id: existing).splitting(
+        leaf: existing, axis: .horizontal, newLeaf: new, placement: .before
+    )
+
+    #expect(tree == .split(
+        axis: .horizontal,
+        first: .leaf(id: new),
+        second: .leaf(id: existing)
+    ))
+}
+
+@Test func splittingAfterPlacesNewLeafSecond() {
+    let existing = UUID(), new = UUID()
+    let tree = SplitTree.leaf(id: existing).splitting(
+        leaf: existing, axis: .vertical, newLeaf: new, placement: .after
+    )
+
+    #expect(tree == .split(
+        axis: .vertical,
+        first: .leaf(id: existing),
+        second: .leaf(id: new)
+    ))
+}

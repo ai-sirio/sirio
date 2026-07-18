@@ -100,6 +100,119 @@ import Foundation
     #expect(await task2.value == nil)
 }
 
+@Test func waitUntilRegisteredTimesOut() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+
+    #expect(await registry.waitUntilRegistered(paneId: paneId, timeoutMs: 20) == false)
+}
+
+@Test func waitUntilRegisteredResumesWhenPaneRegisters() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+    let waiter = Task { await registry.waitUntilRegistered(paneId: paneId, timeoutMs: 1_000) }
+
+    try? await Task.sleep(for: .milliseconds(20))
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+
+    #expect(await waiter.value)
+}
+
+@Test func cancelBeforeRegisterPreventsLateRegistration() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+    let waiter = Task { await registry.waitUntilRegistered(paneId: paneId, timeoutMs: 1_000) }
+
+    try? await Task.sleep(for: .milliseconds(20))
+    await registry.cancelRegistration(paneId: paneId)
+    await registry.unregister(paneId: paneId)
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+
+    #expect(await waiter.value == false)
+    #expect(await registry.isRegistered(paneId: paneId) == false)
+}
+
+@Test func cancelAfterRegisterRemovesPaneAndDrainsExitWaiters() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+    let exitWaiter = Task { await registry.waitExit(paneId: paneId, timeoutMs: nil) }
+
+    try? await Task.sleep(for: .milliseconds(20))
+    await registry.cancelRegistration(paneId: paneId)
+
+    #expect(await registry.isRegistered(paneId: paneId) == false)
+    #expect(await exitWaiter.value == nil)
+}
+
+@Test func normalUnregisterDoesNotTombstonePaneId() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+
+    await registry.unregister(paneId: paneId)
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+
+    #expect(await registry.isRegistered(paneId: paneId))
+}
+
+@Test func rejectedLateRegistrationConsumesCancellationTombstone() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+    await registry.cancelRegistration(paneId: paneId)
+
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+    #expect(await registry.isRegistered(paneId: paneId) == false)
+
+    await registry.register(
+        paneId: paneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+    #expect(await registry.isRegistered(paneId: paneId))
+}
+
+@Test func cancellationTombstonesHaveBoundedRetention() async {
+    let registry = PaneRegistry()
+    let oldestPaneId = UUID()
+    await registry.cancelRegistration(paneId: oldestPaneId)
+    for _ in 0..<1_024 {
+        await registry.cancelRegistration(paneId: UUID())
+    }
+
+    await registry.register(
+        paneId: oldestPaneId,
+        pty: PtyProcess { _ in },
+        scrollback: ScrollbackBuffer()
+    )
+
+    #expect(await registry.isRegistered(paneId: oldestPaneId))
+}
+
 /// Tracks completion of two waiters for the regression test.
 actor WaiterTracker {
     struct State {

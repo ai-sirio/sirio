@@ -5,6 +5,11 @@ public enum SplitAxis: Equatable, Sendable {
     case vertical
 }
 
+public enum SplitPlacement: Equatable, Sendable {
+    case before
+    case after
+}
+
 /// Immutable binary tree of terminal panes. Every mutation returns a new
 /// tree — pane state (PTY, scrollback) is keyed by leaf UUID elsewhere, so
 /// structural edits never touch running terminals.
@@ -12,17 +17,31 @@ public indirect enum SplitTree: Equatable, Sendable {
     case leaf(id: UUID)
     case split(axis: SplitAxis, first: SplitTree, second: SplitTree)
 
-    public func splitting(leaf target: UUID, axis: SplitAxis, newLeaf: UUID) -> SplitTree {
+    public func splitting(
+        leaf target: UUID,
+        axis: SplitAxis,
+        newLeaf: UUID,
+        placement: SplitPlacement = .after
+    ) -> SplitTree {
         switch self {
         case .leaf(let id) where id == target:
-            return .split(axis: axis, first: self, second: .leaf(id: newLeaf))
+            switch placement {
+            case .before:
+                return .split(axis: axis, first: .leaf(id: newLeaf), second: self)
+            case .after:
+                return .split(axis: axis, first: self, second: .leaf(id: newLeaf))
+            }
         case .leaf:
             return self
         case .split(let a, let first, let second):
             return .split(
                 axis: a,
-                first: first.splitting(leaf: target, axis: axis, newLeaf: newLeaf),
-                second: second.splitting(leaf: target, axis: axis, newLeaf: newLeaf)
+                first: first.splitting(
+                    leaf: target, axis: axis, newLeaf: newLeaf, placement: placement
+                ),
+                second: second.splitting(
+                    leaf: target, axis: axis, newLeaf: newLeaf, placement: placement
+                )
             )
         }
     }

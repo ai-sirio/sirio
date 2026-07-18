@@ -11,8 +11,8 @@ import Foundation
 }
 
 @Test func responseHelpers() throws {
-    let ok = ControlResponse.success(id: "r1", result: ["panelId": "P"])
-    #expect(ok.ok && ok.result?["panelId"] == "P" && ok.error == nil)
+    let ok = ControlResponse.success(id: "r1", result: ["id": "P"])
+    #expect(ok.ok && ok.result?["id"] == "P" && ok.error == nil)
     let ko = ControlResponse.failure(id: "r2", error: "unknown panel")
     #expect(!ko.ok && ko.error == "unknown panel")
     let line = try ControlFraming.encodeLine(ko)
