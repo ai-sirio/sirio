@@ -4,7 +4,7 @@ import TillerCore
 import TillerControl
 import TillerTerminal
 
-/// cmux-parity control methods. The legacy methods (panel.*, notify,
+/// cmux-parity control methods. The core methods (panel.*, notify,
 /// session.ref, worktree.set) stay in AppModel.handleControl; everything
 /// added for CLI parity dispatches here.
 extension AppModel {

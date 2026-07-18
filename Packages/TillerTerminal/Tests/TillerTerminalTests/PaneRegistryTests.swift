@@ -213,6 +213,33 @@ import Foundation
     #expect(await registry.isRegistered(paneId: oldestPaneId))
 }
 
+@Test func cancellingInfiniteExitWaitResumesPromptly() async {
+    let registry = PaneRegistry()
+    let paneId = UUID()
+    let tracker = CancellationTracker()
+    await registry.register(
+        paneId: paneId, pty: PtyProcess { _ in }, scrollback: ScrollbackBuffer()
+    )
+    let waiter = Task {
+        let result = await registry.waitExit(paneId: paneId, timeoutMs: nil)
+        await tracker.finish(result)
+        return result
+    }
+    try? await Task.sleep(for: .milliseconds(20))
+
+    waiter.cancel()
+    try? await Task.sleep(for: .milliseconds(20))
+    #expect(await tracker.finished)
+
+    await registry.unregister(paneId: paneId)
+    _ = await waiter.value
+}
+
+private actor CancellationTracker {
+    private(set) var finished = false
+    func finish(_ result: Int32?) { finished = true }
+}
+
 /// Tracks completion of two waiters for the regression test.
 actor WaiterTracker {
     struct State {

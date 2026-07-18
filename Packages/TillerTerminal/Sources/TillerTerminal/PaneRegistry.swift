@@ -125,23 +125,27 @@ public actor PaneRegistry {
         if let code = entry.exitCode { return code }
         let token = nextWaiterToken
         nextWaiterToken += 1
-        return await withCheckedContinuation { (cont: CheckedContinuation<Int32?, Never>) in
-            guard var entry = entries[paneId] else {
-                cont.resume(returning: nil)
-                return
-            }
-            if let code = entry.exitCode {
-                cont.resume(returning: code)
-                return
-            }
-            entry.waiters.append((token: token, cont: cont))
-            entries[paneId] = entry
-            if let timeoutMs {
-                Task { [paneId] in
-                    try? await Task.sleep(for: .milliseconds(timeoutMs))
-                    self.resolveWaiter(paneId: paneId, token: token)
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Int32?, Never>) in
+                guard var entry = entries[paneId], !Task.isCancelled else {
+                    cont.resume(returning: nil)
+                    return
+                }
+                if let code = entry.exitCode {
+                    cont.resume(returning: code)
+                    return
+                }
+                entry.waiters.append((token: token, cont: cont))
+                entries[paneId] = entry
+                if let timeoutMs {
+                    Task { [paneId] in
+                        try? await Task.sleep(for: .milliseconds(timeoutMs))
+                        self.resolveWaiter(paneId: paneId, token: token)
+                    }
                 }
             }
+        } onCancel: {
+            Task { await self.resolveWaiter(paneId: paneId, token: token) }
         }
     }
 
