@@ -50,7 +50,7 @@ import GRDB
     }
 }
 
-/// The migrator must apply all eight migrations in registration order so that a
+/// The migrator must apply all migrations in registration order so that a
 /// database created today can be migrated from any intermediate version.
 @Test func migrationsAreOrderedAndComplete() throws {
     let queue = try DatabaseQueue()
@@ -59,7 +59,7 @@ import GRDB
     let identifiers = try queue.read { db in
         try AppDatabase.migrator.appliedMigrations(db)
     }
-    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"])
+    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9"])
 }
 
 /// Applying migrations one at a time (stepwise) must produce the same final
@@ -76,6 +76,7 @@ import GRDB
     try AppDatabase.migrator.migrate(queueA, upTo: "v6")
     try AppDatabase.migrator.migrate(queueA, upTo: "v7")
     try AppDatabase.migrator.migrate(queueA, upTo: "v8")
+    try AppDatabase.migrator.migrate(queueA, upTo: "v9")
 
     // Queue B: direct to head
     let queueB = try DatabaseQueue()
