@@ -1,0 +1,72 @@
+import Foundation
+
+public struct PlanEntry: Sendable, Equatable, Codable {
+    public var content: String
+    public var priority: String
+    public var status: String
+    public init(content: String, priority: String, status: String) {
+        self.content = content
+        self.priority = priority
+        self.status = status
+    }
+}
+
+public struct AvailableCommand: Sendable, Equatable, Codable {
+    public var name: String
+    public var description: String
+    public init(name: String, description: String) {
+        self.name = name
+        self.description = description
+    }
+}
+
+/// One `session/update` payload, discriminated by `sessionUpdate` on the wire.
+public enum SessionUpdate: Sendable, Equatable {
+    case userMessageChunk(ContentBlock)
+    case agentMessageChunk(ContentBlock)
+    case agentThoughtChunk(ContentBlock)
+    case toolCall(ToolCall)
+    case toolCallUpdate(ToolCallUpdate)
+    case plan([PlanEntry])
+    case availableCommandsUpdate([AvailableCommand])
+    case currentModeUpdate(String)
+    case unknown(String)
+}
+
+extension SessionUpdate: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case sessionUpdate, content, entries, availableCommands, currentModeId
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let discriminator = try container.decode(String.self, forKey: .sessionUpdate)
+        switch discriminator {
+        case "user_message_chunk":
+            self = .userMessageChunk(try container.decode(ContentBlock.self, forKey: .content))
+        case "agent_message_chunk":
+            self = .agentMessageChunk(try container.decode(ContentBlock.self, forKey: .content))
+        case "agent_thought_chunk":
+            self = .agentThoughtChunk(try container.decode(ContentBlock.self, forKey: .content))
+        case "tool_call":
+            self = .toolCall(try ToolCall(from: decoder))
+        case "tool_call_update":
+            self = .toolCallUpdate(try ToolCallUpdate(from: decoder))
+        case "plan":
+            self = .plan(try container.decode([PlanEntry].self, forKey: .entries))
+        case "available_commands_update":
+            self = .availableCommandsUpdate(
+                try container.decode([AvailableCommand].self, forKey: .availableCommands))
+        case "current_mode_update":
+            self = .currentModeUpdate(try container.decode(String.self, forKey: .currentModeId))
+        default:
+            self = .unknown(discriminator)
+        }
+    }
+}
+
+/// Params of the `session/update` notification.
+public struct SessionNotification: Sendable, Equatable, Decodable {
+    public var sessionId: String
+    public var update: SessionUpdate
+}
