@@ -1,6 +1,9 @@
 import ArgumentParser
 import Foundation
 import TillerControl
+import TillerCore
+
+extension TerminalKey: @retroactive ExpressibleByArgument {}
 
 @main
 struct Tillerctl: ParsableCommand {
@@ -13,8 +16,6 @@ struct Tillerctl: ParsableCommand {
             Ping.self, Capabilities.self, Identify.self,
             ListWorkspaces.self, NewWorkspace.self, SelectWorkspace.self,
             CurrentWorkspace.self, CloseWorkspace.self,
-            NewSplit.self, ListPanels.self, ListPaneSurfaces.self, FocusPanel.self,
-            Send.self, SendKey.self, ClosePanel.self,
             ListNotifications.self, ClearNotifications.self,
             RestoreSession.self,
         ]
@@ -26,24 +27,127 @@ struct SocketOptions: ParsableArguments {
     var socket: String = ControlSocket.defaultPath()
 }
 
+enum PanelDirection: String, CaseIterable, ExpressibleByArgument {
+    case left, right, up, down
+
+    init?(argument: String) {
+        self.init(rawValue: argument)
+    }
+}
+
+func requiredPanelTarget(
+    explicit: String?,
+    environment: [String: String],
+    key: String,
+    option: String
+) throws -> String {
+    if let explicit, !explicit.isEmpty { return explicit }
+    if let value = environment[key], !value.isEmpty { return value }
+    throw ValidationError("Missing \(option) and $\(key) is not set")
+}
+
+func createdPaneOutput(id: String, json: Bool) throws -> String {
+    guard json else { return id }
+    let data = try JSONSerialization.data(
+        withJSONObject: ["id": id],
+        options: [.sortedKeys]
+    )
+    return String(decoding: data, as: UTF8.self)
+}
+
+func requireCreatedPaneID(_ response: ControlResponse) throws -> String {
+    guard response.ok, let id = response.result?["id"], !id.isEmpty else {
+        throw ValidationError(response.error ?? "panel creation returned no id")
+    }
+    return id
+}
+
+func panelWaitTimeoutSeconds(timeoutMs: Int?) -> Int? {
+    guard let timeoutMs else { return nil }
+    return max(1, (timeoutMs + 999) / 1_000 + 30)
+}
+
 struct Panel: ParsableCommand {
     static let configuration = CommandConfiguration(
-        subcommands: [Create.self, Write.self, Read.self, Wait.self]
+        subcommands: [
+            Create.self, Split.self, List.self, Write.self, Key.self,
+            Read.self, Wait.self, Focus.self, Close.self,
+        ]
     )
 
     struct Create: ParsableCommand {
         @OptionGroup var socketOptions: SocketOptions
-        @Option(name: .customLong("worktree")) var worktree: String
+        @Option(name: .customLong("worktree")) var worktree: String?
         @Option(name: .customLong("cmd")) var cmd: String?
+        @Flag(name: .customLong("json")) var json = false
+
         func run() throws {
-            let response = try ControlClient.roundTrip(
-                socketPath: socketOptions.socket,
-                request: TillerctlRequestBuilder.panelCreate(worktree: worktree, cmd: cmd)
+            let worktree = try requiredPanelTarget(
+                explicit: worktree,
+                environment: ProcessInfo.processInfo.environment,
+                key: "TILLER_WORKTREE_ID",
+                option: "--worktree"
             )
-            guard response.ok, let panelId = response.result?["panelId"] else {
-                throw ValidationError(response.error ?? "panel.create failed")
-            }
-            print(panelId)
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.panelCreate(worktree: worktree, cmd: cmd),
+                socket: socketOptions.socket
+            )
+            let id = try requireCreatedPaneID(response)
+            print(try createdPaneOutput(id: id, json: json))
+        }
+    }
+
+    struct Split: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument(help: "left | right | up | down") var direction: PanelDirection
+        @Option(name: .customLong("from")) var from: String?
+        @Option(name: .customLong("cmd")) var cmd: String?
+        @Flag(name: .customLong("json")) var json = false
+
+        func run() throws {
+            let source = try requiredPanelTarget(
+                explicit: from,
+                environment: ProcessInfo.processInfo.environment,
+                key: "TILLER_PANE_ID",
+                option: "--from"
+            )
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.panelSplit(
+                    from: source,
+                    direction: direction.rawValue,
+                    cmd: cmd
+                ),
+                socket: socketOptions.socket
+            )
+            print(try createdPaneOutput(
+                id: requireCreatedPaneID(response),
+                json: json
+            ))
+        }
+    }
+
+    struct List: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Option(name: .customLong("worktree")) var worktree: String?
+        @Flag(name: .customLong("json")) var json = false
+
+        func run() throws {
+            let worktree = try requiredPanelTarget(
+                explicit: worktree,
+                environment: ProcessInfo.processInfo.environment,
+                key: "TILLER_WORKTREE_ID",
+                option: "--worktree"
+            )
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.panelList(worktree: worktree),
+                socket: socketOptions.socket
+            )
+            printRows(
+                response,
+                key: "panels",
+                columns: ["id", "tab", "title", "agent", "active"],
+                asJSON: json
+            )
         }
     }
 
@@ -51,28 +155,43 @@ struct Panel: ParsableCommand {
         @OptionGroup var socketOptions: SocketOptions
         @Option var id: String
         @Option var input: String
-        @Flag(help: "Append newline (send Enter).") var enter = false
+        @Flag(help: "Append Enter.") var enter = false
+
         func run() throws {
-            let payload = enter ? input + "\r" : input
-            let response = try ControlClient.roundTrip(
-                socketPath: socketOptions.socket,
-                request: TillerctlRequestBuilder.panelWrite(id: id, input: payload)
+            let payload = input + (enter ? "\r" : "")
+            _ = try roundTripOrDie(
+                TillerctlRequestBuilder.panelWrite(id: id, input: payload),
+                socket: socketOptions.socket
             )
-            guard response.ok else { throw ValidationError(response.error ?? "panel.write failed") }
+        }
+    }
+
+    struct Key: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Option var id: String
+        @Argument(help: "enter | tab | escape | backspace | delete | up | down | left | right")
+        var key: TerminalKey
+
+        func run() throws {
+            _ = try roundTripOrDie(
+                TillerctlRequestBuilder.panelKey(id: id, key: key.rawValue),
+                socket: socketOptions.socket
+            )
         }
     }
 
     struct Read: ParsableCommand {
         @OptionGroup var socketOptions: SocketOptions
         @Option var id: String
+
         func run() throws {
-            let response = try ControlClient.roundTrip(
-                socketPath: socketOptions.socket,
-                request: TillerctlRequestBuilder.panelRead(id: id)
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.panelRead(id: id),
+                socket: socketOptions.socket
             )
-            guard response.ok, let b64 = response.result?["output"],
-                  let data = Data(base64Encoded: b64) else {
-                throw ValidationError(response.error ?? "panel.read failed")
+            guard let encoded = response.result?["output"],
+                  let data = Data(base64Encoded: encoded) else {
+                throw ValidationError("panel.read returned invalid output")
             }
             FileHandle.standardOutput.write(data)
         }
@@ -82,17 +201,51 @@ struct Panel: ParsableCommand {
         @OptionGroup var socketOptions: SocketOptions
         @Option var id: String
         @Option(name: .customLong("timeout-ms")) var timeoutMs: Int?
+
         func run() throws {
-            let response = try ControlClient.roundTrip(
-                socketPath: socketOptions.socket,
-                request: TillerctlRequestBuilder.panelWait(id: id, timeoutMs: timeoutMs),
-                timeoutSeconds: timeoutMs.map { $0 / 1000 + 30 } ?? 86_400
+            if let timeoutMs, timeoutMs < 0 {
+                throw ValidationError("--timeout-ms must be non-negative")
+            }
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.panelWait(id: id, timeoutMs: timeoutMs),
+                socket: socketOptions.socket,
+                timeoutSeconds: panelWaitTimeoutSeconds(timeoutMs: timeoutMs)
             )
-            guard response.ok, let codeString = response.result?["exitCode"],
+            guard let codeString = response.result?["exitCode"],
                   let code = Int32(codeString) else {
-                throw ValidationError(response.error ?? "panel.wait failed/timeout")
+                throw ValidationError("panel.wait returned no exit code")
             }
             throw ExitCode(code)
+        }
+    }
+
+    struct Focus: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Option var id: String
+
+        func run() throws {
+            _ = try roundTripOrDie(
+                TillerctlRequestBuilder.panelFocus(id: id),
+                socket: socketOptions.socket
+            )
+        }
+    }
+
+    struct Close: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Option var id: String?
+
+        func run() throws {
+            let target = try requiredPanelTarget(
+                explicit: id,
+                environment: ProcessInfo.processInfo.environment,
+                key: "TILLER_PANE_ID",
+                option: "--id"
+            )
+            _ = try roundTripOrDie(
+                TillerctlRequestBuilder.panelClose(id: target),
+                socket: socketOptions.socket
+            )
         }
     }
 }
