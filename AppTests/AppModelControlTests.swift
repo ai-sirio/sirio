@@ -261,9 +261,47 @@ struct AppModelControlTests {
         ))
 
         #expect(result.ok == false)
+        #expect(result.error == "panel could not be focused")
         #expect(model.selectedWorktree?.id == worktree.id)
         #expect(model.activeTabId[worktree.id] == tab.id)
         #expect(activation.count == 1)
+    }
+
+    @Test func focusRejectsUnknownInvalidAndMissingPanelIds() async {
+        let model = makeModel()
+        let unknown = await model.handleControl(request(
+            "panel.focus", ["id": UUID().uuidString]
+        ))
+        let invalid = await model.handleControl(request(
+            "panel.focus", ["id": "not-a-uuid"]
+        ))
+        let missing = await model.handleControl(request("panel.focus"))
+
+        #expect(unknown.error == "unknown panel")
+        #expect(invalid.error == "unknown panel")
+        #expect(missing.error == "unknown panel")
+    }
+
+    @Test func cancelledFocusReturnsPromptly() async {
+        let model = makeModel(timeoutMs: 1_000)
+        let worktree = makeWorktree(path: "/tmp/focus-cancelled")
+        let paneId = UUID()
+        let tab = WorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
+        model.worktrees = [worktree.projectId: [worktree]]
+        model.tabs[worktree.id] = [tab]
+
+        let task = Task {
+            await model.handleControl(request("panel.focus", ["id": paneId.uuidString]))
+        }
+        await Task.yield()
+        let clock = ContinuousClock()
+        let start = clock.now
+        task.cancel()
+        let result = await task.value
+        let elapsed = start.duration(to: clock.now)
+
+        #expect(elapsed < .milliseconds(250))
+        #expect(result.error == "panel could not be focused")
     }
 
     @Test func createFailsAndRollsBackWhenPersistenceFails() async {
@@ -324,6 +362,51 @@ struct AppModelControlTests {
         #expect(await task.value.ok)
     }
 
+    @Test func concurrentCreateTimeoutNeverPersistsPendingPane() async {
+        let registry = PaneRegistry()
+        let successfulPaneId = UUID()
+        let failedPaneId = UUID()
+        var generatedPaneIds = [successfulPaneId, failedPaneId]
+        let recorder = ControlPersistenceRecorder()
+        let model = AppModel(
+            paneRegistry: registry,
+            registrationTimeoutMs: 200,
+            paneIdGenerator: { generatedPaneIds.removeFirst() },
+            activateApplication: {},
+            controlTabPersister: { _, tabs, _ in
+                await recorder.record(tabs.flatMap(\.leafIds))
+            }
+        )
+        let worktree = makeWorktree(path: "/tmp/concurrent-persistence")
+        model.worktrees = [worktree.projectId: [worktree]]
+
+        let successfulTask = Task {
+            await model.handleControl(request(
+                "panel.create", ["worktree": worktree.id.uuidString]
+            ))
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+        let failedTask = Task {
+            await model.handleControl(request(
+                "panel.create", ["worktree": worktree.id.uuidString]
+            ))
+        }
+        try? await Task.sleep(for: .milliseconds(20))
+        await registry.register(
+            paneId: successfulPaneId,
+            pty: PtyProcess { _ in },
+            scrollback: ScrollbackBuffer()
+        )
+
+        let successful = await successfulTask.value
+        let failed = await failedTask.value
+        let snapshots = await recorder.snapshots
+
+        #expect(successful.ok)
+        #expect(failed.error == "panel did not register before timeout")
+        #expect(snapshots.allSatisfy { !$0.contains(failedPaneId) })
+    }
+
     private func makeModel(
         registry: PaneRegistry = PaneRegistry(),
         paneId: UUID = UUID(),
@@ -372,6 +455,14 @@ private actor ResponseBox {
 }
 
 private enum ControlPersistenceFailure: Error { case failed }
+
+private actor ControlPersistenceRecorder {
+    private(set) var snapshots: [[UUID]] = []
+
+    func record(_ paneIds: [UUID]) {
+        snapshots.append(paneIds)
+    }
+}
 
 private actor PersistenceGate {
     private(set) var started = false

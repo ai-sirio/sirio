@@ -176,6 +176,7 @@ final class AppModel {
 
     private var controlMountStates: [UUID: ControlMountState] = [:]
     private var tabPersistenceTasks: [UUID: Task<Void, Never>] = [:]
+    private var controlLifecycleTasks: [UUID: Task<ControlResponse, Never>] = [:]
 
     init(
         paneRegistry: PaneRegistry = .shared,
@@ -336,42 +337,50 @@ final class AppModel {
                   let worktree = resolveWorktree(selector) else {
                 return .failure(id: request.id, error: "unknown worktree")
             }
-            let paneId = paneIdGenerator()
-            if let command = request.params["cmd"] { paneCommands[paneId] = command }
-            let mountLease = acquireControlMount(for: worktree.id)
-            let title = request.params["cmd"]?
-                .split(separator: " ").first.map(String.init) ?? "Panel"
-            let tab = openTab(
-                paneId: paneId, title: title, in: worktree,
-                activate: false, persist: false
-            )
+            return await serializeControlLifecycle(for: worktree.id) {
+                let paneId = self.paneIdGenerator()
+                if let command = request.params["cmd"] { self.paneCommands[paneId] = command }
+                let mountLease = self.acquireControlMount(for: worktree.id)
+                let title = request.params["cmd"]?
+                    .split(separator: " ").first.map(String.init) ?? "Panel"
+                let tab = self.openTab(
+                    paneId: paneId, title: title, in: worktree,
+                    activate: false, persist: false
+                )
 
-            guard await paneRegistry.waitUntilRegistered(
-                paneId: paneId, timeoutMs: registrationTimeoutMs
-            ) else {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "panel did not register before timeout")
+                guard await self.paneRegistry.waitUntilRegistered(
+                    paneId: paneId, timeoutMs: self.registrationTimeoutMs
+                ) else {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(
+                        id: request.id, error: "panel did not register before timeout"
+                    )
+                }
+                guard self.tabContaining(paneId: paneId) != nil else {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(
+                        id: request.id, error: "panel was closed before registration completed"
+                    )
+                }
+                do {
+                    try await self.persistControlTabs(for: worktree.id)
+                } catch {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(
+                        id: request.id, error: "panel persistence failed: \(error)"
+                    )
+                }
+                self.releaseControlMount(mountLease, success: true)
+                return .success(id: request.id, result: ["id": paneId.uuidString])
             }
-            guard tabContaining(paneId: paneId) != nil else {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "panel was closed before registration completed")
-            }
-            do {
-                try await persistControlTabs(for: worktree.id)
-            } catch {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "panel persistence failed: \(error)")
-            }
-            releaseControlMount(mountLease, success: true)
-            return .success(id: request.id, result: ["id": paneId.uuidString])
 
         case "panel.split":
             guard let sourceId = request.params["from"].flatMap(UUID.init(uuidString:)),
@@ -390,45 +399,53 @@ final class AppModel {
                     id: request.id, error: "invalid direction (left|right|up|down)"
                 )
             }
-            let paneId = paneIdGenerator()
-            if let command = request.params["cmd"] { paneCommands[paneId] = command }
-            let mountLease = acquireControlMount(for: source.worktree.id)
-            guard split(
-                paneId: sourceId, axis: axis, newPaneId: paneId, placement: placement,
-                persist: false
-            ) else {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "source panel disappeared")
-            }
+            return await serializeControlLifecycle(for: source.worktree.id) {
+                let paneId = self.paneIdGenerator()
+                if let command = request.params["cmd"] { self.paneCommands[paneId] = command }
+                let mountLease = self.acquireControlMount(for: source.worktree.id)
+                guard self.split(
+                    paneId: sourceId, axis: axis, newPaneId: paneId, placement: placement,
+                    persist: false
+                ) else {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(id: request.id, error: "source panel disappeared")
+                }
 
-            guard await paneRegistry.waitUntilRegistered(
-                paneId: paneId, timeoutMs: registrationTimeoutMs
-            ) else {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                rollbackCreatedLeaf(paneId)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "panel did not register before timeout")
+                guard await self.paneRegistry.waitUntilRegistered(
+                    paneId: paneId, timeoutMs: self.registrationTimeoutMs
+                ) else {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.rollbackCreatedLeaf(paneId)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(
+                        id: request.id, error: "panel did not register before timeout"
+                    )
+                }
+                guard self.tabContaining(paneId: paneId) != nil else {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(
+                        id: request.id, error: "panel was closed before registration completed"
+                    )
+                }
+                do {
+                    try await self.persistControlTabs(for: source.worktree.id)
+                } catch {
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.rollbackCreatedLeaf(paneId)
+                    self.paneCommands[paneId] = nil
+                    self.releaseControlMount(mountLease, success: false)
+                    return .failure(
+                        id: request.id, error: "panel persistence failed: \(error)"
+                    )
+                }
+                self.releaseControlMount(mountLease, success: true)
+                return .success(id: request.id, result: ["id": paneId.uuidString])
             }
-            guard tabContaining(paneId: paneId) != nil else {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "panel was closed before registration completed")
-            }
-            do {
-                try await persistControlTabs(for: source.worktree.id)
-            } catch {
-                await paneRegistry.cancelRegistration(paneId: paneId)
-                rollbackCreatedLeaf(paneId)
-                paneCommands[paneId] = nil
-                releaseControlMount(mountLease, success: false)
-                return .failure(id: request.id, error: "panel persistence failed: \(error)")
-            }
-            releaseControlMount(mountLease, success: true)
-            return .success(id: request.id, result: ["id": paneId.uuidString])
 
         case "panel.list":
             guard let selector = request.params["worktree"],
@@ -503,30 +520,40 @@ final class AppModel {
 
         case "panel.focus":
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
-                  await focusPane(paneId: paneId) else {
+                  tabContaining(paneId: paneId) != nil else {
                 return .failure(id: request.id, error: "unknown panel")
+            }
+            guard await focusPane(paneId: paneId) else {
+                return .failure(id: request.id, error: "panel could not be focused")
             }
             return .success(id: request.id)
 
         case "panel.close":
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
-                  let removal = removePaneForControl(paneId) else {
+                  let target = tabContaining(paneId: paneId) else {
                 return .failure(id: request.id, error: "unknown panel")
             }
-            do {
-                try await persistControlTabs(for: removal.worktreeId)
-            } catch {
-                tabs[removal.worktreeId] = removal.tabs
-                activeTabId[removal.worktreeId] = removal.activeTabId
-                return .failure(id: request.id, error: "panel persistence failed: \(error)")
+            return await serializeControlLifecycle(for: target.worktree.id) {
+                guard let removal = self.removePaneForControl(paneId) else {
+                    return .failure(id: request.id, error: "unknown panel")
+                }
+                do {
+                    try await self.persistControlTabs(for: removal.worktreeId)
+                } catch {
+                    self.tabs[removal.worktreeId] = removal.tabs
+                    self.activeTabId[removal.worktreeId] = removal.activeTabId
+                    return .failure(
+                        id: request.id, error: "panel persistence failed: \(error)"
+                    )
+                }
+                await self.paneRegistry.cancelRegistration(paneId: paneId)
+                self.deleteAgentSessionRefs(paneIds: [paneId])
+                self.paneCommands[paneId] = nil
+                self.paneCaches[removal.worktreeId]?.prune(
+                    keeping: self.liveLeafIds(for: removal.worktreeId)
+                )
+                return .success(id: request.id)
             }
-            await paneRegistry.cancelRegistration(paneId: paneId)
-            deleteAgentSessionRefs(paneIds: [paneId])
-            paneCommands[paneId] = nil
-            paneCaches[removal.worktreeId]?.prune(
-                keeping: liveLeafIds(for: removal.worktreeId)
-            )
-            return .success(id: request.id)
 
         case "notify":
             guard let sessionId = UUID(uuidString: request.params["session"] ?? ""),
@@ -1093,6 +1120,19 @@ final class AppModel {
         try await operation.value.get()
     }
 
+    private func serializeControlLifecycle(
+        for worktreeId: UUID,
+        _ operation: @escaping @MainActor () async -> ControlResponse
+    ) async -> ControlResponse {
+        let previous = controlLifecycleTasks[worktreeId]
+        let task = Task { @MainActor in
+            _ = await previous?.value
+            return await operation()
+        }
+        controlLifecycleTasks[worktreeId] = task
+        return await task.value
+    }
+
     func persistTabs(for worktreeId: UUID) {
         paneCaches[worktreeId]?.prune(keeping: liveLeafIds(for: worktreeId))
         guard let store else { return }
@@ -1499,9 +1539,15 @@ final class AppModel {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .milliseconds(registrationTimeoutMs))
         while clock.now < deadline {
+            guard !Task.isCancelled else { return false }
             if paneCache(for: target.worktree.id).focus(paneId: paneId) { return true }
-            try? await Task.sleep(for: .milliseconds(25))
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                return false
+            }
         }
+        guard !Task.isCancelled else { return false }
         return paneCache(for: target.worktree.id).focus(paneId: paneId)
     }
 
