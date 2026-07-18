@@ -33,6 +33,7 @@
 		614368A068530D558CDE3D41 /* PermissionsOnboardingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 150990AF30F26D11CD77AD24 /* PermissionsOnboardingSheet.swift */; };
 		66BF97EA5D657DEDCB4A268D /* AddProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57203478CAD5658B46BACB4C /* AddProjectSheet.swift */; };
 		67FB529584389E037E1941C7 /* ChatController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E46DF390E43B7EA1794BB7 /* ChatController.swift */; };
+		689F0FEBB5755C13DB31C2BC /* WorkspaceTabIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6414000C1B38D33F09352947 /* WorkspaceTabIcon.swift */; };
 		6B7D18F4593A18BB823D5904 /* WindowChromeConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */; };
 		6C3B119F8CCC258257B30A09 /* ForegroundProcessAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */; };
 		6C5099F2710CFBEDF77DD19A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A4CA6EAB10E9F2FCB375761 /* Sparkle */; };
@@ -79,6 +80,7 @@
 		F6AD882DD7A4C16F04FB30A3 /* TillerTerminal in Frameworks */ = {isa = PBXBuildFile; productRef = 238DCD7AA25319E277DDC65C /* TillerTerminal */; };
 		F83B9970BCEAC4026B3510F5 /* icon-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = D2BA4247A916A8C34143444D /* icon-1024.png */; };
 		FA02E7A2441C7BBCA5152F15 /* background-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 09EE812CA04BE25192955CA0 /* background-1024.png */; };
+		FACE3803227ABE03D36D87B1 /* NewTabMenuItems.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -119,6 +121,7 @@
 		57203478CAD5658B46BACB4C /* AddProjectSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddProjectSheet.swift; sourceTree = "<group>"; };
 		61AFD75A225D957FBD64864D /* TillerControl */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerControl; path = Packages/TillerControl; sourceTree = SOURCE_ROOT; };
 		62524A82001D878B38DEDBDB /* GitStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitStatusView.swift; sourceTree = "<group>"; };
+		6414000C1B38D33F09352947 /* WorkspaceTabIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTabIcon.swift; sourceTree = "<group>"; };
 		64880FCA0680E0D6E7A1DFC4 /* spokes-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "spokes-1024.png"; sourceTree = "<group>"; };
 		66D18AD8984B39142C8D80EC /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		67334A794B95BBFBA6C2255E /* TillerAgents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerAgents; path = Packages/TillerAgents; sourceTree = SOURCE_ROOT; };
@@ -135,6 +138,7 @@
 		8B09A03733A33C9FDC925A05 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		9A4F40CB425225370C05E048 /* TillerTerminal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerTerminal; path = Packages/TillerTerminal; sourceTree = SOURCE_ROOT; };
 		9B5A41F673927F0554385559 /* TillerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerApp.swift; sourceTree = "<group>"; };
+		9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTabMenuItems.swift; sourceTree = "<group>"; };
 		A05EFE98529F40E18CF9A8F2 /* ToolCallCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCallCardView.swift; sourceTree = "<group>"; };
 		A7E71C8D94D39CE2EEAE0993 /* MarkdownToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownToolbar.swift; sourceTree = "<group>"; };
 		A7F5ABE295C5749A082FD8FA /* RightPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelView.swift; sourceTree = "<group>"; };
@@ -291,6 +295,7 @@
 				526AD5B187E48B97E58C72C4 /* HideOnCloseWindowDelegate.swift */,
 				1FE0F25AF11FFCF1C640CB80 /* Info.plist */,
 				6ED264D1B3306C90BC890ECE /* MenuBarStatusIcon.swift */,
+				9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */,
 				49151B264C9CB940952FCDAB /* OllamaCloudUsageFetcher.swift */,
 				089712CC679CF6D60EAEF02A /* OpenCodeGoUsageFetcher.swift */,
 				6FA9BFA1A8C9B14562E393FD /* ProjectSettingsSheet.swift */,
@@ -304,6 +309,7 @@
 				2D0C9843AF412998E675F96E /* UsageBarView.swift */,
 				02D06C430BAE462C3046E741 /* UsageStore.swift */,
 				4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */,
+				6414000C1B38D33F09352947 /* WorkspaceTabIcon.swift */,
 				84F98EF0C9277586AF581624 /* WorktreeRunningAgentsBadge.swift */,
 				BD047B77D2E168922ADC710C /* WorktreeStatusGlyph.swift */,
 				6AE84D5A8B781C271F951395 /* Chat */,
@@ -529,6 +535,7 @@
 				C25533F2D034C7F522E85A9A /* MarkdownEditorTabView.swift in Sources */,
 				0861C10C3B431CD58B516CF6 /* MarkdownToolbar.swift in Sources */,
 				8ECABD13D02543070A0AD0F9 /* MenuBarStatusIcon.swift in Sources */,
+				FACE3803227ABE03D36D87B1 /* NewTabMenuItems.swift in Sources */,
 				1A0AA30587BDFB6593034A29 /* OllamaCloudUsageFetcher.swift in Sources */,
 				F58EDD6213BE3AA8EF5359E0 /* OpenCodeGoUsageFetcher.swift in Sources */,
 				614368A068530D558CDE3D41 /* PermissionsOnboardingSheet.swift in Sources */,
@@ -552,6 +559,7 @@
 				AFB018A382E93E4115418A67 /* UsageBarView.swift in Sources */,
 				EE266911819FBECC153B9B8A /* UsageStore.swift in Sources */,
 				6B7D18F4593A18BB823D5904 /* WindowChromeConfigurator.swift in Sources */,
+				689F0FEBB5755C13DB31C2BC /* WorkspaceTabIcon.swift in Sources */,
 				7F65A45109736224BECDB901 /* WorktreeRunningAgentsBadge.swift in Sources */,
 				460BCA1B1C8C29F719F14052 /* WorktreeStatusGlyph.swift in Sources */,
 			);
