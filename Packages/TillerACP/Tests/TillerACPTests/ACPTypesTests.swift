@@ -37,6 +37,44 @@ import Foundation
         #expect(result.modes?.availableModes.count == 2)
     }
 
+    @Test func decodesNewSessionResultWithModels() throws {
+        // claude-code-acp shape: standard ACP model selector.
+        let json = Data("""
+        {"sessionId":"sess-1","models":{"currentModelId":"default",
+         "availableModels":[
+           {"modelId":"default","name":"Default (recommended)","description":"Opus"},
+           {"modelId":"sonnet","name":"Sonnet"}]}}
+        """.utf8)
+        let result = try JSONDecoder().decode(NewSessionResult.self, from: json)
+        #expect(result.resolvedModels?.currentModelId == "default")
+        #expect(result.resolvedModels?.availableModels.map(\.name)
+                == ["Default (recommended)", "Sonnet"])
+    }
+
+    @Test func derivesModelsFromOpenCodeConfigOptions() throws {
+        // OpenCode 1.18 shape: no "models", a configOptions "model" select.
+        let json = Data("""
+        {"sessionId":"ses_1","configOptions":[
+          {"id":"model","name":"Model","type":"select","currentValue":"openai/gpt-5.4",
+           "options":[{"value":"openai/gpt-5.4","name":"OpenAI/GPT-5.4"},
+                      {"value":"openai/gpt-5.6-luna","name":"OpenAI/GPT-5.6 Luna"}]},
+          {"id":"effort","name":"Effort","type":"select","currentValue":"medium",
+           "options":[{"value":"medium","name":"Medium"}]}]}
+        """.utf8)
+        let result = try JSONDecoder().decode(NewSessionResult.self, from: json)
+        #expect(result.resolvedModels?.currentModelId == "openai/gpt-5.4")
+        #expect(result.resolvedModels?.availableModels.map(\.modelId)
+                == ["openai/gpt-5.4", "openai/gpt-5.6-luna"])
+        #expect(result.resolvedModels?.availableModels.map(\.name)
+                == ["OpenAI/GPT-5.4", "OpenAI/GPT-5.6 Luna"])
+    }
+
+    @Test func resolvedModelsIsNilWithoutModelData() throws {
+        let json = Data(#"{"sessionId":"sess-1"}"#.utf8)
+        let result = try JSONDecoder().decode(NewSessionResult.self, from: json)
+        #expect(result.resolvedModels == nil)
+    }
+
     @Test func decodesStopReason() throws {
         let result = try JSONDecoder().decode(
             PromptResult.self, from: Data(#"{"stopReason":"end_turn"}"#.utf8))

@@ -143,12 +143,55 @@ struct ChatComposerView: View {
         }
     }
 
+    /// Model selector when the agent advertises models (both v1 agents do);
+    /// plain agent badge otherwise.
+    @ViewBuilder
     private var agentPill: some View {
-        HStack(spacing: 5) {
-            AgentIcon(agentId: controller.agentId, size: 11)
-            Text(agentDisplayName).font(.caption)
+        if let models = controller.models, !models.availableModels.isEmpty {
+            Menu {
+                ForEach(models.availableModels, id: \.modelId) { model in
+                    Button {
+                        Task { await controller.setModel(model.modelId) }
+                    } label: {
+                        if model.modelId == models.currentModelId {
+                            Label(modelMenuTitle(model), systemImage: "checkmark")
+                        } else {
+                            Text(modelMenuTitle(model))
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    AgentIcon(agentId: controller.agentId, size: 11)
+                    Text(currentModelName).font(.caption).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .modifier(PillBackground())
+        } else {
+            HStack(spacing: 5) {
+                AgentIcon(agentId: controller.agentId, size: 11)
+                Text(agentDisplayName).font(.caption)
+            }
+            .modifier(PillBackground())
         }
-        .modifier(PillBackground())
+    }
+
+    private var currentModelName: String {
+        guard let models = controller.models else { return agentDisplayName }
+        return models.availableModels
+            .first { $0.modelId == models.currentModelId }?.name
+            ?? models.currentModelId
+    }
+
+    private func modelMenuTitle(_ model: ModelInfo) -> String {
+        if let description = model.description, !description.isEmpty {
+            return "\(model.name) — \(description)"
+        }
+        return model.name
     }
 
     private var agentDisplayName: String {
