@@ -8,6 +8,10 @@ import TillerCore
 struct TabBarView: View {
     @Bindable var model: AppModel
     let worktree: Worktree
+    @State private var contentWidth: CGFloat = 0
+    @State private var viewportWidth: CGFloat = 0
+
+    private var isOverflowing: Bool { contentWidth > viewportWidth + 1 }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -20,14 +24,42 @@ struct TabBarView: View {
                         }
                     }
                     .padding(.leading, 6)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                        contentWidth = $0
+                    }
                 }
                 .onChange(of: model.activeTabId[worktree.id]) { _, newValue in
                     guard let id = newValue else { return }
                     withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(id) }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                    viewportWidth = $0
+                }
             }
 
             Spacer(minLength: 0)
+            if isOverflowing {
+                Menu {
+                    ForEach(model.tabs[worktree.id] ?? []) { tab in
+                        Button {
+                            model.activateTab(tab.id, in: worktree.id)
+                        } label: {
+                            if model.activeTab(for: worktree.id)?.id == tab.id {
+                                Label(tab.title, systemImage: "checkmark")
+                            } else {
+                                Text(tab.title)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10))
+                        .foregroundStyle(AppTheme.meta)
+                }
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .help("Tutte le tab")
+            }
 
             Menu {
                 NewTabMenuItems(model: model, worktree: worktree)
