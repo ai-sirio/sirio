@@ -199,3 +199,18 @@ import TillerPersistence
     #expect(loaded.tabs.isEmpty)
     #expect(loaded.activeTabId == nil)
 }
+
+@Test func chatTabRoundTrips() async throws {
+    let db = try AppDatabase.inMemory()
+    let store = ProjectStore(database: db)
+    let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
+    let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
+    let tab = WorkspaceTab(id: UUID(), title: "Claude Code",
+                           content: .chat(agentId: "claude"))
+    try await store.saveTabs(worktreeId: worktree.id, tabs: [tab], activeTabId: tab.id)
+    let loaded = try await store.loadTabs(of: worktree.id)
+    #expect(loaded.tabs.count == 1)
+    #expect(loaded.tabs.first?.chatAgentId == "claude")
+    #expect(loaded.tabs.first?.id == tab.id)
+    #expect(loaded.activeTabId == tab.id)
+}

@@ -132,6 +132,11 @@ public final class AppDatabase: Sendable {
                 t.primaryKey(["sessionId", "ordinal"])
             }
         }
+        migrator.registerMigration("v9") { db in
+            try db.alter(table: "terminalTab") { t in
+                t.add(column: "chatAgentId", .text)
+            }
+        }
         return migrator
     }
 }
