@@ -147,6 +147,31 @@ public struct TranscriptReducer: Sendable, Equatable {
         }
     }
 
+    /// Attaches a pending permission to its tool call, creating the card from
+    /// the request's embedded tool call payload when we never saw the call.
+    public mutating func permissionRequested(requestId: JSONRPCID,
+                                             toolCall: ToolCallUpdate,
+                                             options: [PermissionOption]) {
+        applyToolCallUpdate(toolCall)
+        guard let index = toolCallIndex(toolCall.toolCallId),
+              case .toolCall(var item) = items[index] else { return }
+        item.permission = PermissionState(requestId: requestId, options: options)
+        items[index] = .toolCall(item)
+    }
+
+    /// Records the user's (or cancellation's) answer to a permission request.
+    public mutating func permissionResolved(requestId: JSONRPCID,
+                                            resolution: PermissionState.Resolution) {
+        for index in items.indices {
+            guard case .toolCall(var item) = items[index],
+                  item.permission?.requestId == requestId,
+                  item.permission?.isPending == true else { continue }
+            item.permission?.resolution = resolution
+            items[index] = .toolCall(item)
+            return
+        }
+    }
+
     private func toolCallIndex(_ toolCallId: String) -> Int? {
         items.lastIndex {
             if case .toolCall(let item) = $0 { return item.toolCallId == toolCallId }
