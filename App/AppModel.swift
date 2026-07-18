@@ -907,6 +907,36 @@ final class AppModel {
         tabs[worktreeId]?[idx].title = trimmed
         persistTabs(for: worktreeId)
     }
+    /// Riordina la tab prima di `targetId` (nil = in coda). Usato dal drag
+    /// & drop di tab bar e sidebar; l'ordine persiste nello snapshot già
+    /// serializzato da persistTabs.
+    func moveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) {
+        guard let list = tabs[worktreeId] else { return }
+        let moved = TabOrdering.moving(list, id: tabId, before: targetId)
+        guard moved.map(\.id) != list.map(\.id) else { return }
+        tabs[worktreeId] = moved
+        persistTabs(for: worktreeId)
+    }
+
+    /// ⌘n: attiva la tab n del worktree selezionato (9 = ultima). Out of
+    /// range = no-op.
+    func selectTab(number: Int) {
+        guard let worktree = selectedWorktree,
+              let list = tabs[worktree.id],
+              let index = TabOrdering.selectionIndex(number: number, count: list.count)
+        else { return }
+        activateTab(list[index].id, in: worktree.id)
+    }
+
+    /// ⌃Tab / ⌃⇧Tab: cicla le tab del worktree selezionato con wrap-around.
+    func cycleTab(forward: Bool) {
+        guard let worktree = selectedWorktree, let list = tabs[worktree.id] else { return }
+        let current = list.firstIndex { $0.id == activeTab(for: worktree.id)?.id }
+        guard let index = TabOrdering.cycledIndex(
+            current: current, forward: forward, count: list.count
+        ) else { return }
+        activateTab(list[index].id, in: worktree.id)
+    }
 
     func splitCurrent(_ axis: SplitAxis) {
         guard let worktree = selectedWorktree,
