@@ -6,6 +6,7 @@ public struct SessionHandle: Sendable, Equatable {
     public var sessionId: String
     public var agentCapabilities: AgentCapabilities
     public var modes: SessionModeState?
+    public var models: SessionModelState?
     public var didResume: Bool
 }
 
@@ -83,7 +84,8 @@ public actor ACPSession {
             sessionId = resumeSessionId
             return SessionHandle(sessionId: resumeSessionId,
                                  agentCapabilities: initialize.agentCapabilities,
-                                 modes: loaded.modes, didResume: true)
+                                 modes: loaded.modes, models: loaded.resolvedModels,
+                                 didResume: true)
         }
 
         let created = try await client.request(
@@ -91,7 +93,8 @@ public actor ACPSession {
         sessionId = created.sessionId
         return SessionHandle(sessionId: created.sessionId,
                              agentCapabilities: initialize.agentCapabilities,
-                             modes: created.modes, didResume: false)
+                             modes: created.modes, models: created.resolvedModels,
+                             didResume: false)
     }
 
     /// Sends one user turn; suspends until the agent finishes it.
@@ -112,6 +115,14 @@ public actor ACPSession {
         guard let sessionId else { throw ACPSessionError.notConnected }
         _ = try await client.request(
             "session/set_mode", params: SetModeParams(sessionId: sessionId, modeId: modeId),
+            as: JSONValue.self)
+    }
+
+    public func setModel(_ modelId: String) async throws {
+        guard let sessionId else { throw ACPSessionError.notConnected }
+        _ = try await client.request(
+            "session/set_model",
+            params: SetModelParams(sessionId: sessionId, modelId: modelId),
             as: JSONValue.self)
     }
 

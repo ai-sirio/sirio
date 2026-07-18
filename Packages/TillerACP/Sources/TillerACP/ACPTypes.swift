@@ -114,9 +114,61 @@ public struct SessionModeState: Sendable, Equatable, Codable {
     }
 }
 
+public struct ModelInfo: Sendable, Equatable, Codable {
+    public var modelId: String
+    public var name: String
+    public var description: String?
+    public init(modelId: String, name: String, description: String? = nil) {
+        self.modelId = modelId
+        self.name = name
+        self.description = description
+    }
+}
+
+public struct SessionModelState: Sendable, Equatable, Codable {
+    public var currentModelId: String
+    public var availableModels: [ModelInfo]
+    public init(currentModelId: String, availableModels: [ModelInfo]) {
+        self.currentModelId = currentModelId
+        self.availableModels = availableModels
+    }
+
+    /// OpenCode doesn't send the standard `models` field; its `session/new`
+    /// carries a `configOptions` select with id "model" instead. Map it to the
+    /// standard shape so the rest of the app sees one model API.
+    init?(configOptions: [SessionConfigOption]) {
+        guard let option = configOptions.first(where: { $0.id == "model" }),
+              let current = option.currentValue,
+              let choices = option.options, !choices.isEmpty else { return nil }
+        self.init(currentModelId: current,
+                  availableModels: choices.map {
+                      ModelInfo(modelId: $0.value, name: $0.name)
+                  })
+    }
+}
+
+/// One entry of OpenCode's non-standard `configOptions` (model/effort/mode).
+public struct SessionConfigOption: Sendable, Equatable, Codable {
+    public struct Choice: Sendable, Equatable, Codable {
+        public var value: String
+        public var name: String
+    }
+    public var id: String
+    public var currentValue: String?
+    public var options: [Choice]?
+}
+
 public struct NewSessionResult: Sendable, Equatable, Codable {
     public var sessionId: String
     public var modes: SessionModeState?
+    public var models: SessionModelState?
+    public var configOptions: [SessionConfigOption]?
+
+    /// Standard `models` when present, else derived from OpenCode's
+    /// `configOptions`; nil when the agent offers no model choice.
+    public var resolvedModels: SessionModelState? {
+        models ?? configOptions.flatMap(SessionModelState.init(configOptions:))
+    }
 }
 
 public struct LoadSessionParams: Sendable, Equatable, Codable {
@@ -130,9 +182,15 @@ public struct LoadSessionParams: Sendable, Equatable, Codable {
     }
 }
 
-/// `session/load` result: same optional modes payload as `session/new`.
+/// `session/load` result: same optional modes/models payload as `session/new`.
 public struct LoadSessionResult: Sendable, Equatable, Codable {
     public var modes: SessionModeState?
+    public var models: SessionModelState?
+    public var configOptions: [SessionConfigOption]?
+
+    public var resolvedModels: SessionModelState? {
+        models ?? configOptions.flatMap(SessionModelState.init(configOptions:))
+    }
 }
 
 // MARK: - prompting
@@ -169,5 +227,16 @@ public struct SetModeParams: Sendable, Equatable, Codable {
     public init(sessionId: String, modeId: String) {
         self.sessionId = sessionId
         self.modeId = modeId
+    }
+}
+
+/// `session/set_model` — accepted by both claude-code-acp and opencode
+/// (verified empirically; both answer `{}`).
+public struct SetModelParams: Sendable, Equatable, Codable {
+    public var sessionId: String
+    public var modelId: String
+    public init(sessionId: String, modelId: String) {
+        self.sessionId = sessionId
+        self.modelId = modelId
     }
 }

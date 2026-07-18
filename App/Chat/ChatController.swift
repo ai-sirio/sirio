@@ -21,6 +21,7 @@ final class ChatController {
 
     private(set) var state: ChatState = .idle
     private(set) var modes: SessionModeState?
+    private(set) var models: SessionModelState?
     private(set) var didResume = false
     private(set) var queued: [String] = []
     /// Transcript from a previous run shown read-only when the agent could
@@ -95,6 +96,7 @@ final class ChatController {
             let handle = try await session.connect(
                 cwd: worktreePath, resumeSessionId: record?.acpSessionId)
             modes = handle.modes
+            models = handle.models
             didResume = handle.didResume
             if handle.didResume, let record {
                 // Replay rebuilds the live transcript; drop the local copy.
@@ -191,6 +193,17 @@ final class ChatController {
 
     func setMode(_ modeId: String) async {
         try? await session?.setMode(modeId)
+    }
+
+    /// Optimistic: both adapters answer `{}` without a confirming
+    /// notification, so the pill reflects the choice immediately.
+    func setModel(_ modelId: String) async {
+        let previous = models?.currentModelId
+        models?.currentModelId = modelId
+        do { try await session?.setModel(modelId) } catch {
+            if let previous { models?.currentModelId = previous }
+            promptError = Self.describePromptError(error)
+        }
     }
 
     func answerPermission(requestId: JSONRPCID, optionId: String?) async {
