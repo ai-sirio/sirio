@@ -3,8 +3,8 @@ import Foundation
 import GRDB
 @testable import TillerPersistence
 
-/// A v1 database must survive full migration to head (v6) with all rows
-/// intact and correct defaults applied for columns added in v2–v6.
+/// A v1 database must survive full migration to head with all rows intact and
+/// correct defaults applied for columns added in v2–v6.
 @Test func v1DataSurvivesFullMigration() throws {
     let queue = try DatabaseQueue()
     try AppDatabase.migrator.migrate(queue, upTo: "v1")
@@ -27,7 +27,7 @@ import GRDB
             """, arguments: [blob])
     }
 
-    // Migrate to head (v6)
+    // Migrate to head
     try AppDatabase.migrator.migrate(queue)
 
     // Assert all v1 data survived and v2/v4 defaults are correct
@@ -50,7 +50,7 @@ import GRDB
     }
 }
 
-/// The migrator must apply all seven migrations in registration order so that a
+/// The migrator must apply all eight migrations in registration order so that a
 /// database created today can be migrated from any intermediate version.
 @Test func migrationsAreOrderedAndComplete() throws {
     let queue = try DatabaseQueue()
@@ -59,7 +59,7 @@ import GRDB
     let identifiers = try queue.read { db in
         try AppDatabase.migrator.appliedMigrations(db)
     }
-    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7"])
+    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"])
 }
 
 /// Applying migrations one at a time (stepwise) must produce the same final
@@ -75,12 +75,13 @@ import GRDB
     try AppDatabase.migrator.migrate(queueA, upTo: "v5")
     try AppDatabase.migrator.migrate(queueA, upTo: "v6")
     try AppDatabase.migrator.migrate(queueA, upTo: "v7")
+    try AppDatabase.migrator.migrate(queueA, upTo: "v8")
 
     // Queue B: direct to head
     let queueB = try DatabaseQueue()
     try AppDatabase.migrator.migrate(queueB)
 
-    // Compare schema SQL for the six user tables
+    // Compare schema SQL for the user tables
     let schemaSQL = { (queue: DatabaseQueue) -> [String] in
         try queue.read { db in
             let rows = try Row.fetchAll(db, sql: """

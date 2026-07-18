@@ -115,3 +115,38 @@ public struct AgentSessionRecord: Codable, FetchableRecord, PersistableRecord, S
         self.sessionRef = sessionRef; self.capturedAt = capturedAt
     }
 }
+
+/// One chat conversation bound to a worktree + agent. `acpSessionId` is the
+/// agent-side session reference used for `session/load` resume.
+public struct ChatSessionRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "chatSession"
+    public var id: String
+    public var worktreeId: String
+    public var agentId: String
+    public var acpSessionId: String?
+    public var createdAt: Date
+    public var lastActivityAt: Date
+
+    public init(id: String, worktreeId: String, agentId: String,
+                acpSessionId: String? = nil, createdAt: Date, lastActivityAt: Date) {
+        self.id = id; self.worktreeId = worktreeId; self.agentId = agentId
+        self.acpSessionId = acpSessionId
+        self.createdAt = createdAt; self.lastActivityAt = lastActivityAt
+    }
+}
+
+/// One transcript entry. `payload` is an opaque encoded blob owned by the
+/// caller (TillerACP encodes TranscriptItem); `kind` is denormalized for
+/// future queries.
+public struct ChatItemRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "chatItem"
+    public var sessionId: String
+    public var ordinal: Int
+    public var kind: String
+    public var payload: Data
+
+    public init(sessionId: String, ordinal: Int, kind: String, payload: Data) {
+        self.sessionId = sessionId; self.ordinal = ordinal
+        self.kind = kind; self.payload = payload
+    }
+}
