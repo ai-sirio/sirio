@@ -36,6 +36,7 @@
 		6B7D18F4593A18BB823D5904 /* WindowChromeConfigurator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */; };
 		6C3B119F8CCC258257B30A09 /* ForegroundProcessAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */; };
 		6C5099F2710CFBEDF77DD19A /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A4CA6EAB10E9F2FCB375761 /* Sparkle */; };
+		70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */; };
 		71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */; };
 		73A38617B2049BD55B5D772B /* SystemPermissionProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04B70914CB8B69AABCCE4C40 /* SystemPermissionProbe.swift */; };
 		76B712FC6C4121A72F3FCA1E /* RightPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7F5ABE295C5749A082FD8FA /* RightPanelView.swift */; };
@@ -121,6 +122,7 @@
 		66D18AD8984B39142C8D80EC /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		67334A794B95BBFBA6C2255E /* TillerAgents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerAgents; path = Packages/TillerAgents; sourceTree = SOURCE_ROOT; };
 		6ACCC88E1D2338FB9158DE59 /* TillerACP */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerACP; path = Packages/TillerACP; sourceTree = SOURCE_ROOT; };
+		6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerView.swift; sourceTree = "<group>"; };
 		6ED264D1B3306C90BC890ECE /* MenuBarStatusIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarStatusIcon.swift; sourceTree = "<group>"; };
 		6FA9BFA1A8C9B14562E393FD /* ProjectSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectSettingsSheet.swift; sourceTree = "<group>"; };
 		754ED987A43572FB14EBB2FD /* RightPanelMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelMode.swift; sourceTree = "<group>"; };
@@ -250,6 +252,7 @@
 		6AE84D5A8B781C271F951395 /* Chat */ = {
 			isa = PBXGroup;
 			children = (
+				6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */,
 				D1E46DF390E43B7EA1794BB7 /* ChatController.swift */,
 				A05EFE98529F40E18CF9A8F2 /* ToolCallCardView.swift */,
 				E5C26563F4760C9F22B2AF31 /* TranscriptView.swift */,
@@ -507,6 +510,7 @@
 				39AE727AD01F0280D8BA0B8B /* AppRoute.swift in Sources */,
 				EBEC08157A1EBB7DB44A3F5F /* AppTheme.swift in Sources */,
 				71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */,
+				70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */,
 				67FB529584389E037E1941C7 /* ChatController.swift in Sources */,
 				55B1AEC8546E6623C5C4B2C6 /* CodexUsageFetcher.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
