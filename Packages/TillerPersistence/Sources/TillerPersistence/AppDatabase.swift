@@ -113,6 +113,25 @@ public final class AppDatabase: Sendable {
                 t.add(column: "filePath", .text)
             }
         }
+        migrator.registerMigration("v8") { db in
+            try db.create(table: "chatSession") { t in
+                t.primaryKey("id", .text)
+                t.column("worktreeId", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("agentId", .text).notNull()
+                t.column("acpSessionId", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("lastActivityAt", .datetime).notNull()
+            }
+            try db.create(table: "chatItem") { t in
+                t.column("sessionId", .text).notNull()
+                    .references("chatSession", onDelete: .cascade)
+                t.column("ordinal", .integer).notNull()
+                t.column("kind", .text).notNull()
+                t.column("payload", .blob).notNull()
+                t.primaryKey(["sessionId", "ordinal"])
+            }
+        }
         return migrator
     }
 }
