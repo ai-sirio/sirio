@@ -12,7 +12,11 @@ public struct OpenCodeAdapter: AgentAdapter {
 
     public init() {}
 
-    public func prepare(worktreePath: String, paneId: UUID, tillerctlPath: String) throws {
+    public func prepare(
+        worktreePath: String,
+        paneId: UUID,
+        tillerctlPath: String
+    ) throws {
         let dir = URL(fileURLWithPath: worktreePath)
             .appendingPathComponent(".opencode/plugin")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

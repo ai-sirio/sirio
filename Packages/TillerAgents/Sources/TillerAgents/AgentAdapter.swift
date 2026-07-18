@@ -10,9 +10,7 @@ public protocol AgentAdapter: Sendable {
     /// `tillerctl notify`). False → Tiller watches the pane's exit code instead.
     var hasNativeHooks: Bool { get }
 
-    /// Writes per-worktree hook configuration.
-    /// - Note: NEVER touches user-global config (`~/.claude/settings.json`,
-    ///   `~/.codex/config.toml`, etc.).
+    /// Writes per-worktree hook configuration without touching user-global config.
     func prepare(worktreePath: String, paneId: UUID, tillerctlPath: String) throws
 
     /// Full shell command to run inside the pane.
@@ -23,6 +21,26 @@ public protocol AgentAdapter: Sendable {
     /// reference. `sessionRef` comes from the agentSession table.
     func resumeCommand(worktreePath: String, paneId: UUID,
                        tillerctlPath: String, sessionRef: String) -> String?
+}
+
+public extension AgentAdapter {
+    func prepare(
+        worktreePath: String,
+        paneId: UUID,
+        tillerctlPath: String,
+        skillMarkdown: String
+    ) throws {
+        try TillerSkillProvisioner.install(
+            markdown: skillMarkdown,
+            agentID: id,
+            worktreePath: worktreePath
+        )
+        try prepare(
+            worktreePath: worktreePath,
+            paneId: paneId,
+            tillerctlPath: tillerctlPath
+        )
+    }
 }
 
 /// Well-known adapters shipped with Tiller.

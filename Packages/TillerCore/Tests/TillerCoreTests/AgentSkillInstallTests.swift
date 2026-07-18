@@ -1,9 +1,11 @@
 import Testing
 @testable import TillerCore
 
-@Test func installCommandIsExactExpectedString() {
-    #expect(AgentSkillInstall.command ==
-        "npx skills add e-palmisano/tiller --skill tillerctl-cli -a claude-code,codex,opencode -y")
+@Test func installCommandTargetsCanonicalTillerSkill() {
+    #expect(
+        AgentSkillInstall.command
+            == "npx skills add e-palmisano/tiller --skill tiller -a claude-code,codex,opencode,pi -y"
+    )
 }
 
 @Test func appleScriptWrapsCommandInDoScript() {

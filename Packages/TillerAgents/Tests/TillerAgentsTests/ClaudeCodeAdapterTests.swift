@@ -8,7 +8,7 @@ import Foundation
     defer { try? FileManager.default.removeItem(atPath: dir) }
     let paneId = UUID()
     let adapter = ClaudeCodeAdapter()
-    try adapter.prepare(worktreePath: dir, paneId: paneId, tillerctlPath: "/usr/local/bin/tillerctl")
+    try adapter.prepare(worktreePath: dir, paneId: paneId, tillerctlPath: "/usr/local/bin/tillerctl", skillMarkdown: try repositorySkill())
     let data = try Data(contentsOf: URL(fileURLWithPath: dir + "/.claude/settings.local.json"))
     let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     let hooks = json?["hooks"] as? [String: Any]
@@ -30,7 +30,7 @@ import Foundation
     defer { try? FileManager.default.removeItem(atPath: dir) }
     let existing = #"{"permissions":{"allow":["Bash"]},"hooks":{"PreToolUse":[]}}"#
     try existing.write(toFile: dir + "/.claude/settings.local.json", atomically: true, encoding: .utf8)
-    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: "/x/tillerctl")
+    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: "/x/tillerctl", skillMarkdown: try repositorySkill())
     let json = try JSONSerialization.jsonObject(
         with: Data(contentsOf: URL(fileURLWithPath: dir + "/.claude/settings.local.json"))
     ) as? [String: Any]
@@ -38,6 +38,10 @@ import Foundation
     let hooks = json?["hooks"] as? [String: Any]
     #expect((hooks?["PreToolUse"] as? [Any]) != nil)                         // preserved
     #expect((hooks?["Stop"] as? [Any]) != nil)                               // added
+    #expect((hooks?["Notification"] as? [Any]) != nil)                       // added
+    #expect((hooks?["SessionStart"] as? [Any]) != nil)                       // added
+    #expect((hooks?["UserPromptSubmit"] as? [Any]) != nil)                   // added
+    #expect((hooks?["SessionEnd"] as? [Any]) != nil)                         // added
 }
 
 @Test func claudeCommandIsPlainLaunch() {
@@ -48,21 +52,3 @@ import Foundation
     #expect(ClaudeCodeAdapter().hasNativeHooks == true)
 }
 
-@Test func prepareWritesTillerSkill() throws {
-    let dir = NSTemporaryDirectory() + "tiller-agents-\(UUID().uuidString.prefix(8))"
-    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(atPath: dir) }
-    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: "/x/tillerctl")
-    let written = try String(contentsOfFile: dir + "/.claude/skills/tiller/SKILL.md", encoding: .utf8)
-    #expect(written == TillerSkillDocument.markdown)
-}
-
-@Test func prepareOverwritesStaleSkill() throws {
-    let dir = NSTemporaryDirectory() + "tiller-agents-\(UUID().uuidString.prefix(8))"
-    try FileManager.default.createDirectory(atPath: dir + "/.claude/skills/tiller", withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(atPath: dir) }
-    try "stale".write(toFile: dir + "/.claude/skills/tiller/SKILL.md", atomically: true, encoding: .utf8)
-    try ClaudeCodeAdapter().prepare(worktreePath: dir, paneId: UUID(), tillerctlPath: "/x/tillerctl")
-    let written = try String(contentsOfFile: dir + "/.claude/skills/tiller/SKILL.md", encoding: .utf8)
-    #expect(written == TillerSkillDocument.markdown)
-}

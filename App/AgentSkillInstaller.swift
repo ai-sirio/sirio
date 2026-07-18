@@ -1,10 +1,11 @@
 import Foundation
 import TillerCore
 
-/// Opens Terminal.app and immediately runs the tillerctl-cli skill install
-/// command. Not unit-tested: App has no test target, and this is a real
-/// side effect (launches an external app) — the command/script it runs is
+/// Opens Terminal.app and immediately runs the tiller skill install
+/// command. Not unit-tested because this is a real Terminal.app side effect;
+/// the command/script it runs is
 /// covered by AgentSkillInstallTests in TillerCore.
+/// Opens Terminal to install the public canonical `tiller` skill. Launched worktrees provision it automatically.
 enum AgentSkillInstaller {
     static func openTerminalAndInstall() {
         let process = Process()

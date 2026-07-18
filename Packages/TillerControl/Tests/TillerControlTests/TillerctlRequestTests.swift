@@ -63,25 +63,52 @@ import Testing
         .method == "workspace.close")
 }
 
-@Test func surfaceBuilders() {
-    #expect(TillerctlRequestBuilder.surfaceList().method == "surface.list")
-    #expect(TillerctlRequestBuilder.paneSurfaces().method == "pane.surfaces")
-    #expect(TillerctlRequestBuilder.surfaceFocus(surface: "S")
-        .params == ["surface": "S"])
-    #expect(TillerctlRequestBuilder.surfaceSplit(direction: "right")
-        .params == ["direction": "right"])
-    let send = TillerctlRequestBuilder.surfaceSendText(text: "ls\n", surface: nil)
-    #expect(send.method == "surface.send_text")
-    #expect(send.params == ["text": "ls\n"])      // nil surface omitted
-    let sendTo = TillerctlRequestBuilder.surfaceSendText(text: "x", surface: "S")
-    #expect(sendTo.params == ["text": "x", "surface": "S"])
-    let key = TillerctlRequestBuilder.surfaceSendKey(key: "enter", surface: nil)
-    #expect(key.method == "surface.send_key")
-    #expect(key.params == ["key": "enter"])
-    let close = TillerctlRequestBuilder.surfaceClose(surface: nil)
-    #expect(close.method == "surface.close")
-    #expect(close.params == [:])      // nil surface omitted
-    #expect(TillerctlRequestBuilder.surfaceClose(surface: "S").params == ["surface": "S"])
+@Test func canonicalPanelBuildersUseStableMethodsAndParameters() {
+    let create = TillerctlRequestBuilder.panelCreate(worktree: "worktree", cmd: "codex")
+    #expect(create.method == "panel.create")
+    #expect(create.params == ["worktree": "worktree", "cmd": "codex"])
+
+    let split = TillerctlRequestBuilder.panelSplit(
+        from: "source", direction: "right", cmd: "pi")
+    #expect(split.method == "panel.split")
+    #expect(split.params == ["from": "source", "direction": "right", "cmd": "pi"])
+
+    let list = TillerctlRequestBuilder.panelList(worktree: "/repo/worktree")
+    #expect(list.method == "panel.list")
+    #expect(list.params == ["worktree": "/repo/worktree"])
+
+    let write = TillerctlRequestBuilder.panelWrite(id: "pane", input: "hello\r")
+    #expect(write.method == "panel.write")
+    #expect(write.params == ["id": "pane", "input": "hello\r"])
+
+    let key = TillerctlRequestBuilder.panelKey(id: "pane", key: "enter")
+    #expect(key.method == "panel.key")
+    #expect(key.params == ["id": "pane", "key": "enter"])
+
+    let read = TillerctlRequestBuilder.panelRead(id: "pane")
+    #expect(read.method == "panel.read")
+    #expect(read.params == ["id": "pane"])
+
+    let wait = TillerctlRequestBuilder.panelWait(id: "pane", timeoutMs: 250)
+    #expect(wait.method == "panel.wait")
+    #expect(wait.params == ["id": "pane", "timeoutMs": "250"])
+
+    let focus = TillerctlRequestBuilder.panelFocus(id: "pane")
+    #expect(focus.method == "panel.focus")
+    #expect(focus.params == ["id": "pane"])
+
+    let close = TillerctlRequestBuilder.panelClose(id: "pane")
+    #expect(close.method == "panel.close")
+    #expect(close.params == ["id": "pane"])
+}
+
+@Test func optionalPanelParametersAreOmitted() {
+    #expect(TillerctlRequestBuilder.panelCreate(worktree: "worktree", cmd: nil).params
+        == ["worktree": "worktree"])
+    #expect(TillerctlRequestBuilder.panelSplit(from: "pane", direction: "down", cmd: nil).params
+        == ["from": "pane", "direction": "down"])
+    #expect(TillerctlRequestBuilder.panelWait(id: "pane", timeoutMs: nil).params
+        == ["id": "pane"])
 }
 
 @Test func notificationAndSystemBuilders() {
