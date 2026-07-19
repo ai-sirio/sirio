@@ -233,27 +233,29 @@ struct ChatComposerView: View {
         }
     }
 
-    /// Context-window usage ring; hidden entirely when the agent never sent
-    /// a `usage_update` (e.g. it doesn't implement that ACP extension) —
-    /// there's nothing actionable the user can do about a missing signal,
-    /// so no "unavailable" placeholder state (unlike UsageBarView).
-    @ViewBuilder
+    /// Context-window usage ring; always shown so its position in the control
+    /// bar stays stable. Renders empty/dimmed when the agent hasn't sent a
+    /// `usage_update` yet (or never does — some agents don't implement that
+    /// ACP extension), rather than disappearing and reappearing.
     private var contextUsageIndicator: some View {
-        if let usage = controller.contextUsage, usage.size > 0 {
-            let fraction = min(1, max(0, Double(usage.used) / Double(usage.size)))
-            let remaining = Int(((1 - fraction) * 100).rounded())
-            ZStack {
-                Circle().stroke(.quaternary, lineWidth: 2)
+        let usage = controller.contextUsage
+        let fraction = usage.flatMap { $0.size > 0 ? min(1, max(0, Double($0.used) / Double($0.size))) : nil } ?? 0
+        return ZStack {
+            Circle().stroke(.quaternary, lineWidth: 2)
+            if usage != nil {
                 Circle()
                     .trim(from: 0, to: fraction)
                     .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
-            .frame(width: 16, height: 16)
-            .contentShape(Circle())
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
-            .help("\(remaining)% remaining\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens")
         }
+        .frame(width: 16, height: 16)
+        .contentShape(Circle())
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
+        .help(usage.map { usage in
+            let remaining = Int(((1 - fraction) * 100).rounded())
+            return "\(remaining)% remaining\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens"
+        } ?? "Context usage unavailable")
     }
 
     private func effortLabel(_ effort: SessionConfigOption) -> String {
