@@ -40,10 +40,10 @@ if ever, as a separate future request.
   structure untouched; tool-call cards, plan cards, dividers, thought rows
   all stay exactly as they are today.
 - **Markdown → `NSAttributedString` via Foundation's `AttributedString(markdown:)`**
-  (`.full` interpretedSyntax), not a hand-rolled `swift-markdown` AST walker.
+  (`.full` interpretedSyntax), not a hand-rolled `cmark-gfm` (the parser already vendored transitively by MarkdownUI) AST walker.
   Zero new dependencies. Accepted risk: GFM fidelity (tables, task lists)
   may not fully match MarkdownUI's `.gitHub` theme — verified acceptable by
-  spike (see Testing) before full build-out; `swift-markdown` AST walk stays
+  spike (see Testing) before full build-out; `cmark-gfm` AST walk stays
   as documented fallback if the spike fails.
 - **No internal scroller.** Unlike `ChatTextEditor`, the new view has no
   `maxHeight` clamp — it reports full content height and lives inside
@@ -125,7 +125,7 @@ doesn't currently expose cleanly).
   real captured agent replies (should include at least one GFM table and one
   task list, since those are the identified fidelity risk) and manually
   compare against current MarkdownUI rendering. If tables/task-lists render
-  unacceptably, fall back to the `swift-markdown` AST-walk approach documented
+  unacceptably, fall back to the `cmark-gfm` AST-walk approach documented
   in Decisions instead of shipping degraded output.
 - Continuous drag-selection itself is a manual QA check (not unit-testable):
   select across a paragraph → code block → list boundary in a real agent
