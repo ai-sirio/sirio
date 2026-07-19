@@ -1283,6 +1283,10 @@ final class AppModel {
     /// la shell lo rigenera). Alimenta le etichette dei nodi pane in sidebar.
     var paneTitles: [UUID: String] = [:]
 
+    /// Layer-D recursive process snapshot per pane, feeding the Agents
+    /// panel's terminal subagent tree. In-memory only.
+    var paneProcessTrees: [UUID: [ProcessNode]] = [:]
+
     // MARK: - Markdown editor
 
     /// Documenti aperti, keyed su tab.id. Vivono qui (non nella view) perché
@@ -1333,6 +1337,7 @@ final class AppModel {
         guard let controller = chatControllers[tabId] else { return }
         chatControllers[tabId] = nil
         agentActivity.paneClosed(paneId: tabId)
+        paneProcessTrees[tabId] = nil
         Task { await controller.stop() }
     }
 
@@ -1586,6 +1591,10 @@ final class AppModel {
             // the agent exits back to the shell prompt.
             checkForegroundAgent(paneId: paneId)
         }
+        // Refresh the subagent process snapshot for any registered pane
+        // (spawn-, title- and process-owned alike) — content output means
+        // the agent is active and its child tree may have changed.
+        checkForegroundAgent(paneId: paneId)
         guard let status = ScreenManifest.detect(tailText: tailText, agentId: agentId) else { return }
         guard let t = agentActivity.applyContentSignal(paneId: paneId, status: status, now: Date()) else { return }
         notifyTransition(paneId: paneId, from: t.old, to: t.new)
@@ -1597,12 +1606,15 @@ final class AppModel {
         Task.detached {
             guard let pid = await PaneRegistry.shared.shellPid(paneId: paneId) else { return }
             let agentId = ForegroundProcessAgent.identify(shellPid: pid)
+            let tree = agentId != nil ? ForegroundProcessAgent.processTree(shellPid: pid) : []
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if let agentId {
                     self.agentActivity.processIdentified(paneId: paneId, agentId: agentId, now: Date())
+                    self.paneProcessTrees[paneId] = tree
                 } else {
                     self.agentActivity.processGone(paneId: paneId)
+                    self.paneProcessTrees[paneId] = nil
                 }
             }
         }
