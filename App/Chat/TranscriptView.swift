@@ -40,7 +40,7 @@ struct TranscriptView: View {
         case .agentMessage(_, let text, let isComplete):
             VStack(alignment: .leading, spacing: 2) {
                 Markdown(text)
-                    .markdownTheme(.gitHub)
+                    .markdownTheme(.tiller)
                     .textSelection(.enabled)
                 if !isComplete {
                     RunningDots(color: .secondary)
@@ -86,7 +86,7 @@ struct TranscriptView: View {
     private func userBlockView(_ block: ContentBlock) -> some View {
         switch block {
         case .text(let text):
-            Text(text).textSelection(.enabled)
+            Text(text).font(.system(size: 13)).textSelection(.enabled)
         case .resourceLink(_, let name):
             Label(name, systemImage: "doc")
                 .font(.caption)
@@ -158,7 +158,7 @@ private struct ThoughtRow: View {
             .buttonStyle(.plain)
             if isExpanded {
                 Text(text)
-                    .font(.callout)
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .padding(.leading, 14)
