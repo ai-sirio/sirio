@@ -70,3 +70,16 @@ public struct SessionNotification: Sendable, Equatable, Decodable {
     public var sessionId: String
     public var update: SessionUpdate
 }
+
+
+public extension SessionUpdate {
+    /// Locations trasportate dall'update; usate dal following per aprire il
+    /// file toccato dall'agente nel right panel.
+    var toolCallLocations: [ToolCallLocation] {
+        switch self {
+        case .toolCall(let call): call.locations
+        case .toolCallUpdate(let update): update.locations ?? []
+        default: []
+        }
+    }
+}
