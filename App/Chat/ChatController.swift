@@ -35,6 +35,8 @@ final class ChatController {
     /// Error from the last prompt turn, shown as a dismissable banner. The
     /// turn would otherwise fail silently (e.g. OpenCode model/auth errors).
     var promptError: String?
+    /// Warning non bloccante da .mcp.json invalido; la sessione parte senza MCP.
+    var mcpWarning: String?
     private var reducer = TranscriptReducer()
     var onStatusChange: ((AgentStatus) -> Void)?
 
@@ -98,8 +100,15 @@ final class ChatController {
                     await MainActor.run { self?.handle(event) }
                 }
             }
+            var mcpServers: [McpServerSpec] = []
+            do {
+                mcpServers = try McpConfig.load(worktreeRoot: worktreePath)
+            } catch {
+                mcpWarning = "File .mcp.json non valido: la sessione parte senza server MCP."
+            }
             let handle = try await session.connect(
-                cwd: worktreePath, resumeSessionId: record?.acpSessionId)
+                cwd: worktreePath, resumeSessionId: record?.acpSessionId,
+                mcpServers: mcpServers)
             modes = handle.modes
             models = handle.models
             hasModelConfigOption = handle.configOptions.contains { $0.id == "model" }

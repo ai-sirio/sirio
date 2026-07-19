@@ -78,6 +78,23 @@ private actor FakeAgent {
         #expect(handle.didResume == false)
         #expect(handle.agentCapabilities.loadSession == false)
     }
+    /// I server MCP del progetto viaggiano in session/new nel wire format ACP.
+    @Test func connectSendsMcpServersInSessionNew() async throws {
+        let agent = FakeAgent()
+        let session = try await makeSession(agent: agent)
+        let spec = McpServerSpec(name: "docs", command: "npx",
+                                 args: ["-y", "docs-mcp"])
+        _ = try await session.connect(cwd: "/w", resumeSessionId: nil,
+                                      mcpServers: [spec])
+        var sent: NewSessionParams?
+        for index in 0..<(await agent.mock.sent.count) {
+            guard case .request(_, "session/new", let params) =
+                    try await agent.mock.sentMessage(index) else { continue }
+            sent = try params?.decoded(NewSessionParams.self)
+        }
+        #expect(sent?.mcpServers == [spec])
+    }
+
 
     @Test func connectResumesWhenSupported() async throws {
         let agent = FakeAgent(loadSession: true)

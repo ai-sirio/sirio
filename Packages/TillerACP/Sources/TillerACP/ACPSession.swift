@@ -65,7 +65,8 @@ public actor ACPSession {
     /// Handshakes and opens (or resumes) a session. Resume happens only when
     /// the agent advertises `loadSession` AND a resumeSessionId is given;
     /// otherwise falls back to a fresh session.
-    public func connect(cwd: String, resumeSessionId: String?) async throws -> SessionHandle {
+    public func connect(cwd: String, resumeSessionId: String?,
+                        mcpServers: [McpServerSpec] = []) async throws -> SessionHandle {
         let initialize = try await client.request(
             "initialize",
             params: InitializeParams(
@@ -81,7 +82,8 @@ public actor ACPSession {
         if let resumeSessionId, initialize.agentCapabilities.loadSession {
             let loaded = try await client.request(
                 "session/load",
-                params: LoadSessionParams(sessionId: resumeSessionId, cwd: cwd),
+                params: LoadSessionParams(sessionId: resumeSessionId, cwd: cwd,
+                                           mcpServers: mcpServers),
                 as: LoadSessionResult.self)
             let liveSessionId = loaded.sessionId ?? resumeSessionId
             sessionId = liveSessionId
@@ -93,7 +95,9 @@ public actor ACPSession {
         }
 
         let created = try await client.request(
-            "session/new", params: NewSessionParams(cwd: cwd), as: NewSessionResult.self)
+            "session/new",
+            params: NewSessionParams(cwd: cwd, mcpServers: mcpServers),
+            as: NewSessionResult.self)
         sessionId = created.sessionId
         return SessionHandle(sessionId: created.sessionId,
                              agentCapabilities: initialize.agentCapabilities,
