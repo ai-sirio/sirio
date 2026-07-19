@@ -56,6 +56,21 @@ import TillerPersistence
         #expect(try store.loadTranscript(sessionId: session.id) == sampleItems)
     }
 
+    /// I transcript persistiti sono di turni finiti: un agentMessage salvato
+    /// isComplete=false (bug pre-fix) deve tornare completo al load, altrimenti
+    /// la UI mostra RunningDots su conversazioni ripristinate.
+    @Test func loadTranscriptNormalizesIncompleteAgentMessages() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                              now: .init())
+        let dirty: [TranscriptItem] = [
+            .agentMessage(id: "agent-0", text: "Risposta", isComplete: false),
+        ]
+        try store.saveTranscript(sessionId: session.id, items: dirty, now: .init())
+        let loaded = try store.loadTranscript(sessionId: session.id)
+        #expect(loaded == [.agentMessage(id: "agent-0", text: "Risposta", isComplete: true)])
+    }
+
     @Test func saveTranscriptReplacesAndBumpsActivity() throws {
         let (store, worktreeId) = try makeStore()
         let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",

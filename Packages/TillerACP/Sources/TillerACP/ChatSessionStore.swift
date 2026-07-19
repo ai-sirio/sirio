@@ -70,7 +70,17 @@ public struct ChatSessionStore: Sendable {
                 .fetchAll(db)
         }
         let decoder = JSONDecoder()
-        return records.compactMap { try? decoder.decode(TranscriptItem.self, from: $0.payload) }
+        return records.compactMap { record in
+            guard let item = try? decoder.decode(TranscriptItem.self, from: record.payload)
+            else { return nil }
+            // Persisted transcripts are finished turns; normalize agent messages
+            // left isComplete=false by the pre-fix reducer so restored chats don't
+            // render a perpetual streaming indicator.
+            if case .agentMessage(let id, let text, false) = item {
+                return .agentMessage(id: id, text: text, isComplete: true)
+            }
+            return item
+        }
     }
 }
 
