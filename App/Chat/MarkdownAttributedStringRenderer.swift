@@ -61,7 +61,9 @@ enum MarkdownAttributedStringRenderer {
 
     private static func attributes(for run: AttributedString.Runs.Run) -> [NSAttributedString.Key: Any] {
         var font = NSFont.systemFont(ofSize: bodySize)
-        var color: NSColor = .labelColor
+        // Body prose is muted relative to headings, so headings keep
+        // reading as the visual anchor of a reply.
+        var color: NSColor = .labelColor.withAlphaComponent(0.82)
         let paragraphStyle = NSMutableParagraphStyle()
         var attrs: [NSAttributedString.Key: Any] = [:]
         if let intent = run.presentationIntent {
@@ -71,6 +73,7 @@ enum MarkdownAttributedStringRenderer {
                     let size = headingSizes[level] ?? headingSizes[3]!
                     font = NSFontManager.shared.convert(
                         NSFont.systemFont(ofSize: size), toHaveTrait: .boldFontMask)
+                    color = .labelColor
                     let margin = headingMargins[level] ?? headingMargins[3]!
                     paragraphStyle.paragraphSpacingBefore = margin.top
                     paragraphStyle.paragraphSpacing = margin.bottom

@@ -11,6 +11,20 @@ struct MarkdownAttributedStringRendererTests {
         #expect(font?.pointSize == 13)
     }
 
+    @Test("plain paragraph text is muted relative to full labelColor")
+    func plainParagraphIsMuted() {
+        let result = MarkdownAttributedStringRenderer.render("Hello world")
+        let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(color?.alphaComponent == 0.82)
+    }
+
+    @Test("a heading keeps full-strength labelColor, unlike body prose")
+    func headingIsNotMuted() {
+        let result = MarkdownAttributedStringRenderer.render("# Title")
+        let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(color == .labelColor)
+    }
+
     @Test("bold text gets a bold font")
     func boldText() {
         let result = MarkdownAttributedStringRenderer.render("**bold**")
