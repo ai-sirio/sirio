@@ -137,6 +137,12 @@ public final class AppDatabase: Sendable {
                 t.add(column: "chatAgentId", .text)
             }
         }
+        migrator.registerMigration("v10") { db in
+            try db.alter(table: "chatSession") { t in
+                t.add(column: "contextUsageUsed", .integer)
+                t.add(column: "contextUsageSize", .integer)
+            }
+        }
         return migrator
     }
 }
