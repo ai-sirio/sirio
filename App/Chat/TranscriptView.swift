@@ -72,25 +72,15 @@ struct TranscriptView: View {
     // MARK: - User bubble
 
     private func userBubble(_ blocks: [ContentBlock]) -> some View {
-        HStack(alignment: .top) {
-            Spacer(minLength: 80)
-            VStack(alignment: .trailing, spacing: 4) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    userBlockView(block)
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .foregroundStyle(Color.primary)
-            .background(Color.accentColor.opacity(0.16),
-                        in: RoundedRectangle(cornerRadius: 12))
-            .overlay(alignment: .topTrailing) {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 9, height: 9)
-                    .offset(x: 4, y: -3)
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                userBlockView(block)
             }
         }
-        .padding(.trailing, 6)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(Color.primary)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder
@@ -98,7 +88,6 @@ struct TranscriptView: View {
         switch block {
         case .text(let text):
             Text(text).font(.system(size: 13)).textSelection(.enabled)
-                .frame(maxWidth: 456, alignment: .leading)
         case .resourceLink(_, let name):
             Label(name, systemImage: "doc")
                 .font(.caption)
