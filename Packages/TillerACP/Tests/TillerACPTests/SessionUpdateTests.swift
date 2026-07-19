@@ -67,6 +67,7 @@ import Foundation
         """)
         #expect(mode.update == .currentModeUpdate("plan"))
     }
+
     @Test func decodesUsageUpdate() throws {
         let note = try decode("""
         {"sessionId":"s1","update":{"sessionUpdate":"usage_update","used":146000,"size":200000}}

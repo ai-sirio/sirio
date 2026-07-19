@@ -132,6 +132,7 @@ public struct TranscriptReducer: Sendable, Equatable {
 
         case .usageUpdate:
             break
+
         case .unknown:
             break
         }
