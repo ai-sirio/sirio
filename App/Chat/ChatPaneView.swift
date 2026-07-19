@@ -17,16 +17,16 @@ struct ChatPaneView: View {
             switch controller.state {
             case .needsAuth:
                 banner(
-                    "Autenticazione richiesta",
-                    detail: "Esegui il login dalla CLI (es. `claude /login`) in un terminale, poi riavvia l'agente.",
-                    actionTitle: "Riprova") {
+                    "Authentication required",
+                    detail: "Log in from the CLI (e.g. `claude /login`) in a terminal, then restart the agent.",
+                    actionTitle: "Retry") {
                     Task { await controller.start() }
                 }
             case .disconnected(let message):
                 banner(
-                    "Agente disconnesso",
-                    detail: message ?? "Il processo è terminato.",
-                    actionTitle: "Riavvia agente") {
+                    "Agent disconnected",
+                    detail: message ?? "The process has terminated.",
+                    actionTitle: "Restart agent") {
                     Task { await controller.start() }
                 }
             default:
@@ -34,7 +34,7 @@ struct ChatPaneView: View {
             }
             if let promptError = controller.promptError {
                 banner(
-                    "Errore nel turno",
+                    "Turn error",
                     detail: promptError,
                     actionTitle: "OK") {
                     controller.promptError = nil
@@ -42,7 +42,7 @@ struct ChatPaneView: View {
             }
             if let mcpWarning = controller.mcpWarning {
                 banner(
-                    "Configurazione MCP",
+                    "MCP configuration",
                     detail: mcpWarning,
                     actionTitle: "OK") {
                     controller.mcpWarning = nil
@@ -64,23 +64,22 @@ struct ChatPaneView: View {
     private var header: some View {
         HStack(spacing: 8) {
             AgentIcon(agentId: controller.agentId, size: 14)
-            Text(agentDisplayName).font(.callout.weight(.semibold))
-            stateChip
             Spacer()
+            stateChip
             Button {
                 controller.isFollowing.toggle()
             } label: {
-                Label("Segui l'agente",
+                Label("Follow agent",
                       systemImage: controller.isFollowing ? "eye.fill" : "eye")
                     .font(.caption)
             }
             .buttonStyle(.borderless)
             .foregroundStyle(controller.isFollowing ? Color.accentColor : .secondary)
-            .help("Apre nel pannello di destra i file che l'agente sta modificando")
+            .help("Opens the files the agent is editing in the right panel")
             Button {
                 Task { await controller.newConversation() }
             } label: {
-                Label("Nuova conversazione", systemImage: "plus.bubble")
+                Label("New conversation", systemImage: "plus.bubble")
                     .font(.caption)
             }
             .buttonStyle(.borderless)
@@ -88,25 +87,20 @@ struct ChatPaneView: View {
         .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
-    private var agentDisplayName: String {
-        AgentCatalog.all.first { $0.id == controller.agentId }?.displayName
-            ?? controller.agentId
-    }
-
     @ViewBuilder
     private var stateChip: some View {
         switch controller.state {
         case .connecting:
-            Label("connessione…", systemImage: "circle.dotted")
+            Label("connecting…", systemImage: "circle.dotted")
                 .font(.caption).foregroundStyle(.secondary)
         case .ready:
-            Label("pronto", systemImage: "circle.fill")
+            Label("ready", systemImage: "circle.fill")
                 .font(.caption).foregroundStyle(.green)
         case .prompting:
-            Label("al lavoro", systemImage: "circle.fill")
+            Label("working", systemImage: "circle.fill")
                 .font(.caption).foregroundStyle(.orange)
         case .needsAuth, .disconnected, .idle:
-            Label("disconnesso", systemImage: "circle")
+            Label("disconnected", systemImage: "circle")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

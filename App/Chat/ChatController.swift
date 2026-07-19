@@ -74,7 +74,7 @@ final class ChatController {
     func start() async {
         guard state == .idle || isDisconnected else { return }
         guard let spec = AgentLaunchSpec.forAgent(id: agentId) else {
-            state = .disconnected(message: "Agente senza supporto ACP")
+            state = .disconnected(message: "Agent has no ACP support")
             return
         }
         state = .connecting
@@ -109,7 +109,7 @@ final class ChatController {
             do {
                 mcpServers = try McpConfig.load(worktreeRoot: worktreePath)
             } catch {
-                mcpWarning = "File .mcp.json non valido: la sessione parte senza server MCP."
+                mcpWarning = "Invalid .mcp.json file: session started without MCP servers."
             }
             let handle = try await session.connect(
                 cwd: worktreePath, resumeSessionId: record?.acpSessionId,
@@ -299,7 +299,7 @@ final class ChatController {
             onStatusChange?(.needsInput)
         case .disconnected:
             if state != .needsAuth, !isDisconnected {
-                state = .disconnected(message: "Processo agente terminato")
+                state = .disconnected(message: "Agent process terminated")
             }
         }
     }
