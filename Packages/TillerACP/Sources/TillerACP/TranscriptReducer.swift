@@ -20,12 +20,16 @@ public struct TranscriptReducer: Sendable, Equatable {
         return "\(prefix)-\(nextOrdinal)"
     }
 
-    private mutating func closeOpenStreams() {
+    private mutating func closeAgentMessage() {
         if let index = openAgentMessageIndex,
            case .agentMessage(let id, let text, _) = items[index] {
             items[index] = .agentMessage(id: id, text: text, isComplete: true)
         }
         openAgentMessageIndex = nil
+    }
+
+    private mutating func closeOpenStreams() {
+        closeAgentMessage()
         openThoughtIndex = nil
         openUserMessageIndex = nil
     }
@@ -74,7 +78,7 @@ public struct TranscriptReducer: Sendable, Equatable {
                 items.append(.thought(id: makeId("thought"), text: chunk))
                 openThoughtIndex = items.count - 1
             }
-            openAgentMessageIndex = nil
+            closeAgentMessage()
             openUserMessageIndex = nil
 
         case .userMessageChunk(let block):
@@ -93,7 +97,7 @@ public struct TranscriptReducer: Sendable, Equatable {
                 items.append(.userMessage(id: makeId("user"), blocks: [.text(chunk)]))
                 openUserMessageIndex = items.count - 1
             }
-            openAgentMessageIndex = nil
+            closeAgentMessage()
             openThoughtIndex = nil
 
         case .toolCall(let call):

@@ -26,6 +26,34 @@ import Testing
         #expect(isComplete == true)
     }
 
+    /// Un thought che interrompe un messaggio agente deve chiuderlo: lasciarlo
+    /// isComplete=false mostra RunningDots per sempre sotto la risposta.
+    @Test func thoughtChunkCompletesOpenAgentMessage() {
+        var reducer = TranscriptReducer()
+        reducer.apply(.agentMessageChunk(.text("Risposta")))
+        reducer.apply(.agentThoughtChunk(.text("pensiero")))
+        guard case .agentMessage(_, "Risposta", let isComplete) = reducer.items[0] else {
+            Issue.record("expected agentMessage first"); return
+        }
+        #expect(isComplete)
+    }
+
+    /// Il replay di session/load alterna user e agent chunk: nessun messaggio
+    /// agente già streamato deve restare aperto.
+    @Test func replayLeavesNoOpenAgentMessages() {
+        var reducer = TranscriptReducer()
+        reducer.apply(.userMessageChunk(.text("domanda 1")))
+        reducer.apply(.agentMessageChunk(.text("risposta 1")))
+        reducer.apply(.userMessageChunk(.text("domanda 2")))
+        reducer.apply(.agentMessageChunk(.text("risposta 2")))
+        reducer.turnEnded(.endTurn)
+        let incomplete = reducer.items.filter {
+            if case .agentMessage(_, _, false) = $0 { return true }
+            return false
+        }
+        #expect(incomplete.isEmpty)
+    }
+
     @Test func newUserPromptStartsNewAgentMessage() {
         var reducer = TranscriptReducer()
         reducer.apply(.agentMessageChunk(.text("first")))
