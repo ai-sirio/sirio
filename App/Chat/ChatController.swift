@@ -39,6 +39,11 @@ final class ChatController {
     var mcpWarning: String?
     private var reducer = TranscriptReducer()
     var onStatusChange: ((AgentStatus) -> Void)?
+    /// Following ("Segui l'agente"): default off, non persistito.
+    var isFollowing = false
+    var onFollowLocation: ((String) -> Void)?
+    @ObservationIgnored private var lastFollowAt = Date.distantPast
+    private static let followThrottle: TimeInterval = 0.5
 
     var items: [TranscriptItem] { restored + reducer.items }
     var currentModeId: String? { reducer.currentModeId ?? modes?.currentModeId }
@@ -279,6 +284,11 @@ final class ChatController {
         switch event {
         case .update(let update):
             reducer.apply(update)
+            if isFollowing, let location = update.toolCallLocations.last,
+               Date().timeIntervalSince(lastFollowAt) >= Self.followThrottle {
+                lastFollowAt = Date()
+                onFollowLocation?(location.path)
+            }
             if case .toolCallUpdate(let change) = update,
                change.status == .completed || change.status == .failed {
                 persist()

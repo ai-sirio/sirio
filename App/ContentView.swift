@@ -68,6 +68,19 @@ struct ContentView: View {
                 worktree: model.selectedWorktree,
                 isGitRepository: rightPanelContext.gitProject)
         }
+        .onChange(of: model.chatFollowRequest) {
+            guard let request = model.chatFollowRequest,
+                  let worktree = model.selectedWorktree,
+                  worktree.id == request.worktreeId else { return }
+            rightPanelVisible = true
+            let root = URL(fileURLWithPath: worktree.path).standardizedFileURL.path
+            let relative = request.path.hasPrefix(root + "/")
+                ? String(request.path.dropFirst(root.count + 1))
+                : request.path
+            guard let entry = rightPanelModel.statusByPath[relative] else { return }
+            rightPanelModeRaw = RightPanelMode.diff.rawValue
+            Task { await rightPanelModel.selectDiff(entry) }
+        }
         .onDisappear { rightPanelModel.deactivate() }
         .configuresWindowChrome()
         .toolbar {
