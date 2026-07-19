@@ -8,7 +8,7 @@ import Testing
         #expect(spec.arguments.count == 2)
         #expect(spec.arguments[0] == "-lc")
         #expect(spec.arguments[1] ==
-            "exec npx -y @zed-industries/claude-code-acp@\(AgentLaunchSpec.claudeCodeACPVersion)")
+            "exec npx -y @agentclientprotocol/claude-agent-acp@\(AgentLaunchSpec.claudeCodeACPVersion)")
     }
 
     @Test func pinnedVersionLooksLikeSemver() {

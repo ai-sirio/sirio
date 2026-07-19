@@ -8,9 +8,13 @@ private actor FakeAgent {
     let mock = MockTransport()
     var loadSession = false
     var lastPromptStopReason = "end_turn"
+    /// When set, `session/load` answers with this sessionId (claude-agent-acp
+    /// re-registers resumed conversations under a fresh id).
+    var loadResultSessionId: String?
 
-    init(loadSession: Bool = false) {
+    init(loadSession: Bool = false, loadResultSessionId: String? = nil) {
         self.loadSession = loadSession
+        self.loadResultSessionId = loadResultSessionId
     }
 
     /// Watches sent lines and answers protocol requests in the background.
@@ -42,7 +46,11 @@ private actor FakeAgent {
         case "session/new":
             await mock.emit(#"{"jsonrpc":"2.0","id":\#(idJSON),"result":{"sessionId":"sess-new"}}"#)
         case "session/load":
-            await mock.emit(#"{"jsonrpc":"2.0","id":\#(idJSON),"result":{}}"#)
+            if let loadResultSessionId {
+                await mock.emit(#"{"jsonrpc":"2.0","id":\#(idJSON),"result":{"sessionId":"\#(loadResultSessionId)"}}"#)
+            } else {
+                await mock.emit(#"{"jsonrpc":"2.0","id":\#(idJSON),"result":{}}"#)
+            }
         case "session/prompt":
             await mock.emit(#"{"jsonrpc":"2.0","id":\#(idJSON),"result":{"stopReason":"\#(lastPromptStopReason)"}}"#)
         default:
@@ -76,6 +84,17 @@ private actor FakeAgent {
         let session = try await makeSession(agent: agent)
         let handle = try await session.connect(cwd: "/w", resumeSessionId: "old-1")
         #expect(handle.sessionId == "old-1")
+        #expect(handle.didResume == true)
+    }
+
+    /// claude-agent-acp may answer `session/load` with a different sessionId
+    /// than the one requested (SDK resume can fork); the handle must adopt it
+    /// or later `session/prompt` calls target a dead id.
+    @Test func connectAdoptsSessionIdReturnedByLoad() async throws {
+        let agent = FakeAgent(loadSession: true, loadResultSessionId: "forked-2")
+        let session = try await makeSession(agent: agent)
+        let handle = try await session.connect(cwd: "/w", resumeSessionId: "old-1")
+        #expect(handle.sessionId == "forked-2")
         #expect(handle.didResume == true)
     }
 

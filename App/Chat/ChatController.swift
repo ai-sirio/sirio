@@ -24,6 +24,9 @@ final class ChatController {
     private(set) var models: SessionModelState?
     /// OpenCode-only reasoning-effort select; nil for agents without it.
     private(set) var effortOption: SessionConfigOption?
+    /// True when the agent exposes the model as a `configOptions` select;
+    /// drives the `setModel` transport (`set_config_option` vs `set_model`).
+    private var hasModelConfigOption = false
     private(set) var didResume = false
     private(set) var queued: [String] = []
     /// Transcript from a previous run shown read-only when the agent could
@@ -99,12 +102,17 @@ final class ChatController {
                 cwd: worktreePath, resumeSessionId: record?.acpSessionId)
             modes = handle.modes
             models = handle.models
+            hasModelConfigOption = handle.configOptions.contains { $0.id == "model" }
             effortOption = handle.configOptions.first { $0.id == "effort" }
             didResume = handle.didResume
             if handle.didResume, let record {
                 // Replay rebuilds the live transcript; drop the local copy.
                 restored = []
                 sessionRecordId = record.id
+                // The agent may have re-registered the conversation under a
+                // new id (SDK resume can fork); persist whatever it answered
+                // so the next resume targets the live conversation.
+                try? store?.setACPSessionId(handle.sessionId, sessionId: record.id)
             } else {
                 let created = try store?.createSession(
                     worktreeId: worktreeId.uuidString, agentId: agentId)
@@ -198,12 +206,27 @@ final class ChatController {
         try? await session?.setMode(modeId)
     }
 
-    /// Optimistic: both adapters answer `{}` without a confirming
-    /// notification, so the pill reflects the choice immediately.
+    /// Optimistic: the pill reflects the choice immediately, reverted on
+    /// error. Agents that expose the model as a `configOptions` select
+    /// (claude-agent-acp, OpenCode) don't implement `session/set_model`, so
+    /// route through `set_config_option` and resync from its echo — a model
+    /// switch can also change the available effort levels.
     func setModel(_ modelId: String) async {
         let previous = models?.currentModelId
         models?.currentModelId = modelId
-        do { try await session?.setModel(modelId) } catch {
+        do {
+            if hasModelConfigOption {
+                if let updated = try await session?.setConfigOption(
+                    id: "model", value: modelId) {
+                    if let synced = SessionModelState(configOptions: updated) {
+                        models = synced
+                    }
+                    effortOption = updated.first { $0.id == "effort" }
+                }
+            } else {
+                try await session?.setModel(modelId)
+            }
+        } catch {
             if let previous { models?.currentModelId = previous }
             promptError = Self.describePromptError(error)
         }

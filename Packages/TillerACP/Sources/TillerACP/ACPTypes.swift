@@ -206,6 +206,10 @@ public struct LoadSessionParams: Sendable, Equatable, Codable {
 
 /// `session/load` result: same optional modes/models payload as `session/new`.
 public struct LoadSessionResult: Sendable, Equatable, Codable {
+    /// claude-agent-acp may register the resumed conversation under a new id
+    /// (SDK resume can fork); when present it must replace the requested one,
+    /// or subsequent `session/prompt` calls hit "Session not found".
+    public var sessionId: String?
     public var modes: SessionModeState?
     public var models: SessionModelState?
     public var configOptions: [SessionConfigOption]?
