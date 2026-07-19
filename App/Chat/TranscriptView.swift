@@ -3,7 +3,7 @@ import MarkdownUI
 import TillerACP
 import TillerCore
 
-/// Scrolling transcript styled like a minimal chat log: warm user bubbles on
+/// Scrolling transcript styled like a minimal chat log: tinted user bubbles on
 /// the right with an avatar dot, full-width agent markdown, collapsed
 /// "> Thought" rows, timestamped turn dividers. Autoscrolls while streaming.
 struct TranscriptView: View {
@@ -18,6 +18,9 @@ struct TranscriptView: View {
                     ForEach(controller.items) { item in
                         itemView(item)
                             .id(item.id)
+                    }
+                    if controller.state == .prompting {
+                        thinkingRow
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
@@ -37,15 +40,10 @@ struct TranscriptView: View {
         switch item {
         case .userMessage(_, let blocks):
             userBubble(blocks)
-        case .agentMessage(_, let text, let isComplete):
-            VStack(alignment: .leading, spacing: 2) {
-                Markdown(text)
-                    .markdownTheme(.tiller)
-                    .textSelection(.enabled)
-                if !isComplete {
-                    RunningDots(color: .secondary)
-                }
-            }
+        case .agentMessage(_, let text, _):
+            Markdown(text)
+                .markdownTheme(.tiller)
+                .textSelection(.enabled)
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
@@ -61,6 +59,18 @@ struct TranscriptView: View {
         }
     }
 
+    // MARK: - Thinking indicator
+
+    /// Live status while a turn is in flight; driven by `controller.state`
+    /// rather than a per-message completion flag so it can't get stuck once
+    /// the turn actually ends.
+    private var thinkingRow: some View {
+        HStack(spacing: 6) {
+            RunningDots(color: .orange)
+            Text("Thinking").font(.caption).foregroundStyle(.orange)
+        }
+    }
+
     // MARK: - User bubble
 
     private func userBubble(_ blocks: [ContentBlock]) -> some View {
@@ -72,12 +82,12 @@ struct TranscriptView: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
-            .foregroundStyle(Color.black.opacity(0.85))
-            .background(Color(red: 0.93, green: 0.78, blue: 0.60),
+            .foregroundStyle(Color.primary)
+            .background(Color.accentColor.opacity(0.16),
                         in: RoundedRectangle(cornerRadius: 12))
             .overlay(alignment: .topTrailing) {
                 Circle()
-                    .fill(Color.orange)
+                    .fill(Color.accentColor)
                     .frame(width: 9, height: 9)
                     .offset(x: 4, y: -3)
             }
