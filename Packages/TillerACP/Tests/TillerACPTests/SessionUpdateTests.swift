@@ -183,4 +183,21 @@ import Foundation
         #expect(try JSONDecoder().decode(ToolCallContent.self, from: data) == content)
     }
 
+    @Test func toolCallLocationsExtractsFromCallAndUpdate() {
+        let call = SessionUpdate.toolCall(ToolCall(
+            toolCallId: "t1", title: "Edit", kind: .edit, status: .inProgress,
+            locations: [ToolCallLocation(path: "/repo/a.swift", line: 3)]))
+        #expect(call.toolCallLocations.map(\.path) == ["/repo/a.swift"])
+
+        let update = SessionUpdate.toolCallUpdate(ToolCallUpdate(
+            toolCallId: "t1",
+            locations: [ToolCallLocation(path: "/repo/b.swift", line: nil)]))
+        #expect(update.toolCallLocations.map(\.path) == ["/repo/b.swift"])
+
+        let bare = SessionUpdate.toolCallUpdate(ToolCallUpdate(toolCallId: "t1"))
+        #expect(bare.toolCallLocations.isEmpty)
+
+        #expect(SessionUpdate.agentMessageChunk(.text("hi")).toolCallLocations.isEmpty)
+    }
+
 }
