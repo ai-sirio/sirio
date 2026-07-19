@@ -53,36 +53,40 @@ web); bolle utente e thought usano font di sistema di taglie diverse.
 - Bolla utente e thought espanso allineati a 13pt.
 - Nessuna impostazione configurabile.
 
-## 3. Terminali in chat (card nel transcript)
+## 3. Terminali in chat (card nel transcript) — rivista 2026-07-19
 
-L'agente usa il terminale del client per eseguire comandi (Bash tool,
-background task). Wire verificato su `@agentclientprotocol/sdk@1.2.1`:
-`terminal/create`, `terminal/output`, `terminal/wait_for_exit`,
-`terminal/kill`, `terminal/release`; nei tool call arriva un content
-`{type: "terminal", terminalId}`.
+Verifica sul dist di claude-agent-acp 0.59.0: l'agente **non chiama mai** i
+metodi ACP standard `terminal/*` sul client — la Claude Agent SDK esegue
+Bash internamente e streamma l'output al client via un'estensione `_meta`
+in tre step:
 
-- `ClientCapabilities.terminal: true` nell'`initialize`.
-- Nuovo actor **`ACPTerminalManager`** in TillerACP (leaf, testabile senza
-  UI): lancia `Foundation.Process` con `cwd`/`env` richiesti, accumula
-  stdout+stderr merged, truncation in testa a `outputByteLimit`, traccia exit
-  status, `waitForExit` con continuation. Niente PTY/ghostty: ACP tratta il
-  terminale come buffer di output, non serve rendering ANSI interattivo.
-- `ACPSession.dispatch` serve i 5 metodi delegando al manager; `terminal/kill`
-  termina il processo, `terminal/release` lo termina (se vivo) e libera lo
-  stato.
-- Nuovo case `terminal(terminalId:)` in `ToolCallContent`;
-  `ToolCallCardView` embedda **`TerminalOutputView`**: output monospace
-  (ultime ~50 righe, auto-scroll), chip stato (running / exit code), bottone
-  stop che invoca `kill`.
-- Background: il processo vive finché l'agente non fa `release`; la card
-  continua ad aggiornarsi anche a turno chiuso.
-- Persistenza: a settle point si salva lo snapshot testuale dell'output nel
-  transcript; i processi vivi non si persistono (al restore la card mostra
-  l'ultimo snapshot e stato "terminato").
-- Sicurezza: il comando è già gatekept dal permission flow esistente
-  (`session/request_permission` sul tool call); il terminale è l'esecutore,
-  non un nuovo punto di decisione. I processi ereditano l'ambiente del
-  worktree come i pane terminale esistenti.
+1. `tool_call` (Bash) → `_meta.terminal_info {terminal_id}` + content
+   `{type: "terminal", terminalId}`
+2. `tool_call_update` → `_meta.terminal_output {terminal_id, data}`
+   (chunk di output in streaming, anche per task in background)
+3. `tool_call_update` → `_meta.terminal_exit {terminal_id, exit_code,
+   signal}`
+
+Il client vi aderisce dichiarando `clientCapabilities._meta:
+{"terminal_output": true}` nell'`initialize`.
+
+Design (più piccolo e più sicuro dell'originale — Tiller non esegue alcun
+processo, riceve solo testo):
+
+- `ClientCapabilities` guadagna il campo `_meta` con `terminal_output: true`.
+- Decodifica dei tre `_meta` nelle notifiche `session/update`
+  (`tool_call`/`tool_call_update`); `ToolCallItem` guadagna stato terminale:
+  `terminalId`, output accumulato, exit status. Il reducer applica i chunk.
+- Nuovo case `terminal(terminalId:)` in `ToolCallContent` (decodifica del
+  content block; il rendering legge lo stato dal `ToolCallItem`).
+- `ToolCallCardView` embedda **`TerminalOutputView`**: output monospace
+  (ultime ~50 righe, auto-scroll), chip stato (running / exit code). Nessun
+  bottone kill: il processo vive nell'agente, l'interruzione è il cancel del
+  turno già esistente.
+- Persistenza: gratis — output ed exit vivono nel `ToolCallItem`
+  serializzato; nessuno snapshot separato.
+- I metodi server-side `terminal/*` (per agenti che li chiamassero davvero)
+  restano fuori scope finché un agente supportato non li usa.
 
 ## 4. Client MCP servers (`.mcp.json`)
 
@@ -128,8 +132,9 @@ Tre piani indipendenti, ciascuno TDD (swift-testing) con gate `Scripts/ci.sh`
 → `CI OK`:
 
 1. **Piano A — quick wins**: fix 3 puntini + font + MCP config.
-2. **Piano B — terminali**: capability, `ACPTerminalManager`, dispatch,
-   `ToolCallContent.terminal`, card UI, persistenza snapshot.
+2. **Piano B — terminali**: capability `_meta`, decodifica
+   terminal_info/output/exit nel reducer, `ToolCallContent.terminal`,
+   card UI.
 3. **Piano C — following + edit review**: tracking locations, toggle header,
    apertura right panel, `.editSummary`, revert git.
 
@@ -137,6 +142,8 @@ Tre piani indipendenti, ciascuno TDD (swift-testing) con gate `Scripts/ci.sh`
 
 - Terminali come card nel transcript, non pane TillerTerminal (scope v1;
   l'ACP non richiede PTY interattivo).
+- Terminali via estensione `_meta terminal_output` (l'unica che
+  claude-agent-acp usa davvero), niente esecuzione processi lato Tiller.
 - MCP solo da `.mcp.json` di progetto, nessuna UI settings (YAGNI).
 - Following nel right panel con toggle default off.
 - Edit review post-hoc con revert git, non staged edits.
