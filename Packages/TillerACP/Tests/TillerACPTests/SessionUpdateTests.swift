@@ -113,4 +113,74 @@ import Foundation
             #"{"sessionId":"s1","path":"/w/a.swift","content":"let x = 1"}"#.utf8))
         #expect(write.content == "let x = 1")
     }
+    /// tool_call Bash: content {type:"terminal"} + _meta.terminal_info.
+    @Test func decodesTerminalContentAndInfoMeta() throws {
+        let json = #"""
+        {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Bash",
+         "kind": "execute", "status": "in_progress",
+         "content": [{"type": "terminal", "terminalId": "t1"}],
+         "_meta": {"terminal_info": {"terminal_id": "t1"}}}
+        """#
+        let update = try JSONDecoder().decode(SessionUpdate.self,
+                                              from: Data(json.utf8))
+        guard case .toolCall(let call) = update else {
+            Issue.record("expected toolCall"); return
+        }
+        #expect(call.content == [.terminal(terminalId: "t1")])
+        #expect(call.terminalMeta?.terminalInfo?.terminalId == "t1")
+    }
+
+    /// tool_call_update con chunk di output in streaming.
+    @Test func decodesTerminalOutputMetaOnUpdate() throws {
+        let json = #"""
+        {"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+         "_meta": {"terminal_output": {"terminal_id": "t1", "data": "riga 1\n"}}}
+        """#
+        let update = try JSONDecoder().decode(SessionUpdate.self,
+                                              from: Data(json.utf8))
+        guard case .toolCallUpdate(let partial) = update else {
+            Issue.record("expected toolCallUpdate"); return
+        }
+        #expect(partial.terminalMeta?.terminalOutput?.data == "riga 1\n")
+    }
+
+    /// tool_call_update finale con exit status (exit_code può essere null).
+    @Test func decodesTerminalExitMeta() throws {
+        let json = #"""
+        {"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+         "status": "completed",
+         "_meta": {"terminal_exit": {"terminal_id": "t1", "exit_code": 0,
+                   "signal": null}}}
+        """#
+        let update = try JSONDecoder().decode(SessionUpdate.self,
+                                              from: Data(json.utf8))
+        guard case .toolCallUpdate(let partial) = update else {
+            Issue.record("expected toolCallUpdate"); return
+        }
+        #expect(partial.terminalMeta?.terminalExit?.exitCode == 0)
+        #expect(partial.terminalMeta?.terminalExit?.signal == nil)
+    }
+
+    /// _meta con sole chiavi estranee (es. claudeCode) non deve rompere nulla.
+    @Test func ignoresForeignMetaKeys() throws {
+        let json = #"""
+        {"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+         "_meta": {"claudeCode": {"parentToolUseId": "x"}}}
+        """#
+        let update = try JSONDecoder().decode(SessionUpdate.self,
+                                              from: Data(json.utf8))
+        guard case .toolCallUpdate(let partial) = update else {
+            Issue.record("expected toolCallUpdate"); return
+        }
+        #expect(partial.terminalMeta?.terminalOutput == nil)
+        #expect(partial.terminalMeta?.terminalExit == nil)
+    }
+
+    /// Round-trip Codable del nuovo case terminal (persistenza transcript).
+    @Test func terminalContentRoundTrips() throws {
+        let content = ToolCallContent.terminal(terminalId: "t9")
+        let data = try JSONEncoder().encode(content)
+        #expect(try JSONDecoder().decode(ToolCallContent.self, from: data) == content)
+    }
+
 }
