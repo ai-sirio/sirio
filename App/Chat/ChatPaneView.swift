@@ -40,6 +40,14 @@ struct ChatPaneView: View {
                     controller.promptError = nil
                 }
             }
+            if let mcpWarning = controller.mcpWarning {
+                banner(
+                    "Configurazione MCP",
+                    detail: mcpWarning,
+                    actionTitle: "OK") {
+                    controller.mcpWarning = nil
+                }
+            }
             TranscriptView(controller: controller, worktree: worktree,
                            appModel: appModel)
             Divider()

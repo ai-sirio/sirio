@@ -89,8 +89,8 @@ public struct InitializeResult: Sendable, Equatable, Codable {
 
 public struct NewSessionParams: Sendable, Equatable, Codable {
     public var cwd: String
-    public var mcpServers: [JSONValue]
-    public init(cwd: String, mcpServers: [JSONValue] = []) {
+    public var mcpServers: [McpServerSpec]
+    public init(cwd: String, mcpServers: [McpServerSpec] = []) {
         self.cwd = cwd
         self.mcpServers = mcpServers
     }
@@ -196,8 +196,9 @@ public struct NewSessionResult: Sendable, Equatable, Codable {
 public struct LoadSessionParams: Sendable, Equatable, Codable {
     public var sessionId: String
     public var cwd: String
-    public var mcpServers: [JSONValue]
-    public init(sessionId: String, cwd: String, mcpServers: [JSONValue] = []) {
+    public var mcpServers: [McpServerSpec]
+    public init(sessionId: String, cwd: String,
+                mcpServers: [McpServerSpec] = []) {
         self.sessionId = sessionId
         self.cwd = cwd
         self.mcpServers = mcpServers
