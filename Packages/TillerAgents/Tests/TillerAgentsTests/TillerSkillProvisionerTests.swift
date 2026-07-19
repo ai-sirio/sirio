@@ -75,6 +75,33 @@ private func temporaryDirectory() throws -> URL {
     #expect(try String(contentsOf: destination, encoding: .utf8) == "user content")
 }
 
+@Test func legacyMarkedSkillIsOverwritten() throws {
+    // Pre-refactor installs used a different marker sentence. Files stamped
+    // with it must still be recognized as Tiller-managed, or every existing
+    // worktree gets permanently locked out with unmanagedFile.
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let destination = root.appendingPathComponent(".claude/skills/tiller/SKILL.md")
+    try FileManager.default.createDirectory(
+        at: destination.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    let legacy = """
+    <!-- Machine-managed by Tiller (ClaudeCodeAdapter). Overwritten on agent pane
+         setup — do not hand-edit. -->
+    old content
+    """
+    try legacy.write(to: destination, atomically: true, encoding: .utf8)
+
+    let markdown = try repositorySkill()
+    try TillerSkillProvisioner.install(
+        markdown: markdown,
+        agentID: "claude",
+        worktreePath: root.path
+    )
+    #expect(try String(contentsOf: destination, encoding: .utf8) == markdown)
+}
+
 @Test func unmarkedInputIsRejected() {
     #expect(throws: TillerSkillProvisioner.Error.missingMarker) {
         try TillerSkillProvisioner.install(
