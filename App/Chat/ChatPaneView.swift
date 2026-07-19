@@ -53,7 +53,12 @@ struct ChatPaneView: View {
             Divider()
             ChatComposerView(controller: controller, worktreePath: worktree.path)
         }
-        .task { await controller.start() }
+        .task {
+            controller.onFollowLocation = { [weak appModel] path in
+                appModel?.requestChatFollow(path: path, worktreeId: worktree.id)
+            }
+            await controller.start()
+        }
     }
 
     private var header: some View {
@@ -62,6 +67,16 @@ struct ChatPaneView: View {
             Text(agentDisplayName).font(.callout.weight(.semibold))
             stateChip
             Spacer()
+            Button {
+                controller.isFollowing.toggle()
+            } label: {
+                Label("Segui l'agente",
+                      systemImage: controller.isFollowing ? "eye.fill" : "eye")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(controller.isFollowing ? Color.accentColor : .secondary)
+            .help("Apre nel pannello di destra i file che l'agente sta modificando")
             Button {
                 Task { await controller.newConversation() }
             } label: {

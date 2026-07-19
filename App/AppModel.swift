@@ -201,6 +201,22 @@ final class AppModel {
     /// external `git init` is picked up on the next launch.
     var gitProjectIds: Set<UUID> = []
 
+    /// Richiesta della chat di mostrare un file nel right panel (following /
+    /// click su un file della card riepilogo). ContentView la osserva.
+    struct ChatFollowRequest: Equatable {
+        let path: String
+        let worktreeId: UUID
+        let ordinal: Int
+    }
+    var chatFollowRequest: ChatFollowRequest?
+    private var chatFollowOrdinal = 0
+
+    func requestChatFollow(path: String, worktreeId: UUID) {
+        chatFollowOrdinal += 1
+        chatFollowRequest = ChatFollowRequest(
+            path: path, worktreeId: worktreeId, ordinal: chatFollowOrdinal)
+    }
+
     func isGitProject(_ project: Project) -> Bool { gitProjectIds.contains(project.id) }
     func isGitProject(id: UUID) -> Bool { gitProjectIds.contains(id) }
 
