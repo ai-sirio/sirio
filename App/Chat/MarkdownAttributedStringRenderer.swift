@@ -18,10 +18,12 @@ enum MarkdownAttributedStringRenderer {
     static let codeColor = NSColor.systemTeal.withAlphaComponent(0.75)
     /// `★ Insight ───` callouts are a plain-text convention (not markdown
     /// syntax), so they're detected by content, not by presentationIntent.
-    /// Amber rather than purple — distinct from `codeColor` without reading
-    /// as loud against the dark card background.
-    static let insightColor = NSColor.systemYellow.withAlphaComponent(0.7)
+    /// Rendered as a tinted, indented "card" inset into the same NSTextView
+    /// (rather than a separate SwiftUI card view) so drag-selection stays
+    /// continuous across it, same as any other block.
+    static let insightBackgroundColor = NSColor.systemYellow.withAlphaComponent(0.12)
     private static let insightMarker = "★ Insight"
+    private static let insightInset: CGFloat = 10
 
 
     static func render(_ markdown: String) -> NSAttributedString {
@@ -143,7 +145,12 @@ enum MarkdownAttributedStringRenderer {
         }
 
         if isInsight {
-            color = insightColor
+            attrs[.backgroundColor] = insightBackgroundColor
+            paragraphStyle.headIndent = insightInset
+            paragraphStyle.firstLineHeadIndent = insightInset
+            paragraphStyle.tailIndent = -insightInset
+            paragraphStyle.paragraphSpacingBefore = 8
+            paragraphStyle.paragraphSpacing = 8
         }
 
         attrs[.font] = font
