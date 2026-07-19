@@ -9,6 +9,13 @@ enum MarkdownAttributedStringRenderer {
 
     static let bodySize: CGFloat = 13
     static let codeSize: CGFloat = 12
+    /// h1/h2/h3 match `TillerMarkdownTheme`; h4-h6 fall back to h3 sizing —
+    /// the theme itself only styles up to h3, so there's no richer source of
+    /// truth to copy for deeper levels.
+    private static let headingSizes: [Int: CGFloat] = [1: 15, 2: 14, 3: 13]
+    private static let headingMargins: [Int: (top: CGFloat, bottom: CGFloat)] =
+        [1: (12, 4), 2: (10, 4), 3: (8, 2)]
+
 
     static func render(_ markdown: String) -> NSAttributedString {
         let options = AttributedString.MarkdownParsingOptions(
@@ -37,6 +44,22 @@ enum MarkdownAttributedStringRenderer {
         var color: NSColor = .labelColor
         let paragraphStyle = NSMutableParagraphStyle()
         var attrs: [NSAttributedString.Key: Any] = [:]
+        if let intent = run.presentationIntent {
+            for component in intent.components {
+                switch component.kind {
+                case .header(let level):
+                    let size = headingSizes[level] ?? headingSizes[3]!
+                    font = NSFontManager.shared.convert(
+                        NSFont.systemFont(ofSize: size), toHaveTrait: .boldFontMask)
+                    let margin = headingMargins[level] ?? headingMargins[3]!
+                    paragraphStyle.paragraphSpacingBefore = margin.top
+                    paragraphStyle.paragraphSpacing = margin.bottom
+                default:
+                    break
+                }
+            }
+        }
+
 
         if let inline = run.inlinePresentationIntent {
             if inline.contains(.code) {
