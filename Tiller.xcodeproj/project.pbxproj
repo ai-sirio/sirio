@@ -28,7 +28,6 @@
 		4D4787EA1EE7F550C5244DF8 /* AgentAccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 448394CDE33B4E363B8D2B2E /* AgentAccountStore.swift */; };
 		4DBD3DF8BE16C4F860C49E73 /* TillerCore in Frameworks */ = {isa = PBXBuildFile; productRef = 7A5C152491CA51176C97C90E /* TillerCore */; };
 		50C86763ACB027DBD925D42F /* TillerPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = 1F3A30808F2FA158DD84EA0F /* TillerPersistence */; };
-		55B1AEC8546E6623C5C4B2C6 /* CodexUsageFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = F081F1DEB23952E1B13900F0 /* CodexUsageFetcher.swift */; };
 		5E1080487320188F215B9A4B /* ProjectSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FA9BFA1A8C9B14562E393FD /* ProjectSettingsSheet.swift */; };
 		60AC9616A07D0093FFCE6E46 /* AgentMenuIconCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 440886206B85A90DD5467FE6 /* AgentMenuIconCache.swift */; };
 		614368A068530D558CDE3D41 /* PermissionsOnboardingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 150990AF30F26D11CD77AD24 /* PermissionsOnboardingSheet.swift */; };
@@ -174,7 +173,6 @@
 		ED802856C38F484D5CC6D6C6 /* SKILL.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SKILL.md; sourceTree = "<group>"; };
 		EF0D154EEEE15E023D3BC9A1 /* SidebarMaterialContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarMaterialContainer.swift; sourceTree = "<group>"; };
 		EFDADB4FD77F95DC2D1F77ED /* AppAppearance+NSAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppAppearance+NSAppearance.swift"; sourceTree = "<group>"; };
-		F081F1DEB23952E1B13900F0 /* CodexUsageFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexUsageFetcher.swift; sourceTree = "<group>"; };
 		F40DAB221BF29036B76B496D /* ChatPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPaneView.swift; sourceTree = "<group>"; };
 		F716FE5D12995FF16226B624 /* AppTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
 		FB40E7559F4C849BD3C2094A /* SettingsSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSurface.swift; sourceTree = "<group>"; };
@@ -299,7 +297,6 @@
 				BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */,
 				F716FE5D12995FF16226B624 /* AppTheme.swift */,
 				8B09A03733A33C9FDC925A05 /* Assets.xcassets */,
-				F081F1DEB23952E1B13900F0 /* CodexUsageFetcher.swift */,
 				362949AA885756BAA5340B1C /* ContentView.swift */,
 				DF4B6A5097F21E65740EB222 /* EmptyWorktreeView.swift */,
 				411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */,
@@ -537,7 +534,6 @@
 				70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */,
 				67FB529584389E037E1941C7 /* ChatController.swift in Sources */,
 				E2BB6072F2A503E3A44E461E /* ChatPaneView.swift in Sources */,
-				55B1AEC8546E6623C5C4B2C6 /* CodexUsageFetcher.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
 				6ABCA221B30C94B74744F851 /* EditSummaryCardView.swift in Sources */,
 				C03FBAC9486C5494F80AC8EB /* EmptyWorktreeView.swift in Sources */,
