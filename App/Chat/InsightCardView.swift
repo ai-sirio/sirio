@@ -18,5 +18,6 @@ struct InsightCardView: View {
         .background(Color.yellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8)
             .strokeBorder(Color.yellow.opacity(0.35)))
+        .padding(.vertical, 6)
     }
 }
