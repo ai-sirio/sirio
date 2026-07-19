@@ -15,6 +15,11 @@ enum MarkdownAttributedStringRenderer {
     private static let headingSizes: [Int: CGFloat] = [1: 15, 2: 14, 3: 13]
     private static let headingMargins: [Int: (top: CGFloat, bottom: CGFloat)] =
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
+    private static let codeColor = NSColor.systemTeal
+    /// `★ Insight ───` callouts are a plain-text convention (not markdown
+    /// syntax), so they're detected by content, not by presentationIntent.
+    private static let insightColor = NSColor.systemPurple
+    private static let insightMarker = "★ Insight"
 
 
     static func render(_ markdown: String) -> NSAttributedString {
@@ -40,22 +45,41 @@ enum MarkdownAttributedStringRenderer {
     /// never a mid-paragraph inline-style change.
     private static func render(_ parsed: AttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        var previousBlockIdentity: Int?
-        for run in parsed.runs {
-            var substring = String(parsed[run.range].characters)
-            let blockIdentity = run.presentationIntent?.components.first?.identity
-            if let previousBlockIdentity, blockIdentity != previousBlockIdentity {
-                substring = "\n" + substring
+        for (blockIndex, block) in groupRunsByBlock(parsed).enumerated() {
+            let blockText = block.map { String(parsed[$0.range].characters) }.joined()
+            let isInsight = blockText.contains(insightMarker)
+            for (runIndex, run) in block.enumerated() {
+                var substring = String(parsed[run.range].characters)
+                if blockIndex > 0 && runIndex == 0 {
+                    substring = "\n" + substring
+                }
+                result.append(NSAttributedString(
+                    string: substring, attributes: attributes(for: run, isInsight: isInsight)))
             }
-            if let blockIdentity {
-                previousBlockIdentity = blockIdentity
-            }
-            result.append(NSAttributedString(string: substring, attributes: attributes(for: run)))
         }
         return result
     }
 
-    private static func attributes(for run: AttributedString.Runs.Run) -> [NSAttributedString.Key: Any] {
+    /// Runs sharing the same *immediate* (innermost) `presentationIntent`
+    /// component identity belong to the same block — e.g. every inline span
+    /// inside one paragraph shares that paragraph's identity.
+    private static func groupRunsByBlock(_ parsed: AttributedString) -> [[AttributedString.Runs.Run]] {
+        var blocks: [[AttributedString.Runs.Run]] = []
+        var previousBlockIdentity: Int?
+        for run in parsed.runs {
+            let blockIdentity = run.presentationIntent?.components.first?.identity
+            if blocks.isEmpty || blockIdentity != previousBlockIdentity {
+                blocks.append([])
+            }
+            blocks[blocks.count - 1].append(run)
+            previousBlockIdentity = blockIdentity
+        }
+        return blocks
+    }
+
+    private static func attributes(
+        for run: AttributedString.Runs.Run, isInsight: Bool
+    ) -> [NSAttributedString.Key: Any] {
         var font = NSFont.systemFont(ofSize: bodySize)
         var color: NSColor = .labelColor
         let paragraphStyle = NSMutableParagraphStyle()
@@ -74,6 +98,7 @@ enum MarkdownAttributedStringRenderer {
                     paragraphStyle.paragraphSpacing = 6
                 case .codeBlock:
                     font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
+                    color = codeColor
                     paragraphStyle.paragraphSpacing = 6
                 case .blockQuote:
                     color = .secondaryLabelColor
@@ -97,6 +122,7 @@ enum MarkdownAttributedStringRenderer {
         if let inline = run.inlinePresentationIntent {
             if inline.contains(.code) {
                 font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
+                color = codeColor
             }
             if inline.contains(.stronglyEmphasized) {
                 font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
@@ -112,6 +138,10 @@ enum MarkdownAttributedStringRenderer {
         if let link = run.link {
             attrs[.link] = link as NSURL
             color = .linkColor
+        }
+
+        if isInsight {
+            color = insightColor
         }
 
         attrs[.font] = font
