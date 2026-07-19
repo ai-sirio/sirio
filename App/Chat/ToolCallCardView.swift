@@ -86,6 +86,11 @@ struct ToolCallCardView: View {
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            case .terminal:
+                TerminalOutputView(
+                    output: item.terminalOutput ?? "",
+                    exit: item.terminalExit,
+                    isRunning: item.status == .pending || item.status == .inProgress)
             case .content, .unknown:
                 EmptyView()
             }
