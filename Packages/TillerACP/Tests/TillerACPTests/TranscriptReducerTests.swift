@@ -134,4 +134,14 @@ import Testing
         #expect(reducer.availableCommands.map(\.name) == ["init"])
         #expect(reducer.items.isEmpty)
     }
+
+    @Test func usageUpdateSetsContextUsage() {
+        var reducer = TranscriptReducer()
+        #expect(reducer.contextUsage == nil)
+        reducer.apply(.usageUpdate(ContextUsage(used: 1000, size: 200000)))
+        #expect(reducer.contextUsage == ContextUsage(used: 1000, size: 200000))
+        reducer.apply(.usageUpdate(ContextUsage(used: 2500, size: 200000)))
+        #expect(reducer.contextUsage == ContextUsage(used: 2500, size: 200000))
+        #expect(reducer.items.isEmpty)
+    }
 }
