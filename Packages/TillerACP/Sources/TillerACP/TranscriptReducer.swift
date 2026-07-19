@@ -12,6 +12,9 @@ public struct TranscriptReducer: Sendable, Equatable {
     private var openThoughtIndex: Int?
     private var openUserMessageIndex: Int?
     private var nextOrdinal = 0
+    /// Path (grezzi, come inviati dall'agente) dei tool call kind == .edit
+    /// completati nel turno corrente; svuotato a inizio e fine turno.
+    private var turnEditPaths: [String] = []
 
     public init() {}
 
@@ -36,6 +39,7 @@ public struct TranscriptReducer: Sendable, Equatable {
 
     /// Records the user's prompt (called by the session when a turn starts).
     public mutating func userPrompted(_ blocks: [ContentBlock]) {
+        turnEditPaths = []
         closeOpenStreams()
         items.append(.userMessage(id: makeId("user"), blocks: blocks))
     }
@@ -50,6 +54,10 @@ public struct TranscriptReducer: Sendable, Equatable {
                   item.permission?.isPending == true else { continue }
             item.permission?.resolution = .cancelled
             items[index] = .toolCall(item)
+        }
+        if !turnEditPaths.isEmpty {
+            items.append(.editSummary(id: makeId("edits"), paths: turnEditPaths))
+            turnEditPaths = []
         }
         if !items.isEmpty {
             items.append(.turnDivider(id: makeId("divider"), at: date))
@@ -135,8 +143,10 @@ public struct TranscriptReducer: Sendable, Equatable {
             merged.terminalOutput = existing.terminalOutput
             merged.terminalExit = existing.terminalExit
             items[index] = .toolCall(merged)
+            recordEditPaths(of: merged)
         } else {
             items.append(.toolCall(item))
+            recordEditPaths(of: item)
         }
     }
 
@@ -145,6 +155,7 @@ public struct TranscriptReducer: Sendable, Equatable {
            case .toolCall(var item) = items[index] {
             item.merge(update)
             items[index] = .toolCall(item)
+            recordEditPaths(of: item)
         } else {
             // Update for a call we never saw (e.g. mid-stream reconnect):
             // materialize a minimal card rather than dropping information.
@@ -154,6 +165,7 @@ public struct TranscriptReducer: Sendable, Equatable {
             item.merge(update)
             closeOpenStreams()
             items.append(.toolCall(item))
+            recordEditPaths(of: item)
         }
     }
 
@@ -179,6 +191,17 @@ public struct TranscriptReducer: Sendable, Equatable {
             item.permission?.resolution = resolution
             items[index] = .toolCall(item)
             return
+        }
+    }
+
+    private mutating func recordEditPaths(of item: ToolCallItem) {
+        guard item.kind == .edit, item.status == .completed else { return }
+        var paths = item.locations.map(\.path)
+        for content in item.content {
+            if case .diff(let path, _, _) = content { paths.append(path) }
+        }
+        for path in paths where !turnEditPaths.contains(path) {
+            turnEditPaths.append(path)
         }
     }
 
