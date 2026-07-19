@@ -41,7 +41,7 @@ struct TranscriptView: View {
         case .userMessage(_, let blocks):
             userBubble(blocks)
         case .agentMessage(_, let text, _):
-            AgentMarkdownTextView(markdown: text)
+            agentMessage(text)
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
@@ -54,6 +54,24 @@ struct TranscriptView: View {
         case .editSummary(_, let paths):
             EditSummaryCardView(paths: paths, worktree: worktree,
                                 appModel: appModel)
+        }
+    }
+
+    // MARK: - Agent message
+
+    /// Splits out `★ Insight ───` callouts into their own card, so they read
+    /// as an aside rather than getting stuck inside the single markdown
+    /// NSTextView with the rest of the reply (see `AgentMessageSegmenter`).
+    private func agentMessage(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(AgentMessageSegmenter.segments(from: text).enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .prose(let chunk):
+                    AgentMarkdownTextView(markdown: chunk)
+                case .insight(let body):
+                    InsightCardView(text: body)
+                }
+            }
         }
     }
 

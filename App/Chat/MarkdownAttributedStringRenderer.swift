@@ -5,6 +5,10 @@ import Foundation
 /// `TillerMarkdownTheme`, for rendering inside a single `NSTextView` so
 /// drag-selection stays continuous across block boundaries. See
 /// docs/superpowers/specs/2026-07-19-agent-markdown-selection-design.md.
+///
+/// `★ Insight ───` callouts are stripped out before text ever reaches this
+/// renderer — see `AgentMessageSegmenter` / `InsightCardView` — so this file
+/// only ever sees plain prose markdown.
 enum MarkdownAttributedStringRenderer {
 
     static let bodySize: CGFloat = 13
@@ -16,15 +20,6 @@ enum MarkdownAttributedStringRenderer {
     private static let headingMargins: [Int: (top: CGFloat, bottom: CGFloat)] =
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
     static let codeColor = NSColor.systemTeal.withAlphaComponent(0.75)
-    /// `★ Insight ───` callouts are a plain-text convention (not markdown
-    /// syntax), so they're detected by content, not by presentationIntent.
-    /// Rendered as a tinted, indented "card" inset into the same NSTextView
-    /// (rather than a separate SwiftUI card view) so drag-selection stays
-    /// continuous across it, same as any other block.
-    static let insightBackgroundColor = NSColor.systemYellow.withAlphaComponent(0.12)
-    private static let insightMarker = "★ Insight"
-    private static let insightInset: CGFloat = 10
-
 
     static func render(_ markdown: String) -> NSAttributedString {
         let options = AttributedString.MarkdownParsingOptions(
@@ -49,41 +44,22 @@ enum MarkdownAttributedStringRenderer {
     /// never a mid-paragraph inline-style change.
     private static func render(_ parsed: AttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        for (blockIndex, block) in groupRunsByBlock(parsed).enumerated() {
-            let blockText = block.map { String(parsed[$0.range].characters) }.joined()
-            let isInsight = blockText.contains(insightMarker)
-            for (runIndex, run) in block.enumerated() {
-                var substring = String(parsed[run.range].characters)
-                if blockIndex > 0 && runIndex == 0 {
-                    substring = "\n" + substring
-                }
-                result.append(NSAttributedString(
-                    string: substring, attributes: attributes(for: run, isInsight: isInsight)))
+        var previousBlockIdentity: Int?
+        for run in parsed.runs {
+            var substring = String(parsed[run.range].characters)
+            let blockIdentity = run.presentationIntent?.components.first?.identity
+            if let previousBlockIdentity, blockIdentity != previousBlockIdentity {
+                substring = "\n" + substring
             }
+            if let blockIdentity {
+                previousBlockIdentity = blockIdentity
+            }
+            result.append(NSAttributedString(string: substring, attributes: attributes(for: run)))
         }
         return result
     }
 
-    /// Runs sharing the same *immediate* (innermost) `presentationIntent`
-    /// component identity belong to the same block — e.g. every inline span
-    /// inside one paragraph shares that paragraph's identity.
-    private static func groupRunsByBlock(_ parsed: AttributedString) -> [[AttributedString.Runs.Run]] {
-        var blocks: [[AttributedString.Runs.Run]] = []
-        var previousBlockIdentity: Int?
-        for run in parsed.runs {
-            let blockIdentity = run.presentationIntent?.components.first?.identity
-            if blocks.isEmpty || blockIdentity != previousBlockIdentity {
-                blocks.append([])
-            }
-            blocks[blocks.count - 1].append(run)
-            previousBlockIdentity = blockIdentity
-        }
-        return blocks
-    }
-
-    private static func attributes(
-        for run: AttributedString.Runs.Run, isInsight: Bool
-    ) -> [NSAttributedString.Key: Any] {
+    private static func attributes(for run: AttributedString.Runs.Run) -> [NSAttributedString.Key: Any] {
         var font = NSFont.systemFont(ofSize: bodySize)
         var color: NSColor = .labelColor
         let paragraphStyle = NSMutableParagraphStyle()
@@ -122,7 +98,6 @@ enum MarkdownAttributedStringRenderer {
             }
         }
 
-
         if let inline = run.inlinePresentationIntent {
             if inline.contains(.code) {
                 font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
@@ -142,15 +117,6 @@ enum MarkdownAttributedStringRenderer {
         if let link = run.link {
             attrs[.link] = link as NSURL
             color = .linkColor
-        }
-
-        if isInsight {
-            attrs[.backgroundColor] = insightBackgroundColor
-            paragraphStyle.headIndent = insightInset
-            paragraphStyle.firstLineHeadIndent = insightInset
-            paragraphStyle.tailIndent = -insightInset
-            paragraphStyle.paragraphSpacingBefore = 8
-            paragraphStyle.paragraphSpacing = 8
         }
 
         attrs[.font] = font
