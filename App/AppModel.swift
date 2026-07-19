@@ -6,6 +6,7 @@ import TillerGit
 import TillerTerminal
 import TillerControl
 import TillerAgents
+import TillerACP
 import AppKit
 import UserNotifications
 import OSLog
@@ -104,7 +105,7 @@ final class AppModel {
     /// Highest-priority agent status among all panes in a worktree's tree.
     /// Priority: error > needs-input > running > done. Returns nil if no agent panes.
     func statusForWorktree(_ worktree: Worktree) -> AgentStatus? {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.activityPaneIds }
         return agentActivity.statusForWorktree(paneIds: paneIds)
     }
 
@@ -148,7 +149,7 @@ final class AppModel {
     /// AgentCatalog.all for stable left-to-right icon order in the
     /// worktree row's trailing running-agents badge.
     func runningAgentIds(for worktree: Worktree) -> [String] {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
+        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.activityPaneIds }
         return agentActivity.runningAgentIds(paneIds: paneIds, catalogIds: AgentCatalog.all.map(\.id))
     }
     private let notifier = AgentNotifier()
@@ -200,6 +201,22 @@ final class AppModel {
     /// external `git init` is picked up on the next launch.
     var gitProjectIds: Set<UUID> = []
 
+    /// Richiesta della chat di mostrare un file nel right panel (following /
+    /// click su un file della card riepilogo). ContentView la osserva.
+    struct ChatFollowRequest: Equatable {
+        let path: String
+        let worktreeId: UUID
+        let ordinal: Int
+    }
+    var chatFollowRequest: ChatFollowRequest?
+    private var chatFollowOrdinal = 0
+
+    func requestChatFollow(path: String, worktreeId: UUID) {
+        chatFollowOrdinal += 1
+        chatFollowRequest = ChatFollowRequest(
+            path: path, worktreeId: worktreeId, ordinal: chatFollowOrdinal)
+    }
+
     func isGitProject(_ project: Project) -> Bool { gitProjectIds.contains(project.id) }
     func isGitProject(id: UUID) -> Bool { gitProjectIds.contains(id) }
 
@@ -236,6 +253,7 @@ final class AppModel {
             self.store = store
             self.database = db
             self.agentAccounts = AgentAccountStore(database: db)
+            self.chatStore = ChatSessionStore(database: db)
             projects = try await store.loadAll()
             let ctl = tillerctlPath()
             for project in projects {
@@ -692,7 +710,10 @@ final class AppModel {
             for worktree in projectWorktrees {
                 let tabsBeingRemoved = tabs[worktree.id] ?? []
                 tabs[worktree.id] = nil
-                for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
+                for tab in tabsBeingRemoved {
+                    teardownMarkdownDocument(tabId: tab.id)
+                    teardownChatController(tabId: tab.id)
+                }
                 activeTabId[worktree.id] = nil
             }
             openWorktreeIds.removeAll { id in projectWorktrees.contains { $0.id == id } }
@@ -788,7 +809,10 @@ final class AppModel {
             let tabsBeingRemoved = tabs[worktree.id] ?? []
             tabs[worktree.id] = nil
             paneCaches[worktree.id] = nil
-            for tab in tabsBeingRemoved { teardownMarkdownDocument(tabId: tab.id) }
+            for tab in tabsBeingRemoved {
+                teardownMarkdownDocument(tabId: tab.id)
+                teardownChatController(tabId: tab.id)
+            }
             activeTabId[worktree.id] = nil
             openWorktreeIds.removeAll { $0 == worktree.id }
             if selectedWorktree?.id == worktree.id {
@@ -872,6 +896,7 @@ final class AppModel {
         }
         list.removeAll { $0.id == tabId }
         teardownMarkdownDocument(tabId: tabId)
+        teardownChatController(tabId: tabId)
         // Allow empty tab list — the worktree can have zero tabs.
         // The user creates a new tab via ⌘T or the sidebar "+" menu.
         tabs[worktree.id] = list
@@ -897,6 +922,52 @@ final class AppModel {
         guard !trimmed.isEmpty else { return }
         tabs[worktreeId]?[idx].title = trimmed
         persistTabs(for: worktreeId)
+    }
+    /// Riordina la tab prima di `targetId` (nil = in coda). Usato dal drag
+    /// & drop di tab bar e sidebar; l'ordine persiste nello snapshot già
+    /// serializzato da persistTabs.
+    func moveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) {
+        guard let list = tabs[worktreeId] else { return }
+        let moved = TabOrdering.moving(list, id: tabId, before: targetId)
+        guard moved.map(\.id) != list.map(\.id) else { return }
+        tabs[worktreeId] = moved
+        persistTabs(for: worktreeId)
+    }
+    /// Chiude tutte le tab del worktree tranne quella indicata. Passa dal
+    /// percorso closeTab singolo: le conferme markdown-dirty appaiono una
+    /// alla volta e un annulla lascia la tab aperta.
+    func closeOtherTabs(_ tabId: UUID, in worktree: Worktree) {
+        let ids = (tabs[worktree.id] ?? []).map(\.id).filter { $0 != tabId }
+        for id in ids { closeTab(id, in: worktree) }
+    }
+
+    /// Chiude le tab a destra di quella indicata (stesso percorso singolo).
+    func closeTabsToRight(of tabId: UUID, in worktree: Worktree) {
+        guard let list = tabs[worktree.id],
+              let index = list.firstIndex(where: { $0.id == tabId }) else { return }
+        for id in list.suffix(from: index + 1).map(\.id) {
+            closeTab(id, in: worktree)
+        }
+    }
+
+    /// ⌘n: attiva la tab n del worktree selezionato (9 = ultima). Out of
+    /// range = no-op.
+    func selectTab(number: Int) {
+        guard let worktree = selectedWorktree,
+              let list = tabs[worktree.id],
+              let index = TabOrdering.selectionIndex(number: number, count: list.count)
+        else { return }
+        activateTab(list[index].id, in: worktree.id)
+    }
+
+    /// ⌃Tab / ⌃⇧Tab: cicla le tab del worktree selezionato con wrap-around.
+    func cycleTab(forward: Bool) {
+        guard let worktree = selectedWorktree, let list = tabs[worktree.id] else { return }
+        let current = list.firstIndex { $0.id == activeTab(for: worktree.id)?.id }
+        guard let index = TabOrdering.cycledIndex(
+            current: current, forward: forward, count: list.count
+        ) else { return }
+        activateTab(list[index].id, in: worktree.id)
     }
 
     func splitCurrent(_ axis: SplitAxis) {
@@ -1217,6 +1288,60 @@ final class AppModel {
     /// Documenti aperti, keyed su tab.id. Vivono qui (non nella view) perché
     /// le view SwiftUI muoiono al cambio tab e perderebbero il buffer.
     var markdownDocuments: [UUID: MarkdownDocument] = [:]
+    var chatControllers: [UUID: ChatController] = [:]
+    var chatStore: ChatSessionStore?
+
+    /// Adapters that can host a chat pane (have an ACP launch spec).
+    static func acpAgents() -> [any AgentAdapter] {
+        AgentCatalog.all.filter { AgentLaunchSpec.forAgent(id: $0.id) != nil }
+    }
+
+    @discardableResult
+    func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
+        guard AgentLaunchSpec.forAgent(id: agentId) != nil else { return nil }
+        let title = AgentCatalog.all.first { $0.id == agentId }?.displayName ?? agentId
+        let tab = WorkspaceTab(id: UUID(), title: title,
+                               content: .chat(agentId: agentId))
+        selectedWorktree = worktree
+        tabs[worktree.id, default: []].append(tab)
+        activeTabId[worktree.id] = tab.id
+        agentActivity.agentSpawned(paneId: tab.id, agentId: agentId, now: Date())
+        persistTabs(for: worktree.id)
+        return tab
+    }
+
+    /// Lazily builds the controller for a (restored) chat tab, mirroring
+    /// markdownDocument(for:).
+    func chatController(for tab: WorkspaceTab, in worktree: Worktree) -> ChatController? {
+        guard let agentId = tab.chatAgentId else { return nil }
+        if let controller = chatControllers[tab.id] { return controller }
+        let controller = ChatController(
+            tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
+            worktreePath: worktree.path, store: chatStore)
+        controller.onStatusChange = { [weak self] status in
+            guard let self else { return }
+            let transition = self.agentActivity.notify(
+                paneId: tab.id, status: status, now: Date())
+            self.notifyTransition(paneId: tab.id,
+                                  from: transition.old, to: transition.new)
+        }
+        chatControllers[tab.id] = controller
+        return controller
+    }
+
+    func teardownChatController(tabId: UUID) {
+        guard let controller = chatControllers[tabId] else { return }
+        chatControllers[tabId] = nil
+        agentActivity.paneClosed(paneId: tabId)
+        Task { await controller.stop() }
+    }
+
+    /// Best-effort transcript flush on app quit.
+    func flushChatControllers() {
+        for controller in chatControllers.values {
+            Task { await controller.stop() }
+        }
+    }
 
     /// Funnel unico per tutti i canali di apertura (cmd+click, drop, ⌘O).
     /// Dedup per fileURL: se il file è già aperto nel worktree attiva quella tab.
@@ -1512,7 +1637,7 @@ final class AppModel {
 
     private func worktreeContaining(paneId: UUID) -> Worktree? {
         worktrees.values.flatMap { $0 }.first { wt in
-            (tabs[wt.id] ?? []).contains { $0.leafIds.contains(paneId) }
+            (tabs[wt.id] ?? []).contains { $0.activityPaneIds.contains(paneId) }
         }
     }
 

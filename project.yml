@@ -24,6 +24,8 @@ packages:
     path: Packages/TillerGit
   TillerAgents:
     path: Packages/TillerAgents
+  TillerACP:
+    path: Packages/TillerACP
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     from: 2.4.0
@@ -51,6 +53,7 @@ targets:
       - package: TillerPersistence
       - package: TillerControl
       - package: TillerAgents
+      - package: TillerACP
       - package: MarkdownUI
       - package: TillerGit
       - package: Sparkle

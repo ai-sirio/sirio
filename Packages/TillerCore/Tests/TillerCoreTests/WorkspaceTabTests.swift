@@ -27,3 +27,20 @@ import Foundation
     ]
     #expect(WorkspaceTab.nextShellTitle(existing: existing) == "Terminale 2")
 }
+
+@Test func chatTabExposesAgentIdAndActivityPane() {
+    let id = UUID()
+    let tab = WorkspaceTab(id: id, title: "Claude Code",
+                           content: .chat(agentId: "claude"))
+    #expect(tab.chatAgentId == "claude")
+    #expect(tab.leafIds == [])
+    #expect(tab.terminalTree == nil)
+    #expect(tab.markdownFileURL == nil)
+    #expect(tab.activityPaneIds == [id])
+}
+
+@Test func activityPaneIdsForTerminalMatchesLeafIds() {
+    let leaf = UUID()
+    let tab = WorkspaceTab(id: UUID(), title: "shell", tree: .leaf(id: leaf))
+    #expect(tab.activityPaneIds == [leaf])
+}

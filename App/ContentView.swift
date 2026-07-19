@@ -68,6 +68,19 @@ struct ContentView: View {
                 worktree: model.selectedWorktree,
                 isGitRepository: rightPanelContext.gitProject)
         }
+        .onChange(of: model.chatFollowRequest) {
+            guard let request = model.chatFollowRequest,
+                  let worktree = model.selectedWorktree,
+                  worktree.id == request.worktreeId else { return }
+            rightPanelVisible = true
+            let root = URL(fileURLWithPath: worktree.path).standardizedFileURL.path
+            let relative = request.path.hasPrefix(root + "/")
+                ? String(request.path.dropFirst(root.count + 1))
+                : request.path
+            guard let entry = rightPanelModel.statusByPath[relative] else { return }
+            rightPanelModeRaw = RightPanelMode.diff.rawValue
+            Task { await rightPanelModel.selectDiff(entry) }
+        }
         .onDisappear { rightPanelModel.deactivate() }
         .configuresWindowChrome()
         .toolbar {
@@ -162,6 +175,10 @@ struct ContentView: View {
                     }
             }
             VStack(spacing: 0) {
+                if let worktree = model.selectedWorktree {
+                    TabBarView(model: model, worktree: worktree)
+                    Divider()
+                }
                 terminalStack
                 if showUsageBar {
                     Divider()
@@ -284,6 +301,14 @@ struct ContentView: View {
                                         systemImage: "doc.questionmark",
                                         description: Text(tab.markdownFileURL?.path ?? "")
                                     )
+                                }
+                            case .chat:
+                                if let controller = model.chatController(for: tab, in: worktree) {
+                                    ChatPaneView(controller: controller, worktree: worktree,
+                                                 appModel: model)
+                                } else {
+                                    ContentUnavailableView("Agente non disponibile",
+                                                           systemImage: "bubble.left")
                                 }
                             }
                         }

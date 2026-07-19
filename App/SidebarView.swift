@@ -41,6 +41,12 @@ struct SidebarView: View {
                                                 }
                                             }
                                             Divider()
+                                            ForEach(AppModel.acpAgents(), id: \.id) { adapter in
+                                                Button("Chat · \(adapter.displayName)") {
+                                                    model.openChatTab(agentId: adapter.id, in: worktree)
+                                                }
+                                            }
+                                            Divider()
                                             Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {
                                                 Task { await model.setPrimary(worktree) }
                                             }
@@ -380,27 +386,7 @@ private struct WorktreeRow: View {
 
             if hovering {
                 Menu {
-                    Button {
-                        model.newShellTab(in: worktree)
-                    } label: {
-                        Label("Nuovo Terminale", systemImage: "terminal")
-                    }
-                    Divider()
-                    ForEach(AgentCatalog.all, id: \.id) { adapter in
-                        Button {
-                            Task { await model.spawnAgent(adapter, in: worktree) }
-                        } label: {
-                            if let icon = AgentMenuIconCache.image(for: adapter.id) {
-                                Label {
-                                    Text(adapter.displayName)
-                                } icon: {
-                                    Image(nsImage: icon)
-                                }
-                            } else {
-                                Text(adapter.displayName)
-                            }
-                        }
-                    }
+                    NewTabMenuItems(model: model, worktree: worktree)
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 11))
@@ -514,6 +500,7 @@ private struct TabRow: View {
     @State private var confirmingClose = false
     @State private var draftTitle = ""
     @FocusState private var renameFieldFocused: Bool
+    @State private var dropTargeted = false
 
     private var isSelected: Bool {
         model.selectedWorktree?.id == worktree.id
@@ -522,7 +509,7 @@ private struct TabRow: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            icon
+            WorkspaceTabIcon(model: model, tab: tab)
                 .frame(width: 14)
 
             if renaming {
@@ -600,6 +587,22 @@ private struct TabRow: View {
                 }
             }
         }
+        .draggable(TabDragPayload(tabId: tab.id, worktreeId: worktree.id))
+        .dropDestination(for: TabDragPayload.self) { payloads, _ in
+            guard let payload = payloads.first,
+                  payload.worktreeId == worktree.id,
+                  payload.tabId != tab.id else { return false }
+            model.moveTab(payload.tabId, before: tab.id, in: worktree.id)
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .overlay(alignment: .top) {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(AppTheme.selectionRing)
+                    .frame(height: 2)
+                    .padding(.leading, 44)
+            }
+        }
         .alert("Chiudere il terminale?", isPresented: $confirmingClose) {
             Button("Annulla", role: .cancel) {}
             Button("Chiudi", role: .destructive) { model.closeTab(tab.id, in: worktree) }
@@ -608,19 +611,6 @@ private struct TabRow: View {
         }
     }
 
-    @ViewBuilder private var icon: some View {
-        if tab.markdownFileURL != nil {
-            Image(systemName: "doc.text")
-                .font(.system(size: 10))
-                .foregroundStyle(AppTheme.meta)
-        } else if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {
-            AgentIcon(agentId: agentId, size: 12)
-        } else {
-            Image(systemName: "terminal")
-                .font(.system(size: 10))
-                .foregroundStyle(AppTheme.meta)
-        }
-    }
 
     @ViewBuilder private var rowBackground: some View {
         if isSelected {

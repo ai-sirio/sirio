@@ -222,6 +222,14 @@ public actor ProjectStore {
                         treeJSON: "", updatedAt: Date(),
                         kind: "markdown", filePath: fileURL.path
                     )
+                case .chat(let agentId):
+                    record = TerminalTabRecord(
+                        id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
+                        title: tab.title, orderIdx: idx,
+                        isActive: tab.id == activeTabId,
+                        treeJSON: "", updatedAt: Date(),
+                        kind: "chat", chatAgentId: agentId
+                    )
                 }
                 try record.insert(db)
             }
@@ -251,6 +259,11 @@ public actor ProjectStore {
                     }
                     tabs.append(WorkspaceTab(id: id, title: record.title,
                                              content: .markdown(fileURL: URL(fileURLWithPath: path))))
+                case "chat":
+                    guard let agentId = record.chatAgentId else { continue }
+                    tabs.append(WorkspaceTab(
+                        id: id, title: record.title,
+                        content: .chat(agentId: agentId)))
                 default:
                     guard let tree = try? decoder.decode(SplitTree.self, from: Data(record.treeJSON.utf8)) else {
                         logger.warning("loadTabs: skipping corrupt TerminalTabRecord '\(record.id)'")

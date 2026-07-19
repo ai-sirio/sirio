@@ -5,6 +5,7 @@ import Foundation
 public enum TabContent: Equatable, Sendable {
     case terminal(SplitTree)
     case markdown(fileURL: URL)
+    case chat(agentId: String)
 }
 
 /// Una tab dentro un worktree. L'identità della tab è stabile; title e
@@ -37,6 +38,22 @@ public struct WorkspaceTab: Identifiable, Equatable, Sendable {
     public var markdownFileURL: URL? {
         if case .markdown(let url) = content { return url }
         return nil
+    }
+
+    /// Agent id when this is a chat tab.
+    public var chatAgentId: String? {
+        if case .chat(let agentId) = content { return agentId }
+        return nil
+    }
+
+    /// Pane ids that participate in agent-activity aggregation: terminal
+    /// leaves for terminal tabs, the tab itself for chat tabs.
+    public var activityPaneIds: [UUID] {
+        switch content {
+        case .terminal: leafIds
+        case .markdown: []
+        case .chat: [id]
+        }
     }
 
     /// Titolo default per una nuova shell manuale: "Terminale N", dove N
