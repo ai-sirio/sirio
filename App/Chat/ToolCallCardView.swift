@@ -38,7 +38,7 @@ struct ToolCallCardView: View {
                 .font(.caption)
             Text(item.title)
                 .font(.callout.weight(.medium))
-                .lineLimit(1)
+                .lineLimit(expanded ? nil : 1)
             Spacer()
             statusGlyph
         }

@@ -21,15 +21,18 @@ struct TerminalOutputView: View {
         VStack(alignment: .leading, spacing: 4) {
             statusChip
             if !output.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(tailLines.enumerated()), id: \.offset) { _, line in
-                        Text(line.isEmpty ? " " : String(line))
-                            .font(.system(size: 12, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(tailLines.enumerated()), id: \.offset) { _, line in
+                            Text(line.isEmpty ? " " : String(line))
+                                .font(.system(size: 12, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
+                    .textSelection(.enabled)
+                    .padding(6)
                 }
-                .textSelection(.enabled)
-                .padding(6)
+                .frame(maxHeight: 240)
                 .background(Color.black.opacity(0.85),
                             in: RoundedRectangle(cornerRadius: 6))
                 .foregroundStyle(Color.white.opacity(0.92))
