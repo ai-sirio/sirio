@@ -5,9 +5,9 @@ import Foundation
 /// theme (TillerTerminal) both derive from these components so the sidebar,
 /// detail pane, and terminal surface never drift out of sync.
 public enum AppSurfaceColor {
-    public static let red: Double = 0.102
-    public static let green: Double = 0.110
-    public static let blue: Double = 0.137
+    public static let red: Double = 0.075
+    public static let green: Double = 0.075
+    public static let blue: Double = 0.075
 
     public static var hex: String {
         hexString(red: red, green: green, blue: blue)
