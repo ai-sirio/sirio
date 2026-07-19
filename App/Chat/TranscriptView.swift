@@ -98,6 +98,7 @@ struct TranscriptView: View {
         switch block {
         case .text(let text):
             Text(text).font(.system(size: 13)).textSelection(.enabled)
+                .frame(maxWidth: 456, alignment: .leading)
         case .resourceLink(_, let name):
             Label(name, systemImage: "doc")
                 .font(.caption)
