@@ -51,4 +51,35 @@ struct MarkdownAttributedStringRendererTests {
         let link = result.attribute(.link, at: 0, effectiveRange: nil) as? NSURL
         #expect(link?.absoluteString == "https://example.com")
     }
+    @Test("h1 heading is 15pt semibold")
+    func heading1() {
+        let result = MarkdownAttributedStringRenderer.render("# Title")
+        #expect(result.string == "Title")
+        let font = result.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == 15)
+        #expect(font?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+    }
+
+    @Test("h2 heading is 14pt semibold")
+    func heading2() {
+        let result = MarkdownAttributedStringRenderer.render("## Section")
+        let font = result.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == 14)
+    }
+
+    @Test("h3 heading is 13pt semibold")
+    func heading3() {
+        let result = MarkdownAttributedStringRenderer.render("### Subsection")
+        let font = result.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == 13)
+        #expect(font?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+    }
+
+    @Test("h4 falls back to h3 sizing")
+    func heading4FallsBackToH3() {
+        let result = MarkdownAttributedStringRenderer.render("#### Deep")
+        let font = result.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == 13)
+        #expect(font?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+    }
 }
