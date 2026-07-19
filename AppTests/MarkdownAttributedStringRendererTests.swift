@@ -82,4 +82,34 @@ struct MarkdownAttributedStringRendererTests {
         #expect(font?.pointSize == 13)
         #expect(font?.fontDescriptor.symbolicTraits.contains(.bold) == true)
     }
+
+    @Test("fenced code block uses 12pt monospaced font")
+    func codeBlock() {
+        let result = MarkdownAttributedStringRenderer.render("```\nlet x = 1\n```")
+        #expect(result.string.contains("let x = 1"))
+        let range = (result.string as NSString).range(of: "let x = 1")
+        let font = result.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == 12)
+        #expect(font?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
+    }
+
+    @Test("blockquote is indented and secondary-colored")
+    func blockquote() {
+        let result = MarkdownAttributedStringRenderer.render("> quoted")
+        #expect(result.string.contains("quoted"))
+        let range = (result.string as NSString).range(of: "quoted")
+        let style = result.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.headIndent == 12)
+        let color = result.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
+        #expect(color == .secondaryLabelColor)
+    }
+
+    @Test("unordered list item is indented")
+    func unorderedListItem() {
+        let result = MarkdownAttributedStringRenderer.render("- one\n- two")
+        #expect(result.string.contains("one"))
+        let range = (result.string as NSString).range(of: "one")
+        let style = result.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.headIndent == 16)
+    }
 }

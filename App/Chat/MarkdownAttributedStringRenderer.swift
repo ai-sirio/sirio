@@ -54,6 +54,14 @@ enum MarkdownAttributedStringRenderer {
                     let margin = headingMargins[level] ?? headingMargins[3]!
                     paragraphStyle.paragraphSpacingBefore = margin.top
                     paragraphStyle.paragraphSpacing = margin.bottom
+                case .codeBlock:
+                    font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
+                case .blockQuote:
+                    color = .secondaryLabelColor
+                    paragraphStyle.headIndent = 12
+                    paragraphStyle.firstLineHeadIndent = 12
+                case .listItem:
+                    paragraphStyle.headIndent = 16
                 default:
                     break
                 }
