@@ -7,6 +7,7 @@ public struct TranscriptReducer: Sendable, Equatable {
     public private(set) var items: [TranscriptItem] = []
     public private(set) var currentModeId: String?
     public private(set) var availableCommands: [AvailableCommand] = []
+    public private(set) var contextUsage: ContextUsage?
 
     private var openAgentMessageIndex: Int?
     private var openThoughtIndex: Int?
@@ -130,8 +131,8 @@ public struct TranscriptReducer: Sendable, Equatable {
         case .currentModeUpdate(let modeId):
             currentModeId = modeId
 
-        case .usageUpdate:
-            break
+        case .usageUpdate(let usage):
+            contextUsage = usage
 
         case .unknown:
             break
