@@ -80,7 +80,7 @@ struct TranscriptView: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Color.primary)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder
