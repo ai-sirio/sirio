@@ -30,12 +30,17 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
     public var content: [ToolCallContent]
     public var locations: [ToolCallLocation]
     public var permission: PermissionState?
+    /// Accumulated agent-side terminal output (claude-agent-acp _meta
+    /// extension); nil for tool calls without a terminal.
+    public var terminalOutput: String?
+    public var terminalExit: TerminalExitStatus?
 
     public var id: String { toolCallId }
 
     public init(toolCallId: String, title: String, kind: ToolKind,
                 status: ToolCallStatus, content: [ToolCallContent] = [],
-                locations: [ToolCallLocation] = [], permission: PermissionState? = nil) {
+                locations: [ToolCallLocation] = [], permission: PermissionState? = nil,
+                terminalOutput: String? = nil, terminalExit: TerminalExitStatus? = nil) {
         self.toolCallId = toolCallId
         self.title = title
         self.kind = kind
@@ -43,6 +48,8 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         self.content = content
         self.locations = locations
         self.permission = permission
+        self.terminalOutput = terminalOutput
+        self.terminalExit = terminalExit
     }
 
     init(_ call: ToolCall) {
@@ -57,6 +64,15 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         if let status = update.status { self.status = status }
         if let content = update.content { self.content = content }
         if let locations = update.locations { self.locations = locations }
+        if let meta = update.terminalMeta {
+            if let chunk = meta.terminalOutput {
+                terminalOutput = (terminalOutput ?? "") + chunk.data
+            }
+            if let exit = meta.terminalExit {
+                terminalExit = TerminalExitStatus(exitCode: exit.exitCode,
+                                                  signal: exit.signal)
+            }
+        }
     }
 }
 
