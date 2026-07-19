@@ -243,6 +243,7 @@ struct ChatComposerView: View {
                     .rotationEffect(.degrees(-90))
             }
             .frame(width: 16, height: 16)
+            .contentShape(Circle())
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
             .help("\(remaining)% remaining\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens")
         }
