@@ -56,17 +56,24 @@ struct ChatComposerView: View {
             .strokeBorder(.separator.opacity(0.5), lineWidth: 1))
     }
 
+    private var editorPlaceholder: String {
+        controller.hasPendingPermission
+            ? "Waiting for permission response…"
+            : isPrompting ? "Type to queue for the next turn…"
+            : "Message…"
+    }
+
     private var editor: some View {
-        TextField(controller.hasPendingPermission
-                  ? "Waiting for permission response…"
-                  : isPrompting ? "Type to queue for the next turn…"
-                  : "Message…",
-                  text: $text, axis: .vertical)
-            .textFieldStyle(.plain)
-            .lineLimit(1...8)
-            .disabled(!canInteract)
-            .onSubmit(sendCurrent)
-            .onChange(of: text) { updateMentionQuery() }
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(editorPlaceholder)
+                    .foregroundStyle(.secondary)
+                    .allowsHitTesting(false)
+            }
+            ChatTextEditor(text: $text, isEditable: canInteract, minHeight: 36, maxHeight: 160, onSubmit: sendCurrent)
+        }
+        .disabled(!canInteract)
+        .onChange(of: text) { updateMentionQuery() }
     }
 
     private var controlBar: some View {
