@@ -33,6 +33,8 @@ import TillerPersistence
         let (store, worktreeId) = try makeStore()
         let created = try store.createSession(worktreeId: worktreeId, agentId: "claude",
                                               now: Date(timeIntervalSince1970: 100))
+        try store.saveTranscript(sessionId: created.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 100))
         let latest = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
         #expect(latest?.id == created.id)
         #expect(try store.latestSession(worktreeId: worktreeId, agentId: "opencode") == nil)
@@ -40,12 +42,32 @@ import TillerPersistence
 
     @Test func latestPicksMostRecentActivity() throws {
         let (store, worktreeId) = try makeStore()
-        _ = try store.createSession(worktreeId: worktreeId, agentId: "claude",
-                                    now: Date(timeIntervalSince1970: 100))
+        let older = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                            now: Date(timeIntervalSince1970: 100))
+        try store.saveTranscript(sessionId: older.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 100))
         let newer = try store.createSession(worktreeId: worktreeId, agentId: "claude",
                                             now: Date(timeIntervalSince1970: 200))
+        try store.saveTranscript(sessionId: newer.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 200))
         #expect(try store.latestSession(worktreeId: worktreeId, agentId: "claude")?.id
                 == newer.id)
+    }
+
+    /// Reproduces the "Session not found" resume failure: a session created
+    /// by `ChatController.start()` but abandoned before any turn completes
+    /// never gets an on-disk transcript on the agent side either, so it must
+    /// never be selected as resumable even though it is the most recent row.
+    @Test func emptySessionIsExcludedEvenIfMostRecent() throws {
+        let (store, worktreeId) = try makeStore()
+        let withContent = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                                   now: Date(timeIntervalSince1970: 100))
+        try store.saveTranscript(sessionId: withContent.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 100))
+        _ = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                    now: Date(timeIntervalSince1970: 200))
+        #expect(try store.latestSession(worktreeId: worktreeId, agentId: "claude")?.id
+                == withContent.id)
     }
 
     @Test func transcriptRoundTripsIncludingPermissions() throws {
@@ -90,6 +112,7 @@ import TillerPersistence
         let session = try store.createSession(worktreeId: worktreeId, agentId: "opencode",
                                               now: .init())
         try store.setACPSessionId("acp-42", sessionId: session.id)
+        try store.saveTranscript(sessionId: session.id, items: sampleItems, now: .init())
         #expect(try store.latestSession(worktreeId: worktreeId, agentId: "opencode")?
             .acpSessionId == "acp-42")
     }

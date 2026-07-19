@@ -13,12 +13,18 @@ public struct ChatSessionStore: Sendable {
         self.database = database
     }
 
-    /// Most recently active session for a (worktree, agent) pair.
+    /// Most recently active session for a (worktree, agent) pair that has at
+    /// least one persisted turn. Sessions created by `start()` but abandoned
+    /// before any turn completes never get an on-disk transcript on the
+    /// agent side either, so `session/load` would always fail "Session not
+    /// found" for them — excluding empty sessions here keeps `latestSession`
+    /// pointing at one the agent can actually resume.
     public func latestSession(worktreeId: String, agentId: String) throws -> ChatSessionRecord? {
         try database.read { db in
             try ChatSessionRecord
                 .filter(Column("worktreeId") == worktreeId)
                 .filter(Column("agentId") == agentId)
+                .filter(sql: "EXISTS (SELECT 1 FROM chatItem WHERE chatItem.sessionId = chatSession.id)")
                 .order(Column("lastActivityAt").desc)
                 .fetchOne(db)
         }
