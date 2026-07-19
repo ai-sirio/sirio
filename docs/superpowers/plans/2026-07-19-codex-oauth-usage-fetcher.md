@@ -597,14 +597,18 @@ private func writeAuthFile(_ json: [String: Any]) -> URL {
     return url
 }
 
-private let validAuthJSON: [String: Any] = [
-    "tokens": [
-        "access_token": "access-1",
-        "refresh_token": "refresh-1",
-        "account_id": "acct-1"
-    ],
-    "last_refresh": ISO8601DateFormatter().string(from: Date())
-]
+/// A function, not a global `let`, because `[String: Any]` isn't `Sendable`
+/// and Swift 6 rejects a non-Sendable global's stored value outright.
+private func validAuthJSON() -> [String: Any] {
+    [
+        "tokens": [
+            "access_token": "access-1",
+            "refresh_token": "refresh-1",
+            "account_id": "acct-1"
+        ],
+        "last_refresh": ISO8601DateFormatter().string(from: Date())
+    ]
+}
 
 private let usageResponseJSON = """
 {"rate_limit":{"primary_window":{"used_percent":26,"reset_at":1750000000},
@@ -612,7 +616,7 @@ private let usageResponseJSON = """
 """
 
 @Test func fetchReturnsSuccessWithMappedWindows() async throws {
-    let authURL = writeAuthFile(validAuthJSON)
+    let authURL = writeAuthFile(validAuthJSON())
     defer { try? FileManager.default.removeItem(at: authURL) }
     let transport = FakeCodexHTTPTransport(results: [.success(Data(usageResponseJSON.utf8), 200)])
 
@@ -647,7 +651,7 @@ private let usageResponseJSON = """
 }
 
 @Test func fetchReturnsLoggedOutOn401FromUsageEndpoint() async throws {
-    let authURL = writeAuthFile(validAuthJSON)
+    let authURL = writeAuthFile(validAuthJSON())
     defer { try? FileManager.default.removeItem(at: authURL) }
     let transport = FakeCodexHTTPTransport(results: [.success(Data(), 401)])
 
@@ -657,7 +661,7 @@ private let usageResponseJSON = """
 }
 
 @Test func fetchReturnsTimedOutOnNetworkTimeout() async throws {
-    let authURL = writeAuthFile(validAuthJSON)
+    let authURL = writeAuthFile(validAuthJSON())
     defer { try? FileManager.default.removeItem(at: authURL) }
     let transport = FakeCodexHTTPTransport(results: [.failure(URLError(.timedOut))])
 
@@ -667,7 +671,7 @@ private let usageResponseJSON = """
 }
 
 @Test func fetchReturnsErrorOnMalformedUsageResponse() async throws {
-    let authURL = writeAuthFile(validAuthJSON)
+    let authURL = writeAuthFile(validAuthJSON())
     defer { try? FileManager.default.removeItem(at: authURL) }
     let transport = FakeCodexHTTPTransport(results: [.success(Data("not json".utf8), 200)])
 
