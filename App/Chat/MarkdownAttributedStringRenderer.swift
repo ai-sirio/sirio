@@ -30,10 +30,26 @@ enum MarkdownAttributedStringRenderer {
         return render(parsed)
     }
 
+    /// `AttributedString(markdown:)` does not insert a literal newline
+    /// between blocks — block structure is expressed only through each
+    /// run's `presentationIntent`, and the caller is expected to detect
+    /// block-boundary changes itself. Runs sharing the same *immediate*
+    /// (innermost) `presentationIntent` component identity belong to the
+    /// same block — e.g. every inline span inside one paragraph shares that
+    /// paragraph's identity — so a boundary is only a block-level change,
+    /// never a mid-paragraph inline-style change.
     private static func render(_ parsed: AttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString()
+        var previousBlockIdentity: Int?
         for run in parsed.runs {
-            let substring = String(parsed[run.range].characters)
+            var substring = String(parsed[run.range].characters)
+            let blockIdentity = run.presentationIntent?.components.first?.identity
+            if let previousBlockIdentity, blockIdentity != previousBlockIdentity {
+                substring = "\n" + substring
+            }
+            if let blockIdentity {
+                previousBlockIdentity = blockIdentity
+            }
             result.append(NSAttributedString(string: substring, attributes: attributes(for: run)))
         }
         return result
@@ -54,13 +70,22 @@ enum MarkdownAttributedStringRenderer {
                     let margin = headingMargins[level] ?? headingMargins[3]!
                     paragraphStyle.paragraphSpacingBefore = margin.top
                     paragraphStyle.paragraphSpacing = margin.bottom
+                case .paragraph:
+                    paragraphStyle.paragraphSpacing = 6
                 case .codeBlock:
                     font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
+                    paragraphStyle.paragraphSpacing = 6
                 case .blockQuote:
                     color = .secondaryLabelColor
                     paragraphStyle.headIndent = 12
                     paragraphStyle.firstLineHeadIndent = 12
+                    paragraphStyle.paragraphSpacing = 6
                 case .listItem:
+                    // A list item's run also carries a `.paragraph` component
+                    // (processed earlier in this loop), which would otherwise
+                    // leave every item spaced out like a standalone paragraph
+                    // — reset it so list items stay tight against each other.
+                    paragraphStyle.paragraphSpacing = 0
                     paragraphStyle.headIndent = 16
                 default:
                     break

@@ -121,4 +121,36 @@ struct MarkdownAttributedStringRendererTests {
         let font = result.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
         #expect(font?.pointSize == MarkdownAttributedStringRenderer.bodySize)
     }
+
+    @Test("consecutive paragraphs are separated by a line break, not run together")
+    func consecutiveParagraphsAreSeparated() {
+        let result = MarkdownAttributedStringRenderer.render("Para one\n\nPara two")
+        #expect(result.string == "Para one\nPara two")
+    }
+
+    @Test("a heading is separated from the paragraph before it")
+    func headingSeparatedFromPrecedingParagraph() {
+        let result = MarkdownAttributedStringRenderer.render("Intro\n\n# Heading")
+        #expect(result.string == "Intro\nHeading")
+    }
+
+    @Test("list items are separated by a line break, not run together")
+    func listItemsAreSeparated() {
+        let result = MarkdownAttributedStringRenderer.render("- one\n- two")
+        #expect(result.string == "one\ntwo")
+    }
+
+    @Test("inline spans within one paragraph are NOT split by the block separator")
+    func inlineSpansWithinOneParagraphStayJoined() {
+        let result = MarkdownAttributedStringRenderer.render("This is **bold** text.")
+        #expect(result.string == "This is bold text.")
+    }
+
+    @Test("list items stay tight (no extra paragraph spacing between them)")
+    func listItemsHaveNoExtraSpacing() {
+        let result = MarkdownAttributedStringRenderer.render("- one\n- two")
+        let range = (result.string as NSString).range(of: "one")
+        let style = result.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.paragraphSpacing == 0)
+    }
 }
