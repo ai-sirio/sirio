@@ -16,6 +16,7 @@ struct ChatComposerView: View {
     @State private var images: [ImageAttachment] = []
     @State private var mentionQuery: String?
     @State private var mentionCandidates: [String] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isPrompting: Bool { controller.state == .prompting }
     private var canInteract: Bool {
@@ -74,6 +75,7 @@ struct ChatComposerView: View {
             agentPill
             effortPill
             Spacer()
+            contextUsageIndicator
             Button {
                 attachImage()
             } label: {
@@ -221,6 +223,28 @@ struct ChatComposerView: View {
             .fixedSize()
             .modifier(PillBackground())
             .help(effort.name ?? "Effort")
+        }
+    }
+
+    /// Context-window usage ring; hidden entirely when the agent never sent
+    /// a `usage_update` (e.g. it doesn't implement that ACP extension) —
+    /// there's nothing actionable the user can do about a missing signal,
+    /// so no "unavailable" placeholder state (unlike UsageBarView).
+    @ViewBuilder
+    private var contextUsageIndicator: some View {
+        if let usage = controller.contextUsage, usage.size > 0 {
+            let fraction = min(1, max(0, Double(usage.used) / Double(usage.size)))
+            let remaining = Int(((1 - fraction) * 100).rounded())
+            ZStack {
+                Circle().stroke(.quaternary, lineWidth: 2)
+                Circle()
+                    .trim(from: 0, to: fraction)
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: 16, height: 16)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
+            .help("\(remaining)% remaining\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens")
         }
     }
 

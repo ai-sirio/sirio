@@ -47,6 +47,7 @@ final class ChatController {
 
     var items: [TranscriptItem] { restored + reducer.items }
     var currentModeId: String? { reducer.currentModeId ?? modes?.currentModeId }
+    var contextUsage: ContextUsage? { reducer.contextUsage }
     var availableCommands: [AvailableCommand] { reducer.availableCommands }
     var hasPendingPermission: Bool {
         items.contains {
