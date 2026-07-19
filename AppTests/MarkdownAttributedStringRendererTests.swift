@@ -112,4 +112,13 @@ struct MarkdownAttributedStringRendererTests {
         let style = result.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
         #expect(style?.headIndent == 16)
     }
+
+    @Test("unclosed code fence falls back to plain selectable text")
+    func unclosedFenceFallsBackToPlainText() {
+        let input = "before `unterminated"
+        let result = MarkdownAttributedStringRenderer.render(input)
+        #expect(result.string == input)
+        let font = result.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(font?.pointSize == MarkdownAttributedStringRenderer.bodySize)
+    }
 }
