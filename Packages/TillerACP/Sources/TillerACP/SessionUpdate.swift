@@ -19,6 +19,15 @@ public struct AvailableCommand: Sendable, Equatable, Codable {
         self.description = description
     }
 }
+public struct ContextUsage: Sendable, Equatable, Codable {
+    public var used: Int
+    public var size: Int
+    public init(used: Int, size: Int) {
+        self.used = used
+        self.size = size
+    }
+}
+
 
 /// One `session/update` payload, discriminated by `sessionUpdate` on the wire.
 public enum SessionUpdate: Sendable, Equatable {
@@ -30,12 +39,13 @@ public enum SessionUpdate: Sendable, Equatable {
     case plan([PlanEntry])
     case availableCommandsUpdate([AvailableCommand])
     case currentModeUpdate(String)
+    case usageUpdate(ContextUsage)
     case unknown(String)
 }
 
 extension SessionUpdate: Decodable {
     private enum CodingKeys: String, CodingKey {
-        case sessionUpdate, content, entries, availableCommands, currentModeId
+        case sessionUpdate, content, entries, availableCommands, currentModeId, used, size
     }
 
     public init(from decoder: Decoder) throws {
@@ -59,6 +69,10 @@ extension SessionUpdate: Decodable {
                 try container.decode([AvailableCommand].self, forKey: .availableCommands))
         case "current_mode_update":
             self = .currentModeUpdate(try container.decode(String.self, forKey: .currentModeId))
+        case "usage_update":
+            self = .usageUpdate(ContextUsage(
+                used: try container.decode(Int.self, forKey: .used),
+                size: try container.decode(Int.self, forKey: .size)))
         default:
             self = .unknown(discriminator)
         }

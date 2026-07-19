@@ -130,6 +130,8 @@ public struct TranscriptReducer: Sendable, Equatable {
         case .currentModeUpdate(let modeId):
             currentModeId = modeId
 
+        case .usageUpdate:
+            break
         case .unknown:
             break
         }
