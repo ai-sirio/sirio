@@ -10,6 +10,7 @@
 		004A42005D2DED0CDE2E01BB /* UpdaterModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77BD717DBAD9BA574213A27 /* UpdaterModel.swift */; };
 		019D3540F6FCBC157AC2208A /* SettingsSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB40E7559F4C849BD3C2094A /* SettingsSurface.swift */; };
 		0861C10C3B431CD58B516CF6 /* MarkdownToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E71C8D94D39CE2EEAE0993 /* MarkdownToolbar.swift */; };
+		0C2C39CB89F5865BD49E2AB5 /* AgentsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */; };
 		1A0AA30587BDFB6593034A29 /* OllamaCloudUsageFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49151B264C9CB940952FCDAB /* OllamaCloudUsageFetcher.swift */; };
 		1A529420B5030FAC4937506B /* AgentSkillInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B25C0EB88CB059E939346F /* AgentSkillInstaller.swift */; };
 		22F552DB348684BE2F046E6B /* ForegroundProcessTreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C586A88693846D775479C9BB /* ForegroundProcessTreeTests.swift */; };
@@ -77,6 +78,7 @@
 		CCAA5C3EC06736BD09F338CD /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56231D9700C4BE8BA92FCB02 /* AppModel.swift */; };
 		CE3124078D172C6FAFAD4631 /* PermissionsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C537030635E47A24B2D468E1 /* PermissionsSettingsView.swift */; };
 		D0C100BA6ECC54AF0D214B06 /* InsightCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44A4D7761754955F550F7ED9 /* InsightCardView.swift */; };
+		D7E466D471E016E5842982DA /* AgentsPanelModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA9A53AFFA17AAC600C15585 /* AgentsPanelModel.swift */; };
 		DFADDA7E1C311808EC99C68D /* ToolCallCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A05EFE98529F40E18CF9A8F2 /* ToolCallCardView.swift */; };
 		E2BB6072F2A503E3A44E461E /* ChatPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40DAB221BF29036B76B496D /* ChatPaneView.swift */; };
 		E2CD60F7FBEF6BFBA1AF4867 /* AgentRosterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7F8AC528E2F79471B04996C /* AgentRosterView.swift */; };
@@ -106,6 +108,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsSectionView.swift; sourceTree = "<group>"; };
 		0147E80EE5F3B7B9F50B2E78 /* EditSummaryCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditSummaryCardView.swift; sourceTree = "<group>"; };
 		02D06C430BAE462C3046E741 /* UsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageStore.swift; sourceTree = "<group>"; };
 		04B70914CB8B69AABCCE4C40 /* SystemPermissionProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPermissionProbe.swift; sourceTree = "<group>"; };
@@ -166,6 +169,7 @@
 		B77BD717DBAD9BA574213A27 /* UpdaterModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterModel.swift; sourceTree = "<group>"; };
 		B7F2ED339842DA8F4A8AA1AA /* AppModel+Control.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Control.swift"; sourceTree = "<group>"; };
 		B9B25C0EB88CB059E939346F /* AgentSkillInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSkillInstaller.swift; sourceTree = "<group>"; };
+		BA9A53AFFA17AAC600C15585 /* AgentsPanelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsPanelModel.swift; sourceTree = "<group>"; };
 		BD047B77D2E168922ADC710C /* WorktreeStatusGlyph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeStatusGlyph.swift; sourceTree = "<group>"; };
 		BE99F2EBC89020C876AA77E7 /* RunningDots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningDots.swift; sourceTree = "<group>"; };
 		BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRoute.swift; sourceTree = "<group>"; };
@@ -251,6 +255,8 @@
 		53C35695D47DE31C45A632C9 /* RightPanel */ = {
 			isa = PBXGroup;
 			children = (
+				BA9A53AFFA17AAC600C15585 /* AgentsPanelModel.swift */,
+				0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */,
 				66D18AD8984B39142C8D80EC /* FileExplorerView.swift */,
 				56A0B2497A79763F2B2707AD /* GitDiffView.swift */,
 				62524A82001D878B38DEDBDB /* GitStatusView.swift */,
@@ -550,6 +556,8 @@
 				C5C85B64D3F8F38BAF2D6453 /* AgentNotifier.swift in Sources */,
 				E2CD60F7FBEF6BFBA1AF4867 /* AgentRosterView.swift in Sources */,
 				1A529420B5030FAC4937506B /* AgentSkillInstaller.swift in Sources */,
+				D7E466D471E016E5842982DA /* AgentsPanelModel.swift in Sources */,
+				0C2C39CB89F5865BD49E2AB5 /* AgentsSectionView.swift in Sources */,
 				9BBC8955CB8107D7AE5F96A5 /* AppAppearance+NSAppearance.swift in Sources */,
 				CB13A89EF951925FAD56A199 /* AppDelegate.swift in Sources */,
 				3DBB4D532180921DDC4A5088 /* AppModel+Control.swift in Sources */,
