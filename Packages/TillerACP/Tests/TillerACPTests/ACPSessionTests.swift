@@ -197,6 +197,22 @@ private actor FakeAgent {
         #expect(id == .number(51))
         #expect(error != nil)
     }
+    /// Tiller aderisce all'estensione terminale di claude-agent-acp:
+    /// initialize dichiara _meta {"terminal_output": true}.
+    @Test func initializeAdvertisesTerminalOutputMetaCapability() async throws {
+        let agent = FakeAgent()
+        let session = try await makeSession(agent: agent)
+        _ = try await session.connect(cwd: "/w", resumeSessionId: nil)
+        var sent: InitializeParams?
+        for index in 0..<(await agent.mock.sent.count) {
+            guard case .request(_, "initialize", let params) =
+                    try await agent.mock.sentMessage(index) else { continue }
+            sent = try params?.decoded(InitializeParams.self)
+        }
+        #expect(sent?.clientCapabilities.meta
+                == .object(["terminal_output": .bool(true)]))
+    }
+
 }
 
 /// File system that rejects everything — for tests that never touch fs.

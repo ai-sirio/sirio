@@ -14,9 +14,19 @@ public struct FileSystemCapability: Sendable, Equatable, Codable {
 public struct ClientCapabilities: Sendable, Equatable, Codable {
     public var fs: FileSystemCapability
     public var terminal: Bool
-    public init(fs: FileSystemCapability, terminal: Bool) {
+    /// Extension capabilities (claude-agent-acp reads
+    /// `_meta.terminal_output` to stream Bash output into tool calls).
+    public var meta: JSONValue?
+
+    enum CodingKeys: String, CodingKey {
+        case fs, terminal, meta = "_meta"
+    }
+
+    public init(fs: FileSystemCapability, terminal: Bool,
+                meta: JSONValue? = nil) {
         self.fs = fs
         self.terminal = terminal
+        self.meta = meta
     }
 }
 
