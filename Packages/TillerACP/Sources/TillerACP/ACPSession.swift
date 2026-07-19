@@ -83,8 +83,9 @@ public actor ACPSession {
                 "session/load",
                 params: LoadSessionParams(sessionId: resumeSessionId, cwd: cwd),
                 as: LoadSessionResult.self)
-            sessionId = resumeSessionId
-            return SessionHandle(sessionId: resumeSessionId,
+            let liveSessionId = loaded.sessionId ?? resumeSessionId
+            sessionId = liveSessionId
+            return SessionHandle(sessionId: liveSessionId,
                                  agentCapabilities: initialize.agentCapabilities,
                                  modes: loaded.modes, models: loaded.resolvedModels,
                                  configOptions: loaded.configOptions ?? [],

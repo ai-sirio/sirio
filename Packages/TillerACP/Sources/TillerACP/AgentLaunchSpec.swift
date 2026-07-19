@@ -14,16 +14,20 @@ public struct AgentLaunchSpec: Sendable, Equatable {
     }
 
     /// Pinned adapter version: a protocol-stable, reproducible launch.
-    /// Update deliberately via `npm view @zed-industries/claude-code-acp version`.
-    public static let claudeCodeACPVersion = "0.16.2"
+    /// Update deliberately via `npm view @agentclientprotocol/claude-agent-acp version`.
+    /// (Successor of `@zed-industries/claude-code-acp`, which is frozen at
+    /// 0.16.2 with a stale model list; the renamed package tracks current
+    /// Claude Agent SDK releases and exposes the model as a `configOptions`
+    /// select instead of `session/set_model`.)
+    public static let claudeCodeACPVersion = "0.59.0"
 
-    /// Claude Code via Zed's official ACP adapter, fetched on demand by npx
+    /// Claude Code via the official ACP adapter, fetched on demand by npx
     /// (cached by npm after the first run).
     public static func claudeCode() -> AgentLaunchSpec {
         AgentLaunchSpec(
             executable: "/bin/zsh",
             arguments: ["-lc",
-                "exec npx -y @zed-industries/claude-code-acp@\(claudeCodeACPVersion)"])
+                "exec npx -y @agentclientprotocol/claude-agent-acp@\(claudeCodeACPVersion)"])
     }
 
     /// OpenCode's native ACP mode (binary installed by the user).
