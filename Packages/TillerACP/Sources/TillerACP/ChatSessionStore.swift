@@ -100,6 +100,7 @@ extension TranscriptItem {
         case .toolCall: "toolCall"
         case .plan: "plan"
         case .turnDivider: "turnDivider"
+        case .editSummary: "editSummary"
         }
     }
 }

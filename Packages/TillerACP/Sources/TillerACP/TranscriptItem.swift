@@ -85,6 +85,9 @@ public enum TranscriptItem: Sendable, Equatable, Codable, Identifiable {
     case toolCall(ToolCallItem)
     case plan(id: String, entries: [PlanEntry])
     case turnDivider(id: String, at: Date)
+    /// Riepilogo di fine turno dei file modificati dall'agente (kind .edit
+    /// completati); sintetizzato dal reducer, non arriva dal protocollo.
+    case editSummary(id: String, paths: [String])
 
     public var id: String {
         switch self {
@@ -94,6 +97,7 @@ public enum TranscriptItem: Sendable, Equatable, Codable, Identifiable {
         case .toolCall(let item): item.id
         case .plan(let id, _): id
         case .turnDivider(let id, _): id
+        case .editSummary(let id, _): id
         }
     }
 }
