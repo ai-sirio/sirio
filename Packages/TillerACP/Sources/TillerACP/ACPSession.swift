@@ -73,7 +73,8 @@ public actor ACPSession {
                 protocolVersion: Self.protocolVersion,
                 clientCapabilities: ClientCapabilities(
                     fs: FileSystemCapability(readTextFile: true, writeTextFile: true),
-                    terminal: false)),
+                    terminal: false,
+                    meta: .object(["terminal_output": .bool(true)]))),
             as: InitializeResult.self)
         guard initialize.protocolVersion == Self.protocolVersion else {
             throw ACPSessionError.unsupportedProtocolVersion(initialize.protocolVersion)
