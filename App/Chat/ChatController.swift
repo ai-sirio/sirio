@@ -86,6 +86,9 @@ final class ChatController {
         if let record, let stored = try? store?.loadTranscript(sessionId: record.id) {
             restored = stored
         }
+        if let record, let used = record.contextUsageUsed, let size = record.contextUsageSize {
+            reducer.restoreContextUsage(ContextUsage(used: used, size: size))
+        }
 
         let transport = ProcessTransport(
             executable: spec.executable, arguments: spec.arguments,
@@ -293,6 +296,9 @@ final class ChatController {
             if case .toolCallUpdate(let change) = update,
                change.status == .completed || change.status == .failed {
                 persist()
+            }
+            if case .usageUpdate(let usage) = update, let sessionRecordId {
+                try? store?.setContextUsage(usage, sessionId: sessionRecordId)
             }
         case .permissionRequested(let requestId, let toolCall, let options):
             reducer.permissionRequested(requestId: requestId,

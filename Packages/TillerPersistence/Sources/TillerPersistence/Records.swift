@@ -128,12 +128,18 @@ public struct ChatSessionRecord: Codable, FetchableRecord, PersistableRecord, Se
     public var acpSessionId: String?
     public var createdAt: Date
     public var lastActivityAt: Date
+    /// Last known context-window usage, so a remounted worktree can show the
+    /// ring immediately instead of waiting for the next live `usage_update`.
+    public var contextUsageUsed: Int?
+    public var contextUsageSize: Int?
 
     public init(id: String, worktreeId: String, agentId: String,
-                acpSessionId: String? = nil, createdAt: Date, lastActivityAt: Date) {
+                acpSessionId: String? = nil, createdAt: Date, lastActivityAt: Date,
+                contextUsageUsed: Int? = nil, contextUsageSize: Int? = nil) {
         self.id = id; self.worktreeId = worktreeId; self.agentId = agentId
         self.acpSessionId = acpSessionId
         self.createdAt = createdAt; self.lastActivityAt = lastActivityAt
+        self.contextUsageUsed = contextUsageUsed; self.contextUsageSize = contextUsageSize
     }
 }
 

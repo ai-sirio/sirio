@@ -48,6 +48,17 @@ public struct ChatSessionStore: Sendable {
         }
     }
 
+    /// Stores the last known context-window usage for the session, so a
+    /// worktree remount can restore the ring before the next live update.
+    public func setContextUsage(_ usage: ContextUsage?, sessionId: String) throws {
+        try database.write { db in
+            guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
+            record.contextUsageUsed = usage?.used
+            record.contextUsageSize = usage?.size
+            try record.update(db)
+        }
+    }
+
     /// Atomically replaces the session's transcript and bumps activity.
     public func saveTranscript(sessionId: String, items: [TranscriptItem],
                                now: Date = Date()) throws {

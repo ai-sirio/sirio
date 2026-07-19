@@ -19,6 +19,13 @@ public struct TranscriptReducer: Sendable, Equatable {
 
     public init() {}
 
+    /// Seeds `contextUsage` from a prior session's last known value, before
+    /// any live updates apply — used on worktree remount so the ring shows
+    /// immediately instead of waiting for the next `usage_update`.
+    public mutating func restoreContextUsage(_ usage: ContextUsage?) {
+        contextUsage = usage
+    }
+
     private mutating func makeId(_ prefix: String) -> String {
         defer { nextOrdinal += 1 }
         return "\(prefix)-\(nextOrdinal)"

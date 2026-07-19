@@ -117,6 +117,29 @@ import TillerPersistence
             .acpSessionId == "acp-42")
     }
 
+    @Test func contextUsageRoundTripsThroughLatestSession() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                              now: .init())
+        try store.setContextUsage(ContextUsage(used: 1200, size: 200_000), sessionId: session.id)
+        try store.saveTranscript(sessionId: session.id, items: sampleItems, now: .init())
+        let latest = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
+        #expect(latest?.contextUsageUsed == 1200)
+        #expect(latest?.contextUsageSize == 200_000)
+    }
+
+    @Test func contextUsageClearsWhenSetToNil() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                              now: .init())
+        try store.setContextUsage(ContextUsage(used: 500, size: 100_000), sessionId: session.id)
+        try store.setContextUsage(nil, sessionId: session.id)
+        try store.saveTranscript(sessionId: session.id, items: sampleItems, now: .init())
+        let latest = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
+        #expect(latest?.contextUsageUsed == nil)
+        #expect(latest?.contextUsageSize == nil)
+    }
+
     @Test func kindLabelsAreDistinct() {
         let labels = sampleItems.map(\.kindLabel)
         #expect(labels == ["userMessage", "toolCall", "agentMessage"])

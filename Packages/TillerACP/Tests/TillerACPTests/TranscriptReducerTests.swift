@@ -54,6 +54,16 @@ import Testing
         #expect(incomplete.isEmpty)
     }
 
+    /// Seeded on worktree remount from the last persisted session so the
+    /// context ring shows immediately, not just after the next live update.
+    @Test func restoreContextUsageSeedsBeforeLiveUpdates() {
+        var reducer = TranscriptReducer()
+        reducer.restoreContextUsage(ContextUsage(used: 900, size: 200_000))
+        #expect(reducer.contextUsage == ContextUsage(used: 900, size: 200_000))
+        reducer.apply(.usageUpdate(ContextUsage(used: 1500, size: 200_000)))
+        #expect(reducer.contextUsage == ContextUsage(used: 1500, size: 200_000))
+    }
+
     @Test func newUserPromptStartsNewAgentMessage() {
         var reducer = TranscriptReducer()
         reducer.apply(.agentMessageChunk(.text("first")))
