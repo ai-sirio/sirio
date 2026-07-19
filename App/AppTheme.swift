@@ -14,10 +14,10 @@ enum AppTheme {
     static let background = dynamic(
         light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
-    /// Indigo tint for the sidebar/tab bar/usage bar material (opencode-style).
+    /// Neutral near-black tint for the sidebar/tab bar/usage bar material.
     static let chromeTint = dynamic(
         light: NSColor(srgbRed: 0.92, green: 0.92, blue: 0.96, alpha: 1),
-        dark: NSColor(srgbRed: 0.110, green: 0.110, blue: 0.176, alpha: 1))
+        dark: NSColor(srgbRed: 0.075, green: 0.075, blue: 0.075, alpha: 1))
     static let hairline = dynamic(
         light: NSColor(srgbRed: 0.82, green: 0.83, blue: 0.87, alpha: 1),
         dark: NSColor(srgbRed: 0.165, green: 0.176, blue: 0.220, alpha: 1))
