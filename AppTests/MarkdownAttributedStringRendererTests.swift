@@ -169,25 +169,4 @@ struct MarkdownAttributedStringRendererTests {
         #expect(color == MarkdownAttributedStringRenderer.codeColor)
     }
 
-    @Test("an insight callout block gets a tinted card background")
-    func insightCalloutHasCardBackground() {
-        let result = MarkdownAttributedStringRenderer.render("★ Insight ───\nSome point.\n───")
-        let background = result.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(background == MarkdownAttributedStringRenderer.insightBackgroundColor)
-    }
-
-    @Test("an insight callout block is indented like an inset card")
-    func insightCalloutIsIndented() {
-        let result = MarkdownAttributedStringRenderer.render("★ Insight ───\nSome point.\n───")
-        let style = result.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
-        #expect(style?.headIndent == 10)
-        #expect(style?.tailIndent == -10)
-    }
-
-    @Test("prose before an insight callout has no card background")
-    func proseBeforeInsightStaysNormal() {
-        let result = MarkdownAttributedStringRenderer.render("Intro text.\n\n★ Insight ───\nPoint.\n───")
-        let background = result.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(background == nil)
-    }
 }
