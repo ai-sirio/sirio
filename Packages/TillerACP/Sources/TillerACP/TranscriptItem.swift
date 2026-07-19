@@ -34,13 +34,17 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
     /// extension); nil for tool calls without a terminal.
     public var terminalOutput: String?
     public var terminalExit: TerminalExitStatus?
+    /// Raw tool input as reported by the agent; carries the Task tool's
+    /// `subagent_type` used to detect subagent spawns.
+    public var rawInput: JSONValue?
 
     public var id: String { toolCallId }
 
     public init(toolCallId: String, title: String, kind: ToolKind,
                 status: ToolCallStatus, content: [ToolCallContent] = [],
                 locations: [ToolCallLocation] = [], permission: PermissionState? = nil,
-                terminalOutput: String? = nil, terminalExit: TerminalExitStatus? = nil) {
+                terminalOutput: String? = nil, terminalExit: TerminalExitStatus? = nil,
+                rawInput: JSONValue? = nil) {
         self.toolCallId = toolCallId
         self.title = title
         self.kind = kind
@@ -50,11 +54,13 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         self.permission = permission
         self.terminalOutput = terminalOutput
         self.terminalExit = terminalExit
+        self.rawInput = rawInput
     }
 
     init(_ call: ToolCall) {
         self.init(toolCallId: call.toolCallId, title: call.title, kind: call.kind,
-                  status: call.status, content: call.content, locations: call.locations)
+                  status: call.status, content: call.content, locations: call.locations,
+                  rawInput: call.rawInput)
     }
 
     /// Merges the non-nil fields of a partial update.
@@ -64,6 +70,7 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         if let status = update.status { self.status = status }
         if let content = update.content { self.content = content }
         if let locations = update.locations { self.locations = locations }
+        if let rawInput = update.rawInput { self.rawInput = rawInput }
         if let meta = update.terminalMeta {
             if let chunk = meta.terminalOutput {
                 terminalOutput = (terminalOutput ?? "") + chunk.data
