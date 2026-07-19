@@ -55,8 +55,9 @@ struct TranscriptView: View {
             planCard(entries)
         case .turnDivider(_, let date):
             turnDivider(date)
-        case .editSummary:
-            EmptyView()
+        case .editSummary(_, let paths):
+            EditSummaryCardView(paths: paths, worktree: worktree,
+                                appModel: appModel)
         }
     }
 
