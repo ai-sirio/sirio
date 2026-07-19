@@ -132,6 +132,8 @@ public struct TranscriptReducer: Sendable, Equatable {
            case .toolCall(let existing) = items[index] {
             var merged = item
             merged.permission = existing.permission
+            merged.terminalOutput = existing.terminalOutput
+            merged.terminalExit = existing.terminalExit
             items[index] = .toolCall(merged)
         } else {
             items.append(.toolCall(item))

@@ -87,4 +87,50 @@ import Testing
         }
         #expect(item.permission?.resolution == .cancelled)
     }
+    /// I chunk _meta.terminal_output si accumulano sul ToolCallItem.
+    @Test func terminalOutputChunksAccumulate() {
+        var reducer = TranscriptReducer()
+        reducer.apply(.toolCall(ToolCall(
+            toolCallId: "t1", title: "Bash", kind: .execute, status: .inProgress,
+            content: [.terminal(terminalId: "t1")])))
+        reducer.apply(.toolCallUpdate(ToolCallUpdate(
+            toolCallId: "t1",
+            terminalMeta: TerminalMeta(terminalOutput: .init(terminalId: "t1",
+                                                              data: "riga 1\n")))))
+        reducer.apply(.toolCallUpdate(ToolCallUpdate(
+            toolCallId: "t1",
+            terminalMeta: TerminalMeta(terminalOutput: .init(terminalId: "t1",
+                                                              data: "riga 2\n")))))
+        guard case .toolCall(let item) = reducer.items[0] else {
+            Issue.record("expected toolCall"); return
+        }
+        #expect(item.terminalOutput == "riga 1\nriga 2\n")
+    }
+
+    /// terminal_exit registra l'exit status; un update successivo che rimpiazza
+    /// il content (upsert dal tool_call finale) non deve cancellare l'accumulo.
+    @Test func terminalExitAndContentReplacePreserveState() {
+        var reducer = TranscriptReducer()
+        reducer.apply(.toolCall(ToolCall(
+            toolCallId: "t1", title: "Bash", kind: .execute, status: .inProgress,
+            content: [.terminal(terminalId: "t1")])))
+        reducer.apply(.toolCallUpdate(ToolCallUpdate(
+            toolCallId: "t1",
+            terminalMeta: TerminalMeta(terminalOutput: .init(terminalId: "t1",
+                                                              data: "ok\n")))))
+        reducer.apply(.toolCall(ToolCall(
+            toolCallId: "t1", title: "Bash", kind: .execute, status: .completed,
+            content: [.terminal(terminalId: "t1")])))
+        reducer.apply(.toolCallUpdate(ToolCallUpdate(
+            toolCallId: "t1", status: .completed,
+            terminalMeta: TerminalMeta(terminalExit: .init(terminalId: "t1",
+                                                            exitCode: 0)))))
+        guard case .toolCall(let item) = reducer.items[0] else {
+            Issue.record("expected toolCall"); return
+        }
+        #expect(item.terminalOutput == "ok\n")
+        #expect(item.terminalExit == TerminalExitStatus(exitCode: 0, signal: nil))
+        #expect(item.status == .completed)
+    }
+
 }
