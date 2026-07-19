@@ -15,10 +15,12 @@ enum MarkdownAttributedStringRenderer {
     private static let headingSizes: [Int: CGFloat] = [1: 15, 2: 14, 3: 13]
     private static let headingMargins: [Int: (top: CGFloat, bottom: CGFloat)] =
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
-    private static let codeColor = NSColor.systemTeal
+    static let codeColor = NSColor.systemTeal.withAlphaComponent(0.75)
     /// `★ Insight ───` callouts are a plain-text convention (not markdown
     /// syntax), so they're detected by content, not by presentationIntent.
-    private static let insightColor = NSColor.systemPurple
+    /// Amber rather than purple — distinct from `codeColor` without reading
+    /// as loud against the dark card background.
+    static let insightColor = NSColor.systemYellow.withAlphaComponent(0.7)
     private static let insightMarker = "★ Insight"
 
 

@@ -158,7 +158,7 @@ struct MarkdownAttributedStringRendererTests {
     func inlineCodeIsColored() {
         let result = MarkdownAttributedStringRenderer.render("`code`")
         let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == .systemTeal)
+        #expect(color == MarkdownAttributedStringRenderer.codeColor)
     }
 
     @Test("fenced code block is colored, not just monospaced")
@@ -166,14 +166,14 @@ struct MarkdownAttributedStringRendererTests {
         let result = MarkdownAttributedStringRenderer.render("```\nlet x = 1\n```")
         let range = (result.string as NSString).range(of: "let x = 1")
         let color = result.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
-        #expect(color == .systemTeal)
+        #expect(color == MarkdownAttributedStringRenderer.codeColor)
     }
 
     @Test("an insight callout block is colored distinctly from normal prose")
     func insightCalloutIsColored() {
         let result = MarkdownAttributedStringRenderer.render("★ Insight ───\nSome point.\n───")
         let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == .systemPurple)
+        #expect(color == MarkdownAttributedStringRenderer.insightColor)
     }
 
     @Test("prose before an insight callout keeps the normal label color")
