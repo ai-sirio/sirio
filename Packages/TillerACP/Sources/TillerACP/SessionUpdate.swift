@@ -19,6 +19,7 @@ public struct AvailableCommand: Sendable, Equatable, Codable {
         self.description = description
     }
 }
+
 public struct ContextUsage: Sendable, Equatable, Codable {
     public var used: Int
     public var size: Int
@@ -27,7 +28,6 @@ public struct ContextUsage: Sendable, Equatable, Codable {
         self.size = size
     }
 }
-
 
 /// One `session/update` payload, discriminated by `sessionUpdate` on the wire.
 public enum SessionUpdate: Sendable, Equatable {
