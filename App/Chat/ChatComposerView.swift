@@ -57,9 +57,9 @@ struct ChatComposerView: View {
 
     private var editor: some View {
         TextField(controller.hasPendingPermission
-                  ? "In attesa di risposta al permesso…"
-                  : isPrompting ? "Scrivi per accodare al prossimo turno…"
-                  : "Scrivi un messaggio…",
+                  ? "Waiting for permission response…"
+                  : isPrompting ? "Type to queue for the next turn…"
+                  : "Message…",
                   text: $text, axis: .vertical)
             .textFieldStyle(.plain)
             .lineLimit(1...8)
@@ -81,7 +81,7 @@ struct ChatComposerView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Allega immagine (appunti o file)")
+            .help("Attach image (clipboard or file)")
             .disabled(!canInteract)
             if isPrompting {
                 stopButton
@@ -132,14 +132,14 @@ struct ChatComposerView: View {
 
     private var currentModeName: String {
         controller.modes?.availableModes
-            .first { $0.id == controller.currentModeId }?.name ?? "Modalità"
+            .first { $0.id == controller.currentModeId }?.name ?? "Mode"
     }
 
     private var stateLabel: String {
         switch controller.state {
-        case .ready: "pronto"
-        case .prompting: "al lavoro"
-        case .connecting: "connessione…"
+        case .ready: "ready"
+        case .prompting: "working"
+        case .connecting: "connecting…"
         default: "offline"
         }
     }
@@ -163,7 +163,6 @@ struct ChatComposerView: View {
                 }
             } label: {
                 HStack(spacing: 5) {
-                    AgentIcon(agentId: controller.agentId, size: 11)
                     Text(currentModelName).font(.caption).lineLimit(1)
                     Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
                 }
@@ -173,11 +172,8 @@ struct ChatComposerView: View {
             .fixedSize()
             .modifier(PillBackground())
         } else {
-            HStack(spacing: 5) {
-                AgentIcon(agentId: controller.agentId, size: 11)
-                Text(agentDisplayName).font(.caption)
-            }
-            .modifier(PillBackground())
+            Text(agentDisplayName).font(.caption)
+                .modifier(PillBackground())
         }
     }
 
@@ -268,7 +264,7 @@ struct ChatComposerView: View {
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.escape, modifiers: [])
-        .help("Interrompi il turno")
+        .help("Stop the turn")
     }
 
     // MARK: - Slash commands

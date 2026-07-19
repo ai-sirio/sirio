@@ -22,8 +22,8 @@ struct EditSummaryCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(paths.count == 1 ? "1 file modificato"
-                                   : "\(paths.count) file modificati",
+            Label(paths.count == 1 ? "1 file changed"
+                                   : "\(paths.count) files changed",
                   systemImage: "pencil.line")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -40,17 +40,17 @@ struct EditSummaryCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
         .confirmationDialog(
-            "Ripristinare \((confirmingPath as NSString?)?.lastPathComponent ?? "")?",
+            "Revert \((confirmingPath as NSString?)?.lastPathComponent ?? "")?",
             isPresented: Binding(
                 get: { confirmingPath != nil },
                 set: { if !$0 { confirmingPath = nil } })) {
-            Button("Ripristina", role: .destructive) {
+            Button("Revert", role: .destructive) {
                 if let path = confirmingPath { revert(path) }
                 confirmingPath = nil
             }
-            Button("Annulla", role: .cancel) { confirmingPath = nil }
+            Button("Cancel", role: .cancel) { confirmingPath = nil }
         } message: {
-            Text("Le modifiche del file andranno perse (git restore / clean).")
+            Text("The file's changes will be lost (git restore / clean).")
         }
     }
 
@@ -67,11 +67,11 @@ struct EditSummaryCardView: View {
             .foregroundStyle(.tint)
             Spacer()
             if revertedPaths.contains(path) {
-                Text("ripristinato")
+                Text("reverted")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else if isGitProject {
-                Button("Ripristina") { confirmingPath = path }
+                Button("Revert") { confirmingPath = path }
                     .controlSize(.small)
                     .disabled(revertInProgress)
             }
@@ -92,7 +92,7 @@ struct EditSummaryCardView: View {
                 guard let entry = status.entries.first(where: {
                     $0.path.value == relative
                 }) else {
-                    revertError = "Nessuna modifica da ripristinare per \(relative)."
+                    revertError = "No changes to revert for \(relative)."
                     return
                 }
                 if entry.isUntracked {
