@@ -1300,6 +1300,14 @@ final class AppModel {
         AgentCatalog.all.filter { AgentLaunchSpec.forAgent(id: $0.id) != nil }
     }
 
+    /// Select a worktree tab from the Agents panel. No-op when the tab is gone.
+    func focusTab(tabId: UUID, in worktree: Worktree) {
+        guard (tabs[worktree.id] ?? []).contains(where: { $0.id == tabId }) else { return }
+        selectedWorktree = worktree
+        activeTabId[worktree.id] = tabId
+        persistTabs(for: worktree.id)
+    }
+
     @discardableResult
     func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
         guard AgentLaunchSpec.forAgent(id: agentId) != nil else { return nil }
