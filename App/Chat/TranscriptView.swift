@@ -41,9 +41,7 @@ struct TranscriptView: View {
         case .userMessage(_, let blocks):
             userBubble(blocks)
         case .agentMessage(_, let text, _):
-            Markdown(text)
-                .markdownTheme(.tiller)
-                .textSelection(.enabled)
+            AgentMarkdownTextView(markdown: text)
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
