@@ -56,6 +56,21 @@ struct TillerApp: App {
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             }
+            CommandMenu("Tab") {
+                Button("Tab successiva") { model.cycleTab(forward: true) }
+                    .keyboardShortcut(.tab, modifiers: .control)
+                Button("Tab precedente") { model.cycleTab(forward: false) }
+                    .keyboardShortcut(.tab, modifiers: [.control, .shift])
+                Divider()
+                ForEach(1...9, id: \.self) { number in
+                    Button(number == 9 ? "Ultima tab" : "Tab \(number)") {
+                        model.selectTab(number: number)
+                    }
+                    .keyboardShortcut(
+                        KeyEquivalent(Character("\(number)")), modifiers: .command
+                    )
+                }
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
                     .keyboardShortcut(",", modifiers: .command)
