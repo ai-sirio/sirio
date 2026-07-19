@@ -169,17 +169,25 @@ struct MarkdownAttributedStringRendererTests {
         #expect(color == MarkdownAttributedStringRenderer.codeColor)
     }
 
-    @Test("an insight callout block is colored distinctly from normal prose")
-    func insightCalloutIsColored() {
+    @Test("an insight callout block gets a tinted card background")
+    func insightCalloutHasCardBackground() {
         let result = MarkdownAttributedStringRenderer.render("★ Insight ───\nSome point.\n───")
-        let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == MarkdownAttributedStringRenderer.insightColor)
+        let background = result.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(background == MarkdownAttributedStringRenderer.insightBackgroundColor)
     }
 
-    @Test("prose before an insight callout keeps the normal label color")
+    @Test("an insight callout block is indented like an inset card")
+    func insightCalloutIsIndented() {
+        let result = MarkdownAttributedStringRenderer.render("★ Insight ───\nSome point.\n───")
+        let style = result.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.headIndent == 10)
+        #expect(style?.tailIndent == -10)
+    }
+
+    @Test("prose before an insight callout has no card background")
     func proseBeforeInsightStaysNormal() {
         let result = MarkdownAttributedStringRenderer.render("Intro text.\n\n★ Insight ───\nPoint.\n───")
-        let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == .labelColor)
+        let background = result.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(background == nil)
     }
 }
