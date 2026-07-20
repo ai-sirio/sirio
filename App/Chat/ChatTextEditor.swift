@@ -9,12 +9,21 @@ import AppKit
 /// on macOS. A real `NSTextView` gets correct cursor rects, native
 /// click-drag/double-click selection and copy, and a scroller for free once
 /// the growing height hits `maxHeight`.
+/// Keys the composer may steal from the text view while the slash-command
+/// popup is open.
+enum SlashKey: Equatable {
+    case up, down, tab, enter, escape
+}
+
 struct ChatTextEditor: NSViewRepresentable {
     @Binding var text: String
     var isEditable: Bool
     var minHeight: CGFloat
     var maxHeight: CGFloat
     var onSubmit: () -> Void
+    /// Returns true to consume the key (popup navigation); false restores
+    /// the default behavior. nil behaves like always-false.
+    var onSlashKey: ((SlashKey) -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -82,14 +91,30 @@ struct ChatTextEditor: NSViewRepresentable {
             }
         }
 
-        /// Plain Return sends (swallowed here); Shift+Return inserts a real
+        /// Slash-popup keys get first refusal via `onSlashKey`. Then plain
+        /// Return sends (swallowed here); Shift+Return inserts a real
         /// newline via the default AppKit handling (`return false`).
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if let key = Self.slashKey(for: commandSelector),
+               parent.onSlashKey?(key) == true {
+                return true
+            }
             guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
             let shiftHeld = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
             if shiftHeld { return false }
             parent.onSubmit()
             return true
+        }
+
+        static func slashKey(for selector: Selector) -> SlashKey? {
+            switch selector {
+            case #selector(NSResponder.moveUp(_:)): .up
+            case #selector(NSResponder.moveDown(_:)): .down
+            case #selector(NSResponder.insertTab(_:)): .tab
+            case #selector(NSResponder.insertNewline(_:)): .enter
+            case #selector(NSResponder.cancelOperation(_:)): .escape
+            default: nil
+            }
         }
 
         func recalculateHeight(textView: NSTextView, scrollView: AutoSizingScrollView) {
