@@ -14,14 +14,19 @@ public struct WorkspaceTab: Identifiable, Equatable, Sendable {
     public let id: UUID
     public var title: String
     public var content: TabContent
+    /// True quando `title` è ancora eleggibile per l'auto-naming: placeholder
+    /// di creazione o ultimo titolo scritto dall'auto-naming stesso. Un
+    /// rename manuale (`AppModel.renameTab`) lo flippa a false per sempre.
+    public var titleIsAutoNamed: Bool
 
-    public init(id: UUID, title: String, content: TabContent) {
+    public init(id: UUID, title: String, content: TabContent, titleIsAutoNamed: Bool = true) {
         self.id = id; self.title = title; self.content = content
+        self.titleIsAutoNamed = titleIsAutoNamed
     }
 
     /// Convenience per il caso terminale, il più comune nei call site.
-    public init(id: UUID, title: String, tree: SplitTree) {
-        self.init(id: id, title: title, content: .terminal(tree))
+    public init(id: UUID, title: String, tree: SplitTree, titleIsAutoNamed: Bool = true) {
+        self.init(id: id, title: title, content: .terminal(tree), titleIsAutoNamed: titleIsAutoNamed)
     }
 
     /// Leaf del tree terminale; una tab markdown non ha pane.
