@@ -73,15 +73,17 @@ public struct TerminalTabRecord: Codable, FetchableRecord, PersistableRecord, Se
     public var kind: String
     public var filePath: String?
     public var chatAgentId: String?
+    public var titleIsAutoNamed: Bool
 
     public init(id: String, worktreeId: String, title: String, orderIdx: Int,
                 isActive: Bool, treeJSON: String, updatedAt: Date,
                 kind: String = "terminal", filePath: String? = nil,
-                chatAgentId: String? = nil) {
+                chatAgentId: String? = nil, titleIsAutoNamed: Bool = true) {
         self.id = id; self.worktreeId = worktreeId; self.title = title
         self.orderIdx = orderIdx; self.isActive = isActive
         self.treeJSON = treeJSON; self.updatedAt = updatedAt
         self.kind = kind; self.filePath = filePath; self.chatAgentId = chatAgentId
+        self.titleIsAutoNamed = titleIsAutoNamed
     }
 }
 

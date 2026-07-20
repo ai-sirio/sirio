@@ -157,3 +157,19 @@ import GRDB
     }
     #expect(try db.read { try AgentSessionRecord.fetchCount($0) } == 0)
 }
+@Test func migrationV11AddsTitleIsAutoNamedDefaultingFalse() throws {
+    let db = try AppDatabase.inMemory()
+    try db.write { database in
+        try database.execute(sql: "INSERT INTO project (id, name, rootPath, createdAt, iconKind) VALUES ('p1','demo','/tmp',?,'icon')", arguments: [Date()])
+        try database.execute(sql: "INSERT INTO worktree (id, projectId, branch, path, createdAt) VALUES ('w1','p1','main','/tmp',?)", arguments: [Date()])
+        try database.execute(
+            sql: """
+            INSERT INTO terminalTab (id, worktreeId, title, orderIdx, isActive, treeJSON, updatedAt, kind)
+            VALUES ('t1','w1','Terminale 1',0,1,'{}',?,'terminal')
+            """, arguments: [Date()])
+    }
+    let value = try db.read { database in
+        try Bool.fetchOne(database, sql: "SELECT titleIsAutoNamed FROM terminalTab WHERE id = 't1'")
+    }
+    #expect(value == false)
+}

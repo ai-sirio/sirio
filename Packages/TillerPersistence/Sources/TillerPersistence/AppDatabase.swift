@@ -143,6 +143,11 @@ public final class AppDatabase: Sendable {
                 t.add(column: "contextUsageSize", .integer)
             }
         }
+        migrator.registerMigration("v11") { db in
+            try db.alter(table: "terminalTab") { t in
+                t.add(column: "titleIsAutoNamed", .boolean).notNull().defaults(to: false)
+            }
+        }
         return migrator
     }
 }
