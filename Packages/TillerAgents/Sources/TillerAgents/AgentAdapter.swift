@@ -21,6 +21,11 @@ public protocol AgentAdapter: Sendable {
     /// reference. `sessionRef` comes from the agentSession table.
     func resumeCommand(worktreePath: String, paneId: UUID,
                        tillerctlPath: String, sessionRef: String) -> String?
+    
+    /// Full shell command that runs this adapter's own CLI in non-interactive
+    /// "print" mode, summarizing `prompt` and writing the result to stdout.
+    /// Nil when no safe non-interactive invocation exists yet for this adapter.
+    func summarizerCommand(prompt: String) -> String?
 }
 
 public extension AgentAdapter {
@@ -41,6 +46,8 @@ public extension AgentAdapter {
             tillerctlPath: tillerctlPath
         )
     }
+    
+    func summarizerCommand(prompt: String) -> String? { nil }
 }
 
 /// Well-known adapters shipped with Tiller.

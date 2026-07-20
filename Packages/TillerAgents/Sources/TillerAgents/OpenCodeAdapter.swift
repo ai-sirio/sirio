@@ -49,4 +49,8 @@ public struct OpenCodeAdapter: AgentAdapter {
                               tillerctlPath: String, sessionRef: String) -> String? {
         "opencode --session \(shellQuote(sessionRef))"
     }
+    
+    public func summarizerCommand(prompt: String) -> String? {
+        "opencode run --pure \(shellQuote(prompt))"
+    }
 }

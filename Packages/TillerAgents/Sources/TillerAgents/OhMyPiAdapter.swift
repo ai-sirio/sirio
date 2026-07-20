@@ -45,4 +45,8 @@ public struct OhMyPiAdapter: AgentAdapter {
                               tillerctlPath: String, sessionRef: String) -> String? {
         "omp --hook \(shellQuote("\(worktreePath)/.tiller/omp-hook.ts")) --resume=\(shellQuote(sessionRef))"
     }
+    
+    public func summarizerCommand(prompt: String) -> String? {
+        "omp --print --no-tools \(shellQuote(prompt))"
+    }
 }

@@ -24,4 +24,8 @@ public struct PiAdapter: AgentAdapter {
                               tillerctlPath: String, sessionRef: String) -> String? {
         "pi --session \(shellQuote(sessionRef))"
     }
+    
+    public func summarizerCommand(prompt: String) -> String? {
+        "pi --print --no-tools \(shellQuote(prompt))"
+    }
 }
