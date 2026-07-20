@@ -44,3 +44,12 @@ import Foundation
     let tab = WorkspaceTab(id: UUID(), title: "shell", tree: .leaf(id: leaf))
     #expect(tab.activityPaneIds == [leaf])
 }
+@Test func newTabDefaultsToAutoNamed() {
+    let tab = WorkspaceTab(id: UUID(), title: "Terminale 1", tree: SplitTree.leaf(id: UUID()))
+    #expect(tab.titleIsAutoNamed == true)
+}
+
+@Test func explicitTitleIsAutoNamedOverridesDefault() {
+    let tab = WorkspaceTab(id: UUID(), title: "my tab", tree: SplitTree.leaf(id: UUID()), titleIsAutoNamed: false)
+    #expect(tab.titleIsAutoNamed == false)
+}
