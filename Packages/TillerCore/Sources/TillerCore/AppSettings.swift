@@ -18,6 +18,11 @@ public enum AppSettings {
     /// UserDefaults key for the control-socket toggle. Missing value means
     /// enabled (default true) — disabling it also disables agent hooks.
     public static let controlSocketEnabledKey = "controlSocket.enabled"
+ 
+    /// UserDefaults key per il toggle di auto-naming di tab/agenti. Missing
+    /// value significa disabilitato (default false) — a differenza degli altri
+    /// toggle qui, opt-in perché genera chiamate CLI extra a carico dell'utente.
+    public static let autoNamingEnabledKey = "autoNaming.enabled"
 
     /// Resolve whether the control socket should start.
     /// TILLER_SOCKET_ENABLE (1/0, true/false, on/off — case-insensitive)
