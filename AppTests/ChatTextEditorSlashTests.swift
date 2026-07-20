@@ -70,7 +70,7 @@ struct ChatTextEditorSlashTests {
         #expect(submitted)
     }
 
-    @Test func slashTokenGetsAccentColor() {
+    @Test func slashTokenGetsMutedAccentColor() {
         let editor = makeEditor()
         let coordinator = ChatTextEditor.Coordinator(editor)
         let textView = NSTextView()
@@ -78,18 +78,21 @@ struct ChatTextEditorSlashTests {
         coordinator.applySlashHighlight(to: textView)
         let color = textView.textStorage?.attribute(
             .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == .controlAccentColor)
+        #expect(color == ChatTextEditor.Coordinator.mutedAccentColor)
     }
 
-    @Test func textWithWhitespaceResetsToDefaultColor() {
+    @Test func tokenStaysHighlightedAfterTrailingArguments() {
         let editor = makeEditor()
         let coordinator = ChatTextEditor.Coordinator(editor)
         let textView = NSTextView()
         textView.string = "/help me"
         coordinator.applySlashHighlight(to: textView)
-        let color = textView.textStorage?.attribute(
+        let tokenColor = textView.textStorage?.attribute(
             .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == .textColor)
+        let argsColor = textView.textStorage?.attribute(
+            .foregroundColor, at: "/help".utf16.count, effectiveRange: nil) as? NSColor
+        #expect(tokenColor == ChatTextEditor.Coordinator.mutedAccentColor)
+        #expect(argsColor == .textColor)
     }
 
     @Test func nonSlashTextKeepsDefaultColor() {
