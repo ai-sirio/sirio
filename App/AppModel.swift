@@ -921,6 +921,18 @@ final class AppModel {
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         tabs[worktreeId]?[idx].title = trimmed
+        tabs[worktreeId]?[idx].titleIsAutoNamed = false
+        persistTabs(for: worktreeId)
+    }
+
+    /// Applica un titolo generato dall'auto-naming (Task 9). A differenza di
+    /// `renameTab`, non tocca `titleIsAutoNamed`: resta eleggibile per il
+    /// prossimo pass finché l'utente non rinomina manualmente.
+    func applyAutoTitle(_ tabId: UUID, in worktreeId: UUID, title: String) {
+        guard let idx = tabs[worktreeId]?.firstIndex(where: { $0.id == tabId }) else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, tabs[worktreeId]?[idx].titleIsAutoNamed == true else { return }
+        tabs[worktreeId]?[idx].title = trimmed
         persistTabs(for: worktreeId)
     }
     /// Riordina la tab prima di `targetId` (nil = in coda). Usato dal drag
