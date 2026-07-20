@@ -81,6 +81,7 @@ struct FileExplorerView: View {
                 .frame(width: 14)
             Text(node.name)
                 .font(.system(size: 12))
+                .foregroundStyle(nameColor(for: node))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
@@ -89,6 +90,12 @@ struct FileExplorerView: View {
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .foregroundStyle(statusColor(entry))
                     .help(statusLabel(entry))
+            } else if node.kind.isDirectory,
+                      let dirStatus = panelModel.directoryStatusByPath[node.relativePath] {
+                Circle()
+                    .fill(directoryColor(dirStatus))
+                    .frame(width: 6, height: 6)
+                    .help(directoryLabel(dirStatus))
             }
         }
         .padding(.leading, CGFloat(row.depth) * 14 + 8)
@@ -213,5 +220,32 @@ struct FileExplorerView: View {
         if entry.isUntracked { return AppTheme.gitUntracked }
         if entry.isStaged { return AppTheme.gitStaged }
         return AppTheme.gitModified
+    }
+
+    private func nameColor(for node: FileTreeNode) -> Color {
+        if let entry = panelModel.statusByPath[node.relativePath] {
+            return statusColor(entry)
+        }
+        if node.kind.isDirectory,
+           let dirStatus = panelModel.directoryStatusByPath[node.relativePath] {
+            return directoryColor(dirStatus)
+        }
+        return .primary
+    }
+
+    private func directoryColor(_ status: DirectoryGitStatus) -> Color {
+        switch status {
+        case .conflicted: AppTheme.gitConflict
+        case .changed: AppTheme.gitModified
+        case .untracked: AppTheme.gitUntracked
+        }
+    }
+
+    private func directoryLabel(_ status: DirectoryGitStatus) -> String {
+        switch status {
+        case .conflicted: "Contains conflicts"
+        case .changed: "Contains changes"
+        case .untracked: "Contains untracked files"
+        }
     }
 }
