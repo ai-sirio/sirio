@@ -28,6 +28,10 @@ public struct CodexAdapter: AgentAdapter, Sendable {
                               tillerctlPath: String, sessionRef: String) -> String? {
         "codex -c \(notifyOverride(paneId: paneId, tillerctlPath: tillerctlPath)) resume \(shellQuote(sessionRef))"
     }
+    
+    public func summarizerCommand(prompt: String) -> String? {
+        "codex exec --output-last-message /dev/stdout \(shellQuote(prompt))"
+    }
 
     private func notifyOverride(paneId: UUID, tillerctlPath: String) -> String {
         let args = [tillerctlPath, "notify", "--session", paneId.uuidString, "--status", "needs-input"]

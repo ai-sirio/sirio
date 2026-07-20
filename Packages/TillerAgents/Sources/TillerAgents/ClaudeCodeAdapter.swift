@@ -95,4 +95,8 @@ public struct ClaudeCodeAdapter: AgentAdapter, Sendable {
                               tillerctlPath: String, sessionRef: String) -> String? {
         "claude --resume \(shellQuote(sessionRef))"
     }
+    
+    public func summarizerCommand(prompt: String) -> String? {
+        "claude -p \(shellQuote(prompt))"
+    }
 }
