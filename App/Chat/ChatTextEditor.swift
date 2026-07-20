@@ -93,20 +93,34 @@ struct ChatTextEditor: NSViewRepresentable {
             }
         }
 
-        /// A lone "/token" draft (same condition the composer uses for the
-        /// popup) is tinted with the accent color; anything else resets to
-        /// the default text color. `typingAttributes` are pinned to the
-        /// default so text typed after a space never inherits the accent.
+        /// Only the leading "/token" prefix is tinted (a muted accent), and
+        /// stays tinted even once the user keeps typing arguments after a
+        /// space — only the draft-command condition (starts with "/") is
+        /// checked, not "no whitespace anywhere". Text that doesn't start
+        /// with "/" gets no highlight. `typingAttributes` stay pinned to the
+        /// default color; the token range gets recolored on every edit.
         func applySlashHighlight(to textView: NSTextView) {
             guard let storage = textView.textStorage, storage.length > 0 else { return }
-            let isSlashToken = textView.string.hasPrefix("/")
-                && !textView.string.contains(where: \.isWhitespace)
-            let color: NSColor = isSlashToken ? .controlAccentColor : .textColor
-            storage.addAttribute(
-                .foregroundColor, value: color,
-                range: NSRange(location: 0, length: storage.length))
+            let string = textView.string as NSString
+            var tokenLength = 0
+            if string.hasPrefix("/") {
+                let whitespace = string.rangeOfCharacter(from: .whitespacesAndNewlines)
+                tokenLength = whitespace.location == NSNotFound ? string.length : whitespace.location
+            }
+            if tokenLength > 0 {
+                storage.addAttribute(
+                    .foregroundColor, value: Self.mutedAccentColor,
+                    range: NSRange(location: 0, length: tokenLength))
+            }
+            if tokenLength < storage.length {
+                storage.addAttribute(
+                    .foregroundColor, value: NSColor.textColor,
+                    range: NSRange(location: tokenLength, length: storage.length - tokenLength))
+            }
             textView.typingAttributes[.foregroundColor] = NSColor.textColor
         }
+
+        static let mutedAccentColor = NSColor.controlAccentColor.withAlphaComponent(0.7)
 
         /// Slash-popup keys get first refusal via `onSlashKey`. Then plain
         /// Return sends (swallowed here); Shift+Return inserts a real
