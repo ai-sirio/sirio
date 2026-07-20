@@ -70,6 +70,34 @@ import Foundation
     // Compile-time check: no @discardableResult warning needed.
 }
 
+// MARK: - Restore (chat tabs)
+
+@Test func registerAgentIdSetsAgentIdWithoutStatus() {
+    // Restored chat tabs must not be claimed as .running before any real
+    // status signal arrives — only agentSpawned (fresh tabs) does that.
+    let model = AgentActivityModel()
+    let paneId = UUID()
+
+    model.registerAgentId(paneId: paneId, agentId: "claude")
+
+    #expect(model.paneAgents[paneId] == "claude")
+    #expect(model.agentStatus[paneId] == nil)
+}
+
+@Test func registerAgentIdThenNotifyMakesPaneFullyResolved() {
+    // Mirrors AgentTreeBuilder's guard: a restored chat tab that later
+    // receives a real notify() must have both paneAgents and agentStatus
+    // set, or it silently drops out of the Agents panel tree.
+    let model = AgentActivityModel()
+    let paneId = UUID()
+
+    model.registerAgentId(paneId: paneId, agentId: "claude")
+    model.notify(paneId: paneId, status: .running, now: Date())
+
+    #expect(model.paneAgents[paneId] == "claude")
+    #expect(model.agentStatus[paneId] == .running)
+}
+
 // MARK: - Process exit
 
 @Test func applyExitResultMapsZeroToDone() {
