@@ -98,7 +98,7 @@ struct ChatComposerView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Attach image (clipboard or file)")
+            .help("Attach image")
             .disabled(!canInteract)
             if isPrompting {
                 stopButton
@@ -479,14 +479,11 @@ struct ChatComposerView: View {
         mentionCandidates = []
     }
 
-    /// Pasteboard image if present, else a file picker. (Direct ⌘V paste
-    /// interception inside TextField is a known v1 gap.)
+    /// Opens a file picker for an image. (Direct ⌘V clipboard-paste
+    /// interception inside TextField is a known v1 gap — not wired here,
+    /// since stray PNG data lingering on the general pasteboard from an
+    /// unrelated copy would silently hijack every click of this button.)
     private func attachImage() {
-        if let data = NSPasteboard.general.data(forType: .png) {
-            images.append(ImageAttachment(mimeType: "image/png",
-                                          base64Data: data.base64EncodedString()))
-            return
-        }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg]
         panel.allowsMultipleSelection = false
