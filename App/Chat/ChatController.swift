@@ -223,8 +223,17 @@ final class ChatController {
         await session?.cancel()
     }
 
+    /// Optimistic like `setModel`: the pill reflects the choice immediately,
+    /// reverted on error (some agents never send `current_mode_update`).
     func setMode(_ modeId: String) async {
-        try? await session?.setMode(modeId)
+        let previous = modes?.currentModeId
+        modes?.currentModeId = modeId
+        do {
+            try await session?.setMode(modeId)
+        } catch {
+            if let previous { modes?.currentModeId = previous }
+            promptError = Self.describePromptError(error)
+        }
     }
 
     /// Optimistic: the pill reflects the choice immediately, reverted on
