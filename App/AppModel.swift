@@ -276,6 +276,10 @@ final class AppModel {
                     activeTabId[worktree.id] = loaded.activeTabId.flatMap { active in
                         restoredTabs.contains { $0.id == active } ? active : nil
                     } ?? restoredTabs.first?.id
+                    for tab in restoredTabs {
+                        guard let chatAgentId = tab.chatAgentId else { continue }
+                        agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
+                    }
                     await restoreAgentSessions(
                         for: worktree,
                         paneIds: Set(restoredTabs.flatMap { $0.leafIds })

@@ -81,6 +81,15 @@ public final class AgentActivityModel {
     /// Agent id spawned in the given pane, or nil for plain shells.
     public func agentId(paneId: UUID) -> String? { paneAgents[paneId] }
 
+    /// Registers a restored pane's agent identity without claiming a status.
+    /// Unlike `agentSpawned`, does NOT set `.running` — a restored chat tab
+    /// may be idle, and the real status arrives later via `notify`. Without
+    /// this, restored chat tabs never satisfy `AgentTreeBuilder`'s
+    /// `paneAgents` guard and silently drop out of the Agents panel.
+    public func registerAgentId(paneId: UUID, agentId: String) {
+        paneAgents[paneId] = agentId
+    }
+
     // MARK: - Process exit
 
     /// Map a process exit code to `.done` (code 0) or `.error` (non-zero).
