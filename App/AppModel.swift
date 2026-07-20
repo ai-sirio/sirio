@@ -1306,6 +1306,8 @@ final class AppModel {
     var markdownDocuments: [UUID: MarkdownDocument] = [:]
     var chatControllers: [UUID: ChatController] = [:]
     var chatStore: ChatSessionStore?
+    private var autoNamingThrottle: [UUID: AutoNamingThrottle] = [:]
+
 
     /// Adapters that can host a chat pane (have an ACP launch spec).
     static func acpAgents() -> [any AgentAdapter] {
@@ -1641,6 +1643,9 @@ final class AppModel {
     }
 
     private func notifyTransition(paneId: UUID, from old: AgentStatus?, to new: AgentStatus) {
+        Task { @MainActor [weak self] in
+            await self?.requestAutoRename(paneId: paneId, from: old, to: new)
+        }
         let visible = isSelectedWorktreeContaining(paneId: paneId)
         guard NotificationPolicy.shouldNotify(
             old: old, new: new, appActive: NSApp.isActive, paneVisible: visible
@@ -1648,6 +1653,81 @@ final class AppModel {
         guard let payload = buildPayload(paneId: paneId, status: new) else { return }
         notifier.post(payload)
     }
+
+    /// Innesca un pass di auto-naming quando un turno finisce (running → done
+    /// o needsInput). Copre le chat tab ACP per tutti e 5 gli agenti e le
+    /// terminal tab dei 3 adapter con hook nativi.
+    private func requestAutoRename(
+        paneId: UUID, from old: AgentStatus?, to new: AgentStatus
+    ) async {
+        guard old == .running, new == .done || new == .needsInput else { return }
+        guard AppSettings.autoNamingEnabled(
+            defaultsValue: UserDefaults.standard.object(
+                forKey: AppSettings.autoNamingEnabledKey
+            ) as? Bool
+        ) else { return }
+        guard let worktree = worktreeContaining(paneId: paneId),
+              let idx = tabs[worktree.id]?.firstIndex(where: {
+                  $0.activityPaneIds.contains(paneId)
+              })
+        else { return }
+        let tab = tabs[worktree.id]![idx]
+        guard tab.titleIsAutoNamed,
+              let agentId = agentActivity.paneAgents[paneId],
+              let adapter = AgentCatalog.all.first(where: { $0.id == agentId })
+        else { return }
+
+        let source: TranscriptSource?
+        switch tab.content {
+        case .chat:
+            source = chatControllers[tab.id].map { ChatTranscriptSource(controller: $0) }
+        case .terminal:
+            source = await resolveFileTranscriptSource(
+                paneId: paneId, worktree: worktree, agentId: agentId
+            )
+        case .markdown:
+            source = nil
+        }
+        guard let source, let text = source.recentText() else { return }
+
+        let throttle = autoNamingThrottle[paneId] ?? AutoNamingThrottle()
+        let now = Date()
+        guard throttle.shouldRun(transcriptLength: text.count, now: now) else { return }
+        autoNamingThrottle[paneId] = throttle.recording(
+            transcriptLength: text.count, now: now
+        )
+
+        let worktreePath = worktree.path
+        Task { [weak self] in
+            guard let title = await AutoNamer.summarize(
+                transcript: text, worktreePath: worktreePath, adapter: adapter
+            ) else { return }
+            await MainActor.run {
+                self?.applyAutoTitle(tab.id, in: worktree.id, title: title)
+            }
+        }
+    }
+
+    /// Sorgente file-based per le terminal-tab adapter con hook nativi.
+    private func resolveFileTranscriptSource(
+        paneId: UUID, worktree: Worktree, agentId: String
+    ) async -> TranscriptSource? {
+        guard let store,
+              let refs = try? await store.agentSessionRefs(of: worktree.id),
+              let ref = refs.first(where: { $0.paneId == paneId })
+        else { return nil }
+        switch agentId {
+        case "claude":
+            return ClaudeTranscriptSource(
+                worktreePath: worktree.path, sessionRef: ref.sessionRef
+            )
+        case "codex":
+            return CodexTranscriptSource(sessionRef: ref.sessionRef)
+        default:
+            return nil
+        }
+    }
+
 
 
     // Control-socket bridges to the private notifier.

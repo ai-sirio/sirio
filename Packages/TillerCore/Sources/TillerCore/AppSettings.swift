@@ -38,6 +38,11 @@ public enum AppSettings {
         return defaultsValue ?? true
     }
 
+    /// Resolve whether auto-naming is enabled. Missing value means disabled.
+    public static func autoNamingEnabled(defaultsValue: Bool?) -> Bool {
+        defaultsValue ?? false
+    }
+
     /// UserDefaults key for the app appearance (AppAppearance rawValue).
     /// Missing value means `.system`.
     public static let appearanceThemeKey = "appearance.theme"
