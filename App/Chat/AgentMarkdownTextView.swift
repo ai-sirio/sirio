@@ -20,7 +20,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
         textView.drawsBackground = false
         textView.textContainerInset = .zero
         textView.textContainer?.lineFragmentPadding = 0
-        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.widthTracksTextView = false
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -33,24 +33,46 @@ struct AgentMarkdownTextView: NSViewRepresentable {
         guard context.coordinator.lastRenderedSource != markdown else { return }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         context.coordinator.lastRenderedSource = markdown
+        // Invalidate cached height so the next `sizeThatFits` re-runs layout.
+        context.coordinator.measuredHeight = nil
     }
 
-    /// Same technique as `ChatTextEditor.sizeThatFits`: SwiftUI consults this
-    /// (not Auto Layout / `intrinsicContentSize`) to size an
-    /// `NSViewRepresentable`. No height cap here — the outer `ScrollView` in
+    /// SwiftUI consults this (not Auto Layout / `intrinsicContentSize`) to size
+    /// an `NSViewRepresentable`. No height cap here — the outer `ScrollView` in
     /// `TranscriptView` owns scrolling, this view just reports how tall its
     /// text actually is.
+    ///
+    /// `LazyVStack` inside a `ScrollView` measures every item to compute the
+    /// total scrollable content height, so `sizeThatFits` is called many times
+    /// per layout pass (once per item, then again on every invalidation).
+    /// Without the cache below, each call ran `ensureLayout` — AppKit text
+    /// layout — which turned any non-trivial transcript into a multi-second
+    /// main-thread hang. The cache skips that work when neither the markdown
+    /// nor the proposed width changed. `widthTracksTextView` is disabled so
+    /// the container size we set here is authoritative, preventing a feedback
+    /// loop where the layout manager re-lays out on frame changes.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView,
                       context: Context) -> CGSize? {
         guard let layoutManager = nsView.layoutManager, let container = nsView.textContainer else {
             return nil
         }
+        let width = proposal.width ?? nsView.frame.width
+        if context.coordinator.lastRenderedSource == markdown,
+           context.coordinator.measuredWidth == width,
+           let cached = context.coordinator.measuredHeight {
+            return CGSize(width: width, height: cached)
+        }
+        container.size = CGSize(width: max(0, width), height: .greatestFiniteMagnitude)
         layoutManager.ensureLayout(for: container)
         let height = layoutManager.usedRect(for: container).height
-        return CGSize(width: proposal.width ?? nsView.frame.width, height: height)
+        context.coordinator.measuredWidth = width
+        context.coordinator.measuredHeight = height
+        return CGSize(width: width, height: height)
     }
 
     final class Coordinator {
         var lastRenderedSource: String?
+        var measuredWidth: CGFloat?
+        var measuredHeight: CGFloat?
     }
 }
