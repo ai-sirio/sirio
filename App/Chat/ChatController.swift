@@ -46,6 +46,9 @@ final class ChatController {
     private static let followThrottle: TimeInterval = 0.5
 
     var items: [TranscriptItem] { restored + reducer.items }
+    /// Subagent spawns visible in the transcript (Task-type tool calls),
+    /// consumed by the Agents panel.
+    var activeSubagentTasks: [SubagentTaskInfo] { SubagentTasks.extract(from: items) }
     var currentModeId: String? { reducer.currentModeId ?? modes?.currentModeId }
     var contextUsage: ContextUsage? { reducer.contextUsage }
     var availableCommands: [AvailableCommand] { reducer.availableCommands }

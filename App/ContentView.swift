@@ -274,6 +274,7 @@ struct ContentView: View {
                                             await model.saveScrollback(worktreeId: worktreeId, paneId: id, data: data)
                                             await MainActor.run {
                                                 model.agentActivity.paneClosed(paneId: id)
+                                                model.paneProcessTrees[id] = nil
                                                 model.paneCommands[id] = nil
                                                 model.paneTitles[id] = nil
                                             }
