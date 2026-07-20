@@ -65,6 +65,7 @@ enum MarkdownAttributedStringRenderer {
         // reading as the visual anchor of a reply.
         var color: NSColor = .labelColor.withAlphaComponent(0.82)
         let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 3
         var attrs: [NSAttributedString.Key: Any] = [:]
         if let intent = run.presentationIntent {
             for component in intent.components {
