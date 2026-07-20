@@ -211,7 +211,8 @@ public actor ProjectStore {
                         id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
                         title: tab.title, orderIdx: idx,
                         isActive: tab.id == activeTabId,
-                        treeJSON: treeJSON, updatedAt: Date()
+                        treeJSON: treeJSON, updatedAt: Date(),
+                        titleIsAutoNamed: tab.titleIsAutoNamed
                     )
                 case .markdown(let fileURL):
                     // treeJSON resta vuoto perché la colonna è notNull dalla v3.
@@ -220,7 +221,8 @@ public actor ProjectStore {
                         title: tab.title, orderIdx: idx,
                         isActive: tab.id == activeTabId,
                         treeJSON: "", updatedAt: Date(),
-                        kind: "markdown", filePath: fileURL.path
+                        kind: "markdown", filePath: fileURL.path,
+                        titleIsAutoNamed: tab.titleIsAutoNamed
                     )
                 case .chat(let agentId):
                     record = TerminalTabRecord(
@@ -228,7 +230,8 @@ public actor ProjectStore {
                         title: tab.title, orderIdx: idx,
                         isActive: tab.id == activeTabId,
                         treeJSON: "", updatedAt: Date(),
-                        kind: "chat", chatAgentId: agentId
+                        kind: "chat", chatAgentId: agentId,
+                        titleIsAutoNamed: tab.titleIsAutoNamed
                     )
                 }
                 try record.insert(db)
@@ -258,18 +261,21 @@ public actor ProjectStore {
                         continue
                     }
                     tabs.append(WorkspaceTab(id: id, title: record.title,
-                                             content: .markdown(fileURL: URL(fileURLWithPath: path))))
+                                             content: .markdown(fileURL: URL(fileURLWithPath: path)),
+                                             titleIsAutoNamed: record.titleIsAutoNamed))
                 case "chat":
                     guard let agentId = record.chatAgentId else { continue }
                     tabs.append(WorkspaceTab(
                         id: id, title: record.title,
-                        content: .chat(agentId: agentId)))
+                        content: .chat(agentId: agentId),
+                        titleIsAutoNamed: record.titleIsAutoNamed))
                 default:
                     guard let tree = try? decoder.decode(SplitTree.self, from: Data(record.treeJSON.utf8)) else {
                         logger.warning("loadTabs: skipping corrupt TerminalTabRecord '\(record.id)'")
                         continue
                     }
-                    tabs.append(WorkspaceTab(id: id, title: record.title, tree: tree))
+                    tabs.append(WorkspaceTab(id: id, title: record.title, tree: tree,
+                                             titleIsAutoNamed: record.titleIsAutoNamed))
                 }
                 if record.isActive { active = id }
             }
