@@ -69,4 +69,45 @@ struct ChatTextEditorSlashTests {
             NSTextView(), doCommandBy: #selector(NSResponder.insertNewline(_:))))
         #expect(submitted)
     }
+
+    @Test func slashTokenGetsAccentColor() {
+        let editor = makeEditor()
+        let coordinator = ChatTextEditor.Coordinator(editor)
+        let textView = NSTextView()
+        textView.string = "/he"
+        coordinator.applySlashHighlight(to: textView)
+        let color = textView.textStorage?.attribute(
+            .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(color == .controlAccentColor)
+    }
+
+    @Test func textWithWhitespaceResetsToDefaultColor() {
+        let editor = makeEditor()
+        let coordinator = ChatTextEditor.Coordinator(editor)
+        let textView = NSTextView()
+        textView.string = "/help me"
+        coordinator.applySlashHighlight(to: textView)
+        let color = textView.textStorage?.attribute(
+            .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(color == .textColor)
+    }
+
+    @Test func nonSlashTextKeepsDefaultColor() {
+        let editor = makeEditor()
+        let coordinator = ChatTextEditor.Coordinator(editor)
+        let textView = NSTextView()
+        textView.string = "hello"
+        coordinator.applySlashHighlight(to: textView)
+        let color = textView.textStorage?.attribute(
+            .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(color == .textColor)
+    }
+
+    @Test func emptyTextDoesNotCrash() {
+        let editor = makeEditor()
+        let coordinator = ChatTextEditor.Coordinator(editor)
+        let textView = NSTextView()
+        coordinator.applySlashHighlight(to: textView)
+        #expect(textView.string.isEmpty)
+    }
 }

@@ -58,6 +58,7 @@ struct ChatTextEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         if textView.string != text {
             textView.string = text
+            context.coordinator.applySlashHighlight(to: textView)
         }
         textView.isEditable = isEditable
         scrollView.minHeight = minHeight
@@ -86,9 +87,25 @@ struct ChatTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
+            applySlashHighlight(to: textView)
             if let scrollView = textView.enclosingScrollView as? AutoSizingScrollView {
                 recalculateHeight(textView: textView, scrollView: scrollView)
             }
+        }
+
+        /// A lone "/token" draft (same condition the composer uses for the
+        /// popup) is tinted with the accent color; anything else resets to
+        /// the default text color. `typingAttributes` are pinned to the
+        /// default so text typed after a space never inherits the accent.
+        func applySlashHighlight(to textView: NSTextView) {
+            guard let storage = textView.textStorage, storage.length > 0 else { return }
+            let isSlashToken = textView.string.hasPrefix("/")
+                && !textView.string.contains(where: \.isWhitespace)
+            let color: NSColor = isSlashToken ? .controlAccentColor : .textColor
+            storage.addAttribute(
+                .foregroundColor, value: color,
+                range: NSRange(location: 0, length: storage.length))
+            textView.typingAttributes[.foregroundColor] = NSColor.textColor
         }
 
         /// Slash-popup keys get first refusal via `onSlashKey`. Then plain
