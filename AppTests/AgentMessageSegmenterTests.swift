@@ -63,4 +63,11 @@ struct AgentMessageSegmenterTests {
         let segments = AgentMessageSegmenter.segments(from: markdown)
         #expect(segments == [.prose(markdown)])
     }
+
+    @Test("an insight wrapped in a single backtick span (the real Explanatory-style convention) still extracts")
+    func singleBacktickInsightExtractsInnerBody() {
+        let markdown = "`★ Insight ─────\nSome educational point.\n─────`"
+        let segments = AgentMessageSegmenter.segments(from: markdown)
+        #expect(segments == [.insight("Some educational point.")])
+    }
 }
