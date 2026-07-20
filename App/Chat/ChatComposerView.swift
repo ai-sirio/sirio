@@ -16,6 +16,8 @@ struct ChatComposerView: View {
     @State private var images: [ImageAttachment] = []
     @State private var mentionQuery: String?
     @State private var mentionCandidates: [String] = []
+    @State private var slashSelectionIndex = 0
+    @State private var slashPopupDismissed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isPrompting: Bool { controller.state == .prompting }
@@ -29,7 +31,7 @@ struct ChatComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !slashCandidates.isEmpty {
+            if slashPopupVisible {
                 slashPopup
             }
             if let query = mentionQuery, !mentionCandidates.isEmpty {
@@ -70,10 +72,16 @@ struct ChatComposerView: View {
                     .foregroundStyle(.secondary)
                     .allowsHitTesting(false)
             }
-            ChatTextEditor(text: $text, isEditable: canInteract, minHeight: 36, maxHeight: 160, onSubmit: sendCurrent)
+            ChatTextEditor(text: $text, isEditable: canInteract, minHeight: 36,
+                           maxHeight: 160, onSubmit: sendCurrent,
+                           onSlashKey: handleSlashKey)
         }
         .disabled(!canInteract)
-        .onChange(of: text) { updateMentionQuery() }
+        .onChange(of: text) {
+            updateMentionQuery()
+            slashPopupDismissed = false
+            slashSelectionIndex = 0
+        }
     }
 
     private var controlBar: some View {
@@ -314,9 +322,29 @@ struct ChatComposerView: View {
         return Array(all.filter { $0.name.lowercased().hasPrefix(query) }.prefix(10))
     }
 
+    private var slashPopupVisible: Bool {
+        !slashCandidates.isEmpty && !slashPopupDismissed
+    }
+
+    private func handleSlashKey(_ key: SlashKey) -> Bool {
+        guard slashPopupVisible,
+              let effect = SlashCommandSelection.effect(
+                  for: key, index: slashSelectionIndex, count: slashCandidates.count)
+        else { return false }
+        switch effect {
+        case .moved(let index):
+            slashSelectionIndex = index
+        case .accepted(let index):
+            text = "/\(slashCandidates[index].name) "
+        case .dismissed:
+            slashPopupDismissed = true
+        }
+        return true
+    }
+
     private var slashPopup: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(slashCandidates, id: \.name) { command in
+            ForEach(Array(slashCandidates.enumerated()), id: \.element.name) { index, command in
                 Button {
                     text = "/\(command.name) "
                 } label: {
@@ -333,6 +361,9 @@ struct ChatComposerView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(index == min(slashSelectionIndex, slashCandidates.count - 1)
+                                ? AppTheme.selectionFill : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 4))
             }
         }
         .padding(6)
