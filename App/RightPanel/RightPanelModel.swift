@@ -19,6 +19,7 @@ final class RightPanelModel {
     private(set) var directoryErrors: [String: String] = [:]
     private(set) var status = GitStatusSnapshot.empty
     private(set) var statusByPath: [String: GitStatusEntry] = [:]
+    private(set) var directoryStatusByPath: [String: DirectoryGitStatus] = [:]
     private(set) var selectedDiffPath: GitPath?
     private(set) var diff: GitFileDiff?
     private(set) var filesLoading = false
@@ -84,6 +85,7 @@ final class RightPanelModel {
         directoryErrors = [:]
         status = .empty
         statusByPath = [:]
+        directoryStatusByPath = [:]
         selectedDiffPath = nil
         diff = nil
         filesLoading = false
@@ -262,11 +264,12 @@ extension RightPanelModel {
         await mutate { try await GitActions.discardUntracked(entries, in: $0) }
     }
 
-    private func apply(_ snapshot: GitStatusSnapshot) {
+    func apply(_ snapshot: GitStatusSnapshot) {
         status = snapshot
         statusByPath = Dictionary(
             snapshot.entries.map { ($0.path.value, $0) },
             uniquingKeysWith: { first, _ in first })
+        directoryStatusByPath = DirectoryStatusAggregator.directoryStatuses(from: statusByPath)
         if let selectedDiffPath,
            snapshot.entries.contains(where: { $0.path == selectedDiffPath }) {
             return
