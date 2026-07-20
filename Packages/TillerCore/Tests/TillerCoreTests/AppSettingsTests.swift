@@ -68,3 +68,8 @@ import Testing
 @Test func signpostMetricsKeyIsCorrect() {
     #expect(AppSettings.signpostMetricsKey == "debug.signpostMetrics")
 }
+ 
+@Test func autoNamingEnabledKeyDefaultsToFalseWhenAbsent() {
+    // The UI reads this key via @AppStorage(default: false).
+    #expect(AppSettings.autoNamingEnabledKey == "autoNaming.enabled")
+}

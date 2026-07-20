@@ -12,6 +12,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.resumeAgentSessionsKey) private var resumeAgentSessions = true
     @AppStorage(AppSettings.controlSocketEnabledKey) private var controlSocketEnabled = true
     @AppStorage(AppSettings.maxMountedWorktreesKey) private var maxMountedWorktrees = 0
+    @AppStorage(AppSettings.autoNamingEnabledKey) private var autoNamingEnabled = false
 
     var body: some View {
         Form {
@@ -33,6 +34,12 @@ struct GeneralSettingsView: View {
                 Toggle(isOn: $resumeAgentSessions) {
                     Text("Resume agent sessions on launch")
                     Text("Relaunch supported agents with their previous conversation after Tiller restarts.")
+                }
+            }
+            Section("Automation") {
+                Toggle(isOn: $autoNamingEnabled) {
+                    Text("Auto-rename tabs and agents")
+                    Text("Summarizes each session's conversation into a short tab title using the session's own agent CLI. Manual renames always win.")
                 }
             }
             Section("Performance") {
