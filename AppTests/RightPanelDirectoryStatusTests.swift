@@ -1,7 +1,7 @@
 import Testing
-import TillerGit
 
 @testable import Tiller
+@testable import TillerGit
 
 @Suite("RightPanelDirectoryStatus")
 @MainActor
