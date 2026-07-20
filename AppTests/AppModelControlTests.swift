@@ -9,6 +9,35 @@ import TillerTerminal
 @Suite(.serialized)
 @MainActor
 struct AppModelControlTests {
+    @Test func renameTabDisablesAutoNaming() {
+        let model = makeModel()
+        let worktree = makeWorktree(path: "/tmp/rename-tab")
+        let tab = WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
+        model.worktrees = [worktree.projectId: [worktree]]
+        model.tabs[worktree.id] = [tab]
+
+        #expect(tab.titleIsAutoNamed == true)
+        model.renameTab(tab.id, in: worktree.id, to: "My custom name")
+
+        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        #expect(updated.title == "My custom name")
+        #expect(updated.titleIsAutoNamed == false)
+    }
+
+    @Test func applyAutoTitleLeavesProvenanceUntouched() {
+        let model = makeModel()
+        let worktree = makeWorktree(path: "/tmp/apply-auto-title")
+        let tab = WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
+        model.worktrees = [worktree.projectId: [worktree]]
+        model.tabs[worktree.id] = [tab]
+
+        model.applyAutoTitle(tab.id, in: worktree.id, title: "Fix login bug")
+
+        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        #expect(updated.title == "Fix login bug")
+        #expect(updated.titleIsAutoNamed == true)
+    }
+
     @Test func createReturnsOnlyAfterRegistrationWithoutChangingSelection() async {
         let registry = PaneRegistry()
         let createdPaneId = UUID()
