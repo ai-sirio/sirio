@@ -9,17 +9,20 @@ enum AgentMessageSegment: Equatable {
 
 /// Splits an agent reply's markdown into prose and insight segments.
 ///
-/// Insight callouts are written wrapped in a fenced code block (per the
-/// output-style convention: "★ Insight ───" header line, body, "───"
-/// footer line) — that fence is exactly why `AttributedString(markdown:)`
-/// renders them as one opaque monospaced code span instead of styled prose
-/// (see `MarkdownAttributedStringRenderer`). Pulling them out here, before
-/// that renderer ever sees them, lets each half use the rendering it
-/// actually needs: prose through `AgentMarkdownTextView`, insights through
-/// `InsightCardView`.
+/// Insight callouts are marked by a "★ Insight ───" header line and a
+/// "───" footer line; the actual Explanatory output-style convention wraps
+/// that in a single backtick span (not a fenced code block), which is why
+/// nested inline-code backticks inside the body would otherwise break
+/// `AttributedString(markdown:)` parsing into a mess of stray code spans
+/// (see `MarkdownAttributedStringRenderer`). Some agent CLIs instead emit a
+/// ``` fence, or no wrapper at all — the wrapper is tolerated but not
+/// required; only the header/footer marker lines matter. Pulling the block
+/// out here, before that renderer ever sees it, lets each half use the
+/// rendering it actually needs: prose through `AgentMarkdownTextView`,
+/// insights through `InsightCardView`.
 enum AgentMessageSegmenter {
     private static let insightFence = try! NSRegularExpression(
-        pattern: "```\\n★ Insight [─]+\\n([\\s\\S]*?)\\n[─]+\\n```",
+        pattern: "(?:```\\n|`)?★ Insight [─]+\\n([\\s\\S]*?)\\n[─]+(?:\\n```|`)?",
         options: [])
 
     static func segments(from markdown: String) -> [AgentMessageSegment] {
