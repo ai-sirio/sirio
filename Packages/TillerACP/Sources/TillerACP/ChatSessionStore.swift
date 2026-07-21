@@ -13,17 +13,17 @@ public struct ChatSessionStore: Sendable {
         self.database = database
     }
 
-    /// Most recently active session for a (worktree, agent) pair that has at
-    /// least one persisted turn. Sessions created by `start()` but abandoned
-    /// before any turn completes never get an on-disk transcript on the
-    /// agent side either, so `session/load` would always fail "Session not
-    /// found" for them — excluding empty sessions here keeps `latestSession`
-    /// pointing at one the agent can actually resume.
-    public func latestSession(worktreeId: String, agentId: String) throws -> ChatSessionRecord? {
+    /// Most recently active session for a worktree that has at
+    /// least one persisted turn. The `agentId` on the record is the
+    /// last-used agent, not an owner. Sessions created by `start()` but
+    /// abandoned before any turn completes never get an on-disk transcript
+    /// on the agent side either, so `session/load` would always fail "Session
+    /// not found" for them — excluding empty sessions here keeps
+    /// `latestSession` pointing at one the agent can actually resume.
+    public func latestSession(worktreeId: String) throws -> ChatSessionRecord? {
         try database.read { db in
             try ChatSessionRecord
                 .filter(Column("worktreeId") == worktreeId)
-                .filter(Column("agentId") == agentId)
                 .filter(sql: "EXISTS (SELECT 1 FROM chatItem WHERE chatItem.sessionId = chatSession.id)")
                 .order(Column("lastActivityAt").desc)
                 .fetchOne(db)
@@ -44,6 +44,25 @@ public struct ChatSessionStore: Sendable {
         try database.write { db in
             guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
             record.acpSessionId = acpSessionId
+            try record.update(db)
+        }
+    }
+
+    /// Records the (new) last-used agent for a session after a switch.
+    public func setAgentId(_ agentId: String, sessionId: String) throws {
+        try database.write { db in
+            guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
+            record.agentId = agentId
+            try record.update(db)
+        }
+    }
+
+    /// Severs same-agent resume: after an agent switch the stored ACP session
+    /// belongs to the previous agent and must never be replayed into the new one.
+    public func clearACPSessionId(sessionId: String) throws {
+        try database.write { db in
+            guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
+            record.acpSessionId = nil
             try record.update(db)
         }
     }
