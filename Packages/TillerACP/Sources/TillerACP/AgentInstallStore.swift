@@ -17,7 +17,7 @@ public enum HostPlatform: String, Sendable {
 /// Concrete way to install one registry agent on this machine.
 public enum InstallMethod: Sendable, Equatable {
     case npx(package: String, args: [String], env: [String: String])
-    case binary(archive: URL, cmd: String)
+    case binary(archive: URL, cmd: String, args: [String], env: [String: String])
 }
 
 extension RegistryAgent {
@@ -29,7 +29,8 @@ extension RegistryAgent {
                         env: npx.env ?? [:])
         }
         if let entry = distribution.binary?[platform.rawValue] {
-            return .binary(archive: entry.archive, cmd: entry.cmd)
+            return .binary(archive: entry.archive, cmd: entry.cmd,
+                           args: entry.args ?? [], env: entry.env ?? [:])
         }
         return nil
     }

@@ -39,6 +39,8 @@ public struct AgentDistribution: Sendable, Equatable, Decodable {
     public struct BinaryPlatform: Sendable, Equatable, Decodable {
         public var archive: URL
         public var cmd: String
+        public var args: [String]?
+        public var env: [String: String]?
     }
 
     public var npx: Npx?

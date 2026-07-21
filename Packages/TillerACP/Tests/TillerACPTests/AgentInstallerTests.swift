@@ -89,6 +89,35 @@ final class FakeShell: ShellRunning, @unchecked Sendable {
         })
     }
 
+    /// codex-acp depends on @openai/codex, whose `codex` bin also lands in
+    /// node_modules/.bin and sorts first; the package's own bin must win.
+    @Test func npxInstallPrefersBinMatchingPackageBaseName() async throws {
+        let store = try tempStore()
+        let agent = RegistryAgent(
+            id: "codex-acp", name: "Codex", version: "1.1.5",
+            description: nil, icon: nil,
+            distribution: AgentDistribution(
+                npx: .init(package: "@agentclientprotocol/codex-acp@1.1.5",
+                           args: nil, env: nil)))
+        let shell = FakeShell()
+        shell.effect = { command, _ in
+            guard command.hasPrefix("npm install --prefix ") else { return }
+            let staging = URL(fileURLWithPath: String(
+                command.dropFirst("npm install --prefix ".count)
+                    .dropFirst()
+                    .split(separator: "'", maxSplits: 1)[0]))
+            let bin = staging.appendingPathComponent("node_modules/.bin")
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            for name in ["codex", "codex-acp", "is-docker", "is-inside-container"] {
+                FileManager.default.createFile(
+                    atPath: bin.appendingPathComponent(name).path, contents: Data())
+            }
+        }
+        let installer = AgentInstaller(store: store, shell: shell, download: { _, _ in })
+        let manifest = try await installer.install(agent, platform: .darwinArm64)
+        #expect(manifest.executable.hasSuffix("node_modules/.bin/codex-acp"))
+    }
+
     @Test func npmFailureThrowsAndLeavesNothingInstalled() async throws {
         let store = try tempStore()
         let shell = FakeShell()
@@ -127,6 +156,33 @@ final class FakeShell: ShellRunning, @unchecked Sendable {
         #expect(manifest.executable
                 == store.agentDirectory(id: "amp-acp").appendingPathComponent("amp-acp").path)
         #expect(shell.commands.contains { $0.hasPrefix("chmod +x ") })
+    }
+
+    /// OpenCode's registry entry launches `./opencode acp`: dropping the
+    /// args would start the TUI instead of the ACP server.
+    @Test func binaryInstallCarriesRegistryArgsAndEnv() async throws {
+        let store = try tempStore()
+        let agent = RegistryAgent(
+            id: "opencode", name: "OpenCode", version: "1.18.4", description: nil, icon: nil,
+            distribution: AgentDistribution(binary: [
+                "darwin-aarch64": .init(
+                    archive: URL(string: "https://example.com/opencode.zip")!,
+                    cmd: "./opencode", args: ["acp"], env: ["OC_FLAG": "1"])]))
+        let shell = FakeShell()
+        shell.effect = { command, _ in
+            guard command.hasPrefix("ditto ") else { return }
+            let staging = URL(fileURLWithPath: String(
+                command.split(separator: " ").last!.dropFirst().dropLast()))
+            FileManager.default.createFile(
+                atPath: staging.appendingPathComponent("opencode").path, contents: Data())
+        }
+        let installer = AgentInstaller(store: store, shell: shell,
+                                       download: { _, destination in
+            FileManager.default.createFile(atPath: destination.path, contents: Data())
+        })
+        let manifest = try await installer.install(agent, platform: .darwinArm64)
+        #expect(manifest.arguments == ["acp"])
+        #expect(manifest.environment == ["OC_FLAG": "1"])
     }
 
     @Test func updateReplacesPreviousInstallAtomically() async throws {
