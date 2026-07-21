@@ -175,6 +175,10 @@ final class AppModel {
         var keepMounted: Bool
     }
 
+    /// Iniettabile per i test: il bundle AppTests è ospitato dentro Tiller.app,
+    /// quindi UserDefaults.standard lì è il dominio reale dell'utente.
+    private let defaults: UserDefaults
+
     private var controlMountStates: [UUID: ControlMountState] = [:]
     private var tabPersistenceTasks: [UUID: Task<Void, Never>] = [:]
     private var controlLifecycleTasks: [UUID: Task<ControlResponse, Never>] = [:]
@@ -187,13 +191,15 @@ final class AppModel {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
         },
-        controlTabPersister: ControlTabPersister? = nil
+        controlTabPersister: ControlTabPersister? = nil,
+        defaults: UserDefaults = .standard
     ) {
         self.paneRegistry = paneRegistry
         self.registrationTimeoutMs = registrationTimeoutMs
         self.paneIdGenerator = paneIdGenerator
         self.activateApplication = activateApplication
         self.controlTabPersister = controlTabPersister
+        self.defaults = defaults
     }
     var tabs: [UUID: [WorkspaceTab]] = [:]
     /// Projects whose root currently contains a `.git` entry. Derived at
@@ -1666,7 +1672,7 @@ final class AppModel {
     ) async {
         guard old == .running, new == .done || new == .needsInput else { return }
         guard AppSettings.autoNamingEnabled(
-            defaultsValue: UserDefaults.standard.object(
+            defaultsValue: defaults.object(
                 forKey: AppSettings.autoNamingEnabledKey
             ) as? Bool
         ) else { return }
