@@ -14,10 +14,13 @@ final class ChatController {
     }
 
     let tabId: UUID
-    let agentId: String
+    private(set) var agentId: String
     private let worktreeId: UUID
     private let worktreePath: String
     private let store: ChatSessionStore?
+    private let installStore: AgentInstallStore
+    /// Set on agent switch; the next send() prepends the handoff preamble.
+    private var pendingHandoff = false
 
     private(set) var state: ChatState = .idle
     private(set) var modes: SessionModeState?
@@ -65,27 +68,35 @@ final class ChatController {
     private var forceNewSession = false
 
     init(tabId: UUID, agentId: String, worktreeId: UUID,
-         worktreePath: String, store: ChatSessionStore?) {
+         worktreePath: String, store: ChatSessionStore?,
+         installStore: AgentInstallStore) {
         self.tabId = tabId
-        self.agentId = agentId
+        self.agentId = AgentIdMigration.canonical(agentId)
         self.worktreeId = worktreeId
         self.worktreePath = worktreePath
         self.store = store
+        self.installStore = installStore
     }
 
     // MARK: - Lifecycle
 
     func start() async {
         guard state == .idle || isDisconnected else { return }
-        guard let spec = AgentLaunchSpec.forAgent(id: agentId) else {
-            state = .disconnected(message: "Agent has no ACP support")
+
+        var record = try? store?.latestSession(worktreeId: worktreeId.uuidString)
+        if forceNewSession { record = nil }
+        // First start of a reopened chat: adopt the session's last-used agent.
+        if let record, sessionRecordId == nil, restored.isEmpty, reducer.items.isEmpty {
+            agentId = AgentIdMigration.canonical(record.agentId)
+        }
+        guard let spec = AgentLaunchSpec.resolved(id: agentId, installStore: installStore) else {
+            state = .disconnected(message: "Agent not installed. Install it from Settings → Agents.")
             return
         }
         state = .connecting
 
-        var record = try? store?.latestSession(worktreeId: worktreeId.uuidString)
-        if forceNewSession { record = nil }
-        if let record, let stored = try? store?.loadTranscript(sessionId: record.id) {
+        if let record, sessionRecordId == nil,
+           let stored = try? store?.loadTranscript(sessionId: record.id) {
             restored = stored
         }
         if let record, let used = record.contextUsageUsed, let size = record.contextUsageSize {
@@ -95,7 +106,7 @@ final class ChatController {
         let transport = ProcessTransport(
             executable: spec.executable, arguments: spec.arguments,
             cwd: worktreePath,
-            environment: AgentLaunchSpec.launchEnvironment(),
+            environment: AgentLaunchSpec.launchEnvironment(extra: spec.environment),
             onStderrLine: { line in
                 NSLog("[chat:\(spec.arguments.last ?? "?")] %@", line)
             })
@@ -117,8 +128,11 @@ final class ChatController {
             } catch {
                 mcpWarning = "Invalid .mcp.json file: session started without MCP servers."
             }
+            // Resume only a session created by this same agent.
+            let resumeId = (AgentIdMigration.canonical(record?.agentId ?? "") == agentId)
+                ? record?.acpSessionId : nil
             let handle = try await session.connect(
-                cwd: worktreePath, resumeSessionId: record?.acpSessionId,
+                cwd: worktreePath, resumeSessionId: resumeId,
                 mcpServers: mcpServers)
             modes = handle.modes
             models = handle.models
@@ -126,20 +140,18 @@ final class ChatController {
             effortOption = handle.configOptions.first { $0.id == "effort" }
             didResume = handle.didResume
             if handle.didResume, let record {
-                // Replay rebuilds the live transcript; drop the local copy.
                 restored = []
                 sessionRecordId = record.id
-                // The agent may have re-registered the conversation under a
-                // new id (SDK resume can fork); persist whatever it answered
-                // so the next resume targets the live conversation.
                 try? store?.setACPSessionId(handle.sessionId, sessionId: record.id)
+            } else if let sessionRecordId {
+                // Agent switch reuses the existing record for transcript continuity.
+                try? store?.setACPSessionId(handle.sessionId, sessionId: sessionRecordId)
             } else {
                 let created = try store?.createSession(
                     worktreeId: worktreeId.uuidString, agentId: agentId)
                 sessionRecordId = created?.id
                 if let sessionRecordId {
-                    try? store?.setACPSessionId(handle.sessionId,
-                                                sessionId: sessionRecordId)
+                    try? store?.setACPSessionId(handle.sessionId, sessionId: sessionRecordId)
                 }
             }
             forceNewSession = false
@@ -171,6 +183,37 @@ final class ChatController {
         await start()
     }
 
+    /// Switches the conversation to another agent: same transcript, new
+    /// process, new ACP session; the next prompt carries the handoff preamble.
+    func switchAgent(to newAgentId: String, displayName: String) async {
+        let canonical = AgentIdMigration.canonical(newAgentId)
+        guard canonical != agentId else { return }
+        if state == .prompting { await cancelTurn() }
+        await stop()
+
+        let snapshot = items
+        reducer = TranscriptReducer()
+        restored = snapshot + [.systemNotice(
+            id: UUID().uuidString,
+            text: "Agent changed to \(displayName). The previous conversation will be resent to the new agent; long conversations may exceed its context window.")]
+        agentId = canonical
+        pendingHandoff = snapshot.contains { item in
+            if case .turnDivider = item { return false }
+            if case .systemNotice = item { return false }
+            return true
+        }
+        modes = nil
+        models = nil
+        effortOption = nil
+        if let sessionRecordId {
+            try? store?.setAgentId(canonical, sessionId: sessionRecordId)
+            try? store?.clearACPSessionId(sessionId: sessionRecordId)
+        }
+        state = .idle
+        await start()
+        persist()
+    }
+
     private var isDisconnected: Bool {
         if case .disconnected = state { return true }
         return false
@@ -184,11 +227,17 @@ final class ChatController {
             return
         }
         guard state == .ready else { return }
-        let blocks = ChatPromptBuilder.build(
+        var blocks = ChatPromptBuilder.build(
             text: text, mentionPaths: mentionPaths, images: images,
             worktreePath: worktreePath)
         guard !blocks.isEmpty else { return }
         reducer.userPrompted(blocks)
+        if pendingHandoff {
+            pendingHandoff = false
+            if let preamble = TranscriptHandoff.preamble(items: restored) {
+                blocks.insert(.text(preamble), at: 0)
+            }
+        }
         state = .prompting
         promptError = nil
         onStatusChange?(.running)
