@@ -41,10 +41,8 @@ struct SidebarView: View {
                                                 }
                                             }
                                             Divider()
-                                            ForEach(AppModel.acpAgents(), id: \.id) { adapter in
-                                                Button("Chat · \(adapter.displayName)") {
-                                                    model.openChatTab(agentId: adapter.id, in: worktree)
-                                                }
+                                            Button("New Chat") {
+                                                model.openChatTab(in: worktree)
                                             }
                                             Divider()
                                             Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {

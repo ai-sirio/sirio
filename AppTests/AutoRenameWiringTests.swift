@@ -76,7 +76,7 @@ struct AutoRenameWiringTests {
         let worktree = Worktree(
             id: UUID(), projectId: UUID(), branch: "main", path: "/tmp/auto-rename-wiring")
         model.worktrees = [worktree.projectId: [worktree]]
-        let tab = model.openChatTab(agentId: "claude", in: worktree)!
+        let tab = model.openChatTab(in: worktree)!
         let controller = model.chatController(for: tab, in: worktree)!
         return (model, worktree, tab, controller)
     }
