@@ -28,11 +28,26 @@ struct AgentIcon: View {
                     .scaledToFit()
                     .foregroundStyle(.primary)
             case "opencode":
-                OpenCodeLogo()
+                ZStack {
+                    OpenCodeFrameShape()
+                        .fill(Color.primary, style: FillStyle(eoFill: true))
+                    OpenCodeInnerShape()
+                        .fill(Color(red: 0x4B / 255.0, green: 0x46 / 255.0, blue: 0x46 / 255.0))
+                }
             case "pi":
-                PiLogo()
+                PiShape()
+                    .fill(Color.primary, style: FillStyle(eoFill: true))
             case "omp":
-                OmpLogo()
+                OmpShape()
+                    .fill(LinearGradient(
+                        stops: [
+                            .init(color: Color(red: 0xED / 255.0, green: 0x4A / 255.0, blue: 0xBF / 255.0), location: 0),
+                            .init(color: Color(red: 0x9B / 255.0, green: 0x4D / 255.0, blue: 0xFF / 255.0), location: 0.5),
+                            .init(color: Color(red: 0x5A / 255.0, green: 0xD8 / 255.0, blue: 0xE6 / 255.0), location: 1)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
             default:
                 ZStack {
                     Circle().fill(Self.color(for: agentId))
@@ -61,62 +76,98 @@ struct AgentIcon: View {
     }
 }
 
-/// OpenCode mark (Orca's OpenCodeGoIcon, 240×300 viewBox): a square frame
-/// with the lower two thirds of the interior filled dark.
-private struct OpenCodeLogo: View {
-    var body: some View {
-        GeometryReader { geo in
-            let s = min(geo.size.width / 240, geo.size.height / 300)
-            let ox = (geo.size.width - 240 * s) / 2
-            let oy = (geo.size.height - 300 * s) / 2
-            ZStack {
-                Path { p in
-                    p.addRect(CGRect(x: ox, y: oy, width: 240 * s, height: 300 * s))
-                    p.addRect(CGRect(x: ox + 60 * s, y: oy + 60 * s, width: 120 * s, height: 180 * s))
-                }
-                .fill(Color.primary, style: FillStyle(eoFill: true))
-                Path { p in
-                    p.addRect(CGRect(x: ox + 60 * s, y: oy + 120 * s, width: 120 * s, height: 120 * s))
-                }
-                .fill(Color(red: 0x4B / 255.0, green: 0x46 / 255.0, blue: 0x46 / 255.0))
-            }
-        }
+/// Maps viewBox coordinates into the target rect, aspect-fit and centered.
+/// Shapes (unlike GeometryReader views) have deterministic sizing in every
+/// context, including `ImageRenderer` and menu item rasterization.
+private struct ViewBoxTransform {
+    let scale: CGFloat
+    let offsetX: CGFloat
+    let offsetY: CGFloat
+
+    init(rect: CGRect, viewBoxWidth: CGFloat, viewBoxHeight: CGFloat) {
+        scale = min(rect.width / viewBoxWidth, rect.height / viewBoxHeight)
+        offsetX = rect.minX + (rect.width - viewBoxWidth * scale) / 2
+        offsetY = rect.minY + (rect.height - viewBoxHeight * scale) / 2
+    }
+
+    func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+        CGPoint(x: offsetX + x * scale, y: offsetY + y * scale)
+    }
+
+    func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: offsetX + x * scale, y: offsetY + y * scale,
+               width: w * scale, height: h * scale)
+    }
+}
+
+/// OpenCode mark, outer frame (Orca's OpenCodeGoIcon, 240×300 viewBox):
+/// a square frame drawn via even-odd fill.
+private struct OpenCodeFrameShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let t = ViewBoxTransform(rect: rect, viewBoxWidth: 240, viewBoxHeight: 300)
+        var p = Path()
+        p.addRect(t.rect(0, 0, 240, 300))
+        p.addRect(t.rect(60, 60, 120, 180))
+        return p
+    }
+}
+
+/// OpenCode mark, lower two thirds of the interior (filled dark).
+private struct OpenCodeInnerShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let t = ViewBoxTransform(rect: rect, viewBoxWidth: 240, viewBoxHeight: 300)
+        return Path(t.rect(60, 120, 120, 120))
     }
 }
 
 /// Pi mark (Orca's PiIcon, 800×800 viewBox), even-odd fill for the counter.
-private struct PiLogo: View {
-    var body: some View {
-        GeometryReader { geo in
-            let s = min(geo.size.width, geo.size.height) / 800
-            let ox = (geo.size.width - 800 * s) / 2
-            let oy = (geo.size.height - 800 * s) / 2
-            func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-                CGPoint(x: ox + x * s, y: oy + y * s)
-            }
-            return Path { p in
-                p.move(to: pt(165.29, 165.29))
-                p.addLine(to: pt(517.36, 165.29))
-                p.addLine(to: pt(517.36, 400))
-                p.addLine(to: pt(400, 400))
-                p.addLine(to: pt(400, 517.36))
-                p.addLine(to: pt(282.65, 517.36))
-                p.addLine(to: pt(282.65, 634.72))
-                p.addLine(to: pt(165.29, 634.72))
-                p.closeSubpath()
-                p.move(to: pt(282.65, 282.65))
-                p.addLine(to: pt(282.65, 400))
-                p.addLine(to: pt(400, 400))
-                p.addLine(to: pt(400, 282.65))
-                p.closeSubpath()
-                p.move(to: pt(517.36, 400))
-                p.addLine(to: pt(634.72, 400))
-                p.addLine(to: pt(634.72, 634.72))
-                p.addLine(to: pt(517.36, 634.72))
-                p.closeSubpath()
-            }
-            .fill(Color.primary, style: FillStyle(eoFill: true))
-        }
+private struct PiShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let t = ViewBoxTransform(rect: rect, viewBoxWidth: 800, viewBoxHeight: 800)
+        var p = Path()
+        p.move(to: t.point(165.29, 165.29))
+        p.addLine(to: t.point(517.36, 165.29))
+        p.addLine(to: t.point(517.36, 400))
+        p.addLine(to: t.point(400, 400))
+        p.addLine(to: t.point(400, 517.36))
+        p.addLine(to: t.point(282.65, 517.36))
+        p.addLine(to: t.point(282.65, 634.72))
+        p.addLine(to: t.point(165.29, 634.72))
+        p.closeSubpath()
+        p.move(to: t.point(282.65, 282.65))
+        p.addLine(to: t.point(282.65, 400))
+        p.addLine(to: t.point(400, 400))
+        p.addLine(to: t.point(400, 282.65))
+        p.closeSubpath()
+        p.move(to: t.point(517.36, 400))
+        p.addLine(to: t.point(634.72, 400))
+        p.addLine(to: t.point(634.72, 634.72))
+        p.addLine(to: t.point(517.36, 634.72))
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// omp mark (omp.sh homepage glyph via Orca's OmpIcon, 64×64 viewBox); the
+/// caller fills it with the pink→purple→cyan gradient.
+private struct OmpShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let t = ViewBoxTransform(rect: rect, viewBoxWidth: 64, viewBoxHeight: 64)
+        var p = Path()
+        p.move(to: t.point(10, 14))
+        p.addLine(to: t.point(54, 14))
+        p.addLine(to: t.point(54, 23))
+        p.addLine(to: t.point(43, 23))
+        p.addLine(to: t.point(43, 56))
+        p.addLine(to: t.point(34, 56))
+        p.addLine(to: t.point(34, 23))
+        p.addLine(to: t.point(25, 23))
+        p.addLine(to: t.point(25, 45))
+        p.addLine(to: t.point(16, 45))
+        p.addLine(to: t.point(16, 23))
+        p.addLine(to: t.point(10, 23))
+        p.closeSubpath()
+        return p
     }
 }
 
@@ -130,43 +181,4 @@ private struct PiLogo: View {
         AgentIcon(agentId: "custom", size: 20)
     }
     .padding()
-}
-
-/// omp mark (omp.sh homepage glyph via Orca's OmpIcon, 64×64 viewBox) with
-/// its pink→purple→cyan gradient.
-private struct OmpLogo: View {
-    var body: some View {
-        GeometryReader { geo in
-            let s = min(geo.size.width, geo.size.height) / 64
-            let ox = (geo.size.width - 64 * s) / 2
-            let oy = (geo.size.height - 64 * s) / 2
-            func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-                CGPoint(x: ox + x * s, y: oy + y * s)
-            }
-            return Path { p in
-                p.move(to: pt(10, 14))
-                p.addLine(to: pt(54, 14))
-                p.addLine(to: pt(54, 23))
-                p.addLine(to: pt(43, 23))
-                p.addLine(to: pt(43, 56))
-                p.addLine(to: pt(34, 56))
-                p.addLine(to: pt(34, 23))
-                p.addLine(to: pt(25, 23))
-                p.addLine(to: pt(25, 45))
-                p.addLine(to: pt(16, 45))
-                p.addLine(to: pt(16, 23))
-                p.addLine(to: pt(10, 23))
-                p.closeSubpath()
-            }
-            .fill(LinearGradient(
-                stops: [
-                    .init(color: Color(red: 0xED / 255.0, green: 0x4A / 255.0, blue: 0xBF / 255.0), location: 0),
-                    .init(color: Color(red: 0x9B / 255.0, green: 0x4D / 255.0, blue: 0xFF / 255.0), location: 0.5),
-                    .init(color: Color(red: 0x5A / 255.0, green: 0xD8 / 255.0, blue: 0xE6 / 255.0), location: 1)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ))
-        }
-    }
 }
