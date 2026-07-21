@@ -83,8 +83,10 @@ struct ChatPaneView: View {
                 Divider()
                 Button("Other agents…") { appModel.openAgentsSettings() }
             } label: {
-                HStack(spacing: 4) {
-                    AgentIcon(agentId: controller.agentId, size: 14)
+                HStack(spacing: 5) {
+                    AgentIcon(agentId: controller.agentId, size: 12)
+                    Text(appModel.agentCenter.displayName(for: controller.agentId))
+                        .font(.caption)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(.secondary)
