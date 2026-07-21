@@ -35,9 +35,9 @@ import TillerPersistence
                                               now: Date(timeIntervalSince1970: 100))
         try store.saveTranscript(sessionId: created.id, items: sampleItems,
                                  now: Date(timeIntervalSince1970: 100))
-        let latest = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
+        let latest = try store.latestSession(worktreeId: worktreeId)
         #expect(latest?.id == created.id)
-        #expect(try store.latestSession(worktreeId: worktreeId, agentId: "opencode") == nil)
+        #expect(try store.latestSession(worktreeId: worktreeId)?.agentId == "claude")
     }
 
     @Test func latestPicksMostRecentActivity() throws {
@@ -50,7 +50,7 @@ import TillerPersistence
                                             now: Date(timeIntervalSince1970: 200))
         try store.saveTranscript(sessionId: newer.id, items: sampleItems,
                                  now: Date(timeIntervalSince1970: 200))
-        #expect(try store.latestSession(worktreeId: worktreeId, agentId: "claude")?.id
+        #expect(try store.latestSession(worktreeId: worktreeId)?.id
                 == newer.id)
     }
 
@@ -66,7 +66,7 @@ import TillerPersistence
                                  now: Date(timeIntervalSince1970: 100))
         _ = try store.createSession(worktreeId: worktreeId, agentId: "claude",
                                     now: Date(timeIntervalSince1970: 200))
-        #expect(try store.latestSession(worktreeId: worktreeId, agentId: "claude")?.id
+        #expect(try store.latestSession(worktreeId: worktreeId)?.id
                 == withContent.id)
     }
 
@@ -103,7 +103,7 @@ import TillerPersistence
         try store.saveTranscript(sessionId: session.id, items: shorter,
                                  now: Date(timeIntervalSince1970: 200))
         #expect(try store.loadTranscript(sessionId: session.id) == shorter)
-        let record = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
+        let record = try store.latestSession(worktreeId: worktreeId)
         #expect(record?.lastActivityAt == Date(timeIntervalSince1970: 200))
     }
 
@@ -113,7 +113,7 @@ import TillerPersistence
                                               now: .init())
         try store.setACPSessionId("acp-42", sessionId: session.id)
         try store.saveTranscript(sessionId: session.id, items: sampleItems, now: .init())
-        #expect(try store.latestSession(worktreeId: worktreeId, agentId: "opencode")?
+        #expect(try store.latestSession(worktreeId: worktreeId)?
             .acpSessionId == "acp-42")
     }
 
@@ -123,7 +123,7 @@ import TillerPersistence
                                               now: .init())
         try store.setContextUsage(ContextUsage(used: 1200, size: 200_000), sessionId: session.id)
         try store.saveTranscript(sessionId: session.id, items: sampleItems, now: .init())
-        let latest = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
+        let latest = try store.latestSession(worktreeId: worktreeId)
         #expect(latest?.contextUsageUsed == 1200)
         #expect(latest?.contextUsageSize == 200_000)
     }
@@ -135,10 +135,44 @@ import TillerPersistence
         try store.setContextUsage(ContextUsage(used: 500, size: 100_000), sessionId: session.id)
         try store.setContextUsage(nil, sessionId: session.id)
         try store.saveTranscript(sessionId: session.id, items: sampleItems, now: .init())
-        let latest = try store.latestSession(worktreeId: worktreeId, agentId: "claude")
+        let latest = try store.latestSession(worktreeId: worktreeId)
         #expect(latest?.contextUsageUsed == nil)
         #expect(latest?.contextUsageSize == nil)
     }
+
+    @Test func latestSessionIgnoresAgent() throws {
+        let (store, worktreeId) = try makeStore()
+        let a = try store.createSession(worktreeId: worktreeId, agentId: "claude-acp")
+        try store.saveTranscript(sessionId: a.id, items: [
+            .agentMessage(id: "m1", text: "hi", isComplete: true)])
+        let b = try store.createSession(worktreeId: worktreeId, agentId: "codex-acp",
+                                        now: Date().addingTimeInterval(10))
+        try store.saveTranscript(sessionId: b.id, items: [
+            .agentMessage(id: "m2", text: "yo", isComplete: true)],
+            now: Date().addingTimeInterval(20))
+        #expect(try store.latestSession(worktreeId: worktreeId)?.id == b.id)
+        #expect(try store.latestSession(worktreeId: worktreeId)?.agentId == "codex-acp")
+    }
+
+    @Test func setAgentIdUpdatesRecord() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude-acp")
+        try store.saveTranscript(sessionId: session.id, items: [
+            .agentMessage(id: "m", text: "x", isComplete: true)])
+        try store.setAgentId("codex-acp", sessionId: session.id)
+        #expect(try store.latestSession(worktreeId: worktreeId)?.agentId == "codex-acp")
+    }
+
+    @Test func clearACPSessionIdRemovesResumeHandle() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude-acp")
+        try store.setACPSessionId("acp-123", sessionId: session.id)
+        try store.saveTranscript(sessionId: session.id, items: [
+            .agentMessage(id: "m", text: "x", isComplete: true)])
+        try store.clearACPSessionId(sessionId: session.id)
+        #expect(try store.latestSession(worktreeId: worktreeId)?.acpSessionId == nil)
+    }
+
 
     @Test func kindLabelsAreDistinct() {
         let labels = sampleItems.map(\.kindLabel)

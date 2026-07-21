@@ -83,8 +83,7 @@ final class ChatController {
         }
         state = .connecting
 
-        var record = try? store?.latestSession(
-            worktreeId: worktreeId.uuidString, agentId: agentId)
+        var record = try? store?.latestSession(worktreeId: worktreeId.uuidString)
         if forceNewSession { record = nil }
         if let record, let stored = try? store?.loadTranscript(sessionId: record.id) {
             restored = stored
