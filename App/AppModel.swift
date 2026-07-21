@@ -1316,6 +1316,11 @@ final class AppModel {
     var markdownDocuments: [UUID: MarkdownDocument] = [:]
     var chatControllers: [UUID: ChatController] = [:]
     var chatStore: ChatSessionStore?
+    /// Tiller-managed ACP agent installs (Settings → Agents).
+    let agentInstallStore = AgentInstallStore(
+        rootDirectory: FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Tiller/acp-agents", isDirectory: true))
     private var autoNamingThrottle: [UUID: AutoNamingThrottle] = [:]
 
 
@@ -1353,7 +1358,8 @@ final class AppModel {
         if let controller = chatControllers[tab.id] { return controller }
         let controller = ChatController(
             tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
-            worktreePath: worktree.path, store: chatStore)
+            worktreePath: worktree.path, store: chatStore,
+            installStore: agentInstallStore)
         controller.onStatusChange = { [weak self] status in
             guard let self else { return }
             let transition = self.agentActivity.notify(
