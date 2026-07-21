@@ -15,7 +15,6 @@ struct AutoRenameWiringTests {
     }
 
     @Test func autoRenameSkipsWhenSettingDisabled() async {
-        UserDefaults.standard.removeObject(forKey: AppSettings.autoNamingEnabledKey)
         let (model, worktree, tab, controller) = makeChatTab()
         let originalTitle = tab.title
 
@@ -28,9 +27,7 @@ struct AutoRenameWiringTests {
     }
 
     @Test func autoRenameSkipsUnrelatedTransition() async {
-        UserDefaults.standard.set(true, forKey: AppSettings.autoNamingEnabledKey)
-        defer { UserDefaults.standard.removeObject(forKey: AppSettings.autoNamingEnabledKey) }
-        let (model, worktree, tab, controller) = makeChatTab()
+        let (model, worktree, tab, controller) = makeChatTab(autoNamingEnabled: true)
         let originalTitle = tab.title
 
         controller.onStatusChange?(.error)
@@ -41,9 +38,7 @@ struct AutoRenameWiringTests {
     }
 
     @Test func autoRenameSkipsManuallyRenamedTab() async {
-        UserDefaults.standard.set(true, forKey: AppSettings.autoNamingEnabledKey)
-        defer { UserDefaults.standard.removeObject(forKey: AppSettings.autoNamingEnabledKey) }
-        let (model, worktree, tab, controller) = makeChatTab()
+        let (model, worktree, tab, controller) = makeChatTab(autoNamingEnabled: true)
         model.renameTab(tab.id, in: worktree.id, to: "Kept by user")
 
         controller.onStatusChange?(.running)
@@ -64,8 +59,20 @@ struct AutoRenameWiringTests {
         #expect(updated.titleIsAutoNamed == true)
     }
 
-    private func makeChatTab() -> (AppModel, Worktree, WorkspaceTab, ChatController) {
-        let model = AppModel(paneRegistry: PaneRegistry(), registrationTimeoutMs: 100)
+    /// Usa una suite UserDefaults effimera: i test NON devono mai toccare
+    /// UserDefaults.standard — il bundle di test è ospitato dentro Tiller.app,
+    /// quindi .standard è il dominio reale dev.tiller.Tiller dell'utente.
+    private func makeChatTab(
+        autoNamingEnabled: Bool? = nil
+    ) -> (AppModel, Worktree, WorkspaceTab, ChatController) {
+        let suiteName = "dev.tiller.Tiller.AutoRenameWiringTests"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        if let autoNamingEnabled {
+            defaults.set(autoNamingEnabled, forKey: AppSettings.autoNamingEnabledKey)
+        }
+        let model = AppModel(
+            paneRegistry: PaneRegistry(), registrationTimeoutMs: 100, defaults: defaults)
         let worktree = Worktree(
             id: UUID(), projectId: UUID(), branch: "main", path: "/tmp/auto-rename-wiring")
         model.worktrees = [worktree.projectId: [worktree]]

@@ -79,13 +79,25 @@ targets:
           cp "$SRCROOT/Packages/TillerControl/.build/$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')/tillerctl" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/tillerctl"
           if [ "$CODE_SIGNING_ALLOWED" != "NO" ] && [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
             codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/tillerctl"
+            HAS_XCTEST=0
             for TEST_BUNDLE in "$TARGET_BUILD_DIR/$WRAPPER_NAME/Contents/PlugIns/"*.xctest; do
-              [ -d "$TEST_BUNDLE" ] && codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TEST_BUNDLE"
+              # During build-for-testing the xctest is embedded by the test
+              # target in parallel and may be mid-copy here; sign best-effort
+              # and let the test action re-sign host + bundle afterwards.
+              [ -d "$TEST_BUNDLE" ] || continue
+              HAS_XCTEST=1
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TEST_BUNDLE" 2>/dev/null || true
             done
             for DYLIB in "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH/"*.dylib; do
               [ -f "$DYLIB" ] && codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$DYLIB"
             done
-            codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$WRAPPER_NAME"
+            if [ "$HAS_XCTEST" = "1" ]; then
+              # Test build: the wrapper seal is redone by the test action once
+              # the xctest embed completes — a failure here is only the race.
+              codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$WRAPPER_NAME" || true
+            else
+              codesign --force --options runtime --timestamp --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$TARGET_BUILD_DIR/$WRAPPER_NAME"
+            fi
           fi
         basedOnDependencyAnalysis: false
   TillerTests:
