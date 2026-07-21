@@ -1324,9 +1324,15 @@ final class AppModel {
     private var autoNamingThrottle: [UUID: AutoNamingThrottle] = [:]
 
 
-    /// Adapters that can host a chat pane (have an ACP launch spec).
-    static func acpAgents() -> [any AgentAdapter] {
-        AgentCatalog.all.filter { AgentLaunchSpec.forAgent(id: $0.id) != nil }
+    /// Most recently used chat agent app-wide, falling back to the first
+    /// installed one. Nil when nothing is installed (the chat then shows its
+    /// "not installed" banner pointing at Settings).
+    var defaultChatAgentId: String? {
+        if let last = defaults.string(forKey: "chat.lastAgentId"),
+           AgentLaunchSpec.resolved(id: last, installStore: agentInstallStore) != nil {
+            return last
+        }
+        return agentInstallStore.installedManifests().first?.id
     }
 
     /// Select a worktree tab from the Agents panel. No-op when the tab is gone.
@@ -1338,10 +1344,10 @@ final class AppModel {
     }
 
     @discardableResult
-    func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
-        guard AgentLaunchSpec.forAgent(id: agentId) != nil else { return nil }
-        let title = AgentCatalog.all.first { $0.id == agentId }?.displayName ?? agentId
-        let tab = WorkspaceTab(id: UUID(), title: title,
+    func openChatTab(in worktree: Worktree) -> WorkspaceTab? {
+        let agentId = defaultChatAgentId ?? "claude-acp"
+        rememberChatAgent(agentId)
+        let tab = WorkspaceTab(id: UUID(), title: "Chat",
                                content: .chat(agentId: agentId))
         selectedWorktree = worktree
         tabs[worktree.id, default: []].append(tab)
@@ -1349,6 +1355,11 @@ final class AppModel {
         agentActivity.agentSpawned(paneId: tab.id, agentId: agentId, now: Date())
         persistTabs(for: worktree.id)
         return tab
+    }
+
+    /// Called by ChatController wiring whenever a chat connects or switches.
+    func rememberChatAgent(_ agentId: String) {
+        defaults.set(agentId, forKey: "chat.lastAgentId")
     }
 
     /// Lazily builds the controller for a (restored) chat tab, mirroring

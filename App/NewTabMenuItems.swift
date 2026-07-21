@@ -32,13 +32,8 @@ struct NewTabMenuItems: View {
             }
         }
         Divider()
-        ForEach(AppModel.acpAgents(), id: \.id) { adapter in
-            Button {
-                model.openChatTab(agentId: adapter.id, in: worktree)
-            } label: {
-                Label("Chat · \(adapter.displayName)",
-                      systemImage: "bubble.left.and.text.bubble.right")
-            }
+        Button("New Chat") {
+            model.openChatTab(in: worktree)
         }
     }
 }

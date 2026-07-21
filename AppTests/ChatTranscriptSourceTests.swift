@@ -25,7 +25,8 @@ struct ChatTranscriptSourceTests {
     @Test func recentTextReturnsNilForFreshController() {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude", worktreeId: UUID(),
-            worktreePath: "/tmp", store: nil)
+            worktreePath: "/tmp", store: nil,
+            installStore: AgentInstallStore(rootDirectory: URL(fileURLWithPath: "/tmp")))
         let source = ChatTranscriptSource(controller: controller)
 
         #expect(source.recentText() == nil)
