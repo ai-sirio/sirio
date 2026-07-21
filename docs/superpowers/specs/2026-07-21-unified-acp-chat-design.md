@@ -49,7 +49,7 @@ All non-UI logic goes in `TillerACP` (per package-boundary rules); SwiftUI lives
 ### 3. Unified chat
 
 - `ChatController.agentId` becomes mutable selected-agent state. Chat tab creation no longer asks for an agent upfront: a new chat opens with the most recently used agent app-wide (falling back to the first installed one; if nothing is installed, the chat shows an empty state pointing to Settings).
-- **Selector UI**: menu in the chat header listing installed agents (registry icon, cached on disk, monochrome-tinted to match the toolbar) + "Other agents…" → opens the Agents settings tab.
+- **Selector UI**: menu in the chat header listing installed agents (rendered with the existing `AgentIcon`: brand marks for known agents, colored monogram fallback for the rest — no registry SVG download in v1) + "Other agents…" → opens the Agents settings tab.
 - **Switch flow** (mid-conversation):
   1. Tear down the current ACP session/process.
   2. Append a system-style transcript item: *"Agent changed: X → Y. The previous conversation will be resent to the new agent; long conversations may exceed its context window."* (UI strings in English per project rules.)
