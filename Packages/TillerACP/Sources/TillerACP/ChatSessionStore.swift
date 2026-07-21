@@ -112,6 +112,7 @@ extension TranscriptItem {
         case .plan: "plan"
         case .turnDivider: "turnDivider"
         case .editSummary: "editSummary"
+        case .systemNotice: "systemNotice"
         }
     }
 }
