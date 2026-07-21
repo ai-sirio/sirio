@@ -173,3 +173,23 @@ import GRDB
     }
     #expect(value == false)
 }
+
+@Test func migrationV12FlipsExistingTabsToAutoNamed() throws {
+    let queue = try DatabaseQueue()
+    let migrator = AppDatabase.migrator
+    try migrator.migrate(queue, upTo: "v11")
+    try queue.write { database in
+        try database.execute(sql: "INSERT INTO project (id, name, rootPath, createdAt, iconKind) VALUES ('p1','demo','/tmp',?,'icon')", arguments: [Date()])
+        try database.execute(sql: "INSERT INTO worktree (id, projectId, branch, path, createdAt) VALUES ('w1','p1','main','/tmp',?)", arguments: [Date()])
+        try database.execute(
+            sql: """
+            INSERT INTO terminalTab (id, worktreeId, title, orderIdx, isActive, treeJSON, updatedAt, kind)
+            VALUES ('t1','w1','Terminale 1',0,1,'{}',?,'terminal')
+            """, arguments: [Date()])
+    }
+    try migrator.migrate(queue)
+    let value = try queue.read { database in
+        try Bool.fetchOne(database, sql: "SELECT titleIsAutoNamed FROM terminalTab WHERE id = 't1'")
+    }
+    #expect(value == true)
+}

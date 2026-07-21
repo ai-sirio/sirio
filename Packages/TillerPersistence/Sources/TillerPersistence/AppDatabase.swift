@@ -148,6 +148,12 @@ public final class AppDatabase: Sendable {
                 t.add(column: "titleIsAutoNamed", .boolean).notNull().defaults(to: false)
             }
         }
+        migrator.registerMigration("v12") { db in
+            // v11 backfilled pre-feature tabs with false, excluding them from
+            // auto-naming forever. Flip them: most had default titles, and a
+            // manual rename done from now on re-protects a tab via renameTab.
+            try db.execute(sql: "UPDATE terminalTab SET titleIsAutoNamed = 1")
+        }
         return migrator
     }
 }
