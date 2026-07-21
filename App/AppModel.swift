@@ -137,6 +137,10 @@ final class AppModel {
     var settingsCategory: SettingsCategory = .aiProviders
 
     func openSettings() { route = .settings }
+    func openAgentsSettings() {
+        settingsCategory = .agents
+        route = .settings
+    }
     func closeSettings() { route = .workspace }
     /// Adapter id of the most relevant agent pane in a worktree (same
     /// priority order as statusForWorktree), nil if no agent panes.
@@ -200,6 +204,12 @@ final class AppModel {
         self.activateApplication = activateApplication
         self.controlTabPersister = controlTabPersister
         self.defaults = defaults
+        let installStore = AgentInstallStore(
+            rootDirectory: FileManager.default.urls(
+                for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Tiller/acp-agents", isDirectory: true))
+        self.agentInstallStore = installStore
+        self.agentCenter = AcpAgentCenter(installStore: installStore)
     }
     var tabs: [UUID: [WorkspaceTab]] = [:]
     /// Projects whose root currently contains a `.git` entry. Derived at
@@ -1317,10 +1327,8 @@ final class AppModel {
     var chatControllers: [UUID: ChatController] = [:]
     var chatStore: ChatSessionStore?
     /// Tiller-managed ACP agent installs (Settings → Agents).
-    let agentInstallStore = AgentInstallStore(
-        rootDirectory: FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Tiller/acp-agents", isDirectory: true))
+    let agentInstallStore: AgentInstallStore
+    let agentCenter: AcpAgentCenter
     private var autoNamingThrottle: [UUID: AutoNamingThrottle] = [:]
 
 
@@ -1332,7 +1340,7 @@ final class AppModel {
            AgentLaunchSpec.resolved(id: last, installStore: agentInstallStore) != nil {
             return last
         }
-        return agentInstallStore.installedManifests().first?.id
+        return agentCenter.installedAgents.first?.id
     }
 
     /// Select a worktree tab from the Agents panel. No-op when the tab is gone.

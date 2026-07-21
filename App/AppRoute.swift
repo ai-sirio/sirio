@@ -10,6 +10,7 @@ enum AppRoute {
 /// Categories in the settings sidebar.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case aiProviders
+    case agents
     case general
     case permissions
     case appearance
@@ -19,6 +20,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .aiProviders: "AI Providers"
+        case .agents: "Agents"
         case .general: "General"
         case .permissions: "Permissions"
         case .appearance: "Appearance"
@@ -28,6 +30,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .aiProviders: "sparkles"
+        case .agents: "cpu"
         case .general: "gearshape"
         case .permissions: "lock.shield"
         case .appearance: "paintbrush"
