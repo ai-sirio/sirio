@@ -59,7 +59,7 @@ import GRDB
     let identifiers = try queue.read { db in
         try AppDatabase.migrator.appliedMigrations(db)
     }
-    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11"])
+    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12"])
 }
 
 /// Applying migrations one at a time (stepwise) must produce the same final
@@ -79,6 +79,7 @@ import GRDB
     try AppDatabase.migrator.migrate(queueA, upTo: "v9")
     try AppDatabase.migrator.migrate(queueA, upTo: "v10")
     try AppDatabase.migrator.migrate(queueA, upTo: "v11")
+    try AppDatabase.migrator.migrate(queueA, upTo: "v12")
 
     // Queue B: direct to head
     let queueB = try DatabaseQueue()
