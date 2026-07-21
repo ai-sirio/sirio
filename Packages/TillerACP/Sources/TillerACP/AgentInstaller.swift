@@ -1,5 +1,10 @@
 import Foundation
 
+/// POSIX single-quote escaping: safe for paths with spaces or quotes.
+private func quoted(_ path: String) -> String {
+    "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
 public struct ShellResult: Sendable, Equatable {
     public var exitCode: Int32
     public var output: String
@@ -84,7 +89,7 @@ public actor AgentInstaller {
         switch method {
         case .npx(let package, let args, let env):
             let result = try await shell.run(
-                "npm install --prefix \(staging.path) \(package)",
+                "npm install --prefix \(quoted(staging.path)) \(package)",
                 cwd: store.rootDirectory)
             guard result.exitCode == 0 else {
                 throw AgentInstallError.commandFailed(output: result.output)
@@ -101,8 +106,8 @@ public actor AgentInstaller {
             let archiveFile = staging.appendingPathComponent(archive.lastPathComponent)
             try await download(archive, archiveFile)
             let extract = archive.lastPathComponent.hasSuffix(".zip")
-                ? "ditto -x -k \(archiveFile.path) \(staging.path)"
-                : "tar -xzf \(archiveFile.path) -C \(staging.path)"
+                ? "ditto -x -k \(quoted(archiveFile.path)) \(quoted(staging.path))"
+                : "tar -xzf \(quoted(archiveFile.path)) -C \(quoted(staging.path))"
             let result = try await shell.run(extract, cwd: staging)
             guard result.exitCode == 0 else {
                 throw AgentInstallError.commandFailed(output: result.output)
@@ -113,7 +118,7 @@ public actor AgentInstaller {
                 throw AgentInstallError.noExecutableFound
             }
             _ = try await shell.run(
-                "chmod +x \(staging.appendingPathComponent(relative).path)", cwd: staging)
+                "chmod +x \(quoted(staging.appendingPathComponent(relative).path))", cwd: staging)
             manifest = InstalledAgentManifest(
                 id: agent.id, version: agent.version,
                 executable: final.appendingPathComponent(relative).path,

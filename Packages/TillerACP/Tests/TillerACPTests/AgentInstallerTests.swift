@@ -39,7 +39,8 @@ final class FakeShell: ShellRunning, @unchecked Sendable {
             guard command.hasPrefix("npm install --prefix ") else { return }
             let staging = URL(fileURLWithPath: String(
                 command.dropFirst("npm install --prefix ".count)
-                    .split(separator: " ", maxSplits: 1)[0]))
+                    .dropFirst()
+                    .split(separator: "'", maxSplits: 1)[0]))
             let bin = staging.appendingPathComponent("node_modules/.bin")
             try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
             FileManager.default.createFile(
@@ -55,6 +56,37 @@ final class FakeShell: ShellRunning, @unchecked Sendable {
         #expect(manifest.environment == ["K": "V"])
         #expect(store.manifest(id: "claude-acp") == manifest)
         #expect(FileManager.default.fileExists(atPath: manifest.executable))
+    }
+    @Test func npxInstallSupportsStoreRootWithSpaces() async throws {
+        let spacedRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acp agents \(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: spacedRoot, withIntermediateDirectories: true)
+        let store = AgentInstallStore(rootDirectory: spacedRoot)
+        let shell = FakeShell()
+        let prefix = "npm install --prefix "
+        shell.effect = { command, _ in
+            // Simulate npm parsing a single-quoted --prefix path.
+            guard command.hasPrefix(prefix) else { return }
+            let argument = String(command.dropFirst(prefix.count))
+            guard argument.first == "'" else { return }
+            let stagingPath = argument.dropFirst().split(separator: "'", maxSplits: 1)[0]
+            let staging = URL(fileURLWithPath: String(stagingPath))
+            let bin = staging.appendingPathComponent("node_modules/.bin")
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            FileManager.default.createFile(
+                atPath: bin.appendingPathComponent("claude-agent-acp").path, contents: Data())
+        }
+        let installer = AgentInstaller(store: store, shell: shell,
+                                       download: { _, _ in Issue.record("no download for npx") })
+        let manifest = try await installer.install(npxAgent(), platform: .darwinArm64)
+        let staging = store.rootDirectory
+            .appendingPathComponent("claude-acp.staging")
+        #expect(manifest.executable.hasPrefix(spacedRoot.path + "/"))
+        #expect(FileManager.default.fileExists(atPath: manifest.executable))
+        #expect(shell.commands.contains {
+            $0.contains("npm install --prefix '\(staging.path)'")
+        })
     }
 
     @Test func npmFailureThrowsAndLeavesNothingInstalled() async throws {
@@ -81,8 +113,8 @@ final class FakeShell: ShellRunning, @unchecked Sendable {
             // Simulate `tar -xzf <archive> -C <staging>` producing the binary.
             guard command.hasPrefix("tar ") || command.hasPrefix("chmod ") else { return }
             if command.hasPrefix("tar ") {
-                let staging = URL(fileURLWithPath:
-                    String(command.split(separator: " ").last!))
+                let staging = URL(fileURLWithPath: String(
+                    command.split(separator: " ").last!.dropFirst().dropLast()))
                 FileManager.default.createFile(
                     atPath: staging.appendingPathComponent("amp-acp").path, contents: Data())
             }
@@ -109,7 +141,8 @@ final class FakeShell: ShellRunning, @unchecked Sendable {
             guard command.hasPrefix("npm install --prefix ") else { return }
             let staging = URL(fileURLWithPath: String(
                 command.dropFirst("npm install --prefix ".count)
-                    .split(separator: " ", maxSplits: 1)[0]))
+                    .dropFirst()
+                    .split(separator: "'", maxSplits: 1)[0]))
             let bin = staging.appendingPathComponent("node_modules/.bin")
             try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
             FileManager.default.createFile(
