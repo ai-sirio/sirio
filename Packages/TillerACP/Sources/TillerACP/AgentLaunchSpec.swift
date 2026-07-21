@@ -18,39 +18,6 @@ public struct AgentLaunchSpec: Sendable, Equatable {
         self.environment = environment
     }
 
-    /// Pinned adapter version: a protocol-stable, reproducible launch.
-    /// Update deliberately via `npm view @agentclientprotocol/claude-agent-acp version`.
-    /// (Successor of `@zed-industries/claude-code-acp`, which is frozen at
-    /// 0.16.2 with a stale model list; the renamed package tracks current
-    /// Claude Agent SDK releases and exposes the model as a `configOptions`
-    /// select instead of `session/set_model`.)
-    public static let claudeCodeACPVersion = "0.59.0"
-
-    /// Claude Code via the official ACP adapter, fetched on demand by npx
-    /// (cached by npm after the first run).
-    public static func claudeCode() -> AgentLaunchSpec {
-        AgentLaunchSpec(
-            executable: "/bin/zsh",
-            arguments: ["-lc",
-                "exec npx -y @agentclientprotocol/claude-agent-acp@\(claudeCodeACPVersion)"])
-    }
-
-    /// OpenCode's native ACP mode (binary installed by the user).
-    public static func openCode() -> AgentLaunchSpec {
-        AgentLaunchSpec(executable: "/bin/zsh", arguments: ["-lc", "exec opencode acp"])
-    }
-
-    /// Launch spec for an AgentCatalog id, or nil when the agent has no ACP
-    /// support yet. This is the single source of truth Plan 3's UI uses to
-    /// build the "Chat" menu (v1: Claude Code and OpenCode).
-    public static func forAgent(id: String) -> AgentLaunchSpec? {
-        switch id {
-        case "claude": claudeCode()
-        case "opencode": openCode()
-        default: nil
-        }
-    }
-
     /// Environment for the adapter process. Strips the markers Claude Code
     /// sets in its own shells: when Tiller is launched from such a shell the
     /// child inherits them and the Claude Agent SDK inside claude-code-acp
@@ -80,8 +47,7 @@ public enum AgentIdMigration {
 }
 
 extension AgentLaunchSpec {
-    /// Launch spec resolved from the install store + built-ins. Replaces the
-    /// hardcoded `forAgent(id:)` (removed once all callers migrate).
+    /// Launch spec resolved from the install store and built-ins.
     public static func resolved(id: String,
                                 installStore: AgentInstallStore) -> AgentLaunchSpec? {
         let canonical = AgentIdMigration.canonical(id)
