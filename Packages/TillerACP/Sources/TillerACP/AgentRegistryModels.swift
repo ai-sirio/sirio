@@ -14,6 +14,17 @@ public struct RegistryAgent: Sendable, Equatable, Decodable, Identifiable {
     public var description: String?
     public var icon: URL?
     public var distribution: AgentDistribution
+
+    public init(id: String, name: String, version: String,
+                description: String?, icon: URL?,
+                distribution: AgentDistribution) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.description = description
+        self.icon = icon
+        self.distribution = distribution
+    }
 }
 
 /// The `distribution` object of a registry entry. `uvx` is parsed only as a
