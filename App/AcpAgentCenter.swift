@@ -52,6 +52,7 @@ final class AcpAgentCenter {
             ?? AgentRegistryClient(cacheURL: cacheURL)
         self.installer = installer ?? AgentInstaller(store: installStore)
         self.shell = shell
+        Task { await self.refresh() }
     }
 
     /// Installed agents for the chat selector: manifests + omp when its
