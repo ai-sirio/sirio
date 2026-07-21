@@ -54,6 +54,8 @@ struct TranscriptView: View {
         case .editSummary(_, let paths):
             EditSummaryCardView(paths: paths, worktree: worktree,
                                 appModel: appModel)
+        case .systemNotice:
+            EmptyView()
         }
     }
 
