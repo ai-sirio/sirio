@@ -54,8 +54,13 @@ struct TranscriptView: View {
         case .editSummary(_, let paths):
             EditSummaryCardView(paths: paths, worktree: worktree,
                                 appModel: appModel)
-        case .systemNotice:
-            EmptyView()
+        case .systemNotice(_, let text):
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 6)
         }
     }
 

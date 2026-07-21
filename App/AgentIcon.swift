@@ -8,9 +8,13 @@ struct AgentIcon: View {
     let agentId: String
     var size: CGFloat = 14
 
+    private var normalizedId: String {
+        agentId.hasSuffix("-acp") ? String(agentId.dropLast(4)) : agentId
+    }
+
     var body: some View {
         Group {
-            switch agentId {
+            switch normalizedId {
             case "claude":
                 Image("agent-claude")
                     .renderingMode(.template)
@@ -45,13 +49,14 @@ struct AgentIcon: View {
     static let claudeOrange = Color(red: 0xD9 / 255.0, green: 0x77 / 255.0, blue: 0x57 / 255.0)
 
     static func color(for id: String) -> Color {
-        switch id {
-        case "claude": .orange
-        case "codex": .green
-        case "opencode": .blue
-        case "pi": .purple
-        case "omp": .teal
-        default: .gray
+        let normalizedId = id.hasSuffix("-acp") ? String(id.dropLast(4)) : id
+        switch normalizedId {
+        case "claude": return .orange
+        case "codex": return .green
+        case "opencode": return .blue
+        case "pi": return .purple
+        case "omp": return .teal
+        default: return .gray
         }
     }
 }

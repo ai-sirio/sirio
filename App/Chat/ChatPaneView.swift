@@ -63,7 +63,36 @@ struct ChatPaneView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            AgentIcon(agentId: controller.agentId, size: 14)
+            Menu {
+                ForEach(appModel.agentCenter.installedAgents) { agent in
+                    Button {
+                        Task {
+                            await controller.switchAgent(to: agent.id,
+                                                         displayName: agent.name)
+                            appModel.rememberChatAgent(agent.id)
+                        }
+                    } label: {
+                        if let image = AgentMenuIconCache.image(for: agent.id) {
+                            Label { Text(agent.name) } icon: { Image(nsImage: image) }
+                        } else {
+                            Text(agent.name)
+                        }
+                    }
+                    .disabled(agent.id == controller.agentId)
+                }
+                Divider()
+                Button("Other agents…") { appModel.openAgentsSettings() }
+            } label: {
+                HStack(spacing: 4) {
+                    AgentIcon(agentId: controller.agentId, size: 14)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Switch agent for this conversation")
             Spacer()
             stateChip
             Button {
