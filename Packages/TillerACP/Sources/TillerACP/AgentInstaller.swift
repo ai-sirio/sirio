@@ -1,9 +1,11 @@
 import Foundation
 
 /// POSIX single-quote escaping: safe for paths with spaces or quotes.
-private func quoted(_ path: String) -> String {
+/// Shared with `AgentLaunchSpec.resolved` for the login-shell exec line.
+func posixQuoted(_ path: String) -> String {
     "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
+
 
 public struct ShellResult: Sendable, Equatable {
     public var exitCode: Int32
@@ -89,7 +91,7 @@ public actor AgentInstaller {
         switch method {
         case .npx(let package, let args, let env):
             let result = try await shell.run(
-                "npm install --prefix \(quoted(staging.path)) \(package)",
+                "npm install --prefix \(posixQuoted(staging.path)) \(package)",
                 cwd: store.rootDirectory)
             guard result.exitCode == 0 else {
                 throw AgentInstallError.commandFailed(output: result.output)
@@ -102,12 +104,12 @@ public actor AgentInstaller {
                 id: agent.id, version: agent.version,
                 executable: final.appendingPathComponent("node_modules/.bin/\(binName)").path,
                 arguments: args, environment: env)
-        case .binary(let archive, let cmd):
+        case .binary(let archive, let cmd, let args, let env):
             let archiveFile = staging.appendingPathComponent(archive.lastPathComponent)
             try await download(archive, archiveFile)
             let extract = archive.lastPathComponent.hasSuffix(".zip")
-                ? "ditto -x -k \(quoted(archiveFile.path)) \(quoted(staging.path))"
-                : "tar -xzf \(quoted(archiveFile.path)) -C \(quoted(staging.path))"
+                ? "ditto -x -k \(posixQuoted(archiveFile.path)) \(posixQuoted(staging.path))"
+                : "tar -xzf \(posixQuoted(archiveFile.path)) -C \(posixQuoted(staging.path))"
             let result = try await shell.run(extract, cwd: staging)
             guard result.exitCode == 0 else {
                 throw AgentInstallError.commandFailed(output: result.output)
@@ -118,11 +120,11 @@ public actor AgentInstaller {
                 throw AgentInstallError.noExecutableFound
             }
             _ = try await shell.run(
-                "chmod +x \(quoted(staging.appendingPathComponent(relative).path))", cwd: staging)
+                "chmod +x \(posixQuoted(staging.appendingPathComponent(relative).path))", cwd: staging)
             manifest = InstalledAgentManifest(
                 id: agent.id, version: agent.version,
                 executable: final.appendingPathComponent(relative).path,
-                arguments: [], environment: [:])
+                arguments: args, environment: env)
         }
 
         // Atomic-enough swap: remove old, move staging into place, write manifest.
@@ -133,7 +135,10 @@ public actor AgentInstaller {
     }
 
     /// Picks the launchable entry in node_modules/.bin: single entry wins;
-    /// with several, prefer the one whose name appears in the package name.
+    /// otherwise the bin matching the package's own name (scope and version
+    /// stripped) wins — dependency bins also land here (`codex` next to
+    /// `codex-acp` from @openai/codex) and must never be preferred. Falls
+    /// back to the longest entry contained in the package name.
     private func resolveBinName(in binDir: URL, package: String) throws -> String? {
         let entries = ((try? FileManager.default.contentsOfDirectory(
             at: binDir, includingPropertiesForKeys: nil)) ?? [])
@@ -141,6 +146,11 @@ public actor AgentInstaller {
             .filter { !$0.hasPrefix(".") }
             .sorted()
         if entries.count == 1 { return entries[0] }
-        return entries.first { package.contains($0) } ?? entries.first
+        let nameWithVersion = package.split(separator: "/").last.map(String.init) ?? package
+        let baseName = nameWithVersion.firstIndex(of: "@")
+            .map { String(nameWithVersion[..<$0]) } ?? nameWithVersion
+        if entries.contains(baseName) { return baseName }
+        return entries.filter { package.contains($0) }.max { $0.count < $1.count }
+            ?? entries.first
     }
 }

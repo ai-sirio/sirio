@@ -26,7 +26,7 @@ import Testing
             distribution: AgentDistribution(binary: [
                 "darwin-aarch64": .init(archive: arm, cmd: "./x")]))
         #expect(agent.installMethod(platform: .darwinArm64)
-                == .binary(archive: arm, cmd: "./x"))
+                == .binary(archive: arm, cmd: "./x", args: [], env: [:]))
         #expect(agent.installMethod(platform: .darwinX86) == nil)
     }
 

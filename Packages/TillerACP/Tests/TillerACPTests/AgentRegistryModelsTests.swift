@@ -19,6 +19,10 @@ import Testing
          "distribution": {"binary": {
             "darwin-aarch64": {"archive": "https://example.com/amp-arm.tar.gz", "cmd": "./amp-acp"},
             "darwin-x86_64": {"archive": "https://example.com/amp-x64.tar.gz", "cmd": "./amp-acp"}}}},
+        {"id": "opencode", "name": "OpenCode", "version": "1.18.4",
+         "distribution": {"binary": {
+            "darwin-aarch64": {"archive": "https://example.com/opencode.zip", "cmd": "./opencode",
+                               "args": ["acp"], "env": {"OC_FLAG": "1"}}}}},
         {"id": "fast-agent", "name": "fast-agent", "version": "0.9.19",
          "distribution": {"uvx": {"package": "fast-agent-mcp@0.9.19"}}}
       ]
@@ -27,7 +31,7 @@ import Testing
 
     @Test func decodesRealRegistryShape() throws {
         let registry = try JSONDecoder().decode(ACPRegistry.self, from: Self.fixture)
-        #expect(registry.agents.count == 4)
+        #expect(registry.agents.count == 5)
         let claude = registry.agents[0]
         #expect(claude.id == "claude-acp")
         #expect(claude.distribution.npx?.package == "@agentclientprotocol/claude-agent-acp@0.60.0")
@@ -50,9 +54,18 @@ import Testing
                 == URL(string: "https://example.com/amp-arm.tar.gz"))
     }
 
+    @Test func decodesBinaryArgsAndEnv() throws {
+        let registry = try JSONDecoder().decode(ACPRegistry.self, from: Self.fixture)
+        let amp = registry.agents[2]
+        #expect(amp.distribution.binary?["darwin-aarch64"]?.args == nil)
+        let opencode = registry.agents[3]
+        #expect(opencode.distribution.binary?["darwin-aarch64"]?.args == ["acp"])
+        #expect(opencode.distribution.binary?["darwin-aarch64"]?.env == ["OC_FLAG": "1"])
+    }
+
     @Test func uvxOnlyAgentIsFlagged() throws {
         let registry = try JSONDecoder().decode(ACPRegistry.self, from: Self.fixture)
-        let fast = registry.agents[3]
+        let fast = registry.agents[4]
         #expect(fast.distribution.hasUvx)
         #expect(fast.distribution.npx == nil)
         #expect(fast.distribution.binary == nil)

@@ -41,16 +41,28 @@ import Testing
                                         arguments: ["-lc", "exec omp acp"]))
     }
 
-    @Test func installedManifestResolves() throws {
+    @Test func installedManifestResolvesThroughLoginShell() throws {
         let store = try tempStore()
         try store.write(InstalledAgentManifest(
             id: "claude-acp", version: "0.60.0",
             executable: "/x/claude-agent-acp", arguments: ["--acp"],
             environment: ["K": "V"]))
         let spec = AgentLaunchSpec.resolved(id: "claude", installStore: store)  // legacy id
-        #expect(spec?.executable == "/x/claude-agent-acp")
-        #expect(spec?.arguments == ["--acp"])
+        #expect(spec?.executable == "/bin/zsh")
+        #expect(spec?.arguments == ["-lc", "exec '/x/claude-agent-acp' '--acp'"])
         #expect(spec?.environment == ["K": "V"])
+    }
+
+    @Test func manifestPathsWithSpacesAreQuoted() throws {
+        let store = try tempStore()
+        try store.write(InstalledAgentManifest(
+            id: "opencode", version: "1.18.4",
+            executable: "/Application Support/Tiller/acp-agents/opencode/opencode",
+            arguments: ["acp"], environment: [:]))
+        let spec = AgentLaunchSpec.resolved(id: "opencode", installStore: store)
+        #expect(spec?.arguments ==
+                ["-lc",
+                 "exec '/Application Support/Tiller/acp-agents/opencode/opencode' 'acp'"])
     }
 
     @Test func notInstalledResolvesNil() throws {

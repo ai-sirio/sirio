@@ -56,8 +56,13 @@ extension AgentLaunchSpec {
                                    arguments: ["-lc", "exec omp acp"])
         }
         guard let manifest = installStore.manifest(id: canonical) else { return nil }
-        return AgentLaunchSpec(executable: manifest.executable,
-                               arguments: manifest.arguments,
+        // Through the login shell like omp: npm bins are node scripts whose
+        // `#!/usr/bin/env node` shebang needs the user's PATH, which a
+        // Finder-launched app doesn't have.
+        let command = ([manifest.executable] + manifest.arguments)
+            .map(posixQuoted).joined(separator: " ")
+        return AgentLaunchSpec(executable: "/bin/zsh",
+                               arguments: ["-lc", "exec \(command)"],
                                environment: manifest.environment)
     }
 }
