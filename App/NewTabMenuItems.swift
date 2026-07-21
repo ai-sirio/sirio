@@ -13,7 +13,7 @@ struct NewTabMenuItems: View {
         Button {
             model.newShellTab(in: worktree)
         } label: {
-            Label("Nuovo Terminale", systemImage: "terminal")
+            Label("New Terminal", systemImage: "terminal")
         }
         Divider()
         ForEach(AgentCatalog.all, id: \.id) { adapter in
