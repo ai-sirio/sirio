@@ -1362,6 +1362,7 @@ final class AppModel {
         activeTabId[worktree.id] = tab.id
         agentActivity.agentSpawned(paneId: tab.id, agentId: agentId, now: Date())
         persistTabs(for: worktree.id)
+        _ = chatController(for: tab, in: worktree, startNewConversation: true)
         return tab
     }
 
@@ -1372,13 +1373,15 @@ final class AppModel {
 
     /// Lazily builds the controller for a (restored) chat tab, mirroring
     /// markdownDocument(for:).
-    func chatController(for tab: WorkspaceTab, in worktree: Worktree) -> ChatController? {
+    func chatController(for tab: WorkspaceTab, in worktree: Worktree,
+                     startNewConversation: Bool = false) -> ChatController? {
         guard let agentId = tab.chatAgentId else { return nil }
         if let controller = chatControllers[tab.id] { return controller }
         let controller = ChatController(
             tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
             worktreePath: worktree.path, store: chatStore,
-            installStore: agentInstallStore)
+            installStore: agentInstallStore,
+            startNewConversation: startNewConversation)
         controller.onStatusChange = { [weak self] status in
             guard let self else { return }
             let transition = self.agentActivity.notify(
