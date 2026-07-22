@@ -216,7 +216,7 @@ private actor FakeAgent {
 }
 
 /// File system that rejects everything — for tests that never touch fs.
-private struct NullFileSystem: ACPFileSystem {
+struct NullFileSystem: ACPFileSystem {
     struct Unsupported: Error {}
     func readTextFile(path: String, line: Int?, limit: Int?) throws -> String { throw Unsupported() }
     func writeTextFile(path: String, content: String) throws { throw Unsupported() }
