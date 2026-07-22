@@ -48,15 +48,35 @@ enum MarkdownAttributedStringRenderer {
         for run in parsed.runs {
             var substring = String(parsed[run.range].characters)
             let blockIdentity = run.presentationIntent?.components.first?.identity
-            if let previousBlockIdentity, blockIdentity != previousBlockIdentity {
+            let isNewBlock = blockIdentity != previousBlockIdentity
+            if previousBlockIdentity != nil, isNewBlock {
                 substring = "\n" + substring
             }
-            if let blockIdentity {
-                previousBlockIdentity = blockIdentity
+            if isNewBlock, let marker = listMarker(for: run.presentationIntent) {
+                substring = previousBlockIdentity == nil ? marker + substring
+                    : substring.replacingOccurrences(of: "\n", with: "\n" + marker,
+                                                     range: substring.range(of: "\n"))
             }
+            if let blockIdentity { previousBlockIdentity = blockIdentity }
             result.append(NSAttributedString(string: substring, attributes: attributes(for: run)))
         }
         return result
+    }
+
+    /// A list item's marker ("•\t" or "3.\t"), or nil for non-list blocks.
+    /// Markdown markers are stripped by `AttributedString(markdown:)`; only
+    /// the presentation intent knows an item's ordinal and whether its list is
+    /// ordered.
+    private static func listMarker(for intent: PresentationIntent?) -> String? {
+        guard let components = intent?.components else { return nil }
+        var ordinal: Int?
+        var isOrdered = false
+        for component in components {
+            if case .listItem(let n) = component.kind { ordinal = ordinal ?? n }
+            if case .orderedList = component.kind { isOrdered = true }
+        }
+        guard let ordinal else { return nil }
+        return isOrdered ? "\(ordinal).\t" : "•\t"
     }
 
     private static func attributes(for run: AttributedString.Runs.Run) -> [NSAttributedString.Key: Any] {
@@ -95,7 +115,14 @@ enum MarkdownAttributedStringRenderer {
                     // leave every item spaced out like a standalone paragraph
                     // — reset it so list items stay tight against each other.
                     paragraphStyle.paragraphSpacing = 0
-                    paragraphStyle.headIndent = 16
+                    let depth = intent.components.filter {
+                        if case .listItem = $0.kind { return true } else { return false }
+                    }.count
+                    let indent = CGFloat(depth) * 16
+                    paragraphStyle.firstLineHeadIndent = indent - 16
+                    paragraphStyle.headIndent = indent
+                    paragraphStyle.tabStops = [NSTextTab(textAlignment: .left, location: indent)]
+                    break
                 default:
                     break
                 }
