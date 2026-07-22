@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import TillerCore
 
 struct RightPanelView: View {
@@ -9,8 +8,6 @@ struct RightPanelView: View {
     let isGitRepository: Bool
     let onClose: () -> Void
     @State private var pendingDiscard: PendingGitDiscard?
-    @AppStorage(AppSettings.rightPanelAgentsFractionKey)
-    private var agentsFraction = AppSettings.defaultRightPanelAgentsFraction
 
     private var effectiveMode: RightPanelMode {
         .effective(rawValue: modeRaw, isGitRepository: isGitRepository)
@@ -26,8 +23,8 @@ struct RightPanelView: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 toolsRegion
-                    .frame(height: max(120, geo.size.height * (1 - agentsFraction)))
-                splitDivider(totalHeight: geo.size.height)
+                    .frame(height: geo.size.height * 0.75)
+                Divider()
                 Group {
                     if let worktree = panelModel.worktree {
                         AgentsSectionView(appModel: appModel, worktree: worktree)
@@ -40,7 +37,6 @@ struct RightPanelView: View {
                 .frame(maxHeight: .infinity)
             }
         }
-        .coordinateSpace(name: "rightPanelSplit")
         .task(id: effectiveMode) {
             if effectiveMode == .diff { await panelModel.ensureDiffLoaded() }
         }
@@ -125,22 +121,5 @@ struct RightPanelView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-    }
-
-    private func splitDivider(totalHeight: CGFloat) -> some View {
-        Divider()
-            .frame(maxWidth: .infinity)
-            .frame(height: 7)
-            .contentShape(Rectangle())
-            .onHover { inside in
-                if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
-            }
-            .gesture(
-                DragGesture(coordinateSpace: .named("rightPanelSplit"))
-                    .onChanged { value in
-                        guard totalHeight > 0 else { return }
-                        let newFraction = agentsFraction - value.translation.height / totalHeight
-                        agentsFraction = min(0.6, max(0.15, newFraction))
-                    })
     }
 }

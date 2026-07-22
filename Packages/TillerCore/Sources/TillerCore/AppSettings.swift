@@ -81,8 +81,6 @@ public enum AppSettings {
     }
     public static let rightPanelVisibleKey = "rightPanel.visible"
     public static let rightPanelWidthKey = "rightPanel.width"
-    public static let rightPanelAgentsFractionKey = "rightPanel.agentsFraction"
-    public static let defaultRightPanelAgentsFraction: Double = 1.0 / 3.0
     public static let rightPanelModeKey = "rightPanel.mode"
 
     public static let defaultRightPanelVisible = false

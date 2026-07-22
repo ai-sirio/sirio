@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import TillerCore
 import TillerGit
 import TillerTerminal
@@ -101,8 +102,13 @@ final class RightPanelModel {
 
 extension RightPanelModel {
     func toggleDirectory(_ path: String) async {
-        if expandedDirectories.remove(path) != nil { return }
-        expandedDirectories.insert(path)
+        let wasExpanded = withAnimation(.easeOut(duration: 0.18)) {
+            expandedDirectories.remove(path) != nil
+        }
+        if wasExpanded { return }
+        withAnimation(.easeOut(duration: 0.18)) {
+            expandedDirectories.insert(path)
+        }
         if childrenByDirectory[path] == nil { await loadDirectory(path, token: generation) }
     }
 
