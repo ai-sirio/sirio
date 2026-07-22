@@ -78,6 +78,27 @@ public struct ChatSessionStore: Sendable {
         }
     }
 
+    /// Stores the session's selected permission mode, model, and effort.
+    public func setSessionSettings(permissionMode: String?, selectedModel: String?,
+                                   selectedEffort: String?, sessionId: String) throws {
+        try database.write { db in
+            guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
+            record.permissionMode = permissionMode
+            record.selectedModel = selectedModel
+            record.selectedEffort = selectedEffort
+            try record.update(db)
+        }
+    }
+
+    /// Stores which transport should be used to resume the session.
+    public func setTransportKind(_ transportKind: String, sessionId: String) throws {
+        try database.write { db in
+            guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
+            record.transportKind = transportKind
+            try record.update(db)
+        }
+    }
+
     /// Atomically replaces the session's transcript and bumps activity.
     public func saveTranscript(sessionId: String, items: [TranscriptItem],
                                now: Date = Date()) throws {

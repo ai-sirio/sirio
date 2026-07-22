@@ -193,3 +193,32 @@ import GRDB
     }
     #expect(value == true)
 }
+
+@Test func v13AddsSessionSettingsColumns() throws {
+    let db = try AppDatabase.inMemory()
+    try db.read { conn in
+        let columns = try conn.columns(in: "chatSession").map(\.name)
+        #expect(columns.contains("permissionMode"))
+        #expect(columns.contains("selectedModel"))
+        #expect(columns.contains("selectedEffort"))
+        #expect(columns.contains("transportKind"))
+    }
+}
+
+@Test func migrationV13DefaultsAndBackfillsTransportKind() throws {
+    let queue = try DatabaseQueue()
+    try AppDatabase.migrator.migrate(queue, upTo: "v12")
+    try queue.write { database in
+        try database.execute(sql: "INSERT INTO project (id, name, rootPath, createdAt, iconKind) VALUES ('p1','demo','/tmp',?,'icon')", arguments: [Date()])
+        try database.execute(sql: "INSERT INTO worktree (id, projectId, branch, path, createdAt) VALUES ('w1','p1','main','/tmp',?)", arguments: [Date()])
+        try database.execute(sql: """
+            INSERT INTO chatSession (id, worktreeId, agentId, createdAt, lastActivityAt)
+            VALUES ('s1', 'w1', 'claude-acp', ?, ?), ('s2', 'w1', 'other-agent', ?, ?)
+            """, arguments: [Date(), Date(), Date(), Date()])
+    }
+    try AppDatabase.migrator.migrate(queue)
+    let transportKinds = try queue.read { database in
+        try String.fetchAll(database, sql: "SELECT transportKind FROM chatSession ORDER BY id")
+    }
+    #expect(transportKinds == ["native", "acp"])
+}

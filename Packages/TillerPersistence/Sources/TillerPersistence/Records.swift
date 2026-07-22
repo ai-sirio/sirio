@@ -134,14 +134,22 @@ public struct ChatSessionRecord: Codable, FetchableRecord, PersistableRecord, Se
     /// ring immediately instead of waiting for the next live `usage_update`.
     public var contextUsageUsed: Int?
     public var contextUsageSize: Int?
+    public var permissionMode: String?
+    public var selectedModel: String?
+    public var selectedEffort: String?
+    public var transportKind: String
 
     public init(id: String, worktreeId: String, agentId: String,
                 acpSessionId: String? = nil, createdAt: Date, lastActivityAt: Date,
-                contextUsageUsed: Int? = nil, contextUsageSize: Int? = nil) {
+                contextUsageUsed: Int? = nil, contextUsageSize: Int? = nil,
+                permissionMode: String? = nil, selectedModel: String? = nil,
+                selectedEffort: String? = nil, transportKind: String = "acp") {
         self.id = id; self.worktreeId = worktreeId; self.agentId = agentId
         self.acpSessionId = acpSessionId
         self.createdAt = createdAt; self.lastActivityAt = lastActivityAt
         self.contextUsageUsed = contextUsageUsed; self.contextUsageSize = contextUsageSize
+        self.permissionMode = permissionMode; self.selectedModel = selectedModel
+        self.selectedEffort = selectedEffort; self.transportKind = transportKind
     }
 }
 

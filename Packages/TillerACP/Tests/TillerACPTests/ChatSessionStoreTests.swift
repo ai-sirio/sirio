@@ -140,6 +140,22 @@ import TillerPersistence
         #expect(latest?.contextUsageSize == nil)
     }
 
+    @Test func sessionSettingsRoundTrip() throws {
+        let (store, worktreeId) = try makeStore()
+        let record = try store.createSession(worktreeId: worktreeId, agentId: "claude-acp")
+        try store.setSessionSettings(permissionMode: "acceptEdits",
+                                     selectedModel: "claude-sonnet-5",
+                                     selectedEffort: "high",
+                                     sessionId: record.id)
+        try store.setTransportKind("native", sessionId: record.id)
+        try store.saveTranscript(sessionId: record.id, items: sampleItems)
+        let reloaded = try store.latestSession(worktreeId: worktreeId)
+        #expect(reloaded?.permissionMode == "acceptEdits")
+        #expect(reloaded?.selectedModel == "claude-sonnet-5")
+        #expect(reloaded?.selectedEffort == "high")
+        #expect(reloaded?.transportKind == "native")
+    }
+
     @Test func latestSessionIgnoresAgent() throws {
         let (store, worktreeId) = try makeStore()
         let a = try store.createSession(worktreeId: worktreeId, agentId: "claude-acp")
