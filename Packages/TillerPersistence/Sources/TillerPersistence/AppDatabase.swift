@@ -154,6 +154,20 @@ public final class AppDatabase: Sendable {
             // manual rename done from now on re-protects a tab via renameTab.
             try db.execute(sql: "UPDATE terminalTab SET titleIsAutoNamed = 1")
         }
+        migrator.registerMigration("v13") { db in
+            try db.alter(table: "chatSession") { t in
+                t.add(column: "permissionMode", .text)
+                t.add(column: "selectedModel", .text)
+                t.add(column: "selectedEffort", .text)
+                t.add(column: "transportKind", .text).notNull().defaults(to: "acp")
+            }
+            // Existing sessions for the three native harnesses flip to native;
+            // ids here are the canonical registry ids (AgentIdMigration).
+            try db.execute(sql: """
+                UPDATE chatSession SET transportKind = 'native'
+                WHERE agentId IN ('claude-acp', 'codex-acp', 'opencode', 'claude', 'codex')
+                """)
+        }
         return migrator
     }
 }
