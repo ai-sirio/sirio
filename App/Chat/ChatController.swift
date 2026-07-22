@@ -66,22 +66,26 @@ final class ChatController {
     private var pumpTask: Task<Void, Never>?
     private var sessionRecordId: String?
     private var forceNewSession = false
+    private var lifecycleGeneration = 0
 
     init(tabId: UUID, agentId: String, worktreeId: UUID,
          worktreePath: String, store: ChatSessionStore?,
-         installStore: AgentInstallStore) {
+         installStore: AgentInstallStore,
+         startNewConversation: Bool = false) {
         self.tabId = tabId
         self.agentId = AgentIdMigration.canonical(agentId)
         self.worktreeId = worktreeId
         self.worktreePath = worktreePath
         self.store = store
         self.installStore = installStore
+        self.forceNewSession = startNewConversation
     }
 
     // MARK: - Lifecycle
 
     func start() async {
         guard state == .idle || isDisconnected else { return }
+        let generation = lifecycleGeneration
 
         var record = try? store?.latestSession(worktreeId: worktreeId.uuidString)
         if forceNewSession { record = nil }
@@ -117,6 +121,10 @@ final class ChatController {
 
         do {
             try await session.start()
+            guard generation == lifecycleGeneration else {
+                await session.stop()
+                return
+            }
             pumpTask = Task { [weak self] in
                 for await event in session.events {
                     await MainActor.run { self?.handle(event) }
@@ -134,6 +142,10 @@ final class ChatController {
             let handle = try await session.connect(
                 cwd: worktreePath, resumeSessionId: resumeId,
                 mcpServers: mcpServers)
+            guard generation == lifecycleGeneration else {
+                await session.stop()
+                return
+            }
             modes = handle.modes
             models = handle.models
             hasModelConfigOption = handle.configOptions.contains { $0.id == "model" }
@@ -158,15 +170,19 @@ final class ChatController {
             state = .ready
         } catch let ACPClientError.agentError(error)
             where error.message.lowercased().contains("auth") {
+            guard generation == lifecycleGeneration else { return }
             state = .needsAuth
         } catch {
+            guard generation == lifecycleGeneration else { return }
             state = .disconnected(message: "\(error)")
         }
     }
 
     func stop() async {
+        lifecycleGeneration &+= 1
         persist()
         pumpTask?.cancel()
+        pumpTask = nil
         if let session { await session.stop() }
         session = nil
         if state != .needsAuth { state = .disconnected(message: nil) }
