@@ -1,0 +1,424 @@
+import Foundation
+
+/// Drives Claude Code's `-p --input-format stream-json --output-format
+/// stream-json` protocol and translates it into Tiller's canonical session
+/// events.
+public actor ClaudeStreamJSONDriver: AgentDriver {
+    private enum DriverError: Error, Sendable {
+        case notStarted
+        case notConnected
+        case transportClosed
+        case requestFailed
+        case unsupported
+    }
+
+    private let transport: any ACPTransport
+    private let permissionMode: PermissionMode
+    private let requestedModel: String?
+    private let requestedResumeSessionId: String?
+    private let eventContinuation: AsyncStream<ACPSessionEvent>.Continuation
+    public nonisolated let events: AsyncStream<ACPSessionEvent>
+
+    private var readTask: Task<Void, Never>?
+    private var started = false
+    private var finished = false
+    private var sessionId: String?
+    private var initialized: ClaudeInit?
+    private var didEmitCommands = false
+    private var connectContinuation: CheckedContinuation<ClaudeInit, Error>?
+    private var promptContinuation: CheckedContinuation<StopReason, Error>?
+    private var queuedResults: [ClaudeResult] = []
+    private var pending: [String: CheckedContinuation<JSONValue?, Error>] = [:]
+    private var cancelRequested = false
+
+    public init(transport: any ACPTransport, permissionMode: PermissionMode,
+                model: String?, resumeSessionId: String?) {
+        self.transport = transport
+        self.permissionMode = permissionMode
+        requestedModel = model
+        requestedResumeSessionId = resumeSessionId
+        (events, eventContinuation) = AsyncStream.makeStream(of: ACPSessionEvent.self)
+    }
+
+    /// Builds the Claude Code process command used by the app's worktree host.
+    public static func launchTransport(worktreePath: String,
+                                       permissionMode: PermissionMode,
+                                       model: String?,
+                                       resumeSessionId: String?) -> ProcessTransport {
+        var command = "exec claude -p --input-format stream-json --output-format stream-json --verbose"
+        command += " --permission-mode \(shellArgument(permissionMode.claudeValue))"
+        if let model {
+            command += " --model \(shellArgument(model))"
+        }
+        if let resumeSessionId {
+            command += " --resume \(shellArgument(resumeSessionId))"
+        }
+        return ProcessTransport(executable: "/bin/zsh", arguments: ["-lc", command],
+                                cwd: worktreePath)
+    }
+
+    public func start() async throws {
+        guard !started else { return }
+        try await transport.start()
+        started = true
+        readTask = Task { [weak self] in
+            await self?.readLoop()
+        }
+    }
+
+    public func stop() async {
+        readTask?.cancel()
+        await transport.terminate()
+        finish()
+    }
+
+    public func connect(cwd: String, resumeSessionId: String?,
+                        mcpServers: [McpServerSpec]) async throws -> SessionHandle {
+        _ = cwd
+        _ = mcpServers
+        guard started else { throw DriverError.notStarted }
+
+        let initMessage: ClaudeInit
+        if let initialized {
+            initMessage = initialized
+        } else {
+            initMessage = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<ClaudeInit, Error>) in
+                connectContinuation = continuation
+            }
+        }
+        sessionId = initMessage.sessionId
+        return makeHandle(from: initMessage,
+                          didResume: (resumeSessionId ?? requestedResumeSessionId) != nil)
+    }
+
+    public func prompt(_ blocks: [ContentBlock]) async throws -> StopReason {
+        guard started else { throw DriverError.notStarted }
+        guard sessionId != nil else { throw DriverError.notConnected }
+
+        cancelRequested = false
+        let line = try makeUserPromptLine(blocks)
+        try await transport.send(line: line)
+
+        if !queuedResults.isEmpty {
+            return stopReason(for: queuedResults.removeFirst())
+        }
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<StopReason, Error>) in
+            promptContinuation = continuation
+        }
+    }
+
+    public func cancel() async {
+        cancelRequested = true
+        guard started else { return }
+        let requestId = makeRequestId()
+        let request = JSONValue.object([
+            "type": .string("control_request"),
+            "request_id": .string(requestId),
+            "request": .object(["subtype": .string("interrupt")])
+        ])
+        try? await transport.send(line: makeLine(request))
+    }
+
+    public func setMode(_ modeId: String) async throws {
+        guard sessionId != nil else { throw DriverError.notConnected }
+        let mode = PermissionMode(rawValue: modeId)?.claudeValue ?? modeId
+        let response = try await sendControlRequest(.object([
+            "subtype": .string("set_permission_mode"),
+            "mode": .string(mode)
+        ]))
+        guard isSuccessful(response) else { throw DriverError.requestFailed }
+        eventContinuation.yield(.update(.currentModeUpdate(modeId)))
+    }
+
+    public func setModel(_ modelId: String) async throws {
+        guard sessionId != nil else { throw DriverError.notConnected }
+        let response = try await sendControlRequest(.object([
+            "subtype": .string("set_model"),
+            "model": .string(modelId)
+        ]))
+        guard isSuccessful(response) else { throw DriverError.requestFailed }
+    }
+
+    public func setConfigOption(id: String, value: String) async throws
+        -> [SessionConfigOption]? {
+        _ = id
+        _ = value
+        throw DriverError.unsupported
+    }
+
+    public func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
+        let id = requestIdString(requestId)
+        let behavior: String
+        switch outcome {
+        case .selected(let optionId):
+            behavior = optionId.hasPrefix("allow") ? "allow" : "deny"
+        case .cancelled:
+            behavior = "deny"
+        }
+        let response = JSONValue.object([
+            "type": .string("control_response"),
+            "response": .object([
+                "request_id": .string(id),
+                "subtype": .string("success"),
+                "response": .object(["behavior": .string(behavior)])
+            ])
+        ])
+        try? await transport.send(line: makeLine(response))
+    }
+
+    private func readLoop() async {
+        do {
+            for try await line in transport.lines() {
+                guard !Task.isCancelled else { break }
+                guard let message = try? JSONDecoder().decode(ClaudeWireMessage.self,
+                                                               from: line) else { continue }
+                handle(message)
+            }
+        } catch {
+            // EOF and transport errors have the same session-level meaning.
+        }
+        finish()
+    }
+
+    private func handle(_ message: ClaudeWireMessage) {
+        switch message {
+        case .systemInit(let initMessage):
+            if initialized == nil {
+                initialized = initMessage
+                if !didEmitCommands {
+                    didEmitCommands = true
+                    eventContinuation.yield(.update(.availableCommandsUpdate(
+                        initMessage.slashCommands.map {
+                            AvailableCommand(name: $0, description: "")
+                        })))
+                }
+                connectContinuation?.resume(returning: initMessage)
+                connectContinuation = nil
+            }
+
+        case .assistant(let assistant):
+            for block in assistant.message.content {
+                handleAssistantBlock(block)
+            }
+
+        case .user(let user):
+            for block in user.message.content {
+                if case .toolResult(let result) = block {
+                    let output = result.content.map(renderJSON) ?? ""
+                    eventContinuation.yield(.update(.toolCallUpdate(ToolCallUpdate(
+                        toolCallId: result.toolUseId,
+                        status: result.isError ? .failed : .completed,
+                        content: [.content(.text(output))]))))
+                }
+            }
+
+        case .result(let result):
+            if let usage = result.usage, let contextUsage = contextUsage(from: usage) {
+                eventContinuation.yield(.update(.usageUpdate(contextUsage)))
+            }
+            if let promptContinuation {
+                self.promptContinuation = nil
+                promptContinuation.resume(returning: stopReason(for: result))
+            } else {
+                queuedResults.append(result)
+            }
+
+        case .controlRequest(let id, let request):
+            guard request.subtype == "can_use_tool" else { return }
+            let name = request.toolName ?? "Tool"
+            let toolCall = ToolCallUpdate(
+                toolCallId: id,
+                title: toolTitle(name: name, input: request.input),
+                kind: toolKind(for: name),
+                status: .pending,
+                rawInput: request.input)
+            var options = [
+                PermissionOption(optionId: "allow_once", name: "Allow once",
+                                 kind: .allowOnce),
+                PermissionOption(optionId: "reject_once", name: "Reject",
+                                 kind: .rejectOnce)
+            ]
+            if request.permissionSuggestions?.arrayValue?.isEmpty == false {
+                options.append(PermissionOption(optionId: "allow_always",
+                                                name: "Allow always",
+                                                kind: .allowAlways))
+            }
+            eventContinuation.yield(.permissionRequested(
+                requestId: .string(id), toolCall: toolCall, options: options))
+
+        case .controlResponse(let id, let value):
+            guard let continuation = pending.removeValue(forKey: id) else { return }
+            continuation.resume(returning: value)
+
+        case .unknown:
+            break
+        }
+    }
+
+    private func handleAssistantBlock(_ block: ClaudeContentBlock) {
+        switch block {
+        case .text(let text):
+            eventContinuation.yield(.update(.agentMessageChunk(.text(text))))
+        case .thinking(let thinking):
+            eventContinuation.yield(.update(.agentThoughtChunk(.text(thinking))))
+        case .toolUse(let toolUse):
+            eventContinuation.yield(.update(.toolCall(ToolCall(
+                toolCallId: toolUse.id,
+                title: toolTitle(name: toolUse.name, input: toolUse.input),
+                kind: toolKind(for: toolUse.name),
+                status: .inProgress,
+                rawInput: toolUse.input))))
+        case .toolResult, .unknown:
+            break
+        }
+    }
+
+    private func sendControlRequest(_ request: JSONValue) async throws -> JSONValue? {
+        guard started else { throw DriverError.notStarted }
+        let id = makeRequestId()
+        let value = JSONValue.object([
+            "type": .string("control_request"),
+            "request_id": .string(id),
+            "request": request
+        ])
+        let line = makeLine(value)
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<JSONValue?, Error>) in
+            pending[id] = continuation
+            Task { [weak self] in
+                do {
+                    try await self?.transport.send(line: line)
+                } catch {
+                    await self?.failPending(id: id, error: error)
+                }
+            }
+        }
+    }
+
+    private func failPending(id: String, error: Error) {
+        guard let continuation = pending.removeValue(forKey: id) else { return }
+        continuation.resume(throwing: error)
+    }
+
+    private func makeHandle(from initMessage: ClaudeInit,
+                            didResume: Bool) -> SessionHandle {
+        let supported = PermissionMode.supported(byDriverFor: "claude-acp")
+        let modes = SessionModeState(
+            currentModeId: permissionMode.rawValue,
+            availableModes: supported.map(\.sessionMode))
+        let modelId = initMessage.model.isEmpty ? requestedModel : initMessage.model
+        let models = modelId.map {
+            SessionModelState(currentModelId: $0,
+                              availableModels: [ModelInfo(modelId: $0, name: $0)])
+        }
+        return SessionHandle(
+            sessionId: initMessage.sessionId,
+            agentCapabilities: AgentCapabilities(),
+            modes: modes,
+            models: models,
+            configOptions: [],
+            didResume: didResume)
+    }
+
+    private func contextUsage(from usage: ClaudeUsage) -> ContextUsage? {
+        guard usage.inputTokens != nil || usage.cacheCreationInputTokens != nil
+                || usage.cacheReadInputTokens != nil else { return nil }
+        let used = (usage.inputTokens ?? 0)
+            + (usage.cacheCreationInputTokens ?? 0)
+            + (usage.cacheReadInputTokens ?? 0)
+        return ContextUsage(used: used, size: used)
+    }
+
+    private func stopReason(for result: ClaudeResult) -> StopReason {
+        if cancelRequested { return .cancelled }
+        return result.isError ? .refusal : .endTurn
+    }
+
+    private func isSuccessful(_ value: JSONValue?) -> Bool {
+        value?["subtype"]?.stringValue == "success"
+            || value?["response"]?["subtype"]?.stringValue == "success"
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        let error = DriverError.transportClosed
+        connectContinuation?.resume(throwing: error)
+        connectContinuation = nil
+        promptContinuation?.resume(throwing: error)
+        promptContinuation = nil
+        for continuation in pending.values { continuation.resume(throwing: error) }
+        pending.removeAll()
+        eventContinuation.yield(.disconnected)
+        eventContinuation.finish()
+    }
+
+    private func makeUserPromptLine(_ blocks: [ContentBlock]) throws -> Data {
+        let content = try JSONValue.encoding(blocks)
+        return makeLine(.object([
+            "type": .string("user"),
+            "message": .object([
+                "role": .string("user"),
+                "content": content
+            ])
+        ]))
+    }
+
+    private func makeLine(_ value: JSONValue) -> Data {
+        var data = (try? JSONEncoder().encode(value)) ?? Data("{}".utf8)
+        data.append(UInt8(ascii: "\n"))
+        return data
+    }
+
+    private func makeRequestId() -> String {
+        "tiller-\(UUID().uuidString)"
+    }
+
+    private func requestIdString(_ id: JSONRPCID) -> String {
+        switch id {
+        case .number(let value): String(value)
+        case .string(let value): value
+        }
+    }
+
+    private func toolKind(for name: String) -> ToolKind {
+        switch name.lowercased() {
+        case "bash": .execute
+        case "edit", "write": .edit
+        case "read": .read
+        default: .other
+        }
+    }
+
+    private func toolTitle(name: String, input: JSONValue?) -> String {
+        guard let primary = primaryInput(from: input), !primary.isEmpty else { return name }
+        return "\(name): \(primary)"
+    }
+
+    private func primaryInput(from input: JSONValue?) -> String? {
+        guard let input else { return nil }
+        if let string = input.stringValue { return string }
+        guard case .object(let values) = input else { return renderJSON(input) }
+        for key in ["command", "file_path", "path", "pattern", "query", "description"] {
+            if let value = values[key], let string = value.stringValue { return string }
+        }
+        for value in values.values where value.stringValue != nil {
+            return value.stringValue
+        }
+        return nil
+    }
+
+    private func renderJSON(_ value: JSONValue) -> String {
+        if let string = value.stringValue { return string }
+        guard let data = try? JSONEncoder().encode(value) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func shellArgument(_ value: String) -> String {
+        let safe = value.allSatisfy { $0.isLetter || $0.isNumber || "-._/".contains($0) }
+        guard !safe else { return value }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
