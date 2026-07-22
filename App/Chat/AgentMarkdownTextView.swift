@@ -87,6 +87,13 @@ struct AgentMarkdownTextView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSTextView {
         let textView = Self.makeTextView()
+        let coordinator = context.coordinator
+        textView.onAppearanceChanged = { [weak textView] in
+            guard let textView, let source = coordinator.lastRenderedSource else { return }
+            textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(source))
+            (textView as? MarkdownTextView)?.rebuildCodeBlockHeaders()
+            coordinator.measuredHeight = nil
+        }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         textView.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown
