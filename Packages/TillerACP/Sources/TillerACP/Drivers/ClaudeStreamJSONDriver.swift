@@ -30,6 +30,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var queuedResults: [ClaudeResult] = []
     private var pending: [String: CheckedContinuation<JSONValue?, Error>] = [:]
     private var cancelRequested = false
+    private var effort: String?
 
     public init(transport: any ACPTransport, permissionMode: PermissionMode,
                 model: String?, resumeSessionId: String?) {
@@ -141,6 +142,10 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         guard isSuccessful(response) else { throw DriverError.requestFailed }
     }
 
+    public func setEffort(_ effort: String?) {
+        self.effort = effort
+    }
+
     public func setConfigOption(id: String, value: String) async throws
         -> [SessionConfigOption]? {
         _ = id
@@ -215,8 +220,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             }
 
         case .result(let result):
-            if let usage = result.usage, let contextUsage = contextUsage(from: usage) {
-                eventContinuation.yield(.update(.usageUpdate(contextUsage)))
+            Task { [weak self] in
+                await self?.probeContextUsage()
             }
             if let promptContinuation {
                 self.promptContinuation = nil
@@ -302,6 +307,18 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         continuation.resume(throwing: error)
     }
 
+    private func probeContextUsage() async {
+        do {
+            let response = try await sendControlRequest(.object([
+                "subtype": .string("get_context_usage")
+            ]))
+            guard let usage = contextUsage(from: response) else { return }
+            eventContinuation.yield(.update(.usageUpdate(usage)))
+        } catch {
+            // Older Claude Code versions may not support this control request.
+        }
+    }
+
     private func makeHandle(from initMessage: ClaudeInit,
                             didResume: Bool) -> SessionHandle {
         let supported = PermissionMode.supported(byDriverFor: "claude-acp")
@@ -322,13 +339,13 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             didResume: didResume)
     }
 
-    private func contextUsage(from usage: ClaudeUsage) -> ContextUsage? {
-        guard usage.inputTokens != nil || usage.cacheCreationInputTokens != nil
-                || usage.cacheReadInputTokens != nil else { return nil }
-        let used = (usage.inputTokens ?? 0)
-            + (usage.cacheCreationInputTokens ?? 0)
-            + (usage.cacheReadInputTokens ?? 0)
-        return ContextUsage(used: used, size: used)
+    private func contextUsage(from response: JSONValue?) -> ContextUsage? {
+        guard isSuccessful(response) else { return nil }
+        let payload = response?["response"] ?? response
+        guard let used = payload?["used"]?.intValue,
+              let size = payload?["size"]?.intValue,
+              used >= 0, size > 0 else { return nil }
+        return ContextUsage(used: used, size: size)
     }
 
     private func stopReason(for result: ClaudeResult) -> StopReason {
@@ -356,7 +373,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     }
 
     private func makeUserPromptLine(_ blocks: [ContentBlock]) throws -> Data {
-        let content = try JSONValue.encoding(blocks)
+        let content = try JSONValue.encoding(promptBlocks(blocks))
         return makeLine(.object([
             "type": .string("user"),
             "message": .object([
@@ -364,6 +381,26 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                 "content": content
             ])
         ]))
+    }
+
+    private func promptBlocks(_ blocks: [ContentBlock]) -> [ContentBlock] {
+        guard let effort else { return blocks }
+        let prefix = effortPrefix(effort)
+        var blocks = blocks
+        if let index = blocks.firstIndex(where: {
+            if case .text = $0 { true } else { false }
+        }) {
+            if case .text(let text) = blocks[index] {
+                blocks[index] = .text(prefix + text)
+            }
+        } else {
+            blocks.insert(.text(prefix), at: 0)
+        }
+        return blocks
+    }
+
+    private func effortPrefix(_ effort: String) -> String {
+        "Reasoning effort for this and following turns: \(effort). "
     }
 
     private func makeLine(_ value: JSONValue) -> Data {
