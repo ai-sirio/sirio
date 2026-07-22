@@ -280,4 +280,10 @@ struct MarkdownAttributedStringRendererTests {
         let color = result.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
         #expect(color == NSColor.labelColor.withAlphaComponent(0.85))
     }
+    @Test("agent markdown text view installs the code block layout manager")
+    func installsCustomLayoutManager() {
+        let textView = AgentMarkdownTextView.makeTextView()
+        #expect(textView.layoutManager is CodeBlockLayoutManager)
+    }
+
 }
