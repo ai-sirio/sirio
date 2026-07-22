@@ -216,7 +216,7 @@ final class PtyRuntime: @unchecked Sendable {
         }
     }
 
-    private func emitContentSignal() async {
+    func emitContentSignal() async {
         let sid = SignpostMetrics.makeSignpostID()
         let state = SignpostMetrics.beginInterval("contentSignal", id: sid)
         let tailData = await scrollback.tail(10 * 1024)
@@ -231,7 +231,13 @@ final class PtyRuntime: @unchecked Sendable {
             SignpostMetrics.endInterval("contentSignal", state, message: "empty")
             return
         }
-        onContentSignal?(paneId, tail)
+        // The callback lands in @MainActor UI code (AppModel) but its stored
+        // type erases that isolation: invoking it from the settle executor
+        // trips Swift 6's dynamic isolation check (EXC_BREAKPOINT in
+        // dispatch_assert_queue). Hop to the main actor before delivering.
+        nonisolated(unsafe) let callback = onContentSignal
+        let paneId = paneId
+        await MainActor.run { callback?(paneId, tail) }
         SignpostMetrics.endInterval("contentSignal", state, message: "matched")
     }
 
