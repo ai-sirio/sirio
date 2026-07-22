@@ -198,11 +198,19 @@ struct MarkdownAttributedStringRendererTests {
         #expect(style?.paragraphSpacing == 0)
     }
 
-    @Test("inline code is colored, not just monospaced")
+    @Test("inline code is marked as a chip with a background fill")
+    func inlineCodeChip() {
+        let result = MarkdownAttributedStringRenderer.render("`code`")
+        #expect(result.attribute(CodeBlockStyle.inlineCodeAttribute, at: 0, effectiveRange: nil) != nil)
+        let bg = result.attribute(.backgroundColor, at: 0, effectiveRange: nil) as? NSColor
+        #expect(bg == CodeBlockStyle.chipFill)
+    }
+
+    @Test("inline code uses near-label foreground, not teal")
     func inlineCodeIsColored() {
         let result = MarkdownAttributedStringRenderer.render("`code`")
         let color = result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == MarkdownAttributedStringRenderer.codeColor)
+        #expect(color == NSColor.labelColor.withAlphaComponent(0.9))
     }
 
     @Test("fenced code block is colored, not just monospaced")

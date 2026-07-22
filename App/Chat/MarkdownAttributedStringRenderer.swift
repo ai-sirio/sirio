@@ -132,7 +132,9 @@ enum MarkdownAttributedStringRenderer {
         if let inline = run.inlinePresentationIntent {
             if inline.contains(.code) {
                 font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
-                color = codeColor
+                color = .labelColor.withAlphaComponent(0.9)
+                attrs[CodeBlockStyle.inlineCodeAttribute] = true
+                attrs[.backgroundColor] = CodeBlockStyle.chipFill
             }
             if inline.contains(.stronglyEmphasized) {
                 font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
