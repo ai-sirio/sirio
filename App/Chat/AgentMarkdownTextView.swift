@@ -1,6 +1,58 @@
 import AppKit
 import SwiftUI
 
+/// NSTextView subclass owning the code-block header overlays. Headers are
+/// rebuilt whenever the attributed text changes and repositioned on every
+/// layout pass from the same attribute ranges the layout manager draws from.
+final class MarkdownTextView: NSTextView {
+    private var headerViews: [NSHostingView<CodeBlockHeaderView>] = []
+    var onAppearanceChanged: (() -> Void)?
+
+    func rebuildCodeBlockHeaders() {
+        headerViews.forEach { $0.removeFromSuperview() }
+        headerViews.removeAll()
+        guard let storage = textStorage else { return }
+        storage.enumerateAttribute(CodeBlockStyle.codeBlockAttribute,
+                                   in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let info = value as? CodeBlockInfo else { return }
+            let code = (storage.string as NSString).substring(with: range)
+                .trimmingCharacters(in: .newlines)
+            let host = NSHostingView(rootView: CodeBlockHeaderView(language: info.language, code: code))
+            addSubview(host)
+            headerViews.append(host)
+        }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        layoutCodeBlockHeaders()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onAppearanceChanged?()
+    }
+
+    private func layoutCodeBlockHeaders() {
+        guard let layoutManager, let textContainer, let storage = textStorage else { return }
+        var index = 0
+        storage.enumerateAttribute(CodeBlockStyle.codeBlockAttribute,
+                                   in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard value is CodeBlockInfo, index < headerViews.count else { return }
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            headerViews[index].frame = NSRect(
+                x: 0,
+                y: rect.minY - CodeBlockStyle.headerHeight - 4,
+                width: textContainer.size.width,
+                height: CodeBlockStyle.headerHeight)
+            index += 1
+        }
+    }
+}
+
+
 /// Renders an agent chat message's markdown inside a single `NSTextView` so
 /// drag-selection stays continuous across block boundaries (paragraph, code
 /// block, list, heading) — see
@@ -14,7 +66,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     @MainActor
-    static func makeTextView() -> NSTextView {
+    static func makeTextView() -> MarkdownTextView {
         let storage = NSTextStorage()
         let layoutManager = CodeBlockLayoutManager()
         storage.addLayoutManager(layoutManager)
@@ -22,7 +74,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
         container.widthTracksTextView = false
         container.lineFragmentPadding = 0
         layoutManager.addTextContainer(container)
-        let textView = NSTextView(frame: .zero, textContainer: container)
+        let textView = MarkdownTextView(frame: .zero, textContainer: container)
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
@@ -36,6 +88,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSTextView {
         let textView = Self.makeTextView()
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
+        textView.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown
         return textView
     }
@@ -43,6 +96,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
     func updateNSView(_ textView: NSTextView, context: Context) {
         guard context.coordinator.lastRenderedSource != markdown else { return }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
+        (textView as? MarkdownTextView)?.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown
         // Invalidate cached height so the next `sizeThatFits` re-runs layout.
         context.coordinator.measuredHeight = nil
