@@ -13,17 +13,28 @@ struct AgentMarkdownTextView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> NSTextView {
-        let textView = NSTextView()
+    @MainActor
+    static func makeTextView() -> NSTextView {
+        let storage = NSTextStorage()
+        let layoutManager = CodeBlockLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = false
+        container.lineFragmentPadding = 0
+        layoutManager.addTextContainer(container)
+        let textView = NSTextView(frame: .zero, textContainer: container)
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
-        textView.textContainerInset = .zero
-        textView.textContainer?.lineFragmentPadding = 0
-        textView.textContainer?.widthTracksTextView = false
+        textView.textContainerInset = NSSize.zero
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        return textView
+    }
+
+    func makeNSView(context: Context) -> NSTextView {
+        let textView = Self.makeTextView()
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         context.coordinator.lastRenderedSource = markdown
         return textView
