@@ -5,6 +5,7 @@ import Foundation
 public final class ProcessTransport: ACPTransport, @unchecked Sendable {
     public struct LaunchFailure: Error { public let underlying: Error }
 
+    public let arguments: [String]
     private let process = Process()
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
@@ -18,6 +19,7 @@ public final class ProcessTransport: ACPTransport, @unchecked Sendable {
     public init(executable: String, arguments: [String], cwd: String,
                 environment: [String: String]? = nil,
                 onStderrLine: (@Sendable (String) -> Void)? = nil) {
+        self.arguments = arguments
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
