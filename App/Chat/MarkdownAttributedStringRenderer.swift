@@ -19,7 +19,6 @@ enum MarkdownAttributedStringRenderer {
     private static let headingSizes: [Int: CGFloat] = [1: 15, 2: 14, 3: 13]
     private static let headingMargins: [Int: (top: CGFloat, bottom: CGFloat)] =
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
-    static let codeColor = NSColor.systemTeal.withAlphaComponent(0.75)
 
     static func render(_ markdown: String) -> NSAttributedString {
         let options = AttributedString.MarkdownParsingOptions(
@@ -45,22 +44,62 @@ enum MarkdownAttributedStringRenderer {
     private static func render(_ parsed: AttributedString) -> NSAttributedString {
         let result = NSMutableAttributedString()
         var previousBlockIdentity: Int?
+        var codeBlockIndex = -1
         for run in parsed.runs {
             var substring = String(parsed[run.range].characters)
             let blockIdentity = run.presentationIntent?.components.first?.identity
             let isNewBlock = blockIdentity != previousBlockIdentity
+            let isCodeBlock = run.presentationIntent?.components.contains {
+                if case .codeBlock = $0.kind { return true } else { return false }
+            } ?? false
+            if isNewBlock, isCodeBlock {
+                codeBlockIndex += 1
+            }
             if previousBlockIdentity != nil, isNewBlock {
-                substring = "\n" + substring
+                var separatorAttributes = attributes(for: run, blockIndex: codeBlockIndex)
+                separatorAttributes.removeValue(forKey: .backgroundColor)
+                separatorAttributes.removeValue(forKey: CodeBlockStyle.inlineCodeAttribute)
+                separatorAttributes.removeValue(forKey: CodeBlockStyle.codeBlockAttribute)
+                result.append(NSAttributedString(string: "\n", attributes: separatorAttributes))
             }
             if isNewBlock, let marker = listMarker(for: run.presentationIntent) {
-                substring = previousBlockIdentity == nil ? marker + substring
-                    : substring.replacingOccurrences(of: "\n", with: "\n" + marker,
-                                                     range: substring.range(of: "\n"))
+                substring = marker + substring
             }
             if let blockIdentity { previousBlockIdentity = blockIdentity }
-            result.append(NSAttributedString(string: substring, attributes: attributes(for: run)))
+            result.append(NSAttributedString(
+                string: substring,
+                attributes: attributes(for: run, blockIndex: codeBlockIndex)))
         }
+        applyCodeBlockLayoutMetrics(result)
         return result
+    }
+
+    private static func applyCodeBlockLayoutMetrics(_ result: NSMutableAttributedString) {
+        let text = result.string as NSString
+        result.enumerateAttribute(
+            CodeBlockStyle.codeBlockAttribute,
+            in: NSRange(location: 0, length: result.length)) { value, range, _ in
+            guard value is CodeBlockInfo else { return }
+            var lineStart = range.location
+            var isFirst = true
+            while lineStart < NSMaxRange(range) {
+                let lineRange = text.lineRange(for: NSRange(location: lineStart, length: 0))
+                let clipped = NSIntersectionRange(lineRange, range)
+                let style = NSMutableParagraphStyle()
+                style.firstLineHeadIndent = CodeBlockStyle.cardPadding
+                style.headIndent = CodeBlockStyle.cardPadding
+                style.lineSpacing = 2
+                if isFirst {
+                    style.paragraphSpacingBefore = CodeBlockStyle.headerHeight + 10
+                    isFirst = false
+                }
+                if NSMaxRange(lineRange) >= NSMaxRange(range) {
+                    style.paragraphSpacing = CodeBlockStyle.cardPadding + 8
+                }
+                result.addAttribute(.paragraphStyle, value: style, range: clipped)
+                lineStart = NSMaxRange(lineRange)
+            }
+        }
     }
 
     /// A list item's marker ("•\t" or "3.\t"), or nil for non-list blocks.
@@ -79,7 +118,9 @@ enum MarkdownAttributedStringRenderer {
         return isOrdered ? "\(ordinal).\t" : "•\t"
     }
 
-    private static func attributes(for run: AttributedString.Runs.Run) -> [NSAttributedString.Key: Any] {
+    private static func attributes(
+        for run: AttributedString.Runs.Run,
+        blockIndex: Int) -> [NSAttributedString.Key: Any] {
         var font = NSFont.systemFont(ofSize: bodySize)
         // Body prose is muted relative to headings, so headings keep
         // reading as the visual anchor of a reply.
@@ -100,10 +141,11 @@ enum MarkdownAttributedStringRenderer {
                     paragraphStyle.paragraphSpacing = margin.bottom
                 case .paragraph:
                     paragraphStyle.paragraphSpacing = 9
-                case .codeBlock:
+                case .codeBlock(let languageHint):
                     font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
-                    color = codeColor
-                    paragraphStyle.paragraphSpacing = 6
+                    color = .labelColor.withAlphaComponent(0.85)
+                    attrs[CodeBlockStyle.codeBlockAttribute] =
+                        CodeBlockInfo(language: languageHint ?? "text", index: blockIndex)
                 case .blockQuote:
                     color = .secondaryLabelColor
                     paragraphStyle.headIndent = 12

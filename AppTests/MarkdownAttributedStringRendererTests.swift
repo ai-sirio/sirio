@@ -213,12 +213,52 @@ struct MarkdownAttributedStringRendererTests {
         #expect(color == NSColor.labelColor.withAlphaComponent(0.9))
     }
 
-    @Test("fenced code block is colored, not just monospaced")
+    @Test("code block text uses near-label monochrome by default")
     func codeBlockIsColored() {
         let result = MarkdownAttributedStringRenderer.render("```\nlet x = 1\n```")
         let range = (result.string as NSString).range(of: "let x = 1")
         let color = result.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
-        #expect(color == MarkdownAttributedStringRenderer.codeColor)
+        #expect(color == NSColor.labelColor.withAlphaComponent(0.85))
+    }
+
+    @Test("code block carries language metadata from the fence")
+    func codeBlockLanguage() {
+        let result = MarkdownAttributedStringRenderer.render("```swift\nlet a = 1\n```")
+        let range = (result.string as NSString).range(of: "let a = 1")
+        let info = result.attribute(CodeBlockStyle.codeBlockAttribute, at: range.location, effectiveRange: nil) as? CodeBlockInfo
+        #expect(info?.language == "swift")
+        #expect(info?.index == 0)
+    }
+
+    @Test("code block without a language falls back to text")
+    func codeBlockLanguageFallback() {
+        let result = MarkdownAttributedStringRenderer.render("```\nplain\n```")
+        let range = (result.string as NSString).range(of: "plain")
+        let info = result.attribute(CodeBlockStyle.codeBlockAttribute, at: range.location, effectiveRange: nil) as? CodeBlockInfo
+        #expect(info?.language == "text")
+    }
+
+    @Test("separator newline before a code block does not join the card")
+    func separatorNewlineExcluded() {
+        let result = MarkdownAttributedStringRenderer.render("para\n\n```\ncode\n```")
+        let codeLocation = (result.string as NSString).range(of: "code").location
+        #expect(result.attribute(CodeBlockStyle.codeBlockAttribute, at: codeLocation - 1, effectiveRange: nil) == nil)
+    }
+
+    @Test("code block first line reserves header space, interior lines do not")
+    func codeBlockHeaderSpace() {
+        let result = MarkdownAttributedStringRenderer.render("```swift\nlet a = 1\nlet b = 2\n```")
+        let first = (result.string as NSString).range(of: "let a = 1").location
+        let second = (result.string as NSString).range(of: "let b = 2").location
+        let firstStyle = result.attribute(.paragraphStyle, at: first, effectiveRange: nil) as? NSParagraphStyle
+        let secondStyle = result.attribute(.paragraphStyle, at: second, effectiveRange: nil) as? NSParagraphStyle
+        #expect(firstStyle?.paragraphSpacingBefore == CodeBlockStyle.headerHeight + 10)
+        #expect(secondStyle?.paragraphSpacingBefore == 0)
+        #expect(firstStyle?.headIndent == CodeBlockStyle.cardPadding)
+        #expect(firstStyle?.firstLineHeadIndent == CodeBlockStyle.cardPadding)
+        #expect(secondStyle?.headIndent == CodeBlockStyle.cardPadding)
+        #expect(secondStyle?.firstLineHeadIndent == CodeBlockStyle.cardPadding)
+        #expect(secondStyle?.paragraphSpacing == CodeBlockStyle.cardPadding + 8)
     }
 
 }
