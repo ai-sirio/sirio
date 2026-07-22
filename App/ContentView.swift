@@ -298,7 +298,7 @@ struct ContentView: View {
                                     MarkdownEditorTabView(document: doc)
                                 } else {
                                     ContentUnavailableView(
-                                        "File non trovato",
+                                        "File not found",
                                         systemImage: "doc.questionmark",
                                         description: Text(tab.markdownFileURL?.path ?? "")
                                     )
@@ -308,7 +308,7 @@ struct ContentView: View {
                                     ChatPaneView(controller: controller, worktree: worktree,
                                                  appModel: model)
                                 } else if isVisible {
-                                    ContentUnavailableView("Agente non disponibile",
+                                    ContentUnavailableView("Agent not available",
                                                            systemImage: "bubble.left")
                                 } else {
                                     EmptyView()
