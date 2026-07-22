@@ -2,6 +2,7 @@ import AppKit
 import Testing
 @testable import Tiller
 
+@MainActor
 struct MarkdownAttributedStringRendererTests {
     @Test("body paragraphs use the T3 line and paragraph rhythm")
     func bodyRhythm() {
@@ -261,4 +262,22 @@ struct MarkdownAttributedStringRendererTests {
         #expect(secondStyle?.paragraphSpacing == CodeBlockStyle.cardPadding + 8)
     }
 
+    @Test("swift code block gets syntax-highlighted foreground colors")
+    func codeBlockIsHighlighted() {
+        let result = MarkdownAttributedStringRenderer.render("```swift\nlet x = \"hi\"\n```", isDark: true)
+        let keyword = (result.string as NSString).range(of: "let").location
+        let literal = (result.string as NSString).range(of: "\"hi\"").location
+        let keywordColor = result.attribute(.foregroundColor, at: keyword, effectiveRange: nil) as? NSColor
+        let literalColor = result.attribute(.foregroundColor, at: literal, effectiveRange: nil) as? NSColor
+        #expect(keywordColor != nil)
+        #expect(keywordColor != literalColor)
+    }
+
+    @Test("unknown fence language keeps monochrome foreground")
+    func unknownLanguageStaysMonochrome() {
+        let result = MarkdownAttributedStringRenderer.render("```zzznotalang\nplain\n```", isDark: true)
+        let range = (result.string as NSString).range(of: "plain")
+        let color = result.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
+        #expect(color == NSColor.labelColor.withAlphaComponent(0.85))
+    }
 }
