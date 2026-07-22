@@ -10,6 +10,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "TillerACP", dependencies: ["TillerPersistence"]),
-        .testTarget(name: "TillerACPTests", dependencies: ["TillerACP", "TillerPersistence"])
+        .testTarget(
+            name: "TillerACPTests",
+            dependencies: ["TillerACP", "TillerPersistence"],
+            resources: [.copy("Fixtures")]
+        )
     ]
 )
