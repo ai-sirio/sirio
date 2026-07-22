@@ -129,11 +129,33 @@ struct MarkdownAttributedStringRendererTests {
     @Test("unordered list item is indented")
     func unorderedListItem() {
         let result = MarkdownAttributedStringRenderer.render("- one\n- two")
-        #expect(result.string.contains("one"))
+        #expect(result.string.contains("•\tone"))
         let range = (result.string as NSString).range(of: "one")
         let style = result.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
         #expect(style?.headIndent == 16)
     }
+    @Test("unordered list items get a visible bullet")
+    func unorderedBullet() {
+        let result = MarkdownAttributedStringRenderer.render("- one\n- two")
+        #expect(result.string.contains("•\tone"))
+        #expect(result.string.contains("•\ttwo"))
+    }
+
+    @Test("ordered list items get their ordinal")
+    func orderedMarker() {
+        let result = MarkdownAttributedStringRenderer.render("1. first\n2. second")
+        #expect(result.string.contains("1.\tfirst"))
+        #expect(result.string.contains("2.\tsecond"))
+    }
+
+    @Test("nested list items indent one level deeper")
+    func nestedListIndent() {
+        let result = MarkdownAttributedStringRenderer.render("- outer\n    - inner")
+        let range = (result.string as NSString).range(of: "inner")
+        let style = result.attribute(.paragraphStyle, at: range.location, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.headIndent == 32)
+    }
+
 
     @Test("unclosed code fence falls back to plain selectable text")
     func unclosedFenceFallsBackToPlainText() {
@@ -159,7 +181,7 @@ struct MarkdownAttributedStringRendererTests {
     @Test("list items are separated by a line break, not run together")
     func listItemsAreSeparated() {
         let result = MarkdownAttributedStringRenderer.render("- one\n- two")
-        #expect(result.string == "one\ntwo")
+        #expect(result.string == "•\tone\n•\ttwo")
     }
 
     @Test("inline spans within one paragraph are NOT split by the block separator")
