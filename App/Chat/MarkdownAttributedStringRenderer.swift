@@ -65,7 +65,7 @@ enum MarkdownAttributedStringRenderer {
         // reading as the visual anchor of a reply.
         var color: NSColor = .labelColor.withAlphaComponent(0.82)
         let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = 3
+        paragraphStyle.lineSpacing = 4.5
         var attrs: [NSAttributedString.Key: Any] = [:]
         if let intent = run.presentationIntent {
             for component in intent.components {
@@ -79,7 +79,7 @@ enum MarkdownAttributedStringRenderer {
                     paragraphStyle.paragraphSpacingBefore = margin.top
                     paragraphStyle.paragraphSpacing = margin.bottom
                 case .paragraph:
-                    paragraphStyle.paragraphSpacing = 6
+                    paragraphStyle.paragraphSpacing = 9
                 case .codeBlock:
                     font = NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular)
                     color = codeColor

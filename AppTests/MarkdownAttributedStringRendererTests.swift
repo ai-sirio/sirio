@@ -3,6 +3,14 @@ import Testing
 @testable import Tiller
 
 struct MarkdownAttributedStringRendererTests {
+    @Test("body paragraphs use the T3 line and paragraph rhythm")
+    func bodyRhythm() {
+        let result = MarkdownAttributedStringRenderer.render("Hello world")
+        let style = result.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+        #expect(style?.lineSpacing == 4.5)
+        #expect(style?.paragraphSpacing == 9)
+    }
+
     @Test("plain paragraph uses 13pt body font")
     func plainParagraph() {
         let result = MarkdownAttributedStringRenderer.render("Hello world")
