@@ -73,6 +73,14 @@ The existing no-argument/defaulting `openChatTab(in:)` remains available for
 internal callers and retains its current fallback behavior. The explicit
 selected-agent path is the path used by both New Chat entry points.
 
+The explicit selected-agent `AppModel` path revalidates the selected agent's
+current availability before creating any chat state. If the agent is no longer
+installed, the path creates no chat tab or controller, triggers an ACP
+installation-state refresh, and sets `AppModel.lastError` to a clear
+user-facing unavailable-agent message. The existing global Error alert surfaces
+that message after the native menu closes. It never silently selects another
+agent.
+
 The shared menu reads the live ACP installation state from
 `AcpAgentCenter.installedAgents`. Both entry points therefore render the same
 dynamic source rather than maintaining separate lists or snapshots.
@@ -85,11 +93,18 @@ dynamic source rather than maintaining separate lists or snapshots.
   **Open Agents Settings**. Settings navigation has no chat-creation side
   effect.
 - **Agent removed after display:** If an agent disappears between menu display
-  and selection, reject the selection explicitly and refresh the installation
-  state. Do not silently fall back to another agent.
-- **Valid selection but launch failure:** Use the existing
-  `ChatController` launch-error behavior. Do not silently resume a previous
-  session or retry with another harness.
+  and selection, the explicit `AppModel` path must revalidate availability
+  before creating a tab or controller. Reject the selection, trigger an ACP
+  installation-state refresh, and set `AppModel.lastError` to a clear
+  user-facing unavailable-agent message so the existing global Error alert
+  appears after the native menu closes. Do not silently fall back to another
+  agent.
+- **Valid selection but launch failure:** Keep the newly created chat tab
+  created and selected in the current worktree. Surface the existing
+  `ChatController` state inline in `ChatPaneView`: `.needsAuth` shows
+  **Authentication required** with **Retry**, and `.disconnected` shows
+  **Agent disconnected** with **Restart agent**. Do not roll back the tab,
+  silently fall back, resume a prior session, or automatically retry.
 - **Conversation identity:** Every selection uses
   `startNewConversation: true`; a prior ACP session is never resumed by this
   flow.
@@ -99,11 +114,21 @@ dynamic source rather than maintaining separate lists or snapshots.
 Use model-level tests for the explicit selected-agent path in `AppModel`.
 Verify that the selected ACP ID is canonicalized, persisted as last-used,
 registered for activity, and used to create the expected `WorkspaceTab` and
-controller.
+controller. The valid-selection acceptance assertion must explicitly verify
+that the tab is both created and selected in the current worktree.
 
 Add a no-resume assertion proving that the explicit path creates a new
 conversation and does not load or resume a prior session. Retain coverage for
 the existing no-argument `openChatTab(in:)` default fallback behavior.
+
+Add stale-selection coverage proving that when the selected agent is no longer
+installed, the explicit `AppModel` path shows the unavailable-agent error via
+`AppModel.lastError`/the existing global Error alert, creates no tab or
+controller, and triggers an ACP installation-state refresh. Add launch-failure
+coverage proving that a valid selection leaves the newly created tab selected,
+shows the appropriate `ChatPaneView` banner and action for `.needsAuth` or
+`.disconnected`, and does not resume, roll back, silently fall back, or
+automatically retry.
 
 Test the menu state/action seam for loading, no-agent, settings navigation, and
 selection actions. Verify that the tab-bar/menu and sidebar context-menu use
@@ -138,12 +163,19 @@ document itself.
 - The no-agent state explains the situation and offers **Open Agents Settings**
   without creating a chat.
 - Selecting an available agent immediately creates a current-worktree chat tab,
-  persists it as last-used, registers activity, and starts a new conversation.
-- A stale selection is explicitly rejected and followed by a refresh, with no
-  fallback to another agent.
-- Launch failures use existing `ChatController` error behavior, with no
-  silent resume or fallback.
+  selects that tab in the current worktree, persists it as last-used, registers
+  activity, and starts a new conversation.
+- A stale selection is revalidated by the explicit `AppModel` path, explicitly
+  rejected with a clear unavailable-agent Error alert after the native menu
+  closes, followed by an ACP installation-state refresh; no tab or controller
+  is created and no other agent is selected.
+- A valid selection whose launch fails leaves the newly created tab selected
+  and shows the corresponding inline `ChatPaneView` error banner: `.needsAuth`
+  with **Authentication required** and **Retry**, or `.disconnected` with
+  **Agent disconnected** and **Restart agent**. The tab is not rolled back and
+  the flow does not silently fall back, resume, or automatically retry.
 - The legacy no-argument `openChatTab(in:)` behavior remains intact for
   internal callers.
-- Model and menu seam tests cover the behavior above, and implementation
-  verification passes `Scripts/ci.sh`.
+- Model and menu seam tests explicitly cover stale-selection alert/no-tab/
+  refresh behavior and launch-failure selected-tab/visible-error/no-resume
+  behavior, and implementation verification passes `Scripts/ci.sh`.
