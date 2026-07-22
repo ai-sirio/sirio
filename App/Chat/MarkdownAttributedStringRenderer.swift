@@ -9,6 +9,7 @@ import Foundation
 /// `★ Insight ───` callouts are stripped out before text ever reaches this
 /// renderer — see `AgentMessageSegmenter` / `InsightCardView` — so this file
 /// only ever sees plain prose markdown.
+@MainActor
 enum MarkdownAttributedStringRenderer {
 
     static let bodySize: CGFloat = 13
@@ -20,7 +21,7 @@ enum MarkdownAttributedStringRenderer {
     private static let headingMargins: [Int: (top: CGFloat, bottom: CGFloat)] =
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
 
-    static func render(_ markdown: String) -> NSAttributedString {
+    static func render(_ markdown: String, isDark: Bool = MarkdownAppearance.isDark) -> NSAttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             allowsExtendedAttributes: true,
             interpretedSyntax: .full,
@@ -30,7 +31,7 @@ enum MarkdownAttributedStringRenderer {
                 string: markdown,
                 attributes: [.font: NSFont.systemFont(ofSize: bodySize)])
         }
-        return render(parsed)
+        return render(parsed, isDark: isDark)
     }
 
     /// `AttributedString(markdown:)` does not insert a literal newline
@@ -41,7 +42,7 @@ enum MarkdownAttributedStringRenderer {
     /// same block — e.g. every inline span inside one paragraph shares that
     /// paragraph's identity — so a boundary is only a block-level change,
     /// never a mid-paragraph inline-style change.
-    private static func render(_ parsed: AttributedString) -> NSAttributedString {
+    private static func render(_ parsed: AttributedString, isDark: Bool) -> NSAttributedString {
         let result = NSMutableAttributedString()
         var previousBlockIdentity: Int?
         var codeBlockIndex = -1
@@ -71,6 +72,7 @@ enum MarkdownAttributedStringRenderer {
                 attributes: attributes(for: run, blockIndex: codeBlockIndex)))
         }
         applyCodeBlockLayoutMetrics(result)
+        applyHighlighting(result, isDark: isDark)
         return result
     }
 
@@ -98,6 +100,29 @@ enum MarkdownAttributedStringRenderer {
                 }
                 result.addAttribute(.paragraphStyle, value: style, range: clipped)
                 lineStart = NSMaxRange(lineRange)
+            }
+        }
+    }
+
+    private static func applyHighlighting(_ result: NSMutableAttributedString, isDark: Bool) {
+        result.enumerateAttribute(
+            CodeBlockStyle.codeBlockAttribute,
+            in: NSRange(location: 0, length: result.length)) { value, range, _ in
+            guard let info = value as? CodeBlockInfo else { return }
+            let code = (result.string as NSString).substring(with: range)
+            guard let highlighted = CodeHighlighter.shared.highlight(
+                code: code, language: info.language, isDark: isDark),
+                highlighted.length == range.length else { return }
+            highlighted.enumerateAttribute(
+                .foregroundColor,
+                in: NSRange(location: 0, length: highlighted.length)) { color, subrange, _ in
+                guard let color = color as? NSColor else { return }
+                result.addAttribute(
+                    .foregroundColor,
+                    value: color,
+                    range: NSRange(
+                        location: range.location + subrange.location,
+                        length: subrange.length))
             }
         }
     }
@@ -198,5 +223,12 @@ enum MarkdownAttributedStringRenderer {
         attrs[.foregroundColor] = color
         attrs[.paragraphStyle] = paragraphStyle
         return attrs
+    }
+}
+
+@MainActor
+enum MarkdownAppearance {
+    static var isDark: Bool {
+        NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 }
