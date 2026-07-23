@@ -4,7 +4,8 @@ import TillerACP
 import TillerAgents
 
 /// Message input styled as a floating rounded card: text on top, control row
-/// below (mode pill with status dot, agent pill, attach, circular send).
+/// below (mode pill with status dot, agent pill, follow, new conversation,
+/// attach, circular send).
 /// "/" opens a slash-command popup fed by the agent's advertised commands;
 /// "@" keeps the file-mention autocomplete. ⏎ send, ⇧⏎ newline.
 struct ChatComposerView: View {
@@ -93,6 +94,23 @@ struct ChatComposerView: View {
             agentPill
             Spacer()
             contextUsageIndicator
+            Button {
+                controller.isFollowing.toggle()
+            } label: {
+                Image(systemName: controller.isFollowing ? "eye.fill" : "eye")
+                    .foregroundStyle(controller.isFollowing
+                                     ? Color.accentColor : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Opens the files the agent is editing in the right panel")
+            Button {
+                Task { await controller.newConversation() }
+            } label: {
+                Image(systemName: "plus.bubble")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("New conversation")
             Button {
                 attachImage()
             } label: {
