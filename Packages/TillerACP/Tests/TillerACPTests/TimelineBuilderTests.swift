@@ -167,4 +167,39 @@ struct TimelineBuilderTests {
         }
         #expect(label.count == 60)
     }
+
+    @Test func finalAssistantMessageCarriesDurationAndCopy() {
+        let items: [TranscriptItem] = [
+            user("u1", "go"), agent("a1", "partial"), tool("t1"),
+            agent("a2", "final"), divider("d1"),
+        ]
+        let rows = TimelineBuilder.rows(
+            items: items,
+            state: TimelineState(turnDurations: ["d1": 42]))
+        func meta(_ rowId: String) -> TimelineRow.MessageMeta?? {
+            for row in rows {
+                if case .message(let item, let meta) = row, "msg-\(item.id)" == rowId {
+                    return meta
+                }
+            }
+            return nil
+        }
+        #expect(meta("msg-a1") == .some(nil))
+        let final = meta("msg-a2")
+        #expect(final??.duration == 42)
+        #expect(final??.showsCopyButton == true)
+    }
+
+    @Test func streamingOpenTurnHidesCopyButton() {
+        let items: [TranscriptItem] = [
+            user("u1", "go"), agent("a1", "typing", complete: false),
+        ]
+        let rows = TimelineBuilder.rows(
+            items: items, state: TimelineState(isStreaming: true))
+        guard case .message(_, let meta) = rows[1] else {
+            Issue.record("expected message"); return
+        }
+        #expect(meta?.showsCopyButton == false)
+        #expect(meta?.duration == nil)
+    }
 }

@@ -154,4 +154,16 @@ import Testing
         #expect(reducer.contextUsage == ContextUsage(used: 2500, size: 200000))
         #expect(reducer.items.isEmpty)
     }
+
+    @Test func recordsTurnDurationKeyedByDividerId() {
+        var reducer = TranscriptReducer()
+        let start = Date(timeIntervalSince1970: 1_000)
+        reducer.userPrompted([.text("hi")], at: start)
+        reducer.apply(.agentMessageChunk(.text("hello")))
+        reducer.turnEnded(.endTurn, at: start.addingTimeInterval(42))
+        guard case .turnDivider(let dividerId, _) = reducer.items.last else {
+            Issue.record("expected divider"); return
+        }
+        #expect(reducer.turnDurations[dividerId] == 42)
+    }
 }
