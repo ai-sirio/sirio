@@ -73,7 +73,9 @@ struct AppModelControlTests {
             await response.set(value)
             return value
         }
-        try? await Task.sleep(for: .milliseconds(30))
+        await poll {
+            model.tabs[target.id]?.flatMap(\.leafIds).contains(createdPaneId) == true
+        }
 
         #expect(await response.value == nil)
         #expect(model.selectedWorktree?.id == selected.id)
@@ -367,6 +369,7 @@ struct AppModelControlTests {
         let model = makeModel(
             registry: registry,
             paneId: paneId,
+            timeoutMs: 1_000,
             controlTabPersister: { _, _, _ in await gate.wait() }
         )
         let worktree = makeWorktree(path: "/tmp/persist-order")
@@ -383,7 +386,7 @@ struct AppModelControlTests {
         await registry.register(
             paneId: paneId, pty: PtyProcess { _ in }, scrollback: ScrollbackBuffer()
         )
-        try? await Task.sleep(for: .milliseconds(20))
+        await poll { await gate.started }
 
         #expect(await gate.started)
         #expect(await response.value == nil)
@@ -399,7 +402,7 @@ struct AppModelControlTests {
         let recorder = ControlPersistenceRecorder()
         let model = AppModel(
             paneRegistry: registry,
-            registrationTimeoutMs: 200,
+            registrationTimeoutMs: 1_000,
             paneIdGenerator: { generatedPaneIds.removeFirst() },
             activateApplication: {},
             controlTabPersister: { _, tabs, _ in
@@ -490,6 +493,21 @@ private actor ControlPersistenceRecorder {
 
     func record(_ paneIds: [UUID]) {
         snapshots.append(paneIds)
+    }
+}
+
+/// Polls `condition` until it's true or `timeout` elapses, instead of
+/// guessing a fixed sleep duration for async state to settle.
+@MainActor
+private func poll(
+    timeout: Duration = .milliseconds(1_000),
+    interval: Duration = .milliseconds(5),
+    _ condition: () async -> Bool
+) async {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if await condition() { return }
+        try? await Task.sleep(for: interval)
     }
 }
 
