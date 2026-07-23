@@ -3,7 +3,7 @@ import Observation
 import TillerACP
 import TillerCore
 
-/// Drives one chat tab: owns the agent child process (via ACPSession),
+/// Drives one chat tab: owns the agent child process (via AgentDriver),
 /// folds events into the transcript, persists at settle points, and
 /// surfaces activity status to AppModel. Analog of MarkdownDocument.
 @MainActor @Observable
@@ -19,6 +19,10 @@ final class ChatController {
     private let worktreePath: String
     private let store: ChatSessionStore?
     private let installStore: AgentInstallStore
+    typealias DriverFactory = (
+        String, String, AgentInstallStore, PermissionMode, String?, String?, String?
+    ) -> (any AgentDriver)?
+    private let driverFactory: DriverFactory
     /// Set on agent switch; the next send() prepends the handoff preamble.
     private var pendingHandoff = false
 
@@ -30,6 +34,9 @@ final class ChatController {
     /// True when the agent exposes the model as a `configOptions` select;
     /// drives the `setModel` transport (`set_config_option` vs `set_model`).
     private var hasModelConfigOption = false
+    /// Native agents expose the unified permission selector; ACP agents use
+    /// their own `modes` payload and keep this nil.
+    private(set) var permissionMode: PermissionMode?
     private(set) var didResume = false
     private(set) var queued: [String] = []
     /// Transcript from a previous run shown read-only when the agent could
@@ -62,22 +69,32 @@ final class ChatController {
         }
     }
 
-    private var session: ACPSession?
+    private var driver: (any AgentDriver)?
     private var pumpTask: Task<Void, Never>?
     private var sessionRecordId: String?
+    private var selectedModel: String?
+    private var selectedEffort: String?
     private var forceNewSession = false
     private var lifecycleGeneration = 0
 
     init(tabId: UUID, agentId: String, worktreeId: UUID,
          worktreePath: String, store: ChatSessionStore?,
          installStore: AgentInstallStore,
-         startNewConversation: Bool = false) {
+         startNewConversation: Bool = false,
+         driverFactory: @escaping DriverFactory = {
+             agentId, worktreePath, installStore, permissionMode, model, effort, resumeSessionId in
+             AgentDriverFactory.makeDriver(
+                 agentId: agentId, worktreePath: worktreePath,
+                 installStore: installStore, permissionMode: permissionMode,
+                 model: model, effort: effort, resumeSessionId: resumeSessionId)
+         }) {
         self.tabId = tabId
         self.agentId = AgentIdMigration.canonical(agentId)
         self.worktreeId = worktreeId
         self.worktreePath = worktreePath
         self.store = store
         self.installStore = installStore
+        self.driverFactory = driverFactory
         self.forceNewSession = startNewConversation
     }
 
@@ -93,10 +110,6 @@ final class ChatController {
         if let record, sessionRecordId == nil, restored.isEmpty, reducer.items.isEmpty {
             agentId = AgentIdMigration.canonical(record.agentId)
         }
-        guard let spec = AgentLaunchSpec.resolved(id: agentId, installStore: installStore) else {
-            state = .disconnected(message: "Agent not installed. Install it from Settings → Agents.")
-            return
-        }
         state = .connecting
 
         if let record, sessionRecordId == nil,
@@ -107,49 +120,77 @@ final class ChatController {
             reducer.restoreContextUsage(ContextUsage(used: used, size: size))
         }
 
-        let transport = ProcessTransport(
-            executable: spec.executable, arguments: spec.arguments,
-            cwd: worktreePath,
-            environment: AgentLaunchSpec.launchEnvironment(extra: spec.environment),
-            onStderrLine: { line in
-                NSLog("[chat:\(spec.arguments.last ?? "?")] %@", line)
-            })
-        let session = ACPSession(
-            client: ACPClient(transport: transport),
-            fileSystem: WorktreeFileSystem(root: worktreePath))
-        self.session = session
+        let requestedMode = PermissionMode(rawValue: record?.permissionMode ?? "") ?? .ask
+        permissionMode = AgentDriverFactory.transportKind(for: agentId) == .native
+            ? requestedMode : nil
+        selectedModel = record?.selectedModel
+        selectedEffort = record?.selectedEffort
+        // Resume only a session created by this same agent.
+        let resumeId = (AgentIdMigration.canonical(record?.agentId ?? "") == agentId)
+            ? record?.acpSessionId : nil
+        guard let initialDriver = driverFactory(
+            agentId, worktreePath, installStore, requestedMode,
+            selectedModel, selectedEffort, resumeId) else {
+            state = .disconnected(message: "Agent not installed. Install it from Settings → Agents.")
+            return
+        }
+        self.driver = initialDriver
 
         do {
-            try await session.start()
+            try await initialDriver.start()
             guard generation == lifecycleGeneration else {
-                await session.stop()
+                await initialDriver.stop()
                 return
             }
-            pumpTask = Task { [weak self] in
-                for await event in session.events {
-                    await MainActor.run { self?.handle(event) }
-                }
-            }
+            startPump(for: initialDriver)
             var mcpServers: [McpServerSpec] = []
             do {
                 mcpServers = try McpConfig.load(worktreeRoot: worktreePath)
             } catch {
                 mcpWarning = "Invalid .mcp.json file: session started without MCP servers."
             }
-            // Resume only a session created by this same agent.
-            let resumeId = (AgentIdMigration.canonical(record?.agentId ?? "") == agentId)
-                ? record?.acpSessionId : nil
-            let handle = try await session.connect(
-                cwd: worktreePath, resumeSessionId: resumeId,
-                mcpServers: mcpServers)
+            let handle: SessionHandle
+            do {
+                handle = try await initialDriver.connect(
+                    cwd: worktreePath, resumeSessionId: resumeId,
+                    mcpServers: mcpServers)
+            } catch where resumeId != nil {
+                // Native drivers cannot recover a failed resume in place. The
+                // old transcript remains in `restored`; start a new driver
+                // and create a fresh conversation without the stale token.
+                await initialDriver.stop()
+                pumpTask?.cancel()
+                pumpTask = nil
+                guard generation == lifecycleGeneration else { return }
+                guard let freshDriver = driverFactory(
+                    agentId, worktreePath, installStore, requestedMode,
+                    selectedModel, selectedEffort, nil) else {
+                    throw DriverError.unavailable
+                }
+                self.driver = freshDriver
+                try await freshDriver.start()
+                guard generation == lifecycleGeneration else {
+                    await freshDriver.stop()
+                    return
+                }
+                startPump(for: freshDriver)
+                handle = try await freshDriver.connect(
+                    cwd: worktreePath, resumeSessionId: nil,
+                    mcpServers: mcpServers)
+                restored.append(.systemNotice(
+                    id: UUID().uuidString,
+                    text: "Session resumed as history — new conversation started."))
+            }
             guard generation == lifecycleGeneration else {
-                await session.stop()
+                await driver?.stop()
                 return
             }
             modes = handle.modes
             models = handle.models
             hasModelConfigOption = handle.configOptions.contains { $0.id == "model" }
             effortOption = handle.configOptions.first { $0.id == "effort" }
+            selectedModel = models?.currentModelId ?? selectedModel
+            selectedEffort = effortOption?.currentValue ?? selectedEffort
             didResume = handle.didResume
             if handle.didResume, let record {
                 restored = []
@@ -165,6 +206,12 @@ final class ChatController {
                 if let sessionRecordId {
                     try? store?.setACPSessionId(handle.sessionId, sessionId: sessionRecordId)
                 }
+            }
+            if let sessionRecordId {
+                try? store?.setTransportKind(
+                    AgentDriverFactory.transportKind(for: agentId).rawValue,
+                    sessionId: sessionRecordId)
+                persistSessionSettings()
             }
             forceNewSession = false
             state = .ready
@@ -183,8 +230,8 @@ final class ChatController {
         persist()
         pumpTask?.cancel()
         pumpTask = nil
-        if let session { await session.stop() }
-        session = nil
+        if let driver { await driver.stop() }
+        driver = nil
         if state != .needsAuth { state = .disconnected(message: nil) }
     }
 
@@ -194,6 +241,9 @@ final class ChatController {
         restored = []
         queued = []
         sessionRecordId = nil
+        selectedModel = nil
+        selectedEffort = nil
+        permissionMode = nil
         forceNewSession = true
         state = .idle
         await start()
@@ -221,6 +271,7 @@ final class ChatController {
         modes = nil
         models = nil
         effortOption = nil
+        permissionMode = nil
         if let sessionRecordId {
             try? store?.setAgentId(canonical, sessionId: sessionRecordId)
             try? store?.clearACPSessionId(sessionId: sessionRecordId)
@@ -258,9 +309,9 @@ final class ChatController {
         promptError = nil
         onStatusChange?(.running)
         Task { [weak self] in
-            guard let self, let session = self.session else { return }
+            guard let self, let driver = self.driver else { return }
             do {
-                let reason = try await session.prompt(blocks)
+                let reason = try await driver.prompt(blocks)
                 self.reducer.turnEnded(reason)
             } catch {
                 self.reducer.turnEnded(.cancelled)
@@ -284,7 +335,7 @@ final class ChatController {
     }
 
     func cancelTurn() async {
-        await session?.cancel()
+        await driver?.cancel()
     }
 
     /// Optimistic like `setModel`: the pill reflects the choice immediately,
@@ -293,9 +344,21 @@ final class ChatController {
         let previous = modes?.currentModeId
         modes?.currentModeId = modeId
         do {
-            try await session?.setMode(modeId)
+            try await driver?.setMode(modeId)
         } catch {
             if let previous { modes?.currentModeId = previous }
+            promptError = Self.describePromptError(error)
+        }
+    }
+
+    /// Native agents use Tiller's unified permission mode. ACP agents keep
+    /// their protocol-provided `modes` and expose nil here.
+    func setPermissionMode(_ mode: PermissionMode) async {
+        do {
+            try await driver?.setMode(mode.rawValue)
+            permissionMode = mode
+            persistSessionSettings()
+        } catch {
             promptError = Self.describePromptError(error)
         }
     }
@@ -310,7 +373,7 @@ final class ChatController {
         models?.currentModelId = modelId
         do {
             if hasModelConfigOption {
-                if let updated = try await session?.setConfigOption(
+                if let updated = try await driver?.setConfigOption(
                     id: "model", value: modelId) {
                     if let synced = SessionModelState(configOptions: updated) {
                         models = synced
@@ -318,10 +381,14 @@ final class ChatController {
                     effortOption = updated.first { $0.id == "effort" }
                 }
             } else {
-                try await session?.setModel(modelId)
+                try await driver?.setModel(modelId)
             }
+            selectedModel = models?.currentModelId ?? modelId
+            persistSessionSettings()
         } catch {
             if let previous { models?.currentModelId = previous }
+            selectedModel = previous
+            persistSessionSettings()
             promptError = Self.describePromptError(error)
         }
     }
@@ -332,14 +399,20 @@ final class ChatController {
         let previous = effortOption?.currentValue
         effortOption?.currentValue = value
         do {
-            guard let updated = try await session?.setConfigOption(
-                id: "effort", value: value) else { return }
-            effortOption = updated.first { $0.id == "effort" } ?? effortOption
-            if let syncedModels = SessionModelState(configOptions: updated) {
-                models = syncedModels
+            if let updated = try await driver?.setConfigOption(
+                id: "effort", value: value) {
+                effortOption = updated.first { $0.id == "effort" } ?? effortOption
+                if let syncedModels = SessionModelState(configOptions: updated) {
+                    models = syncedModels
+                }
             }
+            selectedEffort = effortOption?.currentValue ?? value
+            selectedModel = models?.currentModelId ?? selectedModel
+            persistSessionSettings()
         } catch {
             effortOption?.currentValue = previous
+            selectedEffort = previous
+            persistSessionSettings()
             promptError = Self.describePromptError(error)
         }
     }
@@ -348,17 +421,25 @@ final class ChatController {
         if let optionId {
             reducer.permissionResolved(requestId: requestId,
                                        resolution: .selected(optionId: optionId))
-            await session?.answerPermission(requestId: requestId,
+            await driver?.answerPermission(requestId: requestId,
                                             outcome: .selected(optionId: optionId))
             onStatusChange?(.running)
         } else {
             reducer.permissionResolved(requestId: requestId, resolution: .cancelled)
-            await session?.answerPermission(requestId: requestId, outcome: .cancelled)
+            await driver?.answerPermission(requestId: requestId, outcome: .cancelled)
         }
         persist()
     }
 
     // MARK: - Events
+
+    private func startPump(for driver: any AgentDriver) {
+        pumpTask = Task { [weak self] in
+            for await event in driver.events {
+                await MainActor.run { self?.handle(event) }
+            }
+        }
+    }
 
     private func handle(_ event: ACPSessionEvent) {
         switch event {
@@ -409,4 +490,17 @@ final class ChatController {
         guard let store, let sessionRecordId else { return }
         try? store.saveTranscript(sessionId: sessionRecordId, items: items)
     }
+
+    private func persistSessionSettings() {
+        guard let store, let sessionRecordId else { return }
+        try? store.setSessionSettings(
+            permissionMode: permissionMode?.rawValue,
+            selectedModel: selectedModel,
+            selectedEffort: selectedEffort,
+            sessionId: sessionRecordId)
+    }
+}
+
+private enum DriverError: Error {
+    case unavailable
 }
