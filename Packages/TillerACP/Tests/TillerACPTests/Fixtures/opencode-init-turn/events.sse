@@ -1,0 +1,15 @@
+data: {"id":"evt_f8dc566a0001DkvrEMU1v3rQRk","type":"server.connected","properties":{}}
+
+data: {"id":"evt_f8dc56aab001gRNYbtuE8jXJRU","type":"session.updated","properties":{"sessionID":"ses_0723a999fffeGfJSdX5lilsApP","info":{"id":"ses_0723a999fffeGfJSdX5lilsApP","slug":"quick-garden","projectID":"global","directory":"/private/var/folders/w7/hzhb9bcs61dg9r9bs40g6ttw0000gn/T/opencode-fixture.Iywnmx","path":"private/var/folders/w7/hzhb9bcs61dg9r9bs40g6ttw0000gn/T/opencode-fixture.Iywnmx","title":"Task 9 fixture","agent":"build","model":{"id":"kimi-k2.7-code","providerID":"ollama-cloud","variant":"default"},"version":"1.18.4","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784789952096,"updated":1784789953194}}}}
+
+data: {"id":"evt_f8dc56aaf001EN4xBUe3VHZ4VO","type":"message.updated","properties":{"sessionID":"ses_0723a999fffeGfJSdX5lilsApP","info":{"id":"msg_f8dc56aaa001paP6DrB66MlAU4","role":"user","sessionID":"ses_0723a999fffeGfJSdX5lilsApP","time":{"created":1784789953194},"agent":"build","model":{"providerID":"ollama-cloud","modelID":"kimi-k2.7-code"}}}}
+
+data: {"id":"evt_f8dc56ab1001tSBjqxoaQk1Qs4","type":"message.part.updated","properties":{"sessionID":"ses_0723a999fffeGfJSdX5lilsApP","part":{"type":"text","text":"Reply with the single word: done","messageID":"msg_f8dc56aaa001paP6DrB66MlAU4","sessionID":"ses_0723a999fffeGfJSdX5lilsApP","id":"prt_f8dc56aaf001S2KcfUeh52ksg2"},"time":1784789953201}}
+
+data: {"id":"evt_f8dc56ab2001B0joG5fwbzOlO0","type":"session.updated","properties":{"sessionID":"ses_0723a999fffeGfJSdX5lilsApP","info":{"id":"ses_0723a999fffeGfJSdX5lilsApP","slug":"quick-garden","projectID":"global","directory":"/private/var/folders/w7/hzhb9bcs61dg9r9bs40g6ttw0000gn/T/opencode-fixture.Iywnmx","path":"private/var/folders/w7/hzhb9bcs61dg9r9bs40g6ttw0000gn/T/opencode-fixture.Iywnmx","title":"Task 9 fixture","agent":"build","model":{"id":"kimi-k2.7-code","providerID":"ollama-cloud","variant":"default"},"version":"1.18.4","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1784789952096,"updated":1784789953202}}}}
+
+data: {"id":"evt_f8dc56ab5001CYOj974ih5KXBu","type":"session.status","properties":{"sessionID":"ses_0723a999fffeGfJSdX5lilsApP","status":{"type":"busy"}}}
+
+data: {"id":"evt_f8dc56ab8001AhSd8tXt96uqb3","type":"message.updated","properties":{"sessionID":"ses_0723a999fffeGfJSdX5lilsApP","info":{"id":"msg_f8dc56ab8001J4LxvFQ7deOMbT","parentID":"msg_f8dc56aaa001paP6DrB66MlAU4","role":"assistant","mode":"build","agent":"build","path":{"cwd":"/private/var/folders/w7/hzhb9bcs61dg9r9bs40g6ttw0000gn/T/opencode-fixture.Iywnmx","root":"/"},"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"modelID":"kimi-k2.7-code","providerID":"ollama-cloud","time":{"created":1784789953208},"sessionID":"ses_0723a999fffeGfJSdX5lilsApP"}}}
+
+data: {"id":"evt_f8dc58db1001ZSnCoC7DkzXuJj","type":"server.heartbeat","properties":{}}
