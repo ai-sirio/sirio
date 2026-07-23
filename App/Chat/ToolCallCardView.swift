@@ -3,7 +3,7 @@ import TillerACP
 import TillerCore
 
 /// One tool call as a card: kind icon, title, status; expandable content
-/// (diff/output); inline permission request with adapter-provided options.
+/// (diff/output); pending permission requests remain highlighted.
 struct ToolCallCardView: View {
     let item: ToolCallItem
     let controller: ChatController
@@ -19,9 +19,6 @@ struct ToolCallCardView: View {
             header
             if expanded || isPermissionPending {
                 contentBody
-            }
-            if isPermissionPending, let permission = item.permission {
-                permissionButtons(permission)
             }
         }
         .padding(8)
@@ -139,27 +136,4 @@ struct ToolCallCardView: View {
         .textSelection(.enabled)
     }
 
-    private func permissionButtons(_ permission: PermissionState) -> some View {
-        HStack(spacing: 8) {
-            ForEach(permission.options, id: \.optionId) { option in
-                Button(option.name) {
-                    Task {
-                        await controller.answerPermission(
-                            requestId: permission.requestId,
-                            optionId: option.optionId)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .tint(tint(for: option.kind))
-                .controlSize(.small)
-            }
-        }
-    }
-
-    private func tint(for kind: PermissionOptionKind) -> Color {
-        switch kind {
-        case .allowOnce, .allowAlways: .green
-        case .rejectOnce, .rejectAlways: .red
-        }
-    }
 }

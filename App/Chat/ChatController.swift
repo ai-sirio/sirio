@@ -78,6 +78,19 @@ final class ChatController {
             return false
         }
     }
+    /// Pending permissions shown in the composer approval panel (plan-mode
+    /// exits excluded — they render in the proposed-plan card).
+    var composerPermissions: [ComposerPermission] {
+        ComposerPermissions.extract(from: items)
+    }
+    var hasPlanAwaitingApproval: Bool {
+        timelineRows.contains { row in
+            if case .proposedPlan(_, _, .some(let approval)) = row {
+                return approval.isPending
+            }
+            return false
+        }
+    }
 
     private var driver: (any AgentDriver)?
     private var pumpTask: Task<Void, Never>?

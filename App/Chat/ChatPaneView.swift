@@ -32,6 +32,8 @@ struct ChatPaneView: View {
             default:
                 EmptyView()
             }
+            TranscriptView(controller: controller, worktree: worktree,
+                           appModel: appModel)
             if let promptError = controller.promptError {
                 banner(
                     "Turn error",
@@ -48,8 +50,12 @@ struct ChatPaneView: View {
                     controller.mcpWarning = nil
                 }
             }
-            TranscriptView(controller: controller, worktree: worktree,
-                           appModel: appModel)
+            if controller.hasPlanAwaitingApproval {
+                banner(
+                    "Plan awaiting approval",
+                    detail: "Review the proposed plan in the transcript, then approve or reject it.",
+                    actionTitle: "OK") {}
+            }
             Divider()
             ChatComposerView(controller: controller, worktreePath: worktree.path)
         }
