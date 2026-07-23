@@ -6,7 +6,7 @@ struct PermissionModeTests {
         #expect(PermissionMode.ask.claudeValue == "default")
         #expect(PermissionMode.acceptEdits.claudeValue == "acceptEdits")
         #expect(PermissionMode.plan.claudeValue == "plan")
-        #expect(PermissionMode.fullAuto.claudeValue == "bypassPermissions")
+        #expect(PermissionMode.fullAuto.claudeValue == "acceptEdits")
     }
 
     @Test func codexMapping() {

@@ -5,12 +5,15 @@ import Foundation
 public enum PermissionMode: String, CaseIterable, Sendable, Codable {
     case ask, acceptEdits, plan, fullAuto
 
+    /// Claude requires `--dangerously-skip-permissions` at launch for
+    /// `bypassPermissions`. Tiller implements full auto as `acceptEdits` plus
+    /// automatic tool approval instead.
     public var claudeValue: String {
         switch self {
         case .ask: "default"
         case .acceptEdits: "acceptEdits"
         case .plan: "plan"
-        case .fullAuto: "bypassPermissions"
+        case .fullAuto: "acceptEdits"
         }
     }
 
