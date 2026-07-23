@@ -60,4 +60,56 @@ struct TimelineBuilderTests {
             state: TimelineState())
         #expect(Set(rows.map(\.id)).count == rows.count)
     }
+
+    @Test func consecutiveToolCallsFormOneWorkGroup() {
+        let rows = TimelineBuilder.rows(
+            items: [user("u1", "go"), tool("t1"), tool("t2"), tool("t3")],
+            state: TimelineState())
+        let workRows = rows.compactMap { row -> [TimelineRow.WorkEntry]? in
+            if case .work(_, let entries, _) = row { return entries }
+            return nil
+        }
+        #expect(workRows.count == 1)
+        #expect(workRows[0].count == 3)
+        #expect(workRows[0].map(\.id) == ["t1", "t2", "t3"])
+    }
+
+    @Test func workGroupIdIsFirstToolCallId() {
+        let rows = TimelineBuilder.rows(
+            items: [tool("t1"), tool("t2")], state: TimelineState())
+        guard case .work(let groupId, _, let isExpanded) = rows[0] else {
+            Issue.record("expected work row"); return
+        }
+        #expect(groupId == "wg-t1")
+        #expect(isExpanded == false)
+    }
+
+    @Test func expandedStateFollowsTimelineState() {
+        let rows = TimelineBuilder.rows(
+            items: [tool("t1"), tool("t2")],
+            state: TimelineState(expandedWorkGroups: ["wg-t1"]))
+        guard case .work(_, _, let isExpanded) = rows[0] else {
+            Issue.record("expected work row"); return
+        }
+        #expect(isExpanded == true)
+    }
+
+    @Test func interleavedMessageSplitsWorkGroups() {
+        let rows = TimelineBuilder.rows(
+            items: [tool("t1"), agent("a1", "half"), tool("t2")],
+            state: TimelineState())
+        let groupIds = rows.compactMap { row -> String? in
+            if case .work(let id, _, _) = row { return id }
+            return nil
+        }
+        #expect(groupIds == ["wg-t1", "wg-t2"])
+    }
+
+    @Test func compactLabelStripsTrailingCompleted() {
+        #expect(TimelineRow.WorkEntry.compactLabel("Read AppModel.swift completed")
+                == "Read AppModel.swift")
+        #expect(TimelineRow.WorkEntry.compactLabel("Read AppModel.swift")
+                == "Read AppModel.swift")
+        #expect(TimelineRow.WorkEntry.compactLabel("multi\nline title") == "multi")
+    }
 }
