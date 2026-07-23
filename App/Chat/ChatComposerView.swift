@@ -18,6 +18,7 @@ struct ChatComposerView: View {
     @State private var mentionCandidates: [String] = []
     @State private var slashSelectionIndex = 0
     @State private var slashPopupDismissed = false
+    @State private var modelPickerShown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isPrompting: Bool { controller.state == .prompting }
@@ -90,7 +91,6 @@ struct ChatComposerView: View {
         HStack(spacing: 8) {
             modePill
             agentPill
-            effortPill
             Spacer()
             contextUsageIndicator
             Button {
@@ -189,33 +189,31 @@ struct ChatComposerView: View {
         }
     }
 
-    /// Model selector when the agent advertises models (both v1 agents do);
-    /// plain agent badge otherwise.
+    /// Compact model button opening the picker popover; plain agent badge
+    /// when the agent advertises no models.
     @ViewBuilder
     private var agentPill: some View {
         if let models = controller.models, !models.availableModels.isEmpty {
-            Menu {
-                ForEach(models.availableModels, id: \.modelId) { model in
-                    Button {
-                        Task { await controller.setModel(model.modelId) }
-                    } label: {
-                        if model.modelId == models.currentModelId {
-                            Label(modelMenuTitle(model), systemImage: "checkmark")
-                        } else {
-                            Text(modelMenuTitle(model))
-                        }
-                    }
-                }
+            Button {
+                modelPickerShown.toggle()
             } label: {
                 HStack(spacing: 5) {
                     Text(currentModelName).font(.caption).lineLimit(1)
+                    if let effort = controller.effortOption,
+                       effort.currentValue != nil {
+                        Text(effortLabel(effort))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
                     Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
                 }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
+            .buttonStyle(.plain)
             .modifier(PillBackground())
+            .popover(isPresented: $modelPickerShown, arrowEdge: .top) {
+                ModelPickerPopover(controller: controller,
+                                   isPresented: $modelPickerShown)
+            }
         } else {
             Text(agentDisplayName).font(.caption)
                 .modifier(PillBackground())
@@ -227,46 +225,6 @@ struct ChatComposerView: View {
         return models.availableModels
             .first { $0.modelId == models.currentModelId }?.name
             ?? models.currentModelId
-    }
-
-    private func modelMenuTitle(_ model: ModelInfo) -> String {
-        if let description = model.description, !description.isEmpty {
-            return "\(model.name) — \(description)"
-        }
-        return model.name
-    }
-
-    /// Reasoning-effort select ("MED" pill); only agents that expose it
-    /// (OpenCode) get the pill.
-    @ViewBuilder
-    private var effortPill: some View {
-        if let effort = controller.effortOption,
-           let choices = effort.options, !choices.isEmpty {
-            Menu {
-                ForEach(choices, id: \.value) { choice in
-                    Button {
-                        Task { await controller.setEffort(choice.value) }
-                    } label: {
-                        if choice.value == effort.currentValue {
-                            Label(choice.name, systemImage: "checkmark")
-                        } else {
-                            Text(choice.name)
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(effortLabel(effort))
-                        .font(.caption2.weight(.semibold))
-                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .modifier(PillBackground())
-            .help(effort.name ?? "Effort")
-        }
     }
 
     /// Context-window usage ring; always shown so its position in the control
