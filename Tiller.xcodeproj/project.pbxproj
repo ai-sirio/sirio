@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		004A42005D2DED0CDE2E01BB /* UpdaterModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77BD717DBAD9BA574213A27 /* UpdaterModel.swift */; };
 		019D3540F6FCBC157AC2208A /* SettingsSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB40E7559F4C849BD3C2094A /* SettingsSurface.swift */; };
+		022817D4BD2028609175C196 /* ModelPickerPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E7BCB7765ABEE79057FA44C /* ModelPickerPopover.swift */; };
 		06C8C199DCAEB8CFD6B1ED99 /* AgentsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C73446E5618BB18EA2FF9D3 /* AgentsSettingsView.swift */; };
 		0861C10C3B431CD58B516CF6 /* MarkdownToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E71C8D94D39CE2EEAE0993 /* MarkdownToolbar.swift */; };
 		0C2C39CB89F5865BD49E2AB5 /* AgentsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */; };
@@ -188,6 +189,7 @@
 		86A6DD70988B7ADCD96FC243 /* TillerGit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerGit; path = Packages/TillerGit; sourceTree = SOURCE_ROOT; };
 		8B09A03733A33C9FDC925A05 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8DB60BAAD4CE10123E09FB38 /* AutoNamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoNamer.swift; sourceTree = "<group>"; };
+		8E7BCB7765ABEE79057FA44C /* ModelPickerPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerPopover.swift; sourceTree = "<group>"; };
 		9A4F40CB425225370C05E048 /* TillerTerminal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerTerminal; path = Packages/TillerTerminal; sourceTree = SOURCE_ROOT; };
 		9B5A41F673927F0554385559 /* TillerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerApp.swift; sourceTree = "<group>"; };
 		9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTabMenuItems.swift; sourceTree = "<group>"; };
@@ -353,6 +355,7 @@
 				0147E80EE5F3B7B9F50B2E78 /* EditSummaryCardView.swift */,
 				44A4D7761754955F550F7ED9 /* InsightCardView.swift */,
 				A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */,
+				8E7BCB7765ABEE79057FA44C /* ModelPickerPopover.swift */,
 				B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */,
 				D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */,
 				E78AB8A516CF2F33D8CAFF4E /* TillerMarkdownTheme.swift */,
@@ -665,6 +668,7 @@
 				C25533F2D034C7F522E85A9A /* MarkdownEditorTabView.swift in Sources */,
 				0861C10C3B431CD58B516CF6 /* MarkdownToolbar.swift in Sources */,
 				8ECABD13D02543070A0AD0F9 /* MenuBarStatusIcon.swift in Sources */,
+				022817D4BD2028609175C196 /* ModelPickerPopover.swift in Sources */,
 				FACE3803227ABE03D36D87B1 /* NewTabMenuItems.swift in Sources */,
 				1A0AA30587BDFB6593034A29 /* OllamaCloudUsageFetcher.swift in Sources */,
 				F58EDD6213BE3AA8EF5359E0 /* OpenCodeGoUsageFetcher.swift in Sources */,
