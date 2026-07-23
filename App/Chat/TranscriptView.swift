@@ -12,23 +12,22 @@ struct TranscriptView: View {
     let worktree: Worktree
     let appModel: AppModel
 
+    // Stopgap: timeline-row rendering (work groups, turn folds, 700pt column)
+    // is disabled — three main-thread layout storms were sampled with it
+    // enabled (ScrollView re-measuring the whole lazy content per pass while
+    // streaming). Rendering follows the pre-timeline flat item path until the
+    // storm is isolated offline; `rowView` and the row views stay compiled
+    // for that follow-up.
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(controller.timelineRows) { row in
-                        // Constrain the content column per row, centering via
-                        // spacers: framing the LazyVStack forces full lazy
-                        // measurement, and `.frame(alignment:)` pairs trigger
-                        // repeated explicit-alignment layout passes (both
-                        // observed as main-thread layout storms).
-                        HStack(spacing: 0) {
-                            Spacer(minLength: 0)
-                            rowView(row)
-                                .frame(maxWidth: 700)
-                            Spacer(minLength: 0)
-                        }
-                        .id(row.id)
+                    ForEach(controller.items) { item in
+                        itemView(item, meta: nil)
+                            .id(item.id)
+                    }
+                    if controller.state == .prompting {
+                        thinkingRow
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
@@ -41,6 +40,16 @@ struct TranscriptView: View {
                 }
             }
         }
+    }
+
+    /// Pending plan-mode approval (kind .switchMode): excluded from the
+    /// composer panel, so the plan card must keep offering the buttons.
+    private var pendingPlanApproval: PermissionState? {
+        for item in controller.items {
+            if case .toolCall(let call) = item, call.kind == .switchMode,
+               call.permission?.isPending == true { return call.permission }
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -82,7 +91,7 @@ struct TranscriptView: View {
             ToolCallCardView(item: toolCall, controller: controller,
                              worktree: worktree, appModel: appModel)
         case .plan(_, let entries):
-            planCard(entries, approval: nil)
+            planCard(entries, approval: pendingPlanApproval)
         case .turnDivider(_, let date):
             turnDivider(date)
         case .editSummary(_, let paths):
