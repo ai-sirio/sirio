@@ -51,6 +51,9 @@ extension AgentLaunchSpec {
     public static func resolved(id: String,
                                 installStore: AgentInstallStore) -> AgentLaunchSpec? {
         let canonical = AgentIdMigration.canonical(id)
+        if ["claude-acp", "codex-acp", "opencode"].contains(canonical) {
+            return nil
+        }
         if canonical == "omp" {
             return AgentLaunchSpec(executable: "/bin/zsh",
                                    arguments: ["-lc", "exec omp acp"])

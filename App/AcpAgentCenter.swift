@@ -7,6 +7,8 @@ import TillerACP
 /// isolated installer and report back here.
 @MainActor @Observable
 final class AcpAgentCenter {
+    private static let nativeAgentIDs = ["claude-acp", "codex-acp", "opencode"]
+
     struct InstalledAgentSummary: Identifiable, Equatable {
         let id: String
         let name: String
@@ -38,12 +40,14 @@ final class AcpAgentCenter {
     private let registryClient: AgentRegistryClient
     private let installer: AgentInstaller
     private let shell: ShellRunning
+    private let pathProbe: @Sendable (String) -> Bool
     private var registryAgents: [RegistryAgent] = []
 
     init(installStore: AgentInstallStore,
          registryClient: AgentRegistryClient? = nil,
          installer: AgentInstaller? = nil,
-         shell: ShellRunning = ZshRunner()) {
+         shell: ShellRunning = ZshRunner(),
+         pathProbe: @escaping @Sendable (String) -> Bool = defaultPathProbe) {
         self.installStore = installStore
         let cacheURL = installStore.rootDirectory
             .deletingLastPathComponent()
@@ -52,15 +56,24 @@ final class AcpAgentCenter {
             ?? AgentRegistryClient(cacheURL: cacheURL)
         self.installer = installer ?? AgentInstaller(store: installStore)
         self.shell = shell
+        self.pathProbe = pathProbe
         Task { await self.refresh() }
     }
 
-    /// Installed agents for the chat selector: manifests + omp when its
-    /// binary is present. Names come from the registry when known.
+    /// Installed agents for the chat selector: ACP manifests plus built-in
+    /// agents whose native CLI is present. Names come from the registry when
+    /// known.
     var installedAgents: [InstalledAgentSummary] {
-        var result = installStore.installedManifests().map { manifest in
-            InstalledAgentSummary(id: manifest.id,
-                                  name: displayName(for: manifest.id))
+        var result = installStore.installedManifests().compactMap { manifest -> InstalledAgentSummary? in
+            let canonical = AgentIdMigration.canonical(manifest.id)
+            guard !Self.isNative(canonical) else { return nil }
+            return InstalledAgentSummary(id: manifest.id,
+                                         name: displayName(for: manifest.id))
+        }
+        for id in Self.nativeAgentIDs {
+            if case .builtin(true) = statuses[id] {
+                result.append(InstalledAgentSummary(id: id, name: displayName(for: id)))
+            }
         }
         if case .builtin(true) = statuses["omp"] ?? .builtin(available: false) {
             result.append(InstalledAgentSummary(id: "omp", name: "omp"))
@@ -69,7 +82,18 @@ final class AcpAgentCenter {
     }
 
     func displayName(for id: String) -> String {
-        registryAgents.first { $0.id == id }?.name ?? id
+        let canonical = AgentIdMigration.canonical(id)
+        if let name = registryAgents.first(where: {
+            AgentIdMigration.canonical($0.id) == canonical
+        })?.name {
+            return name
+        }
+        switch canonical {
+        case "claude-acp": return "Claude Code"
+        case "codex-acp": return "Codex"
+        case "opencode": return "OpenCode"
+        default: return id
+        }
     }
 
     func refresh(force: Bool = false) async {
@@ -82,15 +106,40 @@ final class AcpAgentCenter {
         }
         lastFetchedAt = await registryClient.lastFetchedAt()
 
+        var nativeAvailability: [String: Bool] = [:]
+        for id in Self.nativeAgentIDs {
+            nativeAvailability[id] = pathProbe(AgentDriverFactory.nativeBinary(for: id))
+        }
+
         var newRows: [AgentRow] = [
             AgentRow(id: "omp", name: "omp (Oh My Pi)",
                      description: "Built-in: uses the omp binary on your PATH.",
                      latestVersion: nil)
         ]
-        newRows += registryAgents.map {
+
+        for id in Self.nativeAgentIDs {
+            let registryAgent = registryAgents.first {
+                AgentIdMigration.canonical($0.id) == id
+            }
+            let binary = AgentDriverFactory.nativeBinary(for: id)
+            let available = nativeAvailability[id] == true
+            newRows.append(AgentRow(
+                id: id,
+                name: registryAgent?.name ?? displayName(for: id),
+                description: available
+                    ? (registryAgent?.description
+                       ?? "Built-in: uses the \(binary) binary on your PATH.")
+                    : "Requires \(binary) on PATH",
+                latestVersion: registryAgent?.version))
+        }
+
+        newRows += registryAgents.filter {
+            !Self.isNative($0.id)
+        }.map {
             AgentRow(id: $0.id, name: $0.name, description: $0.description,
                      latestVersion: $0.version)
-        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         rows = newRows
 
         let ompFound: Bool
@@ -101,7 +150,10 @@ final class AcpAgentCenter {
             ompFound = false
         }
         var newStatuses: [String: RowStatus] = ["omp": .builtin(available: ompFound)]
-        for agent in registryAgents {
+        for id in Self.nativeAgentIDs {
+            newStatuses[id] = .builtin(available: nativeAvailability[id] == true)
+        }
+        for agent in registryAgents where !Self.isNative(agent.id) {
             newStatuses[agent.id] = Self.rowStatus(
                 AgentInstallStatus.resolve(
                     manifest: installStore.manifest(id: agent.id),
@@ -110,13 +162,14 @@ final class AcpAgentCenter {
         }
         // Installed agents that vanished from the registry stay usable.
         for manifest in installStore.installedManifests()
-        where newStatuses[manifest.id] == nil {
+        where !Self.isNative(manifest.id) && newStatuses[manifest.id] == nil {
             newStatuses[manifest.id] = .installed(manifest.version)
         }
         statuses = newStatuses
     }
 
     func install(_ id: String) async {
+        guard !Self.isNative(id) else { return }
         guard let agent = registryAgents.first(where: { $0.id == id }) else { return }
         statuses[id] = .installing
         do {
@@ -136,6 +189,25 @@ final class AcpAgentCenter {
         case .updateAvailable(let installed, let latest):
             .updateAvailable(installed: installed, latest: latest)
         case .unsupported: .unsupported
+        }
+    }
+
+    private static func isNative(_ id: String) -> Bool {
+        AgentDriverFactory.transportKind(for: id) == .native
+    }
+
+    nonisolated private static func defaultPathProbe(_ binary: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", "command -v \(binary)"]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
         }
     }
 }
