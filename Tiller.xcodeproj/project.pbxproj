@@ -62,6 +62,7 @@
 		7F65A45109736224BECDB901 /* WorktreeRunningAgentsBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84F98EF0C9277586AF581624 /* WorktreeRunningAgentsBadge.swift */; };
 		81FDA9F633A3A9B4B05FACBA /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50A32BA4FF89DB0133FF9C6C /* SidebarView.swift */; };
 		830B3F78ADC1E051982B8FE9 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 2B6E1D46AC2DF993DECA02BD /* README.md */; };
+		8311E035D440CD440001F2F9 /* TimelineRowViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */; };
 		842C39BA681065F69B196900 /* TillerAgents in Frameworks */ = {isa = PBXBuildFile; productRef = 56F2759B5316866B25363AF7 /* TillerAgents */; };
 		843D838715C653ED33181B70 /* RightPanelMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754ED987A43572FB14EBB2FD /* RightPanelMode.swift */; };
 		896DB6FB17EDCFBB89C1F6BC /* GitDiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56A0B2497A79763F2B2707AD /* GitDiffView.swift */; };
@@ -146,6 +147,7 @@
 		2F36D85464B28946B5E467C9 /* CodeBlockLayoutManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockLayoutManager.swift; sourceTree = "<group>"; };
 		362949AA885756BAA5340B1C /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		3AFBA57E03B80A9B41F89BA7 /* AgentMessageSegmenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessageSegmenter.swift; sourceTree = "<group>"; };
+		3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineRowViews.swift; sourceTree = "<group>"; };
 		411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundProcessAgent.swift; sourceTree = "<group>"; };
 		440886206B85A90DD5467FE6 /* AgentMenuIconCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMenuIconCache.swift; sourceTree = "<group>"; };
 		448394CDE33B4E363B8D2B2E /* AgentAccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAccountStore.swift; sourceTree = "<group>"; };
@@ -351,6 +353,7 @@
 				B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */,
 				D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */,
 				E78AB8A516CF2F33D8CAFF4E /* TillerMarkdownTheme.swift */,
+				3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */,
 				A05EFE98529F40E18CF9A8F2 /* ToolCallCardView.swift */,
 				E5C26563F4760C9F22B2AF31 /* TranscriptView.swift */,
 			);
@@ -680,6 +683,7 @@
 				7CE9B2261C82392303742787 /* TillerApp.swift in Sources */,
 				9A421353A3548A7F73376DF0 /* TillerMarkdownTheme.swift in Sources */,
 				250881E7C94F2893D17090F5 /* TillerSkillResource.swift in Sources */,
+				8311E035D440CD440001F2F9 /* TimelineRowViews.swift in Sources */,
 				DFADDA7E1C311808EC99C68D /* ToolCallCardView.swift in Sources */,
 				B9888CC9AF89737DF3110B17 /* TranscriptView.swift in Sources */,
 				E8EC832481BE1F2530BCE3D1 /* UpdateToastView.swift in Sources */,
