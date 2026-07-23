@@ -79,8 +79,6 @@ struct SidebarView: View {
                     .padding(.horizontal, 8)
                     .padding(.top, 4)
                     .animation(.easeInOut(duration: 0.18), value: model.expandedProjectIds)
-                    .animation(.easeInOut(duration: 0.18), value: model.worktrees.mapValues { $0.map(\.id) })
-                    .animation(.easeInOut(duration: 0.18), value: model.tabs.mapValues { $0.map(\.id) })
                 }
                 .scrollContentBackground(.hidden)
 
