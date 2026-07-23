@@ -112,4 +112,59 @@ struct TimelineBuilderTests {
                 == "Read AppModel.swift")
         #expect(TimelineRow.WorkEntry.compactLabel("multi\nline title") == "multi")
     }
+
+    @Test func olderTurnsFoldKeepingLastTwoOpen() {
+        // three closed turns + one open turn = 4 turns; first two fold
+        let items: [TranscriptItem] = [
+            user("u1", "first question"), agent("a1", "r1"), divider("d1"),
+            user("u2", "second question"), agent("a2", "r2"), divider("d2"),
+            user("u3", "third question"), agent("a3", "r3"), divider("d3"),
+            user("u4", "fourth question"),
+        ]
+        let rows = TimelineBuilder.rows(items: items, state: TimelineState())
+        let foldIds = rows.compactMap { row -> String? in
+            if case .turnFold(let turnId, _, _) = row { return turnId }
+            return nil
+        }
+        #expect(foldIds == ["d1", "d2"])
+        // folded turns emit no divider row
+        let dividerIds = rows.compactMap { row -> String? in
+            if case .turnDivider(let id, _) = row { return id }
+            return nil
+        }
+        #expect(dividerIds == ["d3"])
+        // open turns keep their message rows
+        #expect(rows.contains { $0.id == "msg-u3" })
+        #expect(rows.contains { $0.id == "msg-u4" })
+        #expect(!rows.contains { $0.id == "msg-u1" })
+    }
+
+    @Test func unfoldedTurnRendersItsRows() {
+        let items: [TranscriptItem] = [
+            user("u1", "first"), agent("a1", "r1"), divider("d1"),
+            user("u2", "second"), divider("d2"),
+            user("u3", "third"), divider("d3"),
+        ]
+        let rows = TimelineBuilder.rows(
+            items: items, state: TimelineState(unfoldedTurns: ["d1"]))
+        #expect(rows.contains { $0.id == "msg-u1" })
+        #expect(!rows.contains { row in
+            if case .turnFold(let id, _, _) = row { return id == "d1" }
+            return false
+        })
+    }
+
+    @Test func foldLabelComesFromFirstUserMessage() {
+        let long = String(repeating: "x", count: 100)
+        let items: [TranscriptItem] = [
+            user("u1", long), divider("d1"),
+            user("u2", "b"), divider("d2"),
+            user("u3", "c"), divider("d3"),
+        ]
+        let rows = TimelineBuilder.rows(items: items, state: TimelineState())
+        guard case .turnFold(_, let label, _) = rows[0] else {
+            Issue.record("expected fold"); return
+        }
+        #expect(label.count == 60)
+    }
 }
