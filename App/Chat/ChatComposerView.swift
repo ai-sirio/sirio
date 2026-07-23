@@ -38,6 +38,8 @@ struct ChatComposerView: View {
                 mentionPopup(query: query)
             }
             queuedList
+            ComposerApprovalPanel(permissions: controller.composerPermissions,
+                                  controller: controller)
             card
         }
         .padding(.horizontal, 12)
