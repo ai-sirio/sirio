@@ -3,8 +3,8 @@ import TillerACP
 import TillerAgents
 import TillerCore
 
-/// A whole chat tab: header (agent identity + state + new conversation),
-/// transcript, composer. State banners cover auth/disconnect/npx failures.
+/// A whole chat tab: transcript + composer. Agent identity/state live in
+/// the window toolbar; state banners cover auth/disconnect/npx failures.
 struct ChatPaneView: View {
     let controller: ChatController
     let worktree: Worktree
@@ -12,8 +12,6 @@ struct ChatPaneView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider()
             switch controller.state {
             case .needsAuth:
                 banner(
@@ -64,81 +62,6 @@ struct ChatPaneView: View {
                 appModel?.requestChatFollow(path: path, worktreeId: worktree.id)
             }
             await controller.start()
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 8) {
-            Menu {
-                ForEach(appModel.agentCenter.installedAgents) { agent in
-                    Button {
-                        Task {
-                            await controller.switchAgent(to: agent.id,
-                                                         displayName: agent.name)
-                            appModel.rememberChatAgent(agent.id)
-                        }
-                    } label: {
-                        if let image = AgentMenuIconCache.image(for: agent.id) {
-                            Label { Text(agent.name) } icon: { Image(nsImage: image) }
-                        } else {
-                            Text(agent.name)
-                        }
-                    }
-                    .disabled(agent.id == controller.agentId)
-                }
-                Divider()
-                Button("Other agents…") { appModel.openAgentsSettings() }
-            } label: {
-                HStack(spacing: 5) {
-                    AgentIcon(agentId: controller.agentId, size: 12)
-                    Text(appModel.agentCenter.displayName(for: controller.agentId))
-                        .font(.caption)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("Switch agent for this conversation")
-            Spacer()
-            stateChip
-            Button {
-                controller.isFollowing.toggle()
-            } label: {
-                Label("Follow agent",
-                      systemImage: controller.isFollowing ? "eye.fill" : "eye")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(controller.isFollowing ? Color.accentColor : .secondary)
-            .help("Opens the files the agent is editing in the right panel")
-            Button {
-                Task { await controller.newConversation() }
-            } label: {
-                Label("New conversation", systemImage: "plus.bubble")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 12).padding(.vertical, 6)
-    }
-
-    @ViewBuilder
-    private var stateChip: some View {
-        switch controller.state {
-        case .connecting:
-            Label("connecting…", systemImage: "circle.dotted")
-                .font(.caption).foregroundStyle(.secondary)
-        case .ready:
-            Label("ready", systemImage: "circle.fill")
-                .font(.caption).foregroundStyle(.green)
-        case .prompting:
-            Label("working", systemImage: "circle.fill")
-                .font(.caption).foregroundStyle(.orange)
-        case .needsAuth, .disconnected, .idle:
-            Label("disconnected", systemImage: "circle")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
