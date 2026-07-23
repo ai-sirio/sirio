@@ -98,7 +98,7 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "sidebar.left")
                     }
-                    .help(sidebarVisible ? "Nascondi Sidebar (⌃⌘S)" : "Mostra Sidebar (⌃⌘S)")
+                    .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
                     .accessibilityLabel("Sidebar")
                 }
 
@@ -113,17 +113,17 @@ struct ContentView: View {
                         Image(systemName: "sidebar.right")
                     }
                     .help(rightPanelVisible
-                          ? "Nascondi pannello destro (⌃⌘I)"
-                          : "Mostra pannello destro (⌃⌘I)")
-                    .accessibilityLabel("Pannello destro")
+                          ? "Hide right panel (⌃⌘I)"
+                          : "Show right panel (⌃⌘I)")
+                    .accessibilityLabel("Right panel")
 
                     Button {
                         model.splitCurrent(.horizontal)
                     } label: {
                         Image(systemName: "square.split.1x2")
                     }
-                    .help("Split terminale")
-                    .accessibilityLabel("Split terminale")
+                    .help("Split terminal")
+                    .accessibilityLabel("Split terminal")
 
                     Button {
                         model.settingsCategory = .permissions
@@ -131,8 +131,8 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "lock.shield")
                     }
-                    .help("Permessi")
-                    .accessibilityLabel("Permessi")
+                    .help("Permissions")
+                    .accessibilityLabel("Permissions")
                 }
             }
         }
@@ -273,6 +273,7 @@ struct ContentView: View {
                             case .terminal(let tree):
                                 TerminalSplitHost(
                                     tree: tree,
+                                    isVisible: isVisible,
                                     workingDirectory: worktree.path,
                                     extraEnvironment: [
                                         "TILLER_ENV": "1",

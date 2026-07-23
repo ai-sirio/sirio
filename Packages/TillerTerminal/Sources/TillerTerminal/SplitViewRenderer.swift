@@ -11,6 +11,7 @@ import GhosttyTerminal
 /// instead of respawning shells.
 public struct TerminalSplitHost: NSViewControllerRepresentable {
     let tree: SplitTree
+    let isVisible: Bool
     let workingDirectory: String?
     let extraEnvironment: [String: String]
     let paneContext: (
@@ -28,6 +29,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
 
     public init(
         tree: SplitTree,
+        isVisible: Bool = true,
         workingDirectory: String? = nil,
         extraEnvironment: [String: String] = [:],
         paneContext: (
@@ -44,6 +46,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
         liveLeafIds: (() -> Set<UUID>)? = nil
     ) {
         self.tree = tree
+        self.isVisible = isVisible
         self.workingDirectory = workingDirectory
         self.extraEnvironment = extraEnvironment
         self.paneContext = paneContext
@@ -64,6 +67,7 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
 
     public func makeNSViewController(context: Context) -> NSViewController {
         let controller = build(tree, coordinator: context.coordinator)
+        (controller as? ContainerViewController)?.surfacesVisible = isVisible
         context.coordinator.resizeObserver = TerminalResizeSettleObserver(containerView: controller.view)
         if let menuProvider {
             let handler = TerminalContextMenuHandler(
@@ -79,6 +83,9 @@ public struct TerminalSplitHost: NSViewControllerRepresentable {
     }
 
     public func updateNSViewController(_ controller: NSViewController, context: Context) {
+        // Visibility can change without a tree change (tab/worktree switch),
+        // so it's applied before the structural guard below.
+        (controller as? ContainerViewController)?.surfacesVisible = isVisible
         guard context.coordinator.lastTree != tree else { return }
         context.coordinator.lastTree = tree
         // node(_:) detaches every cached leaf it reuses (removeFromSuperview),
@@ -243,7 +250,23 @@ private final class EqualSplitViewController: NSSplitViewController {
 /// Stable root controller: TerminalSplitHost's NSViewController identity
 /// never changes across updates; only its single child is swapped.
 final class ContainerViewController: NSViewController {
+    /// Whether this host's terminal surfaces should render. Re-applied on
+    /// every layout pass because NSHostingController materializes leaf
+    /// AppKit views lazily (a host created hidden has no surfaces yet) and
+    /// cached leaves get adopted across hosts carrying stale occlusion.
+    var surfacesVisible = true {
+        didSet {
+            guard surfacesVisible != oldValue, isViewLoaded else { return }
+            SurfaceVisibility.apply(surfacesVisible, in: view)
+        }
+    }
+
     override func loadView() { view = NSView() }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        SurfaceVisibility.apply(surfacesVisible, in: view)
+    }
 
     func setContent(_ child: NSViewController) {
         children.forEach { $0.removeFromParent() }
