@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MarkdownUI
 import TillerACP
@@ -15,15 +16,14 @@ struct TranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(controller.items) { item in
-                        itemView(item)
-                            .id(item.id)
-                    }
-                    if controller.state == .prompting {
-                        thinkingRow
+                    ForEach(controller.timelineRows) { row in
+                        rowView(row)
+                            .id(row.id)
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
+                .frame(maxWidth: 700)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
@@ -36,19 +36,45 @@ struct TranscriptView: View {
     }
 
     @ViewBuilder
-    private func itemView(_ item: TranscriptItem) -> some View {
+    private func rowView(_ row: TimelineRow) -> some View {
+        switch row {
+        case .message(let item, let meta):
+            itemView(item, meta: meta)
+        case .work(let groupId, let entries, let isExpanded):
+            WorkGroupView(groupId: groupId, entries: entries,
+                          isExpanded: isExpanded, controller: controller,
+                          worktree: worktree, appModel: appModel)
+        case .turnFold(let turnId, let label, let at):
+            TurnFoldRow(turnId: turnId, label: label, at: at,
+                        controller: controller)
+        case .turnDivider(_, let at):
+            turnDivider(at)
+        case .proposedPlan(_, let entries, let approval):
+            planCard(entries, approval: approval)
+        case .working:
+            thinkingRow
+        }
+    }
+
+    @ViewBuilder
+    private func itemView(_ item: TranscriptItem, meta: TimelineRow.MessageMeta?) -> some View {
         switch item {
         case .userMessage(_, let blocks):
             userBubble(blocks)
         case .agentMessage(_, let text, _):
-            agentMessage(text)
+            VStack(alignment: .leading, spacing: 4) {
+                agentMessage(text)
+                if let meta, meta.showsCopyButton || meta.duration != nil {
+                    messageMetaRow(meta, text: text)
+                }
+            }
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
             ToolCallCardView(item: toolCall, controller: controller,
                              worktree: worktree, appModel: appModel)
         case .plan(_, let entries):
-            planCard(entries)
+            planCard(entries, approval: nil)
         case .turnDivider(_, let date):
             turnDivider(date)
         case .editSummary(_, let paths):
@@ -138,11 +164,38 @@ struct TranscriptView: View {
         .padding(.vertical, 6)
     }
 
+    private func messageMetaRow(_ meta: TimelineRow.MessageMeta, text: String) -> some View {
+        HStack(spacing: 8) {
+            if let duration = meta.duration {
+                Text(Self.formatDuration(duration))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            if meta.showsCopyButton {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc").font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Copy message")
+            }
+        }
+    }
+
+    static func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        if total < 60 { return "\(total)s" }
+        return "\(total / 60)m \(String(format: "%02d", total % 60))s"
+    }
+
     // MARK: - Plan
 
-    private func planCard(_ entries: [PlanEntry]) -> some View {
+    private func planCard(_ entries: [PlanEntry], approval: PermissionState?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("Piano", systemImage: "checklist")
+            Label("Plan", systemImage: "checklist")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
@@ -154,6 +207,24 @@ struct TranscriptView: View {
                         .font(.caption)
                     Text(entry.content).font(.callout)
                 }
+            }
+            if let approval, approval.isPending {
+                HStack(spacing: 8) {
+                    ForEach(approval.options, id: \.optionId) { option in
+                        Button(option.name) {
+                            Task {
+                                await controller.answerPermission(
+                                    requestId: approval.requestId,
+                                    optionId: option.optionId)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(option.kind == .allowOnce || option.kind == .allowAlways
+                              ? .green : .red)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(.top, 4)
             }
         }
         .padding(8)

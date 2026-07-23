@@ -52,10 +52,20 @@ final class ChatController {
     /// Following ("Segui l'agente"): default off, non persistito.
     var isFollowing = false
     var onFollowLocation: ((String) -> Void)?
+    /// Timeline expansion state (work groups and folded turns the user opened).
+    var expandedWorkGroups: Set<String> = []
+    var unfoldedTurns: Set<String> = []
     @ObservationIgnored private var lastFollowAt = Date.distantPast
     private static let followThrottle: TimeInterval = 0.5
 
     var items: [TranscriptItem] { restored + reducer.items }
+    var timelineRows: [TimelineRow] {
+        TimelineBuilder.rows(items: items, state: TimelineState(
+            expandedWorkGroups: expandedWorkGroups,
+            unfoldedTurns: unfoldedTurns,
+            isStreaming: state == .prompting,
+            turnDurations: reducer.turnDurations))
+    }
     /// Subagent spawns visible in the transcript (Task-type tool calls),
     /// consumed by the Agents panel.
     var activeSubagentTasks: [SubagentTaskInfo] { SubagentTasks.extract(from: items) }
