@@ -44,25 +44,35 @@ import Testing
     @Test func installedManifestResolvesThroughLoginShell() throws {
         let store = try tempStore()
         try store.write(InstalledAgentManifest(
-            id: "claude-acp", version: "0.60.0",
-            executable: "/x/claude-agent-acp", arguments: ["--acp"],
+            id: "pi-acp", version: "0.60.0",
+            executable: "/x/pi-acp", arguments: ["--acp"],
             environment: ["K": "V"]))
-        let spec = AgentLaunchSpec.resolved(id: "claude", installStore: store)  // legacy id
+        let spec = AgentLaunchSpec.resolved(id: "pi-acp", installStore: store)
         #expect(spec?.executable == "/bin/zsh")
-        #expect(spec?.arguments == ["-lc", "exec '/x/claude-agent-acp' '--acp'"])
+        #expect(spec?.arguments == ["-lc", "exec '/x/pi-acp' '--acp'"])
         #expect(spec?.environment == ["K": "V"])
     }
 
     @Test func manifestPathsWithSpacesAreQuoted() throws {
         let store = try tempStore()
         try store.write(InstalledAgentManifest(
-            id: "opencode", version: "1.18.4",
-            executable: "/Application Support/Tiller/acp-agents/opencode/opencode",
+            id: "pi-acp", version: "1.18.4",
+            executable: "/Application Support/Tiller/acp-agents/pi-acp/pi-acp",
             arguments: ["acp"], environment: [:]))
-        let spec = AgentLaunchSpec.resolved(id: "opencode", installStore: store)
+        let spec = AgentLaunchSpec.resolved(id: "pi-acp", installStore: store)
         #expect(spec?.arguments ==
                 ["-lc",
-                 "exec '/Application Support/Tiller/acp-agents/opencode/opencode' 'acp'"])
+                 "exec '/Application Support/Tiller/acp-agents/pi-acp/pi-acp' 'acp'"])
+    }
+
+    @Test func nativeIdsDoNotResolveThroughACPManifests() throws {
+        let store = try tempStore()
+        for id in ["claude-acp", "codex-acp", "opencode"] {
+            try store.write(InstalledAgentManifest(
+                id: id, version: "1.0.0", executable: "/x/\(id)",
+                arguments: [], environment: [:]))
+            #expect(AgentLaunchSpec.resolved(id: id, installStore: store) == nil)
+        }
     }
 
     @Test func notInstalledResolvesNil() throws {
