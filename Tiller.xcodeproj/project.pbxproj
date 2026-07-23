@@ -29,6 +29,7 @@
 		3B14B1A274934BB9ED0B6343 /* GitStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62524A82001D878B38DEDBDB /* GitStatusView.swift */; };
 		3DBB4D532180921DDC4A5088 /* AppModel+Control.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7F2ED339842DA8F4A8AA1AA /* AppModel+Control.swift */; };
 		3E0C7F3C743B17D97F55B798 /* AcpAgentCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE4EAE5FC325A0ED79995A1 /* AcpAgentCenter.swift */; };
+		3EE895692828C805098E0405 /* ChatAgentToolbarPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01862565F2500216EF0A61F4 /* ChatAgentToolbarPicker.swift */; };
 		3FAAE9B86EB4A5E9070737C2 /* AutoRenameWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */; };
 		43DAE27D1CFFC7E6CFE202B5 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = D5B59CD11DF6DE82E00F19AB /* Highlightr */; };
 		44D002186AD3C17D9452C4FD /* AppModelControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 516A0EC113C050943267DA86 /* AppModelControlTests.swift */; };
@@ -61,6 +62,7 @@
 		778067675E9E63867EB07193 /* SidebarMaterialContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF0D154EEEE15E023D3BC9A1 /* SidebarMaterialContainer.swift */; };
 		7CE9B2261C82392303742787 /* TillerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B5A41F673927F0554385559 /* TillerApp.swift */; };
 		7F65A45109736224BECDB901 /* WorktreeRunningAgentsBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84F98EF0C9277586AF581624 /* WorktreeRunningAgentsBadge.swift */; };
+		8147094A30C46FF4F0400B4A /* AgentStatusDotColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11E259E316B39F6F09FFC6BF /* AgentStatusDotColorTests.swift */; };
 		81FDA9F633A3A9B4B05FACBA /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50A32BA4FF89DB0133FF9C6C /* SidebarView.swift */; };
 		830B3F78ADC1E051982B8FE9 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 2B6E1D46AC2DF993DECA02BD /* README.md */; };
 		8311E035D440CD440001F2F9 /* TimelineRowViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */; };
@@ -132,6 +134,7 @@
 /* Begin PBXFileReference section */
 		0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsSectionView.swift; sourceTree = "<group>"; };
 		0147E80EE5F3B7B9F50B2E78 /* EditSummaryCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditSummaryCardView.swift; sourceTree = "<group>"; };
+		01862565F2500216EF0A61F4 /* ChatAgentToolbarPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAgentToolbarPicker.swift; sourceTree = "<group>"; };
 		02D06C430BAE462C3046E741 /* UsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageStore.swift; sourceTree = "<group>"; };
 		04B70914CB8B69AABCCE4C40 /* SystemPermissionProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPermissionProbe.swift; sourceTree = "<group>"; };
 		06621AD3EDE30192047A77ED /* Tiller.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tiller.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -140,6 +143,7 @@
 		09EE812CA04BE25192955CA0 /* background-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "background-1024.png"; sourceTree = "<group>"; };
 		0C8F974FE5B8920C407DE1EB /* UpdateToastView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateToastView.swift; sourceTree = "<group>"; };
 		0D8A9258F770814E2207A7E1 /* CodeHighlighterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlighterTests.swift; sourceTree = "<group>"; };
+		11E259E316B39F6F09FFC6BF /* AgentStatusDotColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentStatusDotColorTests.swift; sourceTree = "<group>"; };
 		150990AF30F26D11CD77AD24 /* PermissionsOnboardingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsOnboardingSheet.swift; sourceTree = "<group>"; };
 		1FE0F25AF11FFCF1C640CB80 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		252DB14ADB73CFC185CA54D9 /* GeneralSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsView.swift; sourceTree = "<group>"; };
@@ -342,6 +346,7 @@
 			children = (
 				EB553F17F039EA89047AFC1C /* AgentMarkdownTextView.swift */,
 				3AFBA57E03B80A9B41F89BA7 /* AgentMessageSegmenter.swift */,
+				01862565F2500216EF0A61F4 /* ChatAgentToolbarPicker.swift */,
 				6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */,
 				D1E46DF390E43B7EA1794BB7 /* ChatController.swift */,
 				F40DAB221BF29036B76B496D /* ChatPaneView.swift */,
@@ -439,6 +444,7 @@
 			children = (
 				C1226B463D7B10AC634BE876 /* AcpAgentCenterTests.swift */,
 				ED03CEB488EC73CF13DB8645 /* AgentMessageSegmenterTests.swift */,
+				11E259E316B39F6F09FFC6BF /* AgentStatusDotColorTests.swift */,
 				516A0EC113C050943267DA86 /* AppModelControlTests.swift */,
 				7DB1869C83CFBFF1F7AD7355 /* AutoNamerTests.swift */,
 				7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */,
@@ -643,6 +649,7 @@
 				EBEC08157A1EBB7DB44A3F5F /* AppTheme.swift in Sources */,
 				71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */,
 				A5FE4417E2CE7408481A645C /* AutoNamer.swift in Sources */,
+				3EE895692828C805098E0405 /* ChatAgentToolbarPicker.swift in Sources */,
 				70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */,
 				67FB529584389E037E1941C7 /* ChatController.swift in Sources */,
 				E2BB6072F2A503E3A44E461E /* ChatPaneView.swift in Sources */,
@@ -711,6 +718,7 @@
 			files = (
 				A3A20B905F142CC7F2B58E0A /* AcpAgentCenterTests.swift in Sources */,
 				B206B595F9AAEDAF00229BB6 /* AgentMessageSegmenterTests.swift in Sources */,
+				8147094A30C46FF4F0400B4A /* AgentStatusDotColorTests.swift in Sources */,
 				44D002186AD3C17D9452C4FD /* AppModelControlTests.swift in Sources */,
 				4742245A9E1D227D13379A56 /* AutoNamerTests.swift in Sources */,
 				3FAAE9B86EB4A5E9070737C2 /* AutoRenameWiringTests.swift in Sources */,
