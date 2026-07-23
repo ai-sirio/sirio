@@ -32,4 +32,11 @@ struct PermissionModeTests {
         #expect(mode.id == "acceptEdits")
         #expect(!mode.name.isEmpty)
     }
+
+    @Test func displayNamesAreHumanReadable() {
+        #expect(PermissionMode.ask.displayName == "Ask")
+        #expect(PermissionMode.acceptEdits.displayName == "Accept edits")
+        #expect(PermissionMode.plan.displayName == "Plan")
+        #expect(PermissionMode.fullAuto.displayName == "Full auto")
+    }
 }

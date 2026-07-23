@@ -122,7 +122,33 @@ struct ChatComposerView: View {
 
     @ViewBuilder
     private var modePill: some View {
-        if let modes = controller.modes, !modes.availableModes.isEmpty {
+        if let mode = controller.permissionMode {
+            Menu {
+                ForEach(PermissionMode.supported(byDriverFor: controller.agentId),
+                        id: \.self) { candidate in
+                    Button {
+                        Task { await controller.setPermissionMode(candidate) }
+                    } label: {
+                        if candidate == mode {
+                            Label(candidate.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(candidate.displayName)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Circle().fill(statusDotColor).frame(width: 6, height: 6)
+                    Text(mode.displayName).font(.caption)
+                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .modifier(PillBackground())
+            .help("Permission mode")
+        } else if let modes = controller.modes, !modes.availableModes.isEmpty {
             Menu {
                 ForEach(modes.availableModes, id: \.id) { mode in
                     Button(mode.name) {
