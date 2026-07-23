@@ -17,13 +17,18 @@ struct TranscriptView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(controller.timelineRows) { row in
-                        // Constrain the content column per row: framing the
-                        // LazyVStack itself forces the ScrollView to measure
-                        // the whole lazy content (main-thread layout storm).
-                        rowView(row)
-                            .frame(maxWidth: 700, alignment: .leading)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .id(row.id)
+                        // Constrain the content column per row, centering via
+                        // spacers: framing the LazyVStack forces full lazy
+                        // measurement, and `.frame(alignment:)` pairs trigger
+                        // repeated explicit-alignment layout passes (both
+                        // observed as main-thread layout storms).
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            rowView(row)
+                                .frame(maxWidth: 700)
+                            Spacer(minLength: 0)
+                        }
+                        .id(row.id)
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
