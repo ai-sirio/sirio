@@ -227,19 +227,20 @@ struct ChatComposerView: View {
             ?? models.currentModelId
     }
 
-    /// Context-window usage ring; always shown so its position in the control
-    /// bar stays stable. Renders empty/dimmed when the agent hasn't sent a
-    /// `usage_update` yet (or never does — some agents don't implement that
-    /// ACP extension), rather than disappearing and reappearing.
+    /// Context-window meter; always shown so its control-bar position stays
+    /// stable. Empty/dimmed until the agent reports usage. Turns orange past
+    /// the 80% warning threshold.
     private var contextUsageIndicator: some View {
         let usage = controller.contextUsage
         let fraction = usage.flatMap { $0.size > 0 ? min(1, max(0, Double($0.used) / Double($0.size))) : nil } ?? 0
+        let warning = fraction > 0.8
         return ZStack {
             Circle().stroke(.quaternary, lineWidth: 2)
             if usage != nil {
                 Circle()
                     .trim(from: 0, to: fraction)
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .stroke(warning ? Color.orange : Color.accentColor,
+                            style: StrokeStyle(lineWidth: 2, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
         }
@@ -247,8 +248,8 @@ struct ChatComposerView: View {
         .contentShape(Circle())
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: fraction)
         .help(usage.map { usage in
-            let remaining = Int(((1 - fraction) * 100).rounded())
-            return "\(remaining)% remaining\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens"
+            let percent = Int((fraction * 100).rounded())
+            return "\(percent)% of context used\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens"
         } ?? "Context usage unavailable")
     }
 
