@@ -94,6 +94,9 @@ final class ChatController {
 
     private var driver: (any AgentDriver)?
     private var pumpTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingEvents: [ACPSessionEvent] = []
+    @ObservationIgnored private var eventFlushScheduled = false
+    @ObservationIgnored private var lastEventFlush = ContinuousClock.now
     private var sessionRecordId: String?
     private var selectedModel: String?
     private var selectedEffort: String?
@@ -253,6 +256,8 @@ final class ChatController {
         persist()
         pumpTask?.cancel()
         pumpTask = nil
+        pendingEvents = []
+        eventFlushScheduled = false
         if let driver { await driver.stop() }
         driver = nil
         if state != .needsAuth { state = .disconnected(message: nil) }
@@ -335,8 +340,10 @@ final class ChatController {
             guard let self, let driver = self.driver else { return }
             do {
                 let reason = try await driver.prompt(blocks)
+                self.flushPendingEvents()
                 self.reducer.turnEnded(reason)
             } catch {
+                self.flushPendingEvents()
                 self.reducer.turnEnded(.cancelled)
                 if self.isDisconnectedError(error) {
                     self.state = .disconnected(message: "\(error)")
@@ -457,11 +464,46 @@ final class ChatController {
     // MARK: - Events
 
     private func startPump(for driver: any AgentDriver) {
+        pendingEvents = []
+        eventFlushScheduled = false
         pumpTask = Task { [weak self] in
             for await event in driver.events {
-                await MainActor.run { self?.handle(event) }
+                await MainActor.run { self?.enqueue(event) }
             }
         }
+    }
+
+    /// Native drivers can emit one `update` per streamed token (Codex sends
+    /// `agent_message_delta` for every fragment). Applying each event queued
+    /// a SwiftUI transaction whose layout flush outgrew the arrival interval
+    /// and hung the main thread, so updates are buffered and applied in
+    /// batches at most once per interval; non-update events (permissions,
+    /// disconnect) flush the buffer and apply immediately.
+    private static let eventFlushInterval: Duration = .milliseconds(40)
+
+    private func enqueue(_ event: ACPSessionEvent) {
+        guard case .update = event else {
+            flushPendingEvents()
+            handle(event)
+            return
+        }
+        pendingEvents.append(event)
+        guard !eventFlushScheduled else { return }
+        eventFlushScheduled = true
+        let delay = Self.eventFlushInterval - (ContinuousClock.now - lastEventFlush)
+        Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            self?.flushPendingEvents()
+        }
+    }
+
+    private func flushPendingEvents() {
+        eventFlushScheduled = false
+        lastEventFlush = ContinuousClock.now
+        guard !pendingEvents.isEmpty else { return }
+        let events = pendingEvents
+        pendingEvents = []
+        for event in events { handle(event) }
     }
 
     private func handle(_ event: ACPSessionEvent) {

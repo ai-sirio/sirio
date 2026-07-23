@@ -138,6 +138,38 @@ struct ChatControllerTests {
         #expect(await resumeDriver.resumeIds == ["legacy-token"])
         #expect(await freshDriver.resumeIds == [nil])
     }
+
+    /// Streamed updates are coalesced before hitting the reducer (token-rate
+    /// drivers were saturating the main thread); the buffer must not lose or
+    /// reorder chunks while batching them.
+    @Test func burstOfStreamedChunksIsCoalescedWithoutLoss() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "burst"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        await controller.start()
+        let fragments = (0..<20).map { "t\($0);" }
+        for fragment in fragments {
+            driver.emit(.update(.agentMessageChunk(.text(fragment))))
+        }
+
+        let expected = fragments.joined()
+        var folded = false
+        for _ in 0..<100 where !folded {
+            folded = controller.items.contains(where: {
+                if case .agentMessage(_, expected, _) = $0 { return true }
+                return false
+            })
+            if !folded { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(folded)
+        #expect(controller.items.count == 1)
+    }
 }
 
 private func makeChatTestFixture(worktreeId: UUID) throws
@@ -186,6 +218,8 @@ private actor ChatTestDriver: AgentDriver {
 
     func start() async throws {}
     func stop() async { continuation.finish() }
+
+    nonisolated func emit(_ event: ACPSessionEvent) { continuation.yield(event) }
 
     func connect(cwd: String, resumeSessionId: String?,
                  mcpServers: [McpServerSpec]) async throws -> SessionHandle {
