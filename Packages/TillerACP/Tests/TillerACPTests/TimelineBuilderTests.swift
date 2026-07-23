@@ -202,4 +202,29 @@ struct TimelineBuilderTests {
         #expect(meta?.showsCopyButton == false)
         #expect(meta?.duration == nil)
     }
+
+    @Test func proposedPlanCarriesPendingSwitchModeApproval() {
+        let approval = PermissionState(
+            requestId: .string("exit"),
+            options: [
+                PermissionOption(optionId: "yes", name: "Approve", kind: .allowOnce),
+                PermissionOption(optionId: "no", name: "Reject", kind: .rejectOnce),
+            ])
+        let items: [TranscriptItem] = [
+            user("u1", "plan it"),
+            .plan(id: "pl1", entries: [PlanEntry(content: "step 1", priority: "medium",
+                                                 status: "pending")]),
+            tool("exit-tool", title: "Exit plan mode", kind: .switchMode,
+                 status: .pending, permission: approval),
+        ]
+        let rows = TimelineBuilder.rows(items: items, state: TimelineState())
+        guard let planRow = rows.first(where: { row in
+            if case .proposedPlan = row { return true }
+            return false
+        }), case .proposedPlan(_, let entries, let rowApproval) = planRow else {
+            Issue.record("expected proposedPlan row"); return
+        }
+        #expect(entries.count == 1)
+        #expect(rowApproval?.requestId == .string("exit"))
+    }
 }
