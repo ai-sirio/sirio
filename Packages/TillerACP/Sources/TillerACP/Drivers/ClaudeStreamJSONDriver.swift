@@ -14,16 +14,28 @@ public struct ClaudeLaunch: Sendable {
 }
 
 public actor ClaudeStreamJSONDriver: AgentDriver {
-    private enum DriverError: Error, Sendable {
+    private enum DriverError: Error, Sendable, CustomStringConvertible, LocalizedError {
         case notStarted
         case notConnected
         case transportClosed
-        case requestFailed
+        case requestFailed(String)
         case unsupported
+
+        var description: String {
+            switch self {
+            case .notStarted: "Claude driver has not started"
+            case .notConnected: "Claude driver is not connected"
+            case .transportClosed: "Claude transport closed"
+            case .requestFailed(let message): message
+            case .unsupported: "Claude operation is unsupported"
+            }
+        }
+
+        var errorDescription: String? { description }
     }
 
     private let transport: any ACPTransport
-    private let permissionMode: PermissionMode
+    private var permissionMode: PermissionMode
     private let requestedModel: String?
     private let requestedResumeSessionId: String?
     private let pinnedSessionId: String
@@ -100,7 +112,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         let response = try await sendControlRequest(.object([
             "subtype": .string("initialize")
         ]))
-        guard isSuccessful(response) else { throw DriverError.requestFailed }
+        guard isSuccessful(response) else { throw requestError(from: response) }
         let connectedSessionId = resumeSessionId ?? pinnedSessionId
         sessionId = connectedSessionId
         return makeHandle(from: response, sessionId: connectedSessionId,
@@ -143,7 +155,10 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             "subtype": .string("set_permission_mode"),
             "mode": .string(mode)
         ]))
-        guard isSuccessful(response) else { throw DriverError.requestFailed }
+        guard isSuccessful(response) else { throw requestError(from: response) }
+        if let permissionMode = PermissionMode(rawValue: modeId) {
+            self.permissionMode = permissionMode
+        }
         eventContinuation.yield(.update(.currentModeUpdate(modeId)))
     }
 
@@ -153,7 +168,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             "subtype": .string("set_model"),
             "model": .string(modelId)
         ]))
-        guard isSuccessful(response) else { throw DriverError.requestFailed }
+        guard isSuccessful(response) else { throw requestError(from: response) }
     }
 
     public func setEffort(_ effort: String?) {
@@ -244,6 +259,14 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
 
         case .controlRequest(let id, let request):
             guard request.subtype == "can_use_tool" else { return }
+            if permissionMode == .fullAuto {
+                Task { [weak self] in
+                    await self?.answerPermission(
+                        requestId: .string(id),
+                        outcome: .selected(optionId: "allow_once"))
+                }
+                return
+            }
             let name = request.toolName ?? "Tool"
             let toolCall = ToolCallUpdate(
                 toolCallId: id,
@@ -393,6 +416,13 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private func isSuccessful(_ value: JSONValue?) -> Bool {
         value?["subtype"]?.stringValue == "success"
             || value?["response"]?["subtype"]?.stringValue == "success"
+    }
+
+    private func requestError(from response: JSONValue?) -> DriverError {
+        .requestFailed(
+            response?["error"]?.stringValue
+                ?? response?["response"]?["error"]?.stringValue
+                ?? "Claude request failed")
     }
 
     private func finish() {

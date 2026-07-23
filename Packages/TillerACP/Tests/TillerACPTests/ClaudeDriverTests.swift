@@ -233,6 +233,58 @@ import Testing
         await driver.stop()
     }
 
+    @Test func fullAutoAutomaticallyAllowsCanUseTool() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .fullAuto,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        await mock.emit(#"{"type":"control_request","request_id":"req-auto","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hello"}}}"#)
+        let sent = try await mock.waitForSent(count: 2)
+        let response = try jsonValue(sent[1])
+        #expect(response["type"]?.stringValue == "control_response")
+        #expect(response["response"]?["request_id"]?.stringValue == "req-auto")
+        #expect(response["response"]?["subtype"]?.stringValue == "success")
+        #expect(response["response"]?["response"]?["behavior"]?.stringValue == "allow")
+
+        try await Task.sleep(for: .milliseconds(20))
+        let events = await collector.snapshot()
+        #expect(!events.contains {
+            if case .permissionRequested = $0 { true } else { false }
+        })
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func setModeErrorIncludesClaudeMessage() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let modeTask = Task { try await driver.setMode("bypassPermissions") }
+        _ = try await mock.waitForSent(count: 2)
+        let request = try jsonValue(await mock.sent[1])
+        let requestId = request["request_id"]?.stringValue
+        let message = "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"
+        let responseLine = #"{"type":"control_response","request_id":"__ID__","response":{"subtype":"error","error":"MESSAGE"}}"#
+            .replacingOccurrences(of: "__ID__", with: requestId ?? "")
+            .replacingOccurrences(of: "MESSAGE", with: message)
+        await mock.emit(responseLine)
+
+        do {
+            try await modeTask.value
+            Issue.record("setMode should throw when Claude rejects the mode")
+        } catch {
+            #expect(String(describing: error) == message)
+        }
+        await driver.stop()
+    }
+
     @Test func setModeWritesControlRequest() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
