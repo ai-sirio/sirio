@@ -101,14 +101,18 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
     private let baseURL: URL
     private let session: URLSession
     private let processTransport: ProcessTransport
+    private let authorizationHeaders: [String]
 
     /// Starts `opencode serve` in the supplied working directory and waits for
     /// its stdout announcement before returning a usable connection.
     public init(cwd: String, session: URLSession = .shared) async throws {
+        let password = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var environment = ProcessInfo.processInfo.environment
+        environment["OPENCODE_SERVER_PASSWORD"] = password
         let transport = ProcessTransport(
             executable: "/bin/zsh",
             arguments: ["-lc", "exec opencode serve --port 0 --hostname 127.0.0.1"],
-            cwd: cwd)
+            cwd: cwd, environment: environment)
 
         do {
             try await transport.start()
@@ -125,6 +129,15 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
             self.baseURL = serverURL
             self.session = session
             self.processTransport = transport
+            let basicCredentials = Data("opencode:\(password)".utf8).base64EncodedString()
+            // The fixture recorder probes these in this order. Keeping the
+            // same negotiation makes this work across OpenCode releases that
+            // expose either bearer or HTTP Basic authentication.
+            self.authorizationHeaders = [
+                "Bearer \(password)",
+                "Basic \(basicCredentials)",
+                "Basic \(Data(":\(password)".utf8).base64EncodedString())"
+            ]
         } catch {
             await transport.terminate()
             throw error
@@ -156,28 +169,49 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
     }
 
     public func request(method: String, path: String, body: Data?) async throws -> Data {
-        var request = URLRequest(url: endpoint(path: path))
-        request.httpMethod = method
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if body != nil {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
+        for (index, authorization) in authorizationHeaders.enumerated() {
+            var request = URLRequest(url: endpoint(path: path))
+            request.httpMethod = method
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue(authorization, forHTTPHeaderField: "Authorization")
+            if body != nil {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
 
-        let (data, response) = try await session.data(for: request)
-        try validate(response)
-        return data
+            let (data, response) = try await session.data(for: request)
+            if (response as? HTTPURLResponse)?.statusCode == 401,
+               index + 1 < authorizationHeaders.count {
+                continue
+            }
+            try validate(response)
+            return data
+        }
+        throw ConnectionError.invalidResponse
     }
 
     public func events() -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var request = URLRequest(url: endpoint(path: "/event"))
-                    request.httpMethod = "GET"
-                    request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                    let (bytes, response) = try await session.bytes(for: request)
-                    try validate(response)
+                    var authorizationIndex = 0
+                    let bytes: URLSession.AsyncBytes
+                    while true {
+                        var request = URLRequest(url: endpoint(path: "/event"))
+                        request.httpMethod = "GET"
+                        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                        request.setValue(authorizationHeaders[authorizationIndex],
+                                         forHTTPHeaderField: "Authorization")
+                        let (candidate, response) = try await session.bytes(for: request)
+                        if (response as? HTTPURLResponse)?.statusCode == 401,
+                           authorizationIndex + 1 < authorizationHeaders.count {
+                            authorizationIndex += 1
+                            continue
+                        }
+                        try validate(response)
+                        bytes = candidate
+                        break
+                    }
 
                     var parser = SSEParser()
                     var chunk = Data()
