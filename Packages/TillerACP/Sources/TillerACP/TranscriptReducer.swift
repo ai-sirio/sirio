@@ -8,6 +8,10 @@ public struct TranscriptReducer: Sendable, Equatable {
     public private(set) var currentModeId: String?
     public private(set) var availableCommands: [AvailableCommand] = []
     public private(set) var contextUsage: ContextUsage?
+    /// Seconds each closed turn took, keyed by its turnDivider id. Transient
+    /// UI state (message meta); never persisted with the transcript.
+    public private(set) var turnDurations: [String: TimeInterval] = [:]
+    private var turnStartedAt: Date?
 
     private var openAgentMessageIndex: Int?
     private var openThoughtIndex: Int?
@@ -46,7 +50,8 @@ public struct TranscriptReducer: Sendable, Equatable {
     }
 
     /// Records the user's prompt (called by the session when a turn starts).
-    public mutating func userPrompted(_ blocks: [ContentBlock]) {
+    public mutating func userPrompted(_ blocks: [ContentBlock], at date: Date = Date()) {
+        turnStartedAt = date
         turnEditPaths = []
         closeOpenStreams()
         items.append(.userMessage(id: makeId("user"), blocks: blocks))
@@ -68,7 +73,12 @@ public struct TranscriptReducer: Sendable, Equatable {
             turnEditPaths = []
         }
         if !items.isEmpty {
-            items.append(.turnDivider(id: makeId("divider"), at: date))
+            let dividerId = makeId("divider")
+            if let start = turnStartedAt {
+                turnDurations[dividerId] = date.timeIntervalSince(start)
+                turnStartedAt = nil
+            }
+            items.append(.turnDivider(id: dividerId, at: date))
         }
     }
 
