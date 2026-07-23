@@ -44,9 +44,12 @@ public actor CodexAppServerDriver: AgentDriver {
     }
 
     /// Builds the Codex app-server process command used by the worktree host.
-    public static func launchTransport(worktreePath: String) -> ProcessTransport {
+    public static func launchTransport(
+        worktreePath: String,
+        onStderrLine: (@Sendable (String) -> Void)? = nil
+    ) -> ProcessTransport {
         ProcessTransport(executable: "/bin/zsh", arguments: ["-lc", "exec codex app-server"],
-                          cwd: worktreePath)
+                          cwd: worktreePath, onStderrLine: onStderrLine)
     }
 
     public func start() async throws {

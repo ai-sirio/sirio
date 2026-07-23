@@ -105,14 +105,15 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
 
     /// Starts `opencode serve` in the supplied working directory and waits for
     /// its stdout announcement before returning a usable connection.
-    public init(cwd: String, session: URLSession = .shared) async throws {
+    public init(cwd: String, session: URLSession = .shared,
+                onStderrLine: (@Sendable (String) -> Void)? = nil) async throws {
         let password = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         var environment = ProcessInfo.processInfo.environment
         environment["OPENCODE_SERVER_PASSWORD"] = password
         let transport = ProcessTransport(
             executable: "/bin/zsh",
             arguments: ["-lc", "exec opencode serve --port 0 --hostname 127.0.0.1"],
-            cwd: cwd, environment: environment)
+            cwd: cwd, environment: environment, onStderrLine: onStderrLine)
 
         do {
             try await transport.start()
@@ -145,8 +146,10 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
     }
 
     /// Convenience overload for callers that already have a directory URL.
-    public convenience init(cwd: URL, session: URLSession = .shared) async throws {
-        try await self.init(cwd: cwd.path, session: session)
+    public convenience init(cwd: URL, session: URLSession = .shared,
+                            onStderrLine: (@Sendable (String) -> Void)? = nil) async throws {
+        try await self.init(cwd: cwd.path, session: session,
+                            onStderrLine: onStderrLine)
     }
 
     /// Extracts the first `http://127.0.0.1:<port>` occurrence from a server
