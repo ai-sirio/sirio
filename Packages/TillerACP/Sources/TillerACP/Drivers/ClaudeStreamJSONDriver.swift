@@ -33,11 +33,12 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var effort: String?
 
     public init(transport: any ACPTransport, permissionMode: PermissionMode,
-                model: String?, resumeSessionId: String?) {
+                model: String?, resumeSessionId: String?, effort: String? = nil) {
         self.transport = transport
         self.permissionMode = permissionMode
         requestedModel = model
         requestedResumeSessionId = resumeSessionId
+        self.effort = effort
         (events, eventContinuation) = AsyncStream.makeStream(of: ACPSessionEvent.self)
     }
 
@@ -45,7 +46,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     public static func launchTransport(worktreePath: String,
                                        permissionMode: PermissionMode,
                                        model: String?,
-                                       resumeSessionId: String?) -> ProcessTransport {
+                                       resumeSessionId: String?,
+                                       onStderrLine: (@Sendable (String) -> Void)? = nil) -> ProcessTransport {
         var command = "exec claude -p --input-format stream-json --output-format stream-json --verbose"
         command += " --permission-mode \(shellArgument(permissionMode.claudeValue))"
         if let model {
@@ -55,7 +57,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             command += " --resume \(shellArgument(resumeSessionId))"
         }
         return ProcessTransport(executable: "/bin/zsh", arguments: ["-lc", command],
-                                cwd: worktreePath)
+                                cwd: worktreePath, onStderrLine: onStderrLine)
     }
 
     public func start() async throws {
