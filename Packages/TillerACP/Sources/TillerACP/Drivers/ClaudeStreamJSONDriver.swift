@@ -3,6 +3,16 @@ import Foundation
 /// Drives Claude Code's `-p --input-format stream-json --output-format
 /// stream-json` protocol and translates it into Tiller's canonical session
 /// events.
+public struct ClaudeLaunch: Sendable {
+    public let transport: ProcessTransport
+    public let sessionId: String
+
+    public init(transport: ProcessTransport, sessionId: String) {
+        self.transport = transport
+        self.sessionId = sessionId
+    }
+}
+
 public actor ClaudeStreamJSONDriver: AgentDriver {
     private enum DriverError: Error, Sendable {
         case notStarted
@@ -16,6 +26,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private let permissionMode: PermissionMode
     private let requestedModel: String?
     private let requestedResumeSessionId: String?
+    private let pinnedSessionId: String
     private let eventContinuation: AsyncStream<ACPSessionEvent>.Continuation
     public nonisolated let events: AsyncStream<ACPSessionEvent>
 
@@ -23,9 +34,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var started = false
     private var finished = false
     private var sessionId: String?
-    private var initialized: ClaudeInit?
     private var didEmitCommands = false
-    private var connectContinuation: CheckedContinuation<ClaudeInit, Error>?
     private var promptContinuation: CheckedContinuation<StopReason, Error>?
     private var queuedResults: [ClaudeResult] = []
     private var pending: [String: CheckedContinuation<JSONValue?, Error>] = [:]
@@ -33,11 +42,13 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var effort: String?
 
     public init(transport: any ACPTransport, permissionMode: PermissionMode,
-                model: String?, resumeSessionId: String?, effort: String? = nil) {
+                model: String?, resumeSessionId: String?, effort: String? = nil,
+                pinnedSessionId: String? = nil) {
         self.transport = transport
         self.permissionMode = permissionMode
         requestedModel = model
         requestedResumeSessionId = resumeSessionId
+        self.pinnedSessionId = pinnedSessionId ?? resumeSessionId ?? UUID().uuidString
         self.effort = effort
         (events, eventContinuation) = AsyncStream.makeStream(of: ACPSessionEvent.self)
     }
@@ -47,17 +58,22 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                                        permissionMode: PermissionMode,
                                        model: String?,
                                        resumeSessionId: String?,
-                                       onStderrLine: (@Sendable (String) -> Void)? = nil) -> ProcessTransport {
+                                       onStderrLine: (@Sendable (String) -> Void)? = nil) -> ClaudeLaunch {
         var command = "exec claude -p --input-format stream-json --output-format stream-json --verbose"
         command += " --permission-mode \(shellArgument(permissionMode.claudeValue))"
         if let model {
             command += " --model \(shellArgument(model))"
         }
+        let sessionId = resumeSessionId ?? UUID().uuidString
         if let resumeSessionId {
             command += " --resume \(shellArgument(resumeSessionId))"
+        } else {
+            command += " --session-id \(shellArgument(sessionId))"
         }
-        return ProcessTransport(executable: "/bin/zsh", arguments: ["-lc", command],
-                                cwd: worktreePath, onStderrLine: onStderrLine)
+        return ClaudeLaunch(
+            transport: ProcessTransport(executable: "/bin/zsh", arguments: ["-lc", command],
+                                        cwd: worktreePath, onStderrLine: onStderrLine),
+            sessionId: sessionId)
     }
 
     public func start() async throws {
@@ -81,17 +97,13 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         _ = mcpServers
         guard started else { throw DriverError.notStarted }
 
-        let initMessage: ClaudeInit
-        if let initialized {
-            initMessage = initialized
-        } else {
-            initMessage = try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<ClaudeInit, Error>) in
-                connectContinuation = continuation
-            }
-        }
-        sessionId = initMessage.sessionId
-        return makeHandle(from: initMessage,
+        let response = try await sendControlRequest(.object([
+            "subtype": .string("initialize")
+        ]))
+        guard isSuccessful(response) else { throw DriverError.requestFailed }
+        let connectedSessionId = resumeSessionId ?? pinnedSessionId
+        sessionId = connectedSessionId
+        return makeHandle(from: response, sessionId: connectedSessionId,
                           didResume: (resumeSessionId ?? requestedResumeSessionId) != nil)
     }
 
@@ -192,17 +204,15 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private func handle(_ message: ClaudeWireMessage) {
         switch message {
         case .systemInit(let initMessage):
-            if initialized == nil {
-                initialized = initMessage
-                if !didEmitCommands {
-                    didEmitCommands = true
-                    eventContinuation.yield(.update(.availableCommandsUpdate(
-                        initMessage.slashCommands.map {
-                            AvailableCommand(name: $0, description: "")
-                        })))
-                }
-                connectContinuation?.resume(returning: initMessage)
-                connectContinuation = nil
+            if !initMessage.sessionId.isEmpty {
+                sessionId = initMessage.sessionId
+            }
+            if !didEmitCommands {
+                didEmitCommands = true
+                eventContinuation.yield(.update(.availableCommandsUpdate(
+                    initMessage.slashCommands.map {
+                        AvailableCommand(name: $0, description: "")
+                    })))
             }
 
         case .assistant(let assistant):
@@ -321,24 +331,49 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         }
     }
 
-    private func makeHandle(from initMessage: ClaudeInit,
+    private func makeHandle(from response: JSONValue?, sessionId: String,
                             didResume: Bool) -> SessionHandle {
         let supported = PermissionMode.supported(byDriverFor: "claude-acp")
         let modes = SessionModeState(
             currentModeId: permissionMode.rawValue,
             availableModes: supported.map(\.sessionMode))
-        let modelId = initMessage.model.isEmpty ? requestedModel : initMessage.model
-        let models = modelId.map {
-            SessionModelState(currentModelId: $0,
-                              availableModels: [ModelInfo(modelId: $0, name: $0)])
-        }
+        let payload = response?["response"] ?? response
+        emitAvailableCommands(from: payload)
         return SessionHandle(
-            sessionId: initMessage.sessionId,
+            sessionId: sessionId,
             agentCapabilities: AgentCapabilities(),
             modes: modes,
-            models: models,
+            models: modelState(from: payload),
             configOptions: [],
             didResume: didResume)
+    }
+
+    private func emitAvailableCommands(from payload: JSONValue?) {
+        guard !didEmitCommands, let values = payload?["commands"]?.arrayValue else { return }
+        didEmitCommands = true
+        let commands = values.compactMap { value -> AvailableCommand? in
+            guard let name = value["name"]?.stringValue else { return nil }
+            return AvailableCommand(name: name,
+                                    description: value["description"]?.stringValue ?? "")
+        }
+        eventContinuation.yield(.update(.availableCommandsUpdate(commands)))
+    }
+
+    private func modelState(from payload: JSONValue?) -> SessionModelState? {
+        guard let values = payload?["models"]?.arrayValue else { return nil }
+        let models = values.compactMap { value -> ModelInfo? in
+            guard let modelId = value["value"]?.stringValue
+                ?? value["id"]?.stringValue else { return nil }
+            let name = value["displayName"]?.stringValue
+                ?? value["name"]?.stringValue
+                ?? modelId
+            return ModelInfo(modelId: modelId, name: name,
+                             description: value["description"]?.stringValue)
+        }
+        guard !models.isEmpty else { return nil }
+        let currentModelId = requestedModel ?? models[0].modelId
+        return SessionModelState(currentModelId: currentModelId,
+                                 availableModels: models)
     }
 
     private func contextUsage(from response: JSONValue?) -> ContextUsage? {
@@ -364,8 +399,6 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         guard !finished else { return }
         finished = true
         let error = DriverError.transportClosed
-        connectContinuation?.resume(throwing: error)
-        connectContinuation = nil
         promptContinuation?.resume(throwing: error)
         promptContinuation = nil
         for continuation in pending.values { continuation.resume(throwing: error) }

@@ -48,6 +48,29 @@ import Testing
         return try JSONDecoder().decode(JSONValue.self, from: line)
     }
 
+    private func connectWithInitializeResponse(
+        _ driver: ClaudeStreamJSONDriver,
+        mock: MockTransport,
+        modelId: String = "claude-test",
+        resumeSessionId: String? = nil
+    ) async throws -> SessionHandle {
+        let connectTask = Task {
+            try await driver.connect(cwd: "/tmp/w", resumeSessionId: resumeSessionId,
+                                     mcpServers: [])
+        }
+        let sent = try await mock.waitForSent(count: 1)
+        let request = try jsonValue(sent[0])
+        #expect(request["type"]?.stringValue == "control_request")
+        #expect(request["request"]?["subtype"]?.stringValue == "initialize")
+        let requestId = request["request_id"]?.stringValue
+        #expect(requestId != nil)
+        let response = """
+        {"type":"control_response","response":{"subtype":"success","request_id":"\(requestId ?? "")","response":{"commands":[{"name":"doctor","description":"Diagnose the session","argumentHint":""}],"models":[{"value":"\(modelId)","resolvedModel":"\(modelId)","displayName":"Test model","description":"A test model"}]}}}
+        """
+        await mock.emit(response)
+        return try await connectTask.value
+    }
+
     @Test func fixtureTurnMapsToCanonicalUpdates() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
@@ -57,24 +80,27 @@ import Testing
         try await driver.start()
 
         let fixture = try fixtureLines()
-        await mock.emit(fixture[0])
-        let handle = try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil,
-                                              mcpServers: [])
-        #expect(handle.sessionId == "4e3c4112-ac2f-42fe-a224-e7dbea976d0c")
+        let handle = try await connectWithInitializeResponse(
+            driver, mock: mock, modelId: "claude-haiku-4-5-20251001")
+        #expect(UUID(uuidString: handle.sessionId) != nil)
         #expect(handle.didResume == false)
         #expect(handle.models?.currentModelId == "claude-haiku-4-5-20251001")
 
+        let promptTask = Task { try await driver.prompt([.text("run the command")]) }
+        _ = try await mock.waitForSent(count: 2)
         await mock.emit(#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}"#)
-        for line in fixture.dropFirst() { await mock.emit(line) }
-
-        let reason = try await driver.prompt([.text("run the command")])
+        for line in fixture { await mock.emit(line) }
+        let reason = try await promptTask.value
         let events = await waitForEvents(collector, count: 4)
         let updates = events.compactMap { event -> SessionUpdate? in
             guard case .update(let update) = event else { return nil }
             return update
         }
 
-        #expect(updates.contains { if case .availableCommandsUpdate = $0 { true } else { false } })
+        #expect(updates.contains {
+            if case .availableCommandsUpdate([AvailableCommand(
+                name: "doctor", description: "Diagnose the session")]) = $0 { true } else { false }
+        })
         #expect(updates.contains { if case .agentMessageChunk(.text("hello")) = $0 { true } else { false } })
         #expect(updates.contains { if case .toolCall(let call) = $0 {
             call.toolCallId == "toolu_019NCm2MgW5v58jSzsLBLHrZ" && call.kind == .execute
@@ -85,8 +111,8 @@ import Testing
         #expect(!updates.contains { if case .usageUpdate = $0 { true } else { false } })
         #expect(reason == .endTurn)
 
-        let sent = try await mock.waitForSent(count: 1)
-        let prompt = try jsonValue(sent[0])
+        let sent = try await mock.waitForSent(count: 2)
+        let prompt = try jsonValue(sent[1])
         #expect(prompt["type"]?.stringValue == "user")
         #expect(prompt["message"]?["role"]?.stringValue == "user")
         eventTask.cancel()
@@ -100,15 +126,14 @@ import Testing
         let collector = EventCollector()
         let eventTask = collect(driver, into: collector)
         try await driver.start()
-        await mock.emit(#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-test","slash_commands":[]}"#)
-        _ = try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
 
         let promptTask = Task { try await driver.prompt([.text("hello")]) }
-        _ = try await mock.waitForSent(count: 1)
+        _ = try await mock.waitForSent(count: 2)
         await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","usage":{"input_tokens":42}}"#)
 
-        let sent = try await mock.waitForSent(count: 2)
-        let probe = try jsonValue(sent[1])
+        let sent = try await mock.waitForSent(count: 3)
+        let probe = try jsonValue(sent[2])
         #expect(probe["type"]?.stringValue == "control_request")
         #expect(probe["request"]?["subtype"]?.stringValue == "get_context_usage")
         let requestId = probe["request_id"]?.stringValue
@@ -127,10 +152,10 @@ import Testing
         })
 
         let secondPromptTask = Task { try await driver.prompt([.text("again")]) }
-        _ = try await mock.waitForSent(count: 3)
+        _ = try await mock.waitForSent(count: 4)
         await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1"}"#)
-        let secondSent = try await mock.waitForSent(count: 4)
-        let secondProbe = try jsonValue(secondSent[3])
+        let secondSent = try await mock.waitForSent(count: 5)
+        let secondProbe = try jsonValue(secondSent[4])
         let secondRequestId = secondProbe["request_id"]?.stringValue
         let error = #"{"type":"control_response","request_id":"__ID__","response":{"subtype":"error","error":"unsupported"}}"#
         await mock.emit(error.replacingOccurrences(of: "__ID__", with: secondRequestId ?? ""))
@@ -154,13 +179,12 @@ import Testing
         let collector = EventCollector()
         let eventTask = collect(driver, into: collector)
         try await driver.start()
-        await mock.emit(#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-test","slash_commands":[]}"#)
-        _ = try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
         await driver.setEffort("high")
 
         let promptTask = Task { try await driver.prompt([.text("hi")]) }
-        let sent = try await mock.waitForSent(count: 1)
-        let prompt = try jsonValue(sent[0])
+        let sent = try await mock.waitForSent(count: 2)
+        let prompt = try jsonValue(sent[1])
         let content = prompt["message"]?["content"]?.arrayValue
         #expect(content?.first?["text"]?.stringValue
                 == "Reasoning effort for this and following turns: high. hi")
@@ -182,8 +206,7 @@ import Testing
         let collector = EventCollector()
         let eventTask = collect(driver, into: collector)
         try await driver.start()
-        await mock.emit(#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-test","slash_commands":[]}"#)
-        _ = try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
 
         await mock.emit(#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hello"},"permission_suggestions":[{"type":"addRules"}]}}"#)
         let events = await waitForEvents(collector, count: 2)
@@ -201,8 +224,8 @@ import Testing
 
         await driver.answerPermission(requestId: .string("req-1"),
                                        outcome: .selected(optionId: "allow_once"))
-        let sent = try await mock.waitForSent(count: 1)
-        let response = try jsonValue(sent[0])
+        let sent = try await mock.waitForSent(count: 2)
+        let response = try jsonValue(sent[1])
         #expect(response["type"]?.stringValue == "control_response")
         #expect(response["response"]?["request_id"]?.stringValue == "req-1")
         #expect(response["response"]?["response"]?["behavior"]?.stringValue == "allow")
@@ -217,12 +240,11 @@ import Testing
         let collector = EventCollector()
         let eventTask = collect(driver, into: collector)
         try await driver.start()
-        await mock.emit(#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-test","slash_commands":[]}"#)
-        _ = try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
 
         let modeTask = Task { try await driver.setMode(PermissionMode.acceptEdits.rawValue) }
-        _ = try await mock.waitForSent(count: 1)
-        let request = try jsonValue(await mock.sent[0])
+        _ = try await mock.waitForSent(count: 2)
+        let request = try jsonValue(await mock.sent[1])
         #expect(request["type"]?.stringValue == "control_request")
         #expect(request["request"]?["subtype"]?.stringValue == "set_permission_mode")
         #expect(request["request"]?["mode"]?.stringValue == "acceptEdits")
@@ -245,10 +267,9 @@ import Testing
         let collector = EventCollector()
         let eventTask = collect(driver, into: collector)
         try await driver.start()
-        await mock.emit(#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-test","slash_commands":[]}"#)
-        _ = try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
         let promptTask = Task { try? await driver.prompt([.text("hello")]) }
-        _ = try await mock.waitForSent(count: 1)
+        _ = try await mock.waitForSent(count: 2)
         await mock.close()
         _ = await promptTask.value
 
@@ -257,12 +278,73 @@ import Testing
         eventTask.cancel()
     }
 
+    @Test func connectDoesNotRequireInitMessage() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        try await driver.start()
+
+        let handle = try await connectWithInitializeResponse(driver, mock: mock)
+
+        #expect(!handle.sessionId.isEmpty)
+        #expect(UUID(uuidString: handle.sessionId) != nil)
+        #expect(handle.models?.availableModels.map(\.modelId) == ["claude-test"])
+        await driver.stop()
+    }
+
+    @Test func connectUsesResumeSessionId() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: "abc")
+        try await driver.start()
+
+        let handle = try await connectWithInitializeResponse(
+            driver, mock: mock, resumeSessionId: "abc")
+
+        #expect(handle.sessionId == "abc")
+        #expect(handle.didResume)
+        await driver.stop()
+    }
+
+    @Test func connectThrowsWhenTransportClosesBeforeInitializeResponse() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        try await driver.start()
+
+        let connectTask = Task { try await driver.connect(cwd: "/tmp/w",
+                                                          resumeSessionId: nil,
+                                                          mcpServers: []) }
+        _ = try await mock.waitForSent(count: 1)
+        await mock.close()
+
+        var didThrow = false
+        do {
+            _ = try await connectTask.value
+            Issue.record("connect should fail when initialize response cannot arrive")
+        } catch {
+            didThrow = true
+        }
+        #expect(didThrow)
+    }
+
     @Test func launchCommandLine() {
-        let transport = ClaudeStreamJSONDriver.launchTransport(
+        let resumeLaunch = ClaudeStreamJSONDriver.launchTransport(
             worktreePath: "/tmp/w", permissionMode: .plan,
             model: "claude-sonnet-5", resumeSessionId: "abc")
-        #expect(transport.arguments.last!.contains("--permission-mode plan"))
-        #expect(transport.arguments.last!.contains("--resume abc"))
-        #expect(transport.arguments.last!.contains("--model claude-sonnet-5"))
+        let resumeCommand = resumeLaunch.transport.arguments.last!
+        #expect(resumeCommand.contains("--permission-mode plan"))
+        #expect(resumeCommand.contains("--resume abc"))
+        #expect(!resumeCommand.contains("--session-id"))
+        #expect(resumeLaunch.sessionId == "abc")
+        #expect(resumeCommand.contains("--model claude-sonnet-5"))
+
+        let freshLaunch = ClaudeStreamJSONDriver.launchTransport(
+            worktreePath: "/tmp/w", permissionMode: .plan,
+            model: nil, resumeSessionId: nil)
+        let freshCommand = freshLaunch.transport.arguments.last!
+        #expect(freshCommand.contains("--session-id \(freshLaunch.sessionId)"))
+        #expect(!freshCommand.contains("--resume"))
+        #expect(UUID(uuidString: freshLaunch.sessionId) != nil)
     }
 }

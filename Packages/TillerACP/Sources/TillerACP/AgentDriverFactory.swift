@@ -71,13 +71,14 @@ public enum AgentDriverFactory {
 
         switch agentId {
         case "claude-acp":
-            let transport = ClaudeStreamJSONDriver.launchTransport(
+            let launch = ClaudeStreamJSONDriver.launchTransport(
                 worktreePath: worktreePath, permissionMode: permissionMode,
                 model: model, resumeSessionId: resumeSessionId,
                 onStderrLine: onStderrLine)
             let driver = ClaudeStreamJSONDriver(
-                transport: transport, permissionMode: permissionMode,
-                model: model, resumeSessionId: resumeSessionId, effort: effort)
+                transport: launch.transport, permissionMode: permissionMode,
+                model: model, resumeSessionId: resumeSessionId, effort: effort,
+                pinnedSessionId: launch.sessionId)
             return driver
 
         case "codex-acp":
