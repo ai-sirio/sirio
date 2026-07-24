@@ -26,6 +26,15 @@ import Testing
         return AgentInstallStore(rootDirectory: dir)
     }
 
+    @Test func canonicalIdsMapBackToCatalogShortIds() {
+        #expect(AgentIdMigration.catalogId("claude-acp") == "claude")
+        #expect(AgentIdMigration.catalogId("codex-acp") == "codex")
+        #expect(AgentIdMigration.catalogId("pi-acp") == "pi")
+        #expect(AgentIdMigration.catalogId("opencode") == "opencode")
+        #expect(AgentIdMigration.catalogId("omp") == "omp")
+        #expect(AgentIdMigration.catalogId("claude") == "claude")
+    }
+
     @Test func legacyIdsCanonicalize() {
         #expect(AgentIdMigration.canonical("claude") == "claude-acp")
         #expect(AgentIdMigration.canonical("codex") == "codex-acp")
