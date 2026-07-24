@@ -11,6 +11,13 @@ public actor OpenCodeHTTPDriver: AgentDriver {
         case unsupported
     }
 
+    private struct ToolPartSnapshot: Equatable {
+        let status: ToolCallStatus
+        let input: JSONValue?
+        let output: String?
+        let error: String?
+    }
+
     private struct ModelCatalog: Sendable {
         var models: SessionModelState?
         var configOptions: [SessionConfigOption]
@@ -30,6 +37,11 @@ public actor OpenCodeHTTPDriver: AgentDriver {
     private var permissionOptions: [String: [PermissionOption]] = [:]
     private var messageRoles: [String: String] = [:]
     private var partText: [String: String] = [:]
+    /// Last emitted (status, rawInput, output/error) per tool callID. OpenCode
+    /// resends `message.part.updated` for a tool part on every SSE tick even
+    /// when nothing changed; without this the chat controller re-applies the
+    /// same tool-call event repeatedly, amplifying its per-flush render cost.
+    private var lastEmittedToolState: [String: ToolPartSnapshot] = [:]
     private var contextSizes: [String: Int] = [:]
     private var configOptions: [SessionConfigOption] = []
     private var currentContextSize: Int?
@@ -300,6 +312,12 @@ public actor OpenCodeHTTPDriver: AgentDriver {
         let state = part["state"] ?? .object([:])
         let status = toolStatus(state["status"]?.stringValue)
         let input = state["input"]
+        let output = state["output"]?.stringValue
+        let error = state["error"]?.stringValue
+        let snapshot = ToolPartSnapshot(status: status, input: input, output: output, error: error)
+        guard lastEmittedToolState[callId] != snapshot else { return }
+        lastEmittedToolState[callId] = snapshot
+
         let title = part["tool"]?.stringValue
             ?? state["title"]?.stringValue
             ?? "Tool call"
@@ -309,9 +327,9 @@ public actor OpenCodeHTTPDriver: AgentDriver {
                 rawInput: input))))
         } else {
             var content: [ToolCallContent]?
-            if let output = state["output"]?.stringValue {
+            if let output {
                 content = [.content(.text(output))]
-            } else if let error = state["error"]?.stringValue {
+            } else if let error {
                 content = [.content(.text(error))]
             }
             eventContinuation.yield(.update(.toolCallUpdate(ToolCallUpdate(

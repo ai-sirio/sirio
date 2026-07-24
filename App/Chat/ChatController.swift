@@ -49,6 +49,8 @@ final class ChatController {
     var mcpWarning: String?
     private var reducer = TranscriptReducer()
     var onStatusChange: ((AgentStatus) -> Void)?
+    /// Test hook: fires once per actual `persist()` write.
+    @ObservationIgnored var onPersist: (() -> Void)?
     /// Following ("Segui l'agente"): default off, non persistito.
     var isFollowing = false
     var onFollowLocation: ((String) -> Void)?
@@ -447,7 +449,26 @@ final class ChatController {
     /// and hung the main thread, so updates are buffered and applied in
     /// batches at most once per interval; non-update events (permissions,
     /// disconnect) flush the buffer and apply immediately.
-    private static let eventFlushInterval: Duration = .milliseconds(40)
+    private static let baseFlushInterval: Duration = .milliseconds(40)
+    /// SwiftUI's own layout commit for the flushed transaction (the actual
+    /// long pole per the freeze investigation — a full-message TextKit
+    /// re-render whose cost grows with transcript length) runs on the main
+    /// run loop *after* this function returns, not inside it, so timing the
+    /// apply loop alone would almost always read ~0 and never engage
+    /// backpressure. Instead this compares the requested delay against how
+    /// long the main thread actually took to come back around: any excess
+    /// ("overrun") was spent on that commit (or anything else blocking the
+    /// main thread), and stretches the next interval accordingly.
+    private static let overrunMultiplier: Double = 2
+    private static let maxFlushInterval: Duration = .milliseconds(500)
+    @ObservationIgnored private var scheduledFlushInterval = ChatController.baseFlushInterval
+    @ObservationIgnored private var pendingFlushRequestedAt = ContinuousClock.now
+    @ObservationIgnored private var pendingFlushDelay = ChatController.baseFlushInterval
+
+    static func nextFlushInterval(lastFlushCost overrun: Duration) -> Duration {
+        let stretched = overrun * overrunMultiplier
+        return min(max(stretched, baseFlushInterval), maxFlushInterval)
+    }
 
     private func enqueue(_ event: ACPSessionEvent) {
         guard case .update = event else {
@@ -458,7 +479,9 @@ final class ChatController {
         pendingEvents.append(event)
         guard !eventFlushScheduled else { return }
         eventFlushScheduled = true
-        let delay = Self.eventFlushInterval - (ContinuousClock.now - lastEventFlush)
+        let delay = scheduledFlushInterval - (ContinuousClock.now - lastEventFlush)
+        pendingFlushRequestedAt = ContinuousClock.now
+        pendingFlushDelay = max(delay, .zero)
         Task { [weak self] in
             if delay > .zero { try? await Task.sleep(for: delay) }
             self?.flushPendingEvents()
@@ -467,6 +490,9 @@ final class ChatController {
 
     private func flushPendingEvents() {
         eventFlushScheduled = false
+        let actualWait = ContinuousClock.now - pendingFlushRequestedAt
+        let overrun = actualWait - pendingFlushDelay
+        scheduledFlushInterval = Self.nextFlushInterval(lastFlushCost: max(overrun, .zero))
         lastEventFlush = ContinuousClock.now
         guard !pendingEvents.isEmpty else { return }
         let events = pendingEvents
@@ -485,7 +511,7 @@ final class ChatController {
             }
             if case .toolCallUpdate(let change) = update,
                change.status == .completed || change.status == .failed {
-                persist()
+                schedulePersist()
             }
             if case .usageUpdate(let usage) = update, let sessionRecordId {
                 try? store?.setContextUsage(usage, sessionId: sessionRecordId)
@@ -522,6 +548,28 @@ final class ChatController {
     private func persist() {
         guard let store, let sessionRecordId else { return }
         try? store.saveTranscript(sessionId: sessionRecordId, items: items)
+        onPersist?()
+    }
+
+    /// Tool-heavy turns resolve several tool calls in a tight burst; each one
+    /// used to call `persist()` synchronously (full transcript serialization
+    /// on the main thread), so the burst serialized N times back to back.
+    /// This coalesces bursts into one write, still shorter than a user
+    /// noticing turn-to-turn lag, and other call sites (turn end, stop,
+    /// permission answer) keep calling `persist()` directly at their settle
+    /// points.
+    private static let persistDebounceInterval: Duration = .milliseconds(800)
+    @ObservationIgnored private var persistScheduled = false
+
+    private func schedulePersist() {
+        guard !persistScheduled else { return }
+        persistScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.persistDebounceInterval)
+            guard let self else { return }
+            self.persistScheduled = false
+            self.persist()
+        }
     }
 
     private func persistSessionSettings() {
