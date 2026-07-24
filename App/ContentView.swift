@@ -40,13 +40,6 @@ struct ContentView: View {
             visible: rightPanelVisible)
     }
 
-    private var activeChatController: ChatController? {
-        guard let worktree = model.selectedWorktree,
-              let tab = model.activeTab(for: worktree.id),
-              case .chat = tab.content else { return nil }
-        return model.chatController(for: tab, in: worktree)
-    }
-
     init(model: AppModel, updater: UpdaterModel) {
         self.model = model
         self.updater = updater
@@ -103,10 +96,6 @@ struct ContentView: View {
                 }
 
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if let controller = activeChatController {
-                        ChatAgentToolbarPicker(controller: controller, appModel: model)
-                    }
-
                     Button {
                         rightPanelVisible.toggle()
                     } label: {
