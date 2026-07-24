@@ -43,6 +43,22 @@ public enum AppSettings {
         defaultsValue ?? false
     }
 
+    /// UserDefaults key for the auto-naming summarizer agent (an AgentCatalog
+    /// short id). Missing or empty value means the default, "claude".
+    /// Validation against the actual adapter list happens at the App layer
+    /// (TillerCore does not know the catalog).
+    public static let summarizerAgentIdKey = "autoNaming.summarizerAgentId"
+    public static let defaultSummarizerAgentId = "claude"
+
+    /// Resolve the stored summarizer agent id, falling back to the default
+    /// for missing or empty values.
+    public static func summarizerAgentId(defaultsValue: String?) -> String {
+        guard let id = defaultsValue, !id.isEmpty else {
+            return defaultSummarizerAgentId
+        }
+        return id
+    }
+
     /// UserDefaults key for the app appearance (AppAppearance rawValue).
     /// Missing value means `.system`.
     public static let appearanceThemeKey = "appearance.theme"

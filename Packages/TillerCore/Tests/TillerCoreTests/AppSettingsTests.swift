@@ -73,3 +73,10 @@ import Testing
     // The UI reads this key via @AppStorage(default: false).
     #expect(AppSettings.autoNamingEnabledKey == "autoNaming.enabled")
 }
+
+@Test func summarizerAgentIdDefaultsToClaude() {
+    #expect(AppSettings.summarizerAgentId(defaultsValue: nil) == "claude")
+    #expect(AppSettings.summarizerAgentId(defaultsValue: "") == "claude")
+    #expect(AppSettings.summarizerAgentId(defaultsValue: "codex") == "codex")
+    #expect(AppSettings.summarizerAgentIdKey == "autoNaming.summarizerAgentId")
+}
