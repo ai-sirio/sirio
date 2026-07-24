@@ -25,7 +25,13 @@ public enum AppSurfaceColor {
 
     /// Shared perceived opacity for every translucent surface (sidebar
     /// material, Ghostty background-opacity, chat main pane).
-    public static let surfaceOpacity: Double = 0.96
+    public static let translucentSurfaceOpacity: Double = 0.96
+
+    public static var surfaceOpacity: Double { translucentSurfaceOpacity }
+
+    public static func surfaceOpacity(translucencyEnabled: Bool) -> Double {
+        translucencyEnabled ? translucentSurfaceOpacity : 1.0
+    }
 
     private static func hexString(red: Double, green: Double, blue: Double) -> String {
         String(format: "%02X%02X%02X",
