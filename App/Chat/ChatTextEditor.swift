@@ -16,7 +16,7 @@ enum SlashKey: Equatable {
 }
 
 struct ChatTextEditor: NSViewRepresentable {
-    @Binding var text: String
+    let document: ComposerDocument
     var isEditable: Bool
     var minHeight: CGFloat
     var maxHeight: CGFloat
@@ -34,9 +34,16 @@ struct ChatTextEditor: NSViewRepresentable {
     ///
     /// Created with the plain `NSTextView()` initializer, which is TextKit 2
     /// on macOS 15. `init(frame:textContainer:)` would opt into TextKit 1.
+    ///
+    /// When a document is supplied, its storage is adopted as the view's own,
+    /// so the document and the view are literally the same text — no mirror,
+    /// no sync, and nothing that can wipe an attachment.
     @MainActor
-    static func makeTextView() -> NSTextView {
+    static func makeTextView(document: ComposerDocument? = nil) -> NSTextView {
         let textView = NSTextView()
+        if let document {
+            textView.textContentStorage?.textStorage = document.storage
+        }
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
         textView.isRichText = false
         textView.drawsBackground = false
@@ -50,10 +57,10 @@ struct ChatTextEditor: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> AutoSizingScrollView {
-        let textView = Self.makeTextView()
+        let textView = Self.makeTextView(document: document)
         textView.delegate = context.coordinator
-        textView.string = text
         textView.isEditable = isEditable
+        textView.typingAttributes = document.typingAttributes
 
         let scrollView = AutoSizingScrollView()
         scrollView.minHeight = minHeight
@@ -66,14 +73,14 @@ struct ChatTextEditor: NSViewRepresentable {
         return scrollView
     }
 
+    /// No text mirroring here on purpose: the document's storage *is* the text
+    /// view's storage, so there is nothing to copy across, and the previous
+    /// `textView.string = text` assignment would have erased every chip.
     func updateNSView(_ scrollView: AutoSizingScrollView, context: Context) {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? NSTextView else { return }
-        if textView.string != text {
-            textView.string = text
-            context.coordinator.applySlashHighlight(to: textView)
-        }
         textView.isEditable = isEditable
+        textView.typingAttributes = document.typingAttributes
         scrollView.minHeight = minHeight
         scrollView.maxHeight = maxHeight
         context.coordinator.recalculateHeight(textView: textView, scrollView: scrollView)
@@ -99,41 +106,24 @@ struct ChatTextEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
-            applySlashHighlight(to: textView)
+            parent.document.refreshQueries()
+            parent.document.typingAttributes = textView.typingAttributes
             if let scrollView = textView.enclosingScrollView as? AutoSizingScrollView {
                 recalculateHeight(textView: textView, scrollView: scrollView)
             }
         }
 
-        /// Only the leading "/token" prefix is tinted (a muted accent), and
-        /// stays tinted even once the user keeps typing arguments after a
-        /// space — only the draft-command condition (starts with "/") is
-        /// checked, not "no whitespace anywhere". Text that doesn't start
-        /// with "/" gets no highlight. `typingAttributes` stay pinned to the
-        /// default color; the token range gets recolored on every edit.
-        func applySlashHighlight(to textView: NSTextView) {
-            guard let storage = textView.textStorage, storage.length > 0 else { return }
-            let string = textView.string as NSString
-            var tokenLength = 0
-            if string.hasPrefix("/") {
-                let whitespace = string.rangeOfCharacter(from: .whitespacesAndNewlines)
-                tokenLength = whitespace.location == NSNotFound ? string.length : whitespace.location
-            }
-            if tokenLength > 0 {
-                storage.addAttribute(
-                    .foregroundColor, value: Self.mutedAccentColor,
-                    range: NSRange(location: 0, length: tokenLength))
-            }
-            if tokenLength < storage.length {
-                storage.addAttribute(
-                    .foregroundColor, value: NSColor.textColor,
-                    range: NSRange(location: tokenLength, length: storage.length - tokenLength))
-            }
-            textView.typingAttributes[.foregroundColor] = NSColor.textColor
+        /// For an editable text view these two are exactly the moments it gains
+        /// and loses first-responder status, so the composer's focus ring can
+        /// be driven from the delegate that already exists — no
+        /// `window.firstResponder` observer to install or tear down.
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.document.isFocused = true
         }
 
-        static let mutedAccentColor = NSColor.controlAccentColor.withAlphaComponent(0.7)
+        func textDidEndEditing(_ notification: Notification) {
+            parent.document.isFocused = false
+        }
 
         /// Slash-popup keys get first refusal via `onSlashKey`. Then plain
         /// Return sends (swallowed here); Shift+Return inserts a real
