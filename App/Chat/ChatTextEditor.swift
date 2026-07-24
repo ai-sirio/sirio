@@ -27,13 +27,18 @@ struct ChatTextEditor: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeNSView(context: Context) -> AutoSizingScrollView {
+    /// Builds the configured text view. Separate from `makeNSView` so tests
+    /// can get a real text view without an `NSViewRepresentableContext`,
+    /// which cannot be constructed outside SwiftUI. Mirrors the seam
+    /// `AgentMarkdownTextView.makeTextView()` already uses.
+    ///
+    /// Created with the plain `NSTextView()` initializer, which is TextKit 2
+    /// on macOS 15. `init(frame:textContainer:)` would opt into TextKit 1.
+    @MainActor
+    static func makeTextView() -> NSTextView {
         let textView = NSTextView()
-        textView.delegate = context.coordinator
-        textView.string = text
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
         textView.isRichText = false
-        textView.isEditable = isEditable
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 0, height: 4)
         textView.textContainer?.lineFragmentPadding = 0
@@ -41,6 +46,14 @@ struct ChatTextEditor: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        return textView
+    }
+
+    func makeNSView(context: Context) -> AutoSizingScrollView {
+        let textView = Self.makeTextView()
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.isEditable = isEditable
 
         let scrollView = AutoSizingScrollView()
         scrollView.minHeight = minHeight
@@ -148,10 +161,17 @@ struct ChatTextEditor: NSViewRepresentable {
             }
         }
 
+        /// Measured through TextKit 2. Reading `textView.layoutManager` here
+        /// would silently downgrade the view to TextKit 1 compatibility mode,
+        /// in which `NSTextAttachmentViewProvider` is never invoked and the
+        /// composer's chips stop rendering with no error of any kind.
+        /// `usageBoundsForTextContainer` is the TextKit 2 analogue of
+        /// `NSLayoutManager.usedRect(for:)`.
         func recalculateHeight(textView: NSTextView, scrollView: AutoSizingScrollView) {
-            guard let layoutManager = textView.layoutManager, let container = textView.textContainer else { return }
-            layoutManager.ensureLayout(for: container)
-            let used = layoutManager.usedRect(for: container).height + textView.textContainerInset.height * 2
+            guard let layoutManager = textView.textLayoutManager else { return }
+            layoutManager.ensureLayout(for: layoutManager.documentRange)
+            let used = layoutManager.usageBoundsForTextContainer.height
+                + textView.textContainerInset.height * 2
             if scrollView.computedHeight != used {
                 scrollView.computedHeight = used
                 scrollView.invalidateIntrinsicContentSize()
