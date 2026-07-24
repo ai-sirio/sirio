@@ -23,6 +23,7 @@ public enum AppSettings {
     /// value significa disabilitato (default false) — a differenza degli altri
     /// toggle qui, opt-in perché genera chiamate CLI extra a carico dell'utente.
     public static let autoNamingEnabledKey = "autoNaming.enabled"
+    public static let translucencyEnabledKey = "appearance.translucencyEnabled"
 
     /// Resolve whether the control socket should start.
     /// TILLER_SOCKET_ENABLE (1/0, true/false, on/off — case-insensitive)
@@ -40,6 +41,10 @@ public enum AppSettings {
 
     /// Resolve whether auto-naming is enabled. Missing value means disabled.
     public static func autoNamingEnabled(defaultsValue: Bool?) -> Bool {
+        defaultsValue ?? false
+    }
+
+    public static func translucencyEnabled(defaultsValue: Bool?) -> Bool {
         defaultsValue ?? false
     }
 
