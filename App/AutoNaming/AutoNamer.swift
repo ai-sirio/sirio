@@ -8,9 +8,11 @@ import TillerAgents
 enum AutoNamer {
     static let maxTitleLength = 60
 
+    /// Timeout largo: `claude -p` a freddo impiega ~20s anche su prompt
+    /// minimi (misurato 2026-07-24); 10s troncava ogni pass di claude/codex.
     static func summarize(
         transcript: String, worktreePath: String,
-        adapter: any AgentAdapter, timeout: TimeInterval = 10
+        adapter: any AgentAdapter, timeout: TimeInterval = 60
     ) async -> String? {
         let prompt = """
         Summarize this coding-agent conversation into a short title, \
