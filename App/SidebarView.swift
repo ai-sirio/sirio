@@ -42,7 +42,7 @@ struct SidebarView: View {
                                             }
                                             Divider()
                                             Button("New Chat") {
-                                                model.openChatTab(in: worktree)
+                                                model.openChatTab(agentId: "claude-acp", in: worktree)
                                             }
                                             Divider()
                                             Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {
