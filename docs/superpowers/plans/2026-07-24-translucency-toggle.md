@@ -138,7 +138,7 @@ git commit -m "feat: make surface opacity a function of the translucency setting
 
 **Interfaces:**
 - Consumes: `AppSettings.translucencyEnabledKey`, `AppSettings.translucencyEnabled(defaultsValue:)` (Task 1); `AppSurfaceColor.surfaceOpacity(translucencyEnabled:)` (Task 2).
-- Produces: `TillerTerminalTheme.theme(fontSize: Float, translucencyEnabled: Bool) -> TerminalTheme` — NO default value for the new parameter; existing pane call sites are updated in Task 4. `current(defaults:)` reads both the font-size key and the translucency key. Dark configuration when disabled: `afterglow + background + fontSize + scrollback-limit` only (opacity/blur commands omitted entirely). Light configuration never changes.
+- Produces: `TillerTerminalTheme.theme(fontSize: Float, translucencyEnabled: Bool = true) -> TerminalTheme` — default `true` preserves existing terminal appearance for pre-Task-4 callers, and Task 4 passes the persisted value explicitly. `current(defaults:)` reads both the font-size key and the translucency key. Dark configuration when disabled: `afterglow + background + fontSize + scrollback-limit` only (opacity/blur commands omitted entirely). Light configuration never changes.
 
 - [ ] **Step 1: Update existing tests and add failing tests**
 
@@ -189,7 +189,7 @@ import GhosttyTerminal
 import TillerCore
 
 enum TillerTerminalTheme {
-    static func theme(fontSize: Float, translucencyEnabled: Bool) -> TerminalTheme {
+    static func theme(fontSize: Float, translucencyEnabled: Bool = true) -> TerminalTheme {
         let scrollbackLimit = TerminalConfigCommand.custom(key: "scrollback-limit", value: "262144")
         let light = TerminalConfiguration.alabaster
             .appending(.fontSize(fontSize))
