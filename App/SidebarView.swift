@@ -32,7 +32,7 @@ struct SidebarView: View {
                                 ForEach(AttentionSort.sorted(model.worktrees[project.id] ?? [], statusOf: model.statusForWorktree)) { worktree in
                                     WorktreeRow(model: model, worktree: worktree)
                                         .contextMenu {
-                                            Button("Nuovo Terminale") {
+                                            Button("New Terminal") {
                                                 model.newShellTab(in: worktree)
                                             }
                                             ForEach(AgentCatalog.all, id: \.id) { adapter in
@@ -41,9 +41,7 @@ struct SidebarView: View {
                                                 }
                                             }
                                             Divider()
-                                            Button("New Chat") {
-                                                model.openChatTab(agentId: "claude-acp", in: worktree)
-                                            }
+                                            NewChatMenuItems(model: model, worktree: worktree)
                                             Divider()
                                             Button(worktree.isPrimary ? "Unset Primary" : "Set Primary") {
                                                 Task { await model.setPrimary(worktree) }
