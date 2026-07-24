@@ -7,12 +7,10 @@ import Testing
 @Suite("ComposerTextKit2")
 @MainActor
 struct ComposerTextKit2Tests {
-    /// `text: .constant("")` is temporary — Task 5 deletes the `text` binding
-    /// and this becomes `document: ComposerDocument()`.
     private func makeCoordinator() -> ChatTextEditor.Coordinator {
         ChatTextEditor.Coordinator(
-            ChatTextEditor(text: .constant(""), isEditable: true, minHeight: 36,
-                           maxHeight: 160, onSubmit: {}, onSlashKey: nil))
+            ChatTextEditor(document: ComposerDocument(), isEditable: true,
+                           minHeight: 36, maxHeight: 160, onSubmit: {}, onSlashKey: nil))
     }
 
     /// A TextKit 1 fallback is silent: no error, no warning, no crash — the
@@ -53,5 +51,34 @@ struct ComposerTextKit2Tests {
         scrollView.computedHeight = 9_000
 
         #expect(scrollView.intrinsicContentSize.height == 160)
+    }
+
+    @Test func editingBeginAndEndDriveDocumentFocus() {
+        let document = ComposerDocument()
+        let coordinator = ChatTextEditor.Coordinator(
+            ChatTextEditor(document: document, isEditable: true, minHeight: 36,
+                           maxHeight: 160, onSubmit: {}, onSlashKey: nil))
+        let textView = ChatTextEditor.makeTextView()
+
+        coordinator.textDidBeginEditing(
+            Notification(name: NSText.didBeginEditingNotification, object: textView))
+        #expect(document.isFocused)
+
+        coordinator.textDidEndEditing(
+            Notification(name: NSText.didEndEditingNotification, object: textView))
+        #expect(!document.isFocused)
+    }
+
+    @Test func textViewSharesTheDocumentStorage() {
+        let document = ComposerDocument()
+        document.storage.append(NSAttributedString(string: "seeded"))
+        let editor = ChatTextEditor(document: document, isEditable: true, minHeight: 36,
+                                    maxHeight: 160, onSubmit: {}, onSlashKey: nil)
+
+        let textView = ChatTextEditor.makeTextView(document: document)
+        _ = editor
+
+        #expect(textView.string == "seeded")
+        #expect(textView.textLayoutManager != nil)
     }
 }

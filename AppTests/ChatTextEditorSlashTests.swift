@@ -12,8 +12,8 @@ struct ChatTextEditorSlashTests {
         onSubmit: @escaping () -> Void = {}
     ) -> ChatTextEditor {
         ChatTextEditor(
-            text: .constant(""), isEditable: true, minHeight: 36, maxHeight: 160,
-            onSubmit: onSubmit, onSlashKey: onSlashKey)
+            document: ComposerDocument(), isEditable: true, minHeight: 36,
+            maxHeight: 160, onSubmit: onSubmit, onSlashKey: onSlashKey)
     }
 
     @Test func mapsSelectorsToSlashKeys() {
@@ -70,47 +70,4 @@ struct ChatTextEditorSlashTests {
         #expect(submitted)
     }
 
-    @Test func slashTokenGetsMutedAccentColor() {
-        let editor = makeEditor()
-        let coordinator = ChatTextEditor.Coordinator(editor)
-        let textView = NSTextView()
-        textView.string = "/he"
-        coordinator.applySlashHighlight(to: textView)
-        let color = textView.textStorage?.attribute(
-            .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == ChatTextEditor.Coordinator.mutedAccentColor)
-    }
-
-    @Test func tokenStaysHighlightedAfterTrailingArguments() {
-        let editor = makeEditor()
-        let coordinator = ChatTextEditor.Coordinator(editor)
-        let textView = NSTextView()
-        textView.string = "/help me"
-        coordinator.applySlashHighlight(to: textView)
-        let tokenColor = textView.textStorage?.attribute(
-            .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        let argsColor = textView.textStorage?.attribute(
-            .foregroundColor, at: "/help".utf16.count, effectiveRange: nil) as? NSColor
-        #expect(tokenColor == ChatTextEditor.Coordinator.mutedAccentColor)
-        #expect(argsColor == .textColor)
-    }
-
-    @Test func nonSlashTextKeepsDefaultColor() {
-        let editor = makeEditor()
-        let coordinator = ChatTextEditor.Coordinator(editor)
-        let textView = NSTextView()
-        textView.string = "hello"
-        coordinator.applySlashHighlight(to: textView)
-        let color = textView.textStorage?.attribute(
-            .foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-        #expect(color == .textColor)
-    }
-
-    @Test func emptyTextDoesNotCrash() {
-        let editor = makeEditor()
-        let coordinator = ChatTextEditor.Coordinator(editor)
-        let textView = NSTextView()
-        coordinator.applySlashHighlight(to: textView)
-        #expect(textView.string.isEmpty)
-    }
 }
