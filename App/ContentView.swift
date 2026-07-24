@@ -186,10 +186,10 @@ struct ContentView: View {
                 }
             }
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-            // Opaque terminal surface only below the titlebar; the shared
-            // material behind the whole ZStack shows through above it, so
-            // the titlebar matches the sidebar.
-            .background(AppTheme.background, ignoresSafeAreaEdges: [])
+            // Translucent terminal/chat surface only below the titlebar; the
+            // shared material behind the whole ZStack shows through above it,
+            // so the titlebar matches the sidebar.
+            .background { MainSurfaceMaterial() }
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
