@@ -33,7 +33,7 @@ struct NewTabMenuItems: View {
         }
         Divider()
         Button("New Chat") {
-            model.openChatTab(in: worktree)
+            model.openChatTab(agentId: "claude-acp", in: worktree)
         }
     }
 }

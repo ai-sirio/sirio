@@ -1332,17 +1332,6 @@ final class AppModel {
     private var autoNamingThrottle: [UUID: AutoNamingThrottle] = [:]
 
 
-    /// Most recently used chat agent app-wide, falling back to the first
-    /// installed one. Nil when nothing is installed (the chat then shows its
-    /// "not installed" banner pointing at Settings).
-    var defaultChatAgentId: String? {
-        if let last = defaults.string(forKey: "chat.lastAgentId"),
-           AgentLaunchSpec.resolved(id: last, installStore: agentInstallStore) != nil {
-            return last
-        }
-        return agentCenter.installedAgents.first?.id
-    }
-
     /// Select a worktree tab from the Agents panel. No-op when the tab is gone.
     func focusTab(tabId: UUID, in worktree: Worktree) {
         guard (tabs[worktree.id] ?? []).contains(where: { $0.id == tabId }) else { return }
@@ -1352,8 +1341,7 @@ final class AppModel {
     }
 
     @discardableResult
-    func openChatTab(in worktree: Worktree) -> WorkspaceTab? {
-        let agentId = defaultChatAgentId ?? "claude-acp"
+    func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
         rememberChatAgent(agentId)
         let tab = WorkspaceTab(id: UUID(), title: "Chat",
                                content: .chat(agentId: agentId))
