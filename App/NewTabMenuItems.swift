@@ -32,8 +32,37 @@ struct NewTabMenuItems: View {
             }
         }
         Divider()
-        Button("New Chat") {
-            model.openChatTab(agentId: "claude-acp", in: worktree)
+        NewChatMenuItems(model: model, worktree: worktree)
+    }
+}
+
+/// Shared "New Chat" submenu listing installed ACP agents, used by the "+"
+/// menu and the sidebar worktree context menu. Empty install list falls back
+/// to a single item that opens the Agents settings.
+struct NewChatMenuItems: View {
+    @Bindable var model: AppModel
+    let worktree: Worktree
+
+    var body: some View {
+        Menu("New Chat") {
+            ForEach(model.agentCenter.installedAgents) { agent in
+                Button {
+                    model.openChatTab(agentId: agent.id, in: worktree)
+                } label: {
+                    if let icon = AgentMenuIconCache.image(for: agent.id) {
+                        Label {
+                            Text(agent.name)
+                        } icon: {
+                            Image(nsImage: icon)
+                        }
+                    } else {
+                        Text(agent.name)
+                    }
+                }
+            }
+            if model.agentCenter.installedAgents.isEmpty {
+                Button("Other agents…") { model.openAgentsSettings() }
+            }
         }
     }
 }
