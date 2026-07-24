@@ -15,3 +15,12 @@ import Testing
 @Test func sharedSurfaceOpacityIs096() {
     #expect(AppSurfaceColor.surfaceOpacity == 0.96)
 }
+
+@Test func surfaceOpacityIsOpaqueWhenTranslucencyDisabled() {
+    #expect(AppSurfaceColor.surfaceOpacity(translucencyEnabled: false) == 1.0)
+}
+
+@Test func surfaceOpacityMatchesLegacyValueWhenTranslucencyEnabled() {
+    #expect(AppSurfaceColor.surfaceOpacity(translucencyEnabled: true) == 0.96)
+    #expect(AppSurfaceColor.surfaceOpacity(translucencyEnabled: true) == AppSurfaceColor.translucentSurfaceOpacity)
+}
