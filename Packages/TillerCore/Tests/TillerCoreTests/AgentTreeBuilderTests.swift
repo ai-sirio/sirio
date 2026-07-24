@@ -32,6 +32,21 @@ import Testing
         #expect(nodes[1].agentId == "codex")
     }
 
+    /// Il nodo chat mostra il titolo della tab (che l'auto-rename aggiorna),
+    /// mai l'id agente raw — le chat registrano id canonici ("claude-acp")
+    /// assenti da displayNames.
+    @Test func chatNodeTitleFollowsTabTitle() {
+        let tab = WorkspaceTab(id: Self.chatTabId, title: "Fix login bug",
+                               content: .chat(agentId: "claude-acp"))
+        let nodes = AgentTreeBuilder.build(
+            tabs: [tab],
+            agentStatus: [Self.chatTabId: .running],
+            paneAgents: [Self.chatTabId: "claude-acp"],
+            chatSubagents: [:], processTrees: [:],
+            catalogIds: ["claude"], displayNames: ["claude": "Claude Code"])
+        #expect(nodes[0].title == "Fix login bug")
+    }
+
     @Test func panesWithoutAgentAreOmitted() {
         let nodes = AgentTreeBuilder.build(
             tabs: makeTabs(),
