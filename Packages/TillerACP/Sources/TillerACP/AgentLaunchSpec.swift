@@ -44,6 +44,18 @@ public enum AgentIdMigration {
         default: id
         }
     }
+
+    /// Inverse of `canonical`: the AgentCatalog short id for a registry id.
+    /// Chat panes register the canonical id, but adapter lookups
+    /// (auto-naming, display names) key on the catalog's short ids.
+    public static func catalogId(_ id: String) -> String {
+        switch id {
+        case "claude-acp": "claude"
+        case "codex-acp": "codex"
+        case "pi-acp": "pi"
+        default: id
+        }
+    }
 }
 
 extension AgentLaunchSpec {

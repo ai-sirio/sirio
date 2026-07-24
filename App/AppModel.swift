@@ -1699,7 +1699,8 @@ final class AppModel {
         else { return }
         let tab = tabs[worktree.id]![idx]
         guard tab.titleIsAutoNamed,
-              let agentId = agentActivity.paneAgents[paneId],
+              let agentId = agentActivity.paneAgents[paneId]
+                  .map(AgentIdMigration.catalogId),
               let adapter = AgentCatalog.all.first(where: { $0.id == agentId })
         else { return }
 
