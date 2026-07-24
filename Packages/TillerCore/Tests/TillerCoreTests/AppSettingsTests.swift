@@ -74,6 +74,15 @@ import Testing
     #expect(AppSettings.autoNamingEnabledKey == "autoNaming.enabled")
 }
 
+@Test func translucencyEnabledDefaultsToFalseWhenAbsent() {
+    #expect(AppSettings.translucencyEnabled(defaultsValue: nil) == false)
+}
+
+@Test func translucencyEnabledReturnsStoredValue() {
+    #expect(AppSettings.translucencyEnabled(defaultsValue: true) == true)
+    #expect(AppSettings.translucencyEnabled(defaultsValue: false) == false)
+}
+
 @Test func summarizerAgentIdDefaultsToClaude() {
     #expect(AppSettings.summarizerAgentId(defaultsValue: nil) == "claude")
     #expect(AppSettings.summarizerAgentId(defaultsValue: "") == "claude")
