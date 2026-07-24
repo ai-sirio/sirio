@@ -43,6 +43,19 @@ final class ComposerChipAttachment: NSTextAttachment {
     /// Failing the initializer rather than trapping avoids adding a crash
     /// site for a path that is not exercised.
     required init?(coder: NSCoder) { nil }
+
+    /// Overridden per-attachment rather than registered with
+    /// `NSTextAttachment.registerViewProviderClass(_:forFileType:)`, because
+    /// that registry is process-global and a composer chip is a detail of one
+    /// view, not a document type.
+    override func viewProvider(
+        for parentView: NSView?, location: NSTextLocation,
+        textContainer: NSTextContainer?
+    ) -> NSTextAttachmentViewProvider? {
+        ComposerChipViewProvider(
+            textAttachment: self, parentView: parentView,
+            textLayoutManager: textContainer?.textLayoutManager, location: location)
+    }
 }
 
 /// What the composer hands to `ChatController.send`. Deliberately the exact
