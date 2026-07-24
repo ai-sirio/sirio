@@ -165,6 +165,44 @@ import Testing
         await driver.stop()
     }
 
+    /// OpenCode resends `message.part.updated` for a tool part on every SSE
+    /// keepalive-style tick even when neither status nor output changed;
+    /// `emitTextPart` already dedupes identical text via `partText`, but
+    /// `emitToolPart` re-emitted unconditionally, amplifying the flush cost
+    /// on tool-heavy turns.
+    @Test func repeatedIdenticalToolPartEmitsOnce() async throws {
+        let connection = try makeConnection()
+        let driver = OpenCodeHTTPDriver(connection: connection, permissionMode: .ask,
+                                         resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        let handle = try await driver.connect(cwd: "/tmp/worktree", resumeSessionId: nil,
+                                              mcpServers: [])
+        let sessionID = handle.sessionId
+
+        let running = json(#"{"type":"message.part.updated","properties":{"sessionID":"__SESSION__","part":{"type":"tool","id":"part_tool","callID":"call-1","messageID":"msg_assistant","sessionID":"__SESSION__","tool":"bash","state":{"status":"running","input":{"command":"echo done"}}}}}"#.replacingOccurrences(of: "__SESSION__", with: sessionID))
+        await connection.emit(running)
+        await connection.emit(running)
+        await connection.emit(running)
+        let completed = json(#"{"type":"message.part.updated","properties":{"sessionID":"__SESSION__","part":{"type":"tool","id":"part_tool","callID":"call-1","messageID":"msg_assistant","sessionID":"__SESSION__","tool":"bash","state":{"status":"completed","input":{"command":"echo done"},"output":"done\n"}}}}"#.replacingOccurrences(of: "__SESSION__", with: sessionID))
+        await connection.emit(completed)
+        await connection.emit(completed)
+
+        // Give the driver a moment to over-deliver duplicates if it's going to.
+        try await Task.sleep(for: .milliseconds(50))
+        let events = updates(await collector.snapshot())
+        let toolEvents = events.filter {
+            if case .toolCall = $0 { return true }
+            if case .toolCallUpdate = $0 { return true }
+            return false
+        }
+        #expect(toolEvents.count == 2)
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
     @Test func permissionRoundTripUsesOpenCodeReplyPathAndBody() async throws {
         let connection = try makeConnection()
         let driver = OpenCodeHTTPDriver(connection: connection, permissionMode: .ask,
