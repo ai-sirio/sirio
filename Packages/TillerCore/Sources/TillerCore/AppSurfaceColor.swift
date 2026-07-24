@@ -13,17 +13,24 @@ public enum AppSurfaceColor {
         hexString(red: red, green: green, blue: blue)
     }
 
-    /// A bit darker than `background` — the terminal surface intentionally
-    /// reads as a recessed focus area rather than flush with the chrome.
-    public static let terminalRed: Double = red * 0.7
-    public static let terminalGreen: Double = green * 0.7
-    public static let terminalBlue: Double = blue * 0.7
+    /// Charcoal surface for terminal and chat panes (#1F1F26) — slightly
+    /// blue-tinted, distinct from the neutral chrome above.
+    public static let terminalRed: Double = 0.122
+    public static let terminalGreen: Double = 0.122
+    public static let terminalBlue: Double = 0.149
 
     public static var terminalHex: String {
         hexString(red: terminalRed, green: terminalGreen, blue: terminalBlue)
     }
 
+    /// Shared perceived opacity for every translucent surface (sidebar
+    /// material, Ghostty background-opacity, chat main pane).
+    public static let surfaceOpacity: Double = 0.96
+
     private static func hexString(red: Double, green: Double, blue: Double) -> String {
-        String(format: "%02X%02X%02X", Int(red * 255), Int(green * 255), Int(blue * 255))
+        String(format: "%02X%02X%02X",
+               Int((red * 255).rounded()),
+               Int((green * 255).rounded()),
+               Int((blue * 255).rounded()))
     }
 }
