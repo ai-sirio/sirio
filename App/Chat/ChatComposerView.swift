@@ -12,10 +12,7 @@ struct ChatComposerView: View {
     let controller: ChatController
     let worktreePath: String
 
-    @State private var text = ""
-    @State private var mentionPaths: [String] = []
-    @State private var images: [ImageAttachment] = []
-    @State private var mentionQuery: String?
+    @State private var document = ComposerDocument()
     @State private var mentionCandidates: [String] = []
     @State private var slashSelectionIndex = 0
     @State private var slashPopupDismissed = false
@@ -26,17 +23,14 @@ struct ChatComposerView: View {
     private var canInteract: Bool {
         (controller.state == .ready || isPrompting) && !controller.hasPendingPermission
     }
-    private var canSend: Bool {
-        canInteract && !(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                         && mentionPaths.isEmpty && images.isEmpty)
-    }
+    private var canSend: Bool { canInteract && !document.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if slashPopupVisible {
                 slashPopup
             }
-            if let query = mentionQuery, !mentionCandidates.isEmpty {
+            if let query = document.mentionQuery, !mentionCandidates.isEmpty {
                 mentionPopup(query: query)
             }
             queuedList
@@ -50,7 +44,6 @@ struct ChatComposerView: View {
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 8) {
-            attachmentChips
             editor
             controlBar
         }
@@ -69,18 +62,20 @@ struct ChatComposerView: View {
 
     private var editor: some View {
         ZStack(alignment: .topLeading) {
-            if text.isEmpty {
+            if document.isEmpty {
                 Text(editorPlaceholder)
                     .foregroundStyle(.secondary)
                     .allowsHitTesting(false)
             }
-            ChatTextEditor(text: $text, isEditable: canInteract, minHeight: 36,
+            ChatTextEditor(document: document, isEditable: canInteract, minHeight: 36,
                            maxHeight: 160, onSubmit: sendCurrent,
                            onSlashKey: handleSlashKey)
         }
         .disabled(!canInteract)
-        .onChange(of: text) {
-            updateMentionQuery()
+        .onChange(of: document.mentionQuery) { _, query in
+            refreshMentionCandidates(query: query)
+        }
+        .onChange(of: document.slashQuery) {
             slashPopupDismissed = false
             slashSelectionIndex = 0
         }
@@ -314,12 +309,10 @@ struct ChatComposerView: View {
 
     // MARK: - Slash commands
 
-    /// Active while the draft is a single "/token": query is what follows the
-    /// slash, matched as a case-insensitive prefix of the command names.
+    /// Active while the draft is a single "/token": the query is what follows
+    /// the slash, matched as a case-insensitive prefix of the command names.
     private var slashCandidates: [AvailableCommand] {
-        guard text.hasPrefix("/"), !text.contains(where: \.isWhitespace),
-              canInteract else { return [] }
-        let query = text.dropFirst().lowercased()
+        guard canInteract, let query = document.slashQuery?.lowercased() else { return [] }
         let all = controller.availableCommands
         guard !query.isEmpty else { return Array(all.prefix(10)) }
         return Array(all.filter { $0.name.lowercased().hasPrefix(query) }.prefix(10))
@@ -338,7 +331,7 @@ struct ChatComposerView: View {
         case .moved(let index):
             slashSelectionIndex = index
         case .accepted(let index):
-            text = "/\(slashCandidates[index].name) "
+            acceptSlashCommand(slashCandidates[index])
         case .dismissed:
             slashPopupDismissed = true
         }
@@ -349,7 +342,7 @@ struct ChatComposerView: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Array(slashCandidates.enumerated()), id: \.element.name) { index, command in
                 Button {
-                    text = "/\(command.name) "
+                    acceptSlashCommand(command)
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text("/\(command.name)")
@@ -376,25 +369,6 @@ struct ChatComposerView: View {
     // MARK: - Attachments / queue
 
     @ViewBuilder
-    private var attachmentChips: some View {
-        if !mentionPaths.isEmpty || !images.isEmpty {
-            HStack(spacing: 6) {
-                ForEach(mentionPaths, id: \.self) { path in
-                    chip(label: (path as NSString).lastPathComponent,
-                         systemImage: "doc") {
-                        mentionPaths.removeAll { $0 == path }
-                    }
-                }
-                ForEach(Array(images.enumerated()), id: \.offset) { index, _ in
-                    chip(label: "Immagine \(index + 1)", systemImage: "photo") {
-                        images.remove(at: index)
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
     private var queuedList: some View {
         ForEach(Array(controller.queued.enumerated()), id: \.offset) { _, queuedText in
             Label(queuedText, systemImage: "clock")
@@ -402,19 +376,6 @@ struct ChatComposerView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
-    }
-
-    private func chip(label: String, systemImage: String,
-                      onRemove: @escaping () -> Void) -> some View {
-        HStack(spacing: 3) {
-            Label(label, systemImage: systemImage).font(.caption)
-            Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill").font(.caption2)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 6).padding(.vertical, 2)
-        .background(.quaternary, in: Capsule())
     }
 
     private func mentionPopup(query: String) -> some View {
@@ -439,53 +400,47 @@ struct ChatComposerView: View {
     // MARK: - Actions
 
     private func sendCurrent() {
-        let outgoing = text
-        let mentions = mentionPaths
-        let attachments = images
         guard canInteract else { return }
-        text = ""
-        mentionPaths = []
-        images = []
-        mentionQuery = nil
-        controller.send(text: outgoing, mentionPaths: mentions, images: attachments)
+        let draft = document.takeDraft()
+        mentionCandidates = []
+        controller.send(text: draft.text, mentionPaths: draft.mentionPaths,
+                        images: draft.images)
     }
 
-    /// The active @-token is the text from the last "@" to the caret's end,
-    /// with no whitespace inside. Kept deliberately simple for v1.
-    private func updateMentionQuery() {
-        guard let atIndex = text.lastIndex(of: "@") else {
-            mentionQuery = nil
+    private func acceptSlashCommand(_ command: AvailableCommand) {
+        _ = document.replaceSlashToken(with: .skill(name: command.name))
+    }
+
+    private func refreshMentionCandidates(query: String?) {
+        guard let query else {
+            mentionCandidates = []
             return
         }
-        let token = String(text[text.index(after: atIndex)...])
-        guard !token.contains(where: \.isWhitespace) else {
-            mentionQuery = nil
-            return
-        }
-        mentionQuery = token
         let path = worktreePath
         Task.detached(priority: .userInitiated) {
             let hits = FileMentionIndex.candidates(
-                worktreePath: path, query: token, limit: 8)
+                worktreePath: path, query: query, limit: 8)
             await MainActor.run {
-                if mentionQuery == token { mentionCandidates = hits }
+                if document.mentionQuery == query { mentionCandidates = hits }
             }
         }
     }
 
+    /// Swaps the live "@token" for a file chip at the same position, so the
+    /// chip lands where the user was typing.
     private func acceptMention(_ path: String) {
-        if let atIndex = text.lastIndex(of: "@") {
-            text = String(text[..<atIndex])
-        }
-        if !mentionPaths.contains(path) { mentionPaths.append(path) }
-        mentionQuery = nil
+        guard let query = document.mentionQuery else { return }
+        let range = (document.storage.string as NSString).range(of: "@\(query)",
+                                                                options: .backwards)
+        guard range.location != NSNotFound else { return }
+        document.insert(.file(path: path), replacing: range)
         mentionCandidates = []
     }
 
-    /// Opens a file picker for an image. (Direct ⌘V clipboard-paste
-    /// interception inside TextField is a known v1 gap — not wired here,
-    /// since stray PNG data lingering on the general pasteboard from an
-    /// unrelated copy would silently hijack every click of this button.)
+    /// Opens a file picker for an image and inserts it as a chip at the caret.
+    /// (Direct ⌘V clipboard-paste interception is a known gap — stray PNG data
+    /// lingering on the general pasteboard from an unrelated copy would
+    /// silently hijack every click of this button.)
     private func attachImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg]
@@ -493,8 +448,10 @@ struct ChatComposerView: View {
         guard panel.runModal() == .OK, let url = panel.url,
               let data = try? Data(contentsOf: url) else { return }
         let mime = url.pathExtension.lowercased() == "png" ? "image/png" : "image/jpeg"
-        images.append(ImageAttachment(mimeType: mime,
-                                      base64Data: data.base64EncodedString()))
+        let attachment = ImageAttachment(mimeType: mime,
+                                         base64Data: data.base64EncodedString())
+        document.insert(.image(attachment),
+                        replacing: NSRange(location: document.storage.length, length: 0))
     }
 }
 
