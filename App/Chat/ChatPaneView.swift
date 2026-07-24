@@ -3,12 +3,38 @@ import TillerACP
 import TillerAgents
 import TillerCore
 
+enum ChatPaneLayoutRole: Hashable {
+    case approvalPanel
+    case composer
+}
+
+struct ChatPaneLayoutPreferenceKey: PreferenceKey {
+    static let defaultValue: [ChatPaneLayoutRole: CGRect] = [:]
+
+    static func reduce(value: inout [ChatPaneLayoutRole: CGRect],
+                       nextValue: () -> [ChatPaneLayoutRole: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct ChatPaneLayoutCaptureEnabledKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var chatPaneLayoutCaptureEnabled: Bool {
+        get { self[ChatPaneLayoutCaptureEnabledKey.self] }
+        set { self[ChatPaneLayoutCaptureEnabledKey.self] = newValue }
+    }
+}
+
 /// A whole chat tab: transcript + composer. Agent identity/state live in
 /// the window toolbar; state banners cover auth/disconnect/npx failures.
 struct ChatPaneView: View {
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
+    @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,14 +80,39 @@ struct ChatPaneView: View {
                     detail: "Review the proposed plan in the transcript, then approve or reject it.",
                     actionTitle: "OK") {}
             }
+            captureLayout(.approvalPanel) {
+                ComposerApprovalPanel(permissions: controller.composerPermissions,
+                                      controller: controller)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .layoutPriority(1)
+            }
             Divider()
-            ChatComposerView(controller: controller, worktreePath: worktree.path)
+            captureLayout(.composer) {
+                ChatComposerView(controller: controller, worktreePath: worktree.path)
+            }
         }
+        .coordinateSpace(name: "chat-pane")
         .task {
             controller.onFollowLocation = { [weak appModel] path in
                 appModel?.requestChatFollow(path: path, worktreeId: worktree.id)
             }
             await controller.start()
+        }
+    }
+
+    @ViewBuilder
+    private func captureLayout<Content: View>(_ role: ChatPaneLayoutRole,
+                                              @ViewBuilder content: () -> Content) -> some View {
+        if layoutCaptureEnabled {
+            content()
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: ChatPaneLayoutPreferenceKey.self,
+                        value: [role: proxy.frame(in: .named("chat-pane"))])
+                })
+        } else {
+            content()
         }
     }
 

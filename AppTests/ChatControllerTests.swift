@@ -248,30 +248,40 @@ struct ChatControllerTests {
 
         let worktree = Worktree(id: worktreeId, projectId: UUID(), branch: "main", path: root.path)
         let appModel = AppModel(paneRegistry: PaneRegistry(), activateApplication: {})
-        let host = NSHostingView(rootView: ChatPaneView(
-            controller: controller, worktree: worktree, appModel: appModel))
+        let capture = ChatPaneLayoutCapture()
+        let host = NSHostingView(rootView: ChatPaneLayoutProbe(capture: capture) {
+            ChatPaneView(controller: controller, worktree: worktree, appModel: appModel)
+                .environment(\.chatPaneLayoutCaptureEnabled, true)
+        })
         host.setFrameSize(NSSize(width: 640, height: 480))
         host.layoutSubtreeIfNeeded()
+        for _ in 0..<20 {
+            if capture.frames[.approvalPanel] != nil, capture.frames[.composer] != nil { break }
+            await Task.yield()
+        }
 
-        let approvalPanel = try #require(host.descendant(withAccessibilityIdentifier: "chat-approval-panel"))
-        let composer = try #require(host.descendant(withAccessibilityIdentifier: "chat-composer"))
-        let approvalFrame = approvalPanel.convert(approvalPanel.bounds, to: host)
-        let composerFrame = composer.convert(composer.bounds, to: host)
+        let approvalFrame = try #require(capture.frames[.approvalPanel])
+        let composerFrame = try #require(capture.frames[.composer])
         #expect(approvalFrame.maxY <= composerFrame.minY)
 
         await driver.releasePrompt()
     }
 }
 
-private extension NSView {
-    func descendant(withAccessibilityIdentifier identifier: String) -> NSView? {
-        if accessibilityIdentifier() == identifier { return self }
-        for child in subviews {
-            if let match = child.descendant(withAccessibilityIdentifier: identifier) {
-                return match
+@MainActor
+private final class ChatPaneLayoutCapture {
+    var frames: [ChatPaneLayoutRole: CGRect] = [:]
+}
+
+private struct ChatPaneLayoutProbe<Content: View>: View {
+    let capture: ChatPaneLayoutCapture
+    let content: () -> Content
+
+    var body: some View {
+        content()
+            .onPreferenceChange(ChatPaneLayoutPreferenceKey.self) { frames in
+                capture.frames = frames
             }
-        }
-        return nil
     }
 }
 
