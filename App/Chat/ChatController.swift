@@ -277,38 +277,6 @@ final class ChatController {
         await start()
     }
 
-    /// Switches the conversation to another agent: same transcript, new
-    /// process, new ACP session; the next prompt carries the handoff preamble.
-    func switchAgent(to newAgentId: String, displayName: String) async {
-        let canonical = AgentIdMigration.canonical(newAgentId)
-        guard canonical != agentId else { return }
-        if state == .prompting { await cancelTurn() }
-        await stop()
-
-        let snapshot = items
-        reducer = TranscriptReducer()
-        restored = snapshot + [.systemNotice(
-            id: UUID().uuidString,
-            text: "Agent changed to \(displayName). The previous conversation will be resent to the new agent; long conversations may exceed its context window.")]
-        agentId = canonical
-        pendingHandoff = snapshot.contains { item in
-            if case .turnDivider = item { return false }
-            if case .systemNotice = item { return false }
-            return true
-        }
-        modes = nil
-        models = nil
-        effortOption = nil
-        permissionMode = nil
-        if let sessionRecordId {
-            try? store?.setAgentId(canonical, sessionId: sessionRecordId)
-            try? store?.clearACPSessionId(sessionId: sessionRecordId)
-        }
-        state = .idle
-        await start()
-        persist()
-    }
-
     private var isDisconnected: Bool {
         if case .disconnected = state { return true }
         return false
