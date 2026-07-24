@@ -82,10 +82,13 @@ public enum AgentTreeBuilder {
                         kind: .subagent,
                         status: sub.status)
                 }
+                // Il titolo segue la tab (l'auto-rename lo aggiorna); l'id
+                // agente delle chat è canonico ("claude-acp") e non risolve
+                // in displayNames, che restano per i nodi processo.
                 chatNodes.append(AgentNode(
                     id: "chat:\(tab.id.uuidString)",
                     agentId: agentId,
-                    title: displayNames[agentId] ?? agentId,
+                    title: tab.title,
                     kind: .chat(tabId: tab.id),
                     status: status,
                     children: children))
