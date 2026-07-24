@@ -26,15 +26,18 @@ struct ComposerChipView: View {
 /// Hosts `ComposerChipView` inside the text flow.
 ///
 /// TextKit 2 only. Under TextKit 1 compatibility mode AppKit never asks for a
-/// view provider, so the chip would silently not render — see
-/// `ComposerTextKit2Tests.measuringHeightKeepsTextKit2`.
+/// view provider, so the chip would silently not render. A guard test in the
+/// composer's text layout tests verifies TextKit 2 stays active.
 final class ComposerChipViewProvider: NSTextAttachmentViewProvider {
     override func loadView() {
         guard let chip = (textAttachment as? ComposerChipAttachment)?.chip else {
+            assertionFailure("ComposerChipViewProvider used with a non-ComposerChipAttachment")
             view = NSView()
             return
         }
         let host = NSHostingView(rootView: ComposerChipView(chip: chip))
+        // fittingSize is correct only if ComposerChipView lays out synchronously.
+        // Deferred layout (e.g., async image loading) would measure at the wrong size.
         host.frame.size = host.fittingSize
         view = host
         // Let the hosting view's own size drive the attachment's layout
