@@ -1681,8 +1681,8 @@ final class AppModel {
     }
 
     /// Innesca un pass di auto-naming quando un turno finisce (running → done
-    /// o needsInput). Copre le chat tab ACP per tutti e 5 gli agenti e le
-    /// terminal tab dei 3 adapter con hook nativi.
+    /// o needsInput). Copre le chat tab ACP di qualunque agente del registry e le
+    /// terminal tab claude/codex; il titolo lo genera l'agente summarizer scelto in Settings, con fallback all'agente della tab.
     private func requestAutoRename(
         paneId: UUID, from old: AgentStatus?, to new: AgentStatus
     ) async {
@@ -1699,10 +1699,9 @@ final class AppModel {
         else { return }
         let tab = tabs[worktree.id]![idx]
         guard tab.titleIsAutoNamed,
-              let agentId = agentActivity.paneAgents[paneId]
-                  .map(AgentIdMigration.catalogId),
-              let adapter = AgentCatalog.all.first(where: { $0.id == agentId })
+              let tabAgentId = agentActivity.paneAgents[paneId]
         else { return }
+        let catalogAgentId = AgentIdMigration.catalogId(tabAgentId)
 
         let source: TranscriptSource?
         switch tab.content {
@@ -1710,7 +1709,7 @@ final class AppModel {
             source = chatControllers[tab.id].map { ChatTranscriptSource(controller: $0) }
         case .terminal:
             source = await resolveFileTranscriptSource(
-                paneId: paneId, worktree: worktree, agentId: agentId
+                paneId: paneId, worktree: worktree, agentId: catalogAgentId
             )
         case .markdown:
             source = nil
@@ -1724,13 +1723,22 @@ final class AppModel {
             transcriptLength: text.count, now: now
         )
 
+        let selectedId = AppSettings.summarizerAgentId(
+            defaultsValue: defaults.string(forKey: AppSettings.summarizerAgentIdKey)
+        )
+        let adapters = SummarizerSelection.adapters(
+            selectedId: selectedId, tabAgentId: tabAgentId
+        )
         let worktreePath = worktree.path
         Task { [weak self] in
-            guard let title = await AutoNamer.summarize(
-                transcript: text, worktreePath: worktreePath, adapter: adapter
-            ) else { return }
-            await MainActor.run {
-                self?.applyAutoTitle(tab.id, in: worktree.id, title: title)
+            for adapter in adapters {
+                guard let title = await AutoNamer.summarize(
+                    transcript: text, worktreePath: worktreePath, adapter: adapter
+                ) else { continue }
+                await MainActor.run {
+                    self?.applyAutoTitle(tab.id, in: worktree.id, title: title)
+                }
+                return
             }
         }
     }
