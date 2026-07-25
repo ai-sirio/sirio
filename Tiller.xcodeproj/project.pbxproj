@@ -28,6 +28,7 @@
 		2C7FB8280112816D5F6D5F3A /* TabDragPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB98BB0C9A0B54BEE34A813 /* TabDragPayload.swift */; };
 		2FFAA26E907C5F783A758A7D /* AIProvidersSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E02B8B0BAC9D266F3E2893C6 /* AIProvidersSettingsView.swift */; };
 		31213898B6E63011C844618F /* HideOnCloseWindowDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 526AD5B187E48B97E58C72C4 /* HideOnCloseWindowDelegate.swift */; };
+		31A47B2EC680554D9708A54C /* PlanCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3592EBDE2DC633F0652BF83 /* PlanCardView.swift */; };
 		38FF3B1CD1CB02E364BD065C /* MarkdownAttributedStringRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */; };
 		39AE727AD01F0280D8BA0B8B /* AppRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */; };
 		3B14B1A274934BB9ED0B6343 /* GitStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62524A82001D878B38DEDBDB /* GitStatusView.swift */; };
@@ -221,6 +222,7 @@
 		9B5A41F673927F0554385559 /* TillerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerApp.swift; sourceTree = "<group>"; };
 		9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTabMenuItems.swift; sourceTree = "<group>"; };
 		A05EFE98529F40E18CF9A8F2 /* ToolCallCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolCallCardView.swift; sourceTree = "<group>"; };
+		A3592EBDE2DC633F0652BF83 /* PlanCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanCardView.swift; sourceTree = "<group>"; };
 		A69A4378ADAA0562DD45A8EE /* CodeBlockHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockHeaderView.swift; sourceTree = "<group>"; };
 		A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownAttributedStringRenderer.swift; sourceTree = "<group>"; };
 		A7E71C8D94D39CE2EEAE0993 /* MarkdownToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownToolbar.swift; sourceTree = "<group>"; };
@@ -394,6 +396,7 @@
 				44A4D7761754955F550F7ED9 /* InsightCardView.swift */,
 				A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */,
 				8E7BCB7765ABEE79057FA44C /* ModelPickerPopover.swift */,
+				A3592EBDE2DC633F0652BF83 /* PlanCardView.swift */,
 				B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */,
 				D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */,
 				E78AB8A516CF2F33D8CAFF4E /* TillerMarkdownTheme.swift */,
@@ -727,6 +730,7 @@
 				F58EDD6213BE3AA8EF5359E0 /* OpenCodeGoUsageFetcher.swift in Sources */,
 				614368A068530D558CDE3D41 /* PermissionsOnboardingSheet.swift in Sources */,
 				CE3124078D172C6FAFAD4631 /* PermissionsSettingsView.swift in Sources */,
+				31A47B2EC680554D9708A54C /* PlanCardView.swift in Sources */,
 				5E1080487320188F215B9A4B /* ProjectSettingsSheet.swift in Sources */,
 				843D838715C653ED33181B70 /* RightPanelMode.swift in Sources */,
 				BEC2DDCA8BA2831CA1ECFF95 /* RightPanelModel.swift in Sources */,
