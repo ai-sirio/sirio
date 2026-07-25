@@ -95,7 +95,6 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         readTask = Task { [weak self] in
             await self?.readLoop()
         }
-        await Task.yield()
     }
 
     public func stop() async {
