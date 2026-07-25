@@ -402,8 +402,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private func contextUsage(from response: JSONValue?) -> ContextUsage? {
         guard isSuccessful(response) else { return nil }
         let payload = response?["response"] ?? response
-        guard let used = payload?["used"]?.intValue,
-              let size = payload?["size"]?.intValue,
+        guard let used = payload?["totalTokens"]?.intValue,
+              let size = payload?["maxTokens"]?.intValue ?? payload?["rawMaxTokens"]?.intValue,
               used >= 0, size > 0 else { return nil }
         return ContextUsage(used: used, size: size)
     }

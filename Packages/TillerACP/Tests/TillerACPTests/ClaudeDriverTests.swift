@@ -138,7 +138,7 @@ import Testing
         #expect(probe["request"]?["subtype"]?.stringValue == "get_context_usage")
         let requestId = probe["request_id"]?.stringValue
         #expect(requestId != nil)
-        let success = #"{"type":"control_response","request_id":"__ID__","response":{"subtype":"success","used":1000,"size":200000}}"#
+        let success = #"{"type":"control_response","request_id":"__ID__","response":{"subtype":"success","totalTokens":1000,"maxTokens":200000,"rawMaxTokens":200000}}"#
         await mock.emit(success.replacingOccurrences(of: "__ID__", with: requestId ?? ""))
 
         #expect(try await promptTask.value == .endTurn)
