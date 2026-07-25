@@ -9,6 +9,7 @@ public struct ExecTerminalPane: View {
     @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.current())
     @AppStorage(AppSettings.terminalFontSizeKey)
     private var terminalFontSize = AppSettings.defaultTerminalFontSize
+    @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 
     public init() {}
 
@@ -16,13 +17,14 @@ public struct ExecTerminalPane: View {
         TerminalSurfaceView(context: state)
             .onAppear {
                 state.configuration = TerminalSurfaceOptions(backend: .exec)
-                applyFontSize()
+                applyTheme()
             }
-            .onChange(of: terminalFontSize) { _, _ in applyFontSize() }
+            .onChange(of: terminalFontSize) { _, _ in applyTheme() }
+            .onChange(of: translucencyEnabled) { _, _ in applyTheme() }
     }
 
-    private func applyFontSize() {
+    private func applyTheme() {
         let size = Float(AppSettings.clampTerminalFontSize(terminalFontSize))
-        state.setTheme(TillerTerminalTheme.theme(fontSize: size))
+        state.setTheme(TillerTerminalTheme.theme(fontSize: size, translucencyEnabled: translucencyEnabled))
     }
 }

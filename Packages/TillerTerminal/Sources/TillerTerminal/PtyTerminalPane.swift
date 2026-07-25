@@ -63,6 +63,7 @@ public struct PtyTerminalPane: View {
     @StateObject private var state = TerminalViewState(theme: TillerTerminalTheme.current())
     @AppStorage(AppSettings.terminalFontSizeKey)
     private var terminalFontSize = AppSettings.defaultTerminalFontSize
+    @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
     private let workingDirectory: String?
     private let command: String?
     private let paneId: UUID
@@ -133,13 +134,14 @@ public struct PtyTerminalPane: View {
             .onChange(of: state.title) { _, newTitle in
                 onTitleChange?(paneId, newTitle)
             }
-            .onAppear { applyFontSize() }
-            .onChange(of: terminalFontSize) { _, _ in applyFontSize() }
+            .onAppear { applyTheme() }
+            .onChange(of: terminalFontSize) { _, _ in applyTheme() }
+            .onChange(of: translucencyEnabled) { _, _ in applyTheme() }
     }
 
-    private func applyFontSize() {
+    private func applyTheme() {
         let size = Float(AppSettings.clampTerminalFontSize(terminalFontSize))
-        state.setTheme(TillerTerminalTheme.theme(fontSize: size))
+        state.setTheme(TillerTerminalTheme.theme(fontSize: size, translucencyEnabled: translucencyEnabled))
     }
 }
 
