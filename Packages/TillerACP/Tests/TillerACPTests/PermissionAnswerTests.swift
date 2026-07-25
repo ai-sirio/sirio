@@ -22,12 +22,17 @@ import Testing
         return await transport.sent.map { String(decoding: $0, as: UTF8.self) }
     }
 
-    @Test func controlResponseCarriesUpdatedInput() async {
+    @Test func controlResponseCarriesUpdatedInput() async throws {
         let sent = await sentLines(answering: .answered(
             optionId: "SQLite", updatedInput: .object(["choice": .string("SQLite")])))
         #expect(sent.contains { $0.contains("\"behavior\":\"allow\"") })
-        #expect(sent.contains { $0.contains("updatedInput") })
-        #expect(sent.contains { $0.contains("SQLite") })
+        guard let line = sent.first else {
+            Issue.record("expected a sent control response")
+            return
+        }
+        let response = try JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
+        #expect(response["type"]?.stringValue == "control_response")
+        #expect(response["response"]?["response"]?["updatedInput"]?["choice"]?.stringValue == "SQLite")
     }
 
     @Test func plainSelectionStillSendsNoUpdatedInput() async {
