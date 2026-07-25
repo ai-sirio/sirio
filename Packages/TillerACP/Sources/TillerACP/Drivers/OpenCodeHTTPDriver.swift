@@ -206,6 +206,15 @@ public actor OpenCodeHTTPDriver: AgentDriver {
             case .allowAlways: response = "always"
             case .rejectOnce, .rejectAlways: response = "reject"
             }
+        case .answered(let optionId, _):
+            let kind = options.first(where: { $0.optionId == optionId })?.kind
+                ?? PermissionOptionKind(rawValue: optionId)
+                ?? .rejectOnce
+            switch kind {
+            case .allowOnce: response = "once"
+            case .allowAlways: response = "always"
+            case .rejectOnce, .rejectAlways: response = "reject"
+            }
         }
         let body = try? encodedJSON(.object(["response": .string(response)]))
         _ = try? await connection.request(

@@ -53,6 +53,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var cancelRequested = false
     private var effort: String?
 
+    public nonisolated var supportsStructuredAnswers: Bool { true }
+
     public init(transport: any ACPTransport, permissionMode: PermissionMode,
                 model: String?, resumeSessionId: String?, effort: String? = nil,
                 pinnedSessionId: String? = nil) {
@@ -184,19 +186,21 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
 
     public func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
         let id = requestIdString(requestId)
-        let behavior: String
+        var payload: [String: JSONValue]
         switch outcome {
         case .selected(let optionId):
-            behavior = optionId.hasPrefix("allow") ? "allow" : "deny"
+            payload = ["behavior": .string(optionId.hasPrefix("allow") ? "allow" : "deny")]
+        case .answered(_, let updatedInput):
+            payload = ["behavior": .string("allow"), "updatedInput": updatedInput]
         case .cancelled:
-            behavior = "deny"
+            payload = ["behavior": .string("deny")]
         }
         let response = JSONValue.object([
             "type": .string("control_response"),
             "response": .object([
                 "request_id": .string(id),
                 "subtype": .string("success"),
-                "response": .object(["behavior": .string(behavior)])
+                "response": .object(payload)
             ])
         ])
         try? await transport.send(line: makeLine(response))

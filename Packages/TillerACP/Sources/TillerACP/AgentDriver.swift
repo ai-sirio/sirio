@@ -16,6 +16,14 @@ public protocol AgentDriver: Actor {
     func setModel(_ modelId: String) async throws
     func setConfigOption(id: String, value: String) async throws -> [SessionConfigOption]?
     func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async
+    /// Whether the driver can carry a chosen option back to the agent
+    /// (`updatedInput`). Drivers that cannot make question cards fall back to
+    /// plain allow/reject.
+    nonisolated var supportsStructuredAnswers: Bool { get }
+}
+
+public extension AgentDriver {
+    nonisolated var supportsStructuredAnswers: Bool { false }
 }
 
 extension ACPSession: AgentDriver {}

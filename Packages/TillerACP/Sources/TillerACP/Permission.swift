@@ -29,6 +29,10 @@ public struct RequestPermissionParams: Sendable, Equatable, Decodable {
 /// or `{outcome: {outcome: "cancelled"}}`.
 public enum PermissionOutcome: Sendable, Equatable {
     case selected(optionId: String)
+    /// A chosen answer to a question, carried back to the agent as the tool's
+    /// updated input. Encodes as `selected` on the ACP wire, which has no
+    /// equivalent field.
+    case answered(optionId: String, updatedInput: JSONValue)
     case cancelled
 }
 
@@ -49,6 +53,9 @@ extension PermissionOutcome: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .selected(let optionId):
+            try container.encode("selected", forKey: .outcome)
+            try container.encode(optionId, forKey: .optionId)
+        case .answered(let optionId, _):
             try container.encode("selected", forKey: .outcome)
             try container.encode(optionId, forKey: .optionId)
         case .cancelled:
