@@ -12,7 +12,7 @@ import TillerCore
         .appending(scrollbackLimit))
     #expect(theme.dark == TerminalConfiguration.afterglow
         .appending(.background(AppSurfaceColor.terminalHex))
-        .appending(TerminalConfigCommand.custom(key: "background-opacity", value: "\(AppSurfaceColor.surfaceOpacity)"))
+        .appending(TerminalConfigCommand.custom(key: "background-opacity", value: "\(AppSurfaceColor.surfaceOpacity(translucencyEnabled: true))"))
         .appending(TerminalConfigCommand.custom(key: "background-blur-radius", value: "20"))
         .appending(.fontSize(14))
         .appending(scrollbackLimit))
