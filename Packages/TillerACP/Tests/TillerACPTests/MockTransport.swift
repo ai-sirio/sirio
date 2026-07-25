@@ -7,6 +7,7 @@ actor MockTransport: ACPTransport {
     private(set) var sent: [Data] = []
     private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
     private var pendingLines: [Data] = []
+    private var closeRequested = false
 
     func start() {}
 
@@ -24,6 +25,7 @@ actor MockTransport: ACPTransport {
         self.continuation = continuation
         for line in pendingLines { continuation.yield(line) }
         pendingLines = []
+        if closeRequested { continuation.finish() }
     }
 
     /// Emits one agent → client line (a JSON string, no trailing newline).
@@ -33,7 +35,11 @@ actor MockTransport: ACPTransport {
     }
 
     func close() {
-        continuation?.finish()
+        if let continuation {
+            continuation.finish()
+        } else {
+            closeRequested = true
+        }
     }
 
     func terminate() {
