@@ -115,14 +115,9 @@ Autoscroll (#2) uses macOS 15's `ScrollPosition` with `isPositionedByUser`: it f
 | Driver that cannot answer with `updatedInput` | Card degrades to allow/reject rather than showing buttons that do nothing |
 | Session dies with a question pending | Card marked expired, pending bar clears |
 
-## Open question (resolve first, do not block on)
+## Question source
 
-`answerPermission` currently sends only `behavior: allow|deny` (`ClaudeStreamJSONDriver.swift:185-203`), so "option 2 of 3" is not expressible today. Before building the Question card, probe how `AskUserQuestion` actually reaches Tiller:
-
-- as a `can_use_tool` control request, or as a plain tool call;
-- whether the ACP path (`claude-agent-acp`) and the native stream-json path agree.
-
-Capture the wire from a prompt that triggers it. `ChatQuestion` is designed to accept either source, so the probe decides which adapter to wire up, not the design. The ordinary allow/reject permission gate already works and renders in the same card regardless of the outcome.
+The native stream-json probe carried the question through neither `can_use_tool` nor a plain `tool_use`: both classifiers were zero because this non-interactive Claude environment reported `AskUserQuestion` unavailable after emitting `ToolSearch`. Therefore `ChatQuestion.from(toolCall:)` does not read `rawInput["questions"]` in this native probe and only sees permission options in native flow; keep both code paths because the ACP transport may differ from the native one.
 
 ## Testing
 
