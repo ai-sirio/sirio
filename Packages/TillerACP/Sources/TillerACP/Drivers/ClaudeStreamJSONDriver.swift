@@ -95,6 +95,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         readTask = Task { [weak self] in
             await self?.readLoop()
         }
+        await Task.yield()
     }
 
     public func stop() async {
@@ -232,7 +233,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
 
         case .assistant(let assistant):
             for block in assistant.message.content {
-                handleAssistantBlock(block)
+                handleAssistantBlock(block,
+                                     parentToolUseId: assistant.parentToolUseId)
             }
 
         case .user(let user):
@@ -297,11 +299,17 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         }
     }
 
-    private func handleAssistantBlock(_ block: ClaudeContentBlock) {
+    /// `parentToolUseId` is non-nil for blocks produced *inside* a subagent.
+    /// Its tool calls nest under the spawning Task; its prose is intermediate
+    /// chatter and is dropped — the final report arrives as the tool result.
+    private func handleAssistantBlock(_ block: ClaudeContentBlock,
+                                      parentToolUseId: String?) {
         switch block {
         case .text(let text):
+            guard parentToolUseId == nil else { return }
             eventContinuation.yield(.update(.agentMessageChunk(.text(text))))
         case .thinking(let thinking):
+            guard parentToolUseId == nil else { return }
             eventContinuation.yield(.update(.agentThoughtChunk(.text(thinking))))
         case .toolUse(let toolUse):
             eventContinuation.yield(.update(.toolCall(ToolCall(
@@ -309,7 +317,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                 title: toolTitle(name: toolUse.name, input: toolUse.input),
                 kind: toolKind(for: toolUse.name),
                 status: .inProgress,
-                rawInput: toolUse.input))))
+                rawInput: toolUse.input,
+                parentToolCallId: parentToolUseId))))
         case .toolResult, .unknown:
             break
         }
