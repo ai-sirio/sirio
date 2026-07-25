@@ -1,8 +1,18 @@
 import Testing
 @testable import TillerCore
 
-@Test func chromeHexIsUnchanged() {
-    #expect(AppSurfaceColor.hex == "131313")
+@Test func chromeIsIndigoTinted121216() {
+    #expect(AppSurfaceColor.red == 0.070)
+    #expect(AppSurfaceColor.green == 0.072)
+    #expect(AppSurfaceColor.blue == 0.086)
+    #expect(AppSurfaceColor.hex == "121216")
+}
+
+/// The chrome carries the same blue lean as the terminal surface: both sit in
+/// one color family, which a neutral gray chrome broke.
+@Test func chromeAndTerminalSurfaceShareABlueLean() {
+    #expect(AppSurfaceColor.blue > AppSurfaceColor.red)
+    #expect(AppSurfaceColor.terminalBlue > AppSurfaceColor.terminalRed)
 }
 
 @Test func terminalSurfaceIsCharcoal1F1F26() {

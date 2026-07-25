@@ -19,13 +19,17 @@ enum AppTheme {
     static let terminalSurface = dynamic(
         light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.terminalRed, green: AppSurfaceColor.terminalGreen, blue: AppSurfaceColor.terminalBlue, alpha: 1))
-    /// Neutral near-black tint for the sidebar/tab bar/usage bar material.
+    /// Near-black tint for the sidebar/tab bar/usage bar material — the same
+    /// components as `background`, so the two never drift apart.
     static let chromeTint = dynamic(
         light: NSColor(srgbRed: 0.92, green: 0.92, blue: 0.96, alpha: 1),
-        dark: NSColor(srgbRed: 0.075, green: 0.075, blue: 0.075, alpha: 1))
+        dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
+    /// Shared border/divider stroke: sidebar dividers, settings field outlines,
+    /// the update toast. Dark sits at ~1.9:1 against the chrome — readable as a
+    /// boundary without turning every settings field into a hard-edged box.
     static let hairline = dynamic(
         light: NSColor(srgbRed: 0.82, green: 0.83, blue: 0.87, alpha: 1),
-        dark: NSColor(srgbRed: 0.165, green: 0.176, blue: 0.220, alpha: 1))
+        dark: NSColor(srgbRed: 0.25, green: 0.26, blue: 0.31, alpha: 1))
     static let rowHover = dynamic(
         light: NSColor(srgbRed: 0.90, green: 0.905, blue: 0.93, alpha: 1),
         dark: NSColor(srgbRed: 0.125, green: 0.137, blue: 0.176, alpha: 1))
@@ -44,8 +48,10 @@ enum AppTheme {
     static let subtitle = dynamic(
         light: NSColor(srgbRed: 0.35, green: 0.37, blue: 0.45, alpha: 1),
         dark: NSColor(srgbRed: 0.72, green: 0.74, blue: 0.82, alpha: 1))
+    /// Light value is darker than a naive mirror of the dark one: `meta` is
+    /// caption-sized, and the previous #6B7085 cleared WCAG AA by 0.04.
     static let meta = dynamic(
-        light: NSColor(srgbRed: 0.42, green: 0.44, blue: 0.52, alpha: 1),
+        light: NSColor(srgbRed: 0.38, green: 0.40, blue: 0.48, alpha: 1),
         dark: NSColor(srgbRed: 0.66, green: 0.68, blue: 0.77, alpha: 1))
     static let primaryPillBg = dynamic(
         light: NSColor(srgbRed: 0.88, green: 0.885, blue: 0.92, alpha: 1),

@@ -5,9 +5,14 @@ import Foundation
 /// theme (TillerTerminal) both derive from these components so the sidebar,
 /// detail pane, and terminal surface never drift out of sync.
 public enum AppSurfaceColor {
-    public static let red: Double = 0.075
-    public static let green: Double = 0.075
-    public static let blue: Double = 0.075
+    /// Near-black chrome (#121216) carrying the same faint indigo tint as
+    /// `terminal*` below — a mathematically neutral gray here read as a
+    /// different color family than every other token in `AppTheme`.
+    /// Luminance is unchanged from the previous #131313, so text contrast
+    /// against the chrome is identical.
+    public static let red: Double = 0.070
+    public static let green: Double = 0.072
+    public static let blue: Double = 0.086
 
     public static var hex: String {
         hexString(red: red, green: green, blue: blue)
