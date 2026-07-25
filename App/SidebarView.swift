@@ -100,7 +100,8 @@ struct SidebarView: View {
                     Spacer()
                 }
                 .foregroundStyle(AppTheme.subtitle)
-                .padding(8)
+                .padding(.horizontal, 8)
+                .frame(height: AppTheme.bottomBarHeight)
             }
             .toolbar {
                 Button {

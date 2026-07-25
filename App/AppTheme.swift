@@ -88,6 +88,14 @@ enum AppTheme {
         light: NSColor(srgbRed: 0.88, green: 0.92, blue: 0.98, alpha: 1),
         dark: NSColor(srgbRed: 0.10, green: 0.17, blue: 0.28, alpha: 1))
 
+    /// Height of both bottom chrome bars: the sidebar footer and the usage bar.
+    /// They sit in different `HSplitView` columns, so their top dividers line up
+    /// only while the two bars are exactly as tall as each other. Sizing either
+    /// one intrinsically instead lets them drift — the usage bar's 10pt font put
+    /// it 19pt shorter than the sidebar footer, so the chat composer ran past the
+    /// sidebar's divider.
+    static let bottomBarHeight: CGFloat = 30
+
     /// Resolves at draw time against the view's effective appearance — the
     /// same mechanism behind Apple's semantic colors.
     private static func dynamic(light: NSColor, dark: NSColor) -> Color {

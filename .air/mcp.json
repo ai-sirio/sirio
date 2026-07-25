@@ -1,0 +1,9 @@
+{
+    "mcpServers": {
+        "iconify": {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "iconify-mcp-server@latest"]
+        }
+    }
+}

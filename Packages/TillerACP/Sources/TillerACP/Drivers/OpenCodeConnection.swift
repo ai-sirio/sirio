@@ -103,9 +103,22 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
     private let processTransport: ProcessTransport
     private let authorizationHeaders: [String]
 
+    /// `POST /session/{id}/message` blocks for the whole agent turn, so the
+    /// request timeout has to outlast a turn rather than a network round trip —
+    /// `URLSession.shared`'s 60s default aborts long turns with
+    /// `NSURLErrorTimedOut`. The same tolerance keeps the `/event` stream alive
+    /// between heartbeats.
+    static func sessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 86_400
+        return configuration
+    }
+
+    private static let defaultSession = URLSession(configuration: sessionConfiguration())
+
     /// Starts `opencode serve` in the supplied working directory and waits for
     /// its stdout announcement before returning a usable connection.
-    public init(cwd: String, session: URLSession = .shared,
+    public init(cwd: String, session: URLSession? = nil,
                 onStderrLine: (@Sendable (String) -> Void)? = nil) async throws {
         let password = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         var environment = ProcessInfo.processInfo.environment
@@ -128,7 +141,7 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
             guard let serverURL else { throw ConnectionError.serverURLNotFound }
 
             self.baseURL = serverURL
-            self.session = session
+            self.session = session ?? Self.defaultSession
             self.processTransport = transport
             let basicCredentials = Data("opencode:\(password)".utf8).base64EncodedString()
             // The fixture recorder probes these in this order. Keeping the
@@ -146,7 +159,7 @@ public final class OpenCodeProcessConnection: OpenCodeConnection, @unchecked Sen
     }
 
     /// Convenience overload for callers that already have a directory URL.
-    public convenience init(cwd: URL, session: URLSession = .shared,
+    public convenience init(cwd: URL, session: URLSession? = nil,
                             onStderrLine: (@Sendable (String) -> Void)? = nil) async throws {
         try await self.init(cwd: cwd.path, session: session,
                             onStderrLine: onStderrLine)
