@@ -27,8 +27,6 @@ public enum AppSurfaceColor {
     /// material, Ghostty background-opacity, chat main pane).
     public static let translucentSurfaceOpacity: Double = 0.96
 
-    public static var surfaceOpacity: Double { translucentSurfaceOpacity }
-
     public static func surfaceOpacity(translucencyEnabled: Bool) -> Double {
         translucencyEnabled ? translucentSurfaceOpacity : 1.0
     }
