@@ -42,6 +42,96 @@ import Testing
         #expect(question?.options.allSatisfy { !$0.isRejection } == true)
     }
 
+    @Test func disambiguatesRepeatedStructuredOptionLabels() {
+        var call = ToolCallItem(toolCallId: "t1", title: "AskUserQuestion",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "question": .string("Which mode?"),
+                "options": .array([
+                    .object(["label": .string("Automatic")]),
+                    .object(["label": .string("Automatic")]),
+                ]),
+            ])]),
+        ])
+        call.permission = PermissionState(requestId: .string("r1"), options: [])
+
+        let ids = ChatQuestion.from(call)?.options.map(\.id) ?? []
+        #expect(ids == ["Automatic", "Automatic-1"])
+        #expect(Set(ids).count == ids.count)
+    }
+
+    @Test func structuredQuestionTakesPrecedenceOverPermissionOptions() {
+        var call = ToolCallItem(toolCallId: "t1", title: "Permission fallback",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "header": .string("Structured header"),
+                "question": .string("Which mode?"),
+                "options": .array([
+                    .object(["label": .string("Automatic")]),
+                ]),
+            ])]),
+        ])
+        call.permission = PermissionState(
+            requestId: .string("r1"),
+            options: [PermissionOption(optionId: "permission-id", name: "Permission option",
+                                       kind: .allowOnce)])
+
+        let question = ChatQuestion.from(call)
+        #expect(question?.header == "Structured header")
+        #expect(question?.prompt == "Which mode?")
+        #expect(question?.options.map(\.id) == ["Automatic"])
+    }
+
+    @Test func dropsMalformedStructuredOptionsButKeepsValidSiblings() {
+        var call = ToolCallItem(toolCallId: "t1", title: "AskUserQuestion",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "header": .string("Storage"),
+                "question": .string("Which backend?"),
+                "options": .array([
+                    .object(["label": .string("SQLite")]),
+                    .object(["description": .string("missing label")]),
+                ]),
+            ])]),
+        ])
+        call.permission = PermissionState(
+            requestId: .string("r1"),
+            options: [PermissionOption(optionId: "permission-id", name: "Permission fallback",
+                                       kind: .allowOnce)])
+
+        let question = ChatQuestion.from(call)
+        #expect(question?.options.map(\.label) == ["SQLite"])
+        #expect(question?.options.map(\.id) == ["SQLite"])
+    }
+
+    @Test func fallsBackToPermissionOptionsWhenAllStructuredOptionsAreMalformed() {
+        var call = ToolCallItem(toolCallId: "t1", title: "Permission fallback",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "header": .string("Storage"),
+                "question": .string("Which backend?"),
+                "options": .array([
+                    .object(["description": .string("missing label")]),
+                    .object(["description": .string("still missing label")]),
+                ]),
+            ])]),
+        ])
+        call.permission = PermissionState(
+            requestId: .string("r1"),
+            options: [PermissionOption(optionId: "permission-id", name: "Permission fallback",
+                                       kind: .allowOnce)])
+
+        let question = ChatQuestion.from(call)
+        #expect(question?.header == "Permission fallback")
+        #expect(question?.prompt == "")
+        #expect(question?.options.map(\.id) == ["permission-id"])
+        #expect(question?.options.map(\.label) == ["Permission fallback"])
+    }
+
     @Test func reportsTheChosenOption() {
         var call = ToolCallItem(toolCallId: "t1", title: "Write", kind: .edit,
                                 status: .completed)
