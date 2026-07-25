@@ -50,9 +50,13 @@ struct UsageBarView: View {
             }
         }
         .font(.system(size: 10))
+        // The bar is a fixed height, so segments truncate rather than wrap —
+        // wrapping would silently clip the second line on a narrow window.
+        .lineLimit(1)
         .padding(.horizontal, 12)
-        .padding(.vertical, 2)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity,
+               minHeight: AppTheme.bottomBarHeight,
+               maxHeight: AppTheme.bottomBarHeight)
         .background(SidebarMaterialContainer())
     }
 

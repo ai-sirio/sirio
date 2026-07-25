@@ -9,6 +9,13 @@ import Foundation
         #expect(url?.absoluteString == "http://127.0.0.1:53422")
     }
 
+    @Test func sessionDoesNotTimeOutDuringLongTurns() {
+        // POST /session/{id}/message blocks for the whole agent turn, so the
+        // 60s URLSession.shared default aborts any turn longer than a minute.
+        let configuration = OpenCodeProcessConnection.sessionConfiguration()
+        #expect(configuration.timeoutIntervalForRequest >= 3_600)
+    }
+
     @Test func sseParserHandlesSplitFrames() {
         var parser = SSEParser()
         let first = parser.feed(Data("data: {\"a\":".utf8))
