@@ -176,6 +176,12 @@ public actor CodexAppServerDriver: AgentDriver {
             } else {
                 decision = style == .appServer ? "decline" : "denied"
             }
+        case .answered(let optionId, _):
+            if optionId.hasPrefix("allow") {
+                decision = style == .appServer ? "accept" : "approved"
+            } else {
+                decision = style == .appServer ? "decline" : "denied"
+            }
         case .cancelled:
             decision = style == .appServer ? "cancel" : "denied"
         }
