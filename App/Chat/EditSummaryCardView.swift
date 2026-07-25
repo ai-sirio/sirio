@@ -21,24 +21,23 @@ struct EditSummaryCardView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(paths.count == 1 ? "1 file changed"
-                                   : "\(paths.count) files changed",
-                  systemImage: "pencil.line")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ForEach(paths, id: \.self) { path in
-                row(path)
-            }
-            if let revertError {
-                Text(revertError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+        ChatCard(kind: .edit) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(paths.count == 1 ? "1 file changed"
+                                       : "\(paths.count) files changed",
+                      systemImage: "pencil.line")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ForEach(paths, id: \.self) { path in
+                    row(path)
+                }
+                if let revertError {
+                    Text(revertError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
         .confirmationDialog(
             "Revert \((confirmingPath as NSString?)?.lastPathComponent ?? "")?",
             isPresented: Binding(

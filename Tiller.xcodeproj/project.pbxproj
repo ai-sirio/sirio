@@ -76,6 +76,7 @@
 		842C39BA681065F69B196900 /* TillerAgents in Frameworks */ = {isa = PBXBuildFile; productRef = 56F2759B5316866B25363AF7 /* TillerAgents */; };
 		843D838715C653ED33181B70 /* RightPanelMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754ED987A43572FB14EBB2FD /* RightPanelMode.swift */; };
 		896DB6FB17EDCFBB89C1F6BC /* GitDiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56A0B2497A79763F2B2707AD /* GitDiffView.swift */; };
+		8A4A2707324A17F3BE027B92 /* ChatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5309B32D170F4FF73CE6BE24 /* ChatCard.swift */; };
 		8D9D1C05D835E0BA7A7B0D14 /* TabBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80DC2F061B4A286C7ADF990F /* TabBarView.swift */; };
 		8E5D8ACB74A4F8DB576AB990 /* SummarizerSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 829705C11FEAE19AF6E58E77 /* SummarizerSelection.swift */; };
 		8ECABD13D02543070A0AD0F9 /* MenuBarStatusIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED264D1B3306C90BC890ECE /* MenuBarStatusIcon.swift */; };
@@ -179,6 +180,7 @@
 		50A32BA4FF89DB0133FF9C6C /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		516A0EC113C050943267DA86 /* AppModelControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelControlTests.swift; sourceTree = "<group>"; };
 		526AD5B187E48B97E58C72C4 /* HideOnCloseWindowDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HideOnCloseWindowDelegate.swift; sourceTree = "<group>"; };
+		5309B32D170F4FF73CE6BE24 /* ChatCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatCard.swift; sourceTree = "<group>"; };
 		56231D9700C4BE8BA92FCB02 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		56A0B2497A79763F2B2707AD /* GitDiffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiffView.swift; sourceTree = "<group>"; };
 		57203478CAD5658B46BACB4C /* AddProjectSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddProjectSheet.swift; sourceTree = "<group>"; };
@@ -373,6 +375,7 @@
 			children = (
 				EB553F17F039EA89047AFC1C /* AgentMarkdownTextView.swift */,
 				3AFBA57E03B80A9B41F89BA7 /* AgentMessageSegmenter.swift */,
+				5309B32D170F4FF73CE6BE24 /* ChatCard.swift */,
 				6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */,
 				D1E46DF390E43B7EA1794BB7 /* ChatController.swift */,
 				F40DAB221BF29036B76B496D /* ChatPaneView.swift */,
@@ -688,6 +691,7 @@
 				EBEC08157A1EBB7DB44A3F5F /* AppTheme.swift in Sources */,
 				71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */,
 				A5FE4417E2CE7408481A645C /* AutoNamer.swift in Sources */,
+				8A4A2707324A17F3BE027B92 /* ChatCard.swift in Sources */,
 				70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */,
 				67FB529584389E037E1941C7 /* ChatController.swift in Sources */,
 				E2BB6072F2A503E3A44E461E /* ChatPaneView.swift in Sources */,

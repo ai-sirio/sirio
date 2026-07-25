@@ -15,17 +15,14 @@ struct ToolCallCardView: View {
     private var isPermissionPending: Bool { item.permission?.isPending == true }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            header
-            if expanded || isPermissionPending {
-                contentBody
+        ChatCard(kind: .tool, isHighlighted: isPermissionPending) {
+            VStack(alignment: .leading, spacing: 6) {
+                header
+                if expanded || isPermissionPending {
+                    contentBody
+                }
             }
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8)
-            .strokeBorder(isPermissionPending ? Color.orange.opacity(0.7) : .clear))
     }
 
     private var header: some View {
