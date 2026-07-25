@@ -19,11 +19,13 @@ struct TranscriptView: View {
     // storm is isolated offline; `rowView` and the row views stay compiled
     // for that follow-up.
     var body: some View {
+        let grouped = controller.grouped
+
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(controller.items) { item in
-                        itemView(item, meta: nil)
+                    ForEach(grouped.roots) { item in
+                        itemView(item, meta: nil, grouped: grouped)
                             .id(item.id)
                     }
                     if controller.state == .prompting {
@@ -43,10 +45,10 @@ struct TranscriptView: View {
     }
 
     @ViewBuilder
-    private func rowView(_ row: TimelineRow) -> some View {
+    private func rowView(_ row: TimelineRow, grouped: ToolCallTree.Grouped) -> some View {
         switch row {
         case .message(let item, let meta):
-            itemView(item, meta: meta)
+            itemView(item, meta: meta, grouped: grouped)
         case .work(let groupId, let entries, let isExpanded):
             WorkGroupView(groupId: groupId, entries: entries,
                           isExpanded: isExpanded, controller: controller,
@@ -64,7 +66,8 @@ struct TranscriptView: View {
     }
 
     @ViewBuilder
-    private func itemView(_ item: TranscriptItem, meta: TimelineRow.MessageMeta?) -> some View {
+    private func itemView(_ item: TranscriptItem, meta: TimelineRow.MessageMeta?,
+                          grouped: ToolCallTree.Grouped) -> some View {
         switch item {
         case .userMessage(_, let blocks):
             userBubble(blocks)
@@ -82,7 +85,7 @@ struct TranscriptView: View {
                              worktree: worktree, appModel: appModel)
         case .plan(_, let entries):
             PlanCardView(entries: entries,
-                         approval: controller.grouped.pendingPlanApproval,
+                         approval: grouped.pendingPlanApproval,
                          controller: controller)
         case .turnDivider(_, let date):
             turnDivider(date)

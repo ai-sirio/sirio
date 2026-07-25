@@ -61,8 +61,8 @@ final class ChatController {
     private static let followThrottle: TimeInterval = 0.5
 
     var items: [TranscriptItem] { restored + reducer.items }
-    /// Roots + children + pending plan approval, computed once per items
-    /// change. Views must read this instead of scanning `items` themselves.
+    /// Roots + children + pending plan approval. Recomputed on every access;
+    /// callers should read it once per redraw rather than once per row.
     var grouped: ToolCallTree.Grouped { ToolCallTree.group(items: items) }
     var timelineRows: [TimelineRow] {
         TimelineBuilder.rows(items: items, state: TimelineState(
