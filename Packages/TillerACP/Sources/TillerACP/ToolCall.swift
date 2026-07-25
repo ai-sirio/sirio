@@ -155,15 +155,18 @@ public struct ToolCall: Sendable, Equatable, Codable {
     public var locations: [ToolCallLocation]
     public var rawInput: JSONValue?
     public var terminalMeta: TerminalMeta?
+    public var parentToolCallId: String?
     private enum CodingKeys: String, CodingKey {
         case toolCallId, title, kind, status, content, locations, rawInput
+        case parentToolCallId
         case terminalMeta = "_meta"
     }
 
     public init(toolCallId: String, title: String, kind: ToolKind,
                 status: ToolCallStatus, content: [ToolCallContent] = [],
                 locations: [ToolCallLocation] = [], rawInput: JSONValue? = nil,
-                terminalMeta: TerminalMeta? = nil) {
+                terminalMeta: TerminalMeta? = nil,
+                parentToolCallId: String? = nil) {
         self.toolCallId = toolCallId
         self.title = title
         self.kind = kind
@@ -172,6 +175,7 @@ public struct ToolCall: Sendable, Equatable, Codable {
         self.locations = locations
         self.rawInput = rawInput
         self.terminalMeta = terminalMeta
+        self.parentToolCallId = parentToolCallId
     }
 
     public init(from decoder: Decoder) throws {
@@ -184,6 +188,8 @@ public struct ToolCall: Sendable, Equatable, Codable {
         locations = try container.decodeIfPresent([ToolCallLocation].self, forKey: .locations) ?? []
         rawInput = try container.decodeIfPresent(JSONValue.self, forKey: .rawInput)
         terminalMeta = try container.decodeIfPresent(TerminalMeta.self, forKey: .terminalMeta)
+        parentToolCallId = try container.decodeIfPresent(String.self,
+                                                         forKey: .parentToolCallId)
     }
 }
 
@@ -191,6 +197,7 @@ public struct ToolCall: Sendable, Equatable, Codable {
 public struct ToolCallUpdate: Sendable, Equatable, Codable {
     private enum CodingKeys: String, CodingKey {
         case toolCallId, title, kind, status, content, locations, rawInput
+        case parentToolCallId
         case terminalMeta = "_meta"
     }
 
@@ -202,11 +209,13 @@ public struct ToolCallUpdate: Sendable, Equatable, Codable {
     public var locations: [ToolCallLocation]?
     public var rawInput: JSONValue?
     public var terminalMeta: TerminalMeta?
+    public var parentToolCallId: String?
 
     public init(toolCallId: String, title: String? = nil, kind: ToolKind? = nil,
                 status: ToolCallStatus? = nil, content: [ToolCallContent]? = nil,
                 locations: [ToolCallLocation]? = nil, rawInput: JSONValue? = nil,
-                terminalMeta: TerminalMeta? = nil) {
+                terminalMeta: TerminalMeta? = nil,
+                parentToolCallId: String? = nil) {
         self.toolCallId = toolCallId
         self.title = title
         self.kind = kind
@@ -215,5 +224,6 @@ public struct ToolCallUpdate: Sendable, Equatable, Codable {
         self.locations = locations
         self.rawInput = rawInput
         self.terminalMeta = terminalMeta
+        self.parentToolCallId = parentToolCallId
     }
 }
