@@ -19,6 +19,7 @@ struct ChatComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isPrompting: Bool { controller.state == .prompting }
+    private var isConnecting: Bool { controller.state == .connecting }
     private var canInteract: Bool {
         (controller.state == .ready || isPrompting) && !controller.hasPendingPermission
     }
@@ -84,6 +85,14 @@ struct ChatComposerView: View {
         }
     }
 
+
+    private var loadingButton: some View {
+        ProgressView()
+            .controlSize(.small)
+            .frame(width: 26, height: 26)
+            .background(.quaternary, in: Circle())
+            .help("Starting the agent…")
+    }
 
     // MARK: - Slash commands
 

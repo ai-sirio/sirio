@@ -23,6 +23,19 @@ struct ComposerControlBar: View {
         isFocused ? (.accentColor, 1.5) : (Color(nsColor: .separatorColor), 1)
     }
 
+    enum TrailingControl { case loading, stop, send }
+
+    /// Which control closes the row. Startup is slow enough on some agents that
+    /// a plain Send button reads as "nothing happened", so connecting gets a
+    /// spinner of its own instead of falling through to send.
+    static func trailingControl(for state: ChatController.ChatState) -> TrailingControl {
+        switch state {
+        case .connecting: .loading
+        case .prompting: .stop
+        default: .send
+        }
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Button(action: onAttach) {
@@ -38,10 +51,10 @@ struct ComposerControlBar: View {
             overflowMenu
             contextUsageIndicator
             modePill
-            if controller.state == .prompting {
-                stopButton
-            } else {
-                sendButton
+            switch Self.trailingControl(for: controller.state) {
+            case .loading: loadingButton
+            case .stop: stopButton
+            case .send: sendButton
             }
         }
     }
@@ -231,6 +244,17 @@ struct ComposerControlBar: View {
         .buttonStyle(.plain)
         .keyboardShortcut(.return, modifiers: [])
         .disabled(!canSend)
+    }
+
+    /// Send-button chrome with a spinner in place of the label, so the row
+    /// keeps its 24pt height while the agent starts up.
+    private var loadingButton: some View {
+        ProgressView()
+            .controlSize(.small)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            .help("Starting the agent…")
     }
 
     private var stopButton: some View {
