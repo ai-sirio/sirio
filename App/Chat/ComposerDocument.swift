@@ -29,7 +29,12 @@ final class ComposerDocument {
     private(set) var mentionQuery: String?
     var isFocused = false
 
-    var isEmpty: Bool { storage.length == 0 }
+    /// Stored, not computed from `storage.length`: `@Observable` only tracks
+    /// stored properties, and the storage is a `let` whose contents mutate
+    /// inside AppKit. Computed from it, this never invalidated a SwiftUI read,
+    /// so the composer's placeholder stayed on screen underneath the text
+    /// being typed. Every mutation path refreshes it through `syncIsEmpty`.
+    private(set) var isEmpty = true
 
     /// The leading `/token`, as an NSString range, when the draft is a single
     /// unbroken slash token. Whitespace anywhere in it means the user has
@@ -47,6 +52,15 @@ final class ComposerDocument {
             String((storage.string as NSString).substring(with: $0).dropFirst())
         }
         mentionQuery = Self.mentionToken(in: storage.string)
+        syncIsEmpty()
+    }
+
+    /// Called from every path that mutates the storage. Assigning only on a
+    /// real change keeps SwiftUI from being woken on each keystroke of an
+    /// already non-empty draft.
+    private func syncIsEmpty() {
+        let empty = storage.length == 0
+        if isEmpty != empty { isEmpty = empty }
     }
 
     /// The active `@`-token runs from the last "@" to the end of the text, with
@@ -71,6 +85,7 @@ final class ComposerDocument {
         storage.replaceCharacters(in: range, with: replacement)
         resetTypingAttributes()
         slashQuery = nil
+        syncIsEmpty()
         return NSRange(location: range.location + replacement.length, length: 0)
     }
 
@@ -79,6 +94,7 @@ final class ComposerDocument {
             in: range,
             with: NSAttributedString(attachment: ComposerChipAttachment(chip: chip)))
         resetTypingAttributes()
+        syncIsEmpty()
     }
 
     /// Drains the draft. The returned triple is exactly what
@@ -89,6 +105,7 @@ final class ComposerDocument {
         storage.setAttributedString(NSAttributedString(string: ""))
         slashQuery = nil
         mentionQuery = nil
+        syncIsEmpty()
         return draft
     }
 
