@@ -77,6 +77,7 @@ public struct ChatQuestion: Sendable, Equatable {
             prompt
         }
         guard case .array(let rawOptions)? = first["options"] else { return nil }
+        var usedIDs = Set<String>()
         let options: [Option] = rawOptions.enumerated().compactMap { index, value in
             guard case .object(let option) = value,
                   case .string(let label)? = option["label"] else { return nil }
@@ -85,8 +86,18 @@ public struct ChatQuestion: Sendable, Equatable {
             } else {
                 nil
             }
-            return Option(id: label.isEmpty ? "option-\(index)" : label,
-                          label: label, detail: detail)
+            let baseID = label.isEmpty ? "option-\(index)" : label
+            var id = baseID
+            if usedIDs.contains(id) {
+                id = "\(baseID)-\(index)"
+                var suffix = 2
+                while usedIDs.contains(id) {
+                    id = "\(baseID)-\(index)-\(suffix)"
+                    suffix += 1
+                }
+            }
+            usedIDs.insert(id)
+            return Option(id: id, label: label, detail: detail)
         }
         guard !options.isEmpty else { return nil }
         return (header, prompt, options)
