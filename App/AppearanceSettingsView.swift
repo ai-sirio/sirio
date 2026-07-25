@@ -8,6 +8,7 @@ struct AppearanceSettingsView: View {
     @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
     @AppStorage(AppSettings.terminalFontSizeKey) private var terminalFontSize = AppSettings.defaultTerminalFontSize
     @AppStorage(AppSettings.fileIconThemeKey) private var fileIconThemeRaw = FileIconTheme.sfSymbols.rawValue
+    @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 
     var body: some View {
         Form {
@@ -18,6 +19,7 @@ struct AppearanceSettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                Toggle("Translucency", isOn: $translucencyEnabled)
             }
             Section("Terminal") {
                 Stepper(value: $terminalFontSize, in: AppSettings.terminalFontSizeRange) {
