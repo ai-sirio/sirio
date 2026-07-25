@@ -61,6 +61,9 @@ final class ChatController {
     private static let followThrottle: TimeInterval = 0.5
 
     var items: [TranscriptItem] { restored + reducer.items }
+    /// Roots + children + pending plan approval, computed once per items
+    /// change. Views must read this instead of scanning `items` themselves.
+    var grouped: ToolCallTree.Grouped { ToolCallTree.group(items: items) }
     var timelineRows: [TimelineRow] {
         TimelineBuilder.rows(items: items, state: TimelineState(
             expandedWorkGroups: expandedWorkGroups,
@@ -86,12 +89,7 @@ final class ChatController {
         ComposerPermissions.extract(from: items)
     }
     var hasPlanAwaitingApproval: Bool {
-        timelineRows.contains { row in
-            if case .proposedPlan(_, _, .some(let approval)) = row {
-                return approval.isPending
-            }
-            return false
-        }
+        grouped.pendingPlanApproval?.isPending == true
     }
 
     private var driver: (any AgentDriver)?
