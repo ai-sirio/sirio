@@ -103,11 +103,16 @@ struct TranscriptView: View {
         switch item {
         case .userMessage(_, let blocks):
             userBubble(blocks)
-        case .agentMessage(_, let text, _):
-            VStack(alignment: .leading, spacing: 4) {
-                agentMessage(text)
-                if let meta, meta.showsCopyButton || meta.duration != nil {
-                    messageMetaRow(meta, text: text)
+        case .agentMessage(_, let text, let isComplete):
+            switch AgentMessagePresentation.mode(isComplete: isComplete) {
+            case .streaming:
+                StreamingAgentTextView(text: text)
+            case .rich:
+                VStack(alignment: .leading, spacing: 4) {
+                    agentMessage(text)
+                    if let meta, meta.showsCopyButton || meta.duration != nil {
+                        messageMetaRow(meta, text: text)
+                    }
                 }
             }
         case .thought(_, let text):

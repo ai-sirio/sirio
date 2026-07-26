@@ -26,6 +26,20 @@ import Testing
         #expect(isComplete == true)
     }
 
+    @Test func explicitCloseCompletesOpenMessageWithoutAddingDivider() {
+        var reducer = TranscriptReducer()
+        reducer.apply(.agentMessageChunk(.text("partial")))
+
+        reducer.closeAgentMessage()
+
+        guard case .agentMessage(_, "partial", let isComplete) = reducer.items[0] else {
+            Issue.record("expected completed agentMessage")
+            return
+        }
+        #expect(isComplete)
+        #expect(reducer.items.count == 1)
+    }
+
     /// Un thought che interrompe un messaggio agente deve chiuderlo: lasciarlo
     /// isComplete=false mostra RunningDots per sempre sotto la risposta.
     @Test func thoughtChunkCompletesOpenAgentMessage() {
