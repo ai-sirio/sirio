@@ -208,7 +208,10 @@ extension RightPanelModel {
     ) async {
         let sid = SignpostMetrics.makeSignpostID()
         let state = SignpostMetrics.beginInterval("panelRefresh", id: sid)
-        defer { SignpostMetrics.endInterval("panelRefresh", state) }
+        defer {
+            SignpostMetrics.endInterval(
+                "panelRefresh", state, message: "paths: \(changedPaths.count)")
+        }
         guard token == generation, let rootURL, let worktree else { return }
         let loadedKeys = childrenByDirectory.keys.filter { key in
             if forceAllLoadedDirectories || changedPaths.isEmpty { return true }
