@@ -11,6 +11,7 @@ struct TranscriptView: View {
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
 
     // Stopgap: timeline-row rendering (work groups, turn folds, 700pt column)
     // is disabled — three main-thread layout storms were sampled with it
@@ -36,9 +37,21 @@ struct TranscriptView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
+            .scrollPosition($scrollPosition)
+            // Streaming growth: follow only while the user has not taken over
+            // the scroll. No geometry reads — `isPositionedByUser` is the
+            // scroll view's own state.
+            .onChange(of: controller.streamTick) {
+                guard !scrollPosition.isPositionedByUser else { return }
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+            // A new item re-pins only when the user just sent something —
+            // an agent's new tool call must not yank the view while reading.
             .onChange(of: controller.items.count) {
+                guard let last = controller.items.last,
+                      case .userMessage = last else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
             }
             .onChange(of: controller.scrollTarget) {
@@ -141,13 +154,15 @@ struct TranscriptView: View {
 
     // MARK: - Thinking indicator
 
-    /// Live status while a turn is in flight; driven by `controller.state`
-    /// rather than a per-message completion flag so it can't get stuck once
-    /// the turn actually ends.
+    /// Live status while a turn is in flight. Naming the current tool call
+    /// turns a mute spinner into an answer to "what is it doing?".
     private var thinkingRow: some View {
         HStack(spacing: 6) {
-            RunningDots(color: .orange)
-            Text("Thinking").font(.caption).foregroundStyle(.orange)
+            RunningDots(color: AppTheme.railQuestion)
+            Text(controller.currentActivity ?? "Thinking")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
     }
 
