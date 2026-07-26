@@ -2,6 +2,19 @@ import Foundation
 import TillerCore
 import TillerTerminal
 
+/// The slice of preferences `UsageStore` reads. Exists so tests can drive
+/// the polling lifecycle from a fixed set of values: a `UserDefaults` suite
+/// is not isolated — its search list still falls back to the app domain, so
+/// a test using one would read the developer's real toggles and spawn real
+/// fetchers.
+protocol UsagePreferencesReading {
+    func bool(forKey key: String) -> Bool
+    func integer(forKey key: String) -> Int
+    func string(forKey key: String) -> String?
+}
+
+extension UserDefaults: UsagePreferencesReading {}
+
 /// Owns the latest usage state for all four tracked providers (Claude,
 /// Codex, OpenCode Go, Ollama Cloud), a shared refresh timer, and
 /// per-provider single-flight fetching. Risky mapping logic lives in
@@ -30,16 +43,44 @@ final class UsageStore {
     /// access to cancel the timer.
     private nonisolated(unsafe) var timer: Task<Void, Never>?
 
+    private let defaults: UsagePreferencesReading
+
+    init(defaults: UsagePreferencesReading = UserDefaults.standard) {
+        self.defaults = defaults
+    }
+
     /// Refresh cadence, read from prefs each cycle and clamped so a corrupt
     /// value can never drive the timer.
     private var refreshInterval: Duration {
-        let stored = UserDefaults.standard.integer(forKey: "usage.refreshIntervalSeconds")
+        let stored = defaults.integer(forKey: "usage.refreshIntervalSeconds")
         let seconds = stored == 0 ? AppSettings.defaultRefreshSeconds : AppSettings.clampRefresh(stored)
         return .seconds(seconds)
     }
 
-    func start() {
+    /// True while a refresh timer is armed. Nothing wakes up when false.
+    var isPolling: Bool { timer != nil }
+
+    /// How many times a timer has been armed. Lets tests prove the
+    /// reconciliation is idempotent rather than merely non-crashing.
+    private(set) var timerArmCount = 0
+
+    /// Providers whose usage bar toggle is currently on.
+    var enabledProviders: Set<UsageProvider> {
+        Set(UsageProvider.allCases.filter { defaults.bool(forKey: $0.showInBarKey) })
+    }
+
+    /// Reconciles the timer with the set of providers that want polling:
+    /// arms one timer for a non-empty set, cancels it for an empty one.
+    /// Idempotent — calling it repeatedly with providers enabled keeps the
+    /// timer that is already running rather than stacking another.
+    func updatePolling(enabledProviders: Set<UsageProvider>) {
+        guard !enabledProviders.isEmpty else {
+            timer?.cancel()
+            timer = nil
+            return
+        }
         guard timer == nil else { return }
+        timerArmCount += 1
         Task { await refreshAll() }
         timer = Task { [weak self] in
             while !Task.isCancelled {
@@ -50,15 +91,20 @@ final class UsageStore {
         }
     }
 
+    /// Reconciles the timer against the toggles currently stored in prefs.
+    func updatePolling() {
+        updatePolling(enabledProviders: enabledProviders)
+    }
+
     /// Cancel and re-arm the timer so a changed interval applies immediately.
     func restartTimer() {
         timer?.cancel()
         timer = nil
-        start()
+        updatePolling()
     }
 
     func refresh() async {
-        guard UserDefaults.standard.bool(forKey: "usage.claude.showInBar") else { return }
+        guard defaults.bool(forKey: UsageProvider.claude.showInBarKey) else { return }
         guard !isFetching else { return }
         isFetching = true
         defer { isFetching = false }
@@ -68,7 +114,7 @@ final class UsageStore {
     }
 
     func refreshCodex() async {
-        guard UserDefaults.standard.bool(forKey: "usage.codex.showInBar") else { return }
+        guard defaults.bool(forKey: UsageProvider.codex.showInBarKey) else { return }
         guard !isFetchingCodex else { return }
         isFetchingCodex = true
         defer { isFetchingCodex = false }
@@ -89,18 +135,18 @@ final class UsageStore {
     }
 
     func refreshOpencodeGo() async {
-        guard UserDefaults.standard.bool(forKey: "usage.opencodeGo.showInBar") else { return }
+        guard defaults.bool(forKey: UsageProvider.opencodeGo.showInBarKey) else { return }
         guard !isFetchingOpencodeGo else { return }
         isFetchingOpencodeGo = true
         defer { isFetchingOpencodeGo = false }
-        let override = UserDefaults.standard.string(forKey: "usage.opencodeGo.workspaceIdOverride")
+        let override = defaults.string(forKey: "usage.opencodeGo.workspaceIdOverride")
         let outcome = await OpenCodeGoUsageFetcher.fetch(workspaceIdOverride: override)
         opencodeGo = UsageStateReducer.reduce(outcome: outcome, previous: opencodeGo)
         if case .loaded = opencodeGo { lastOpencodeGoUpdate = Date() }
     }
 
     func refreshOllamaCloud() async {
-        guard UserDefaults.standard.bool(forKey: "usage.ollamaCloud.showInBar") else { return }
+        guard defaults.bool(forKey: UsageProvider.ollamaCloud.showInBarKey) else { return }
         guard !isFetchingOllamaCloud else { return }
         isFetchingOllamaCloud = true
         defer { isFetchingOllamaCloud = false }

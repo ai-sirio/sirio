@@ -211,8 +211,23 @@ struct AIProvidersSettingsView: View {
         .onChange(of: intervalSeconds) { _, _ in
             store.restartTimer()
         }
+        // Every toggle drives the shared timer: enabling the first one arms
+        // it, disabling the last one cancels it.
         .onChange(of: showClaudeInBar) { _, isOn in
+            store.updatePolling()
             if isOn { Task { await store.refresh() } }
+        }
+        .onChange(of: showCodexInBar) { _, isOn in
+            store.updatePolling()
+            if isOn { Task { await store.refreshCodex() } }
+        }
+        .onChange(of: showOpencodeGoInBar) { _, isOn in
+            store.updatePolling()
+            if isOn { Task { await store.refreshOpencodeGo() } }
+        }
+        .onChange(of: showOllamaCloudInBar) { _, isOn in
+            store.updatePolling()
+            if isOn { Task { await store.refreshOllamaCloud() } }
         }
         .onChange(of: workspaceIdOverride) { _, _ in
             Task { await store.refreshOpencodeGo() }
