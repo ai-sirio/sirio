@@ -92,6 +92,7 @@ struct ChatPaneView: View {
                 ChatComposerView(controller: controller, worktreePath: worktree.path)
             }
         }
+        .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
         .coordinateSpace(name: "chat-pane")
         .task {
             controller.onFollowLocation = { [weak appModel] path in

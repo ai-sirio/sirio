@@ -81,6 +81,7 @@ struct TabBarView: View {
             .padding(.trailing, 8)
         }
         .frame(height: 32)
+        .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
     }
 }
 
@@ -170,16 +171,20 @@ struct TabBarItem: View {
         .padding(.vertical, 5)
         .contentShape(Rectangle())
         .background {
-            if isActive {
-                RoundedRectangle(cornerRadius: 7)
-                    .fill(AppTheme.selectionFill)
-                    .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(AppTheme.background)
+                .overlay {
+                    if isActive {
                         RoundedRectangle(cornerRadius: 7)
-                            .stroke(AppTheme.selectionRing, lineWidth: 1)
-                    )
-            } else if hovering {
-                RoundedRectangle(cornerRadius: 7).fill(AppTheme.rowHover)
-            }
+                            .fill(AppTheme.selectionFill)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(AppTheme.selectionRing, lineWidth: 1)
+                            )
+                    } else if hovering {
+                        RoundedRectangle(cornerRadius: 7).fill(AppTheme.rowHover)
+                    }
+                }
         }
         .onHover { hovering = $0 }
         .onTapGesture { model.activateTab(tab.id, in: worktree.id) }

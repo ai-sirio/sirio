@@ -1,11 +1,18 @@
 import Testing
 @testable import TillerCore
 
-@Test func chromeIsIndigoTinted121216() {
-    #expect(AppSurfaceColor.red == 0.070)
-    #expect(AppSurfaceColor.green == 0.072)
-    #expect(AppSurfaceColor.blue == 0.086)
-    #expect(AppSurfaceColor.hex == "121216")
+@Test func chromeIsWarmGraphite1A1A1E() {
+    #expect(AppSurfaceColor.red == 0.102)
+    #expect(AppSurfaceColor.green == 0.102)
+    #expect(AppSurfaceColor.blue == 0.118)
+    #expect(AppSurfaceColor.hex == "1A1A1E")
+}
+
+@Test func chatSurfaceIsNearBlack121216() {
+    #expect(AppSurfaceColor.chatRed == 0.070)
+    #expect(AppSurfaceColor.chatGreen == 0.072)
+    #expect(AppSurfaceColor.chatBlue == 0.086)
+    #expect(AppSurfaceColor.chatHex == "121216")
 }
 
 /// The chrome carries the same blue lean as the terminal surface: both sit in
@@ -15,11 +22,11 @@ import Testing
     #expect(AppSurfaceColor.terminalBlue > AppSurfaceColor.terminalRed)
 }
 
-@Test func terminalSurfaceIsCharcoal1F1F26() {
-    #expect(AppSurfaceColor.terminalRed == 0.122)
-    #expect(AppSurfaceColor.terminalGreen == 0.122)
-    #expect(AppSurfaceColor.terminalBlue == 0.149)
-    #expect(AppSurfaceColor.terminalHex == "1F1F26")
+@Test func terminalSurfaceMatchesChatSurface121216() {
+    #expect(AppSurfaceColor.terminalRed == AppSurfaceColor.chatRed)
+    #expect(AppSurfaceColor.terminalGreen == AppSurfaceColor.chatGreen)
+    #expect(AppSurfaceColor.terminalBlue == AppSurfaceColor.chatBlue)
+    #expect(AppSurfaceColor.terminalHex == "121216")
 }
 
 @Test func sharedSurfaceOpacityIs096() {

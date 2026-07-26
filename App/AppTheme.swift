@@ -14,11 +14,17 @@ enum AppTheme {
     static let background = dynamic(
         light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
-    /// Charcoal surface for the terminal/chat main pane (#1F1F26 dark).
+    /// Near-black surface for the terminal main pane (#121216 dark) — same
+    /// value as `chatSurface` below, so terminal and chat panes match.
     /// Light mode mirrors `background` — translucency is a dark-mode look.
     static let terminalSurface = dynamic(
         light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.terminalRed, green: AppSurfaceColor.terminalGreen, blue: AppSurfaceColor.terminalBlue, alpha: 1))
+    /// Near-black surface for the chat main pane (#121216 dark).
+    /// Light mode mirrors `background` — translucency is a dark-mode look.
+    static let chatSurface = dynamic(
+        light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
+        dark: NSColor(srgbRed: AppSurfaceColor.chatRed, green: AppSurfaceColor.chatGreen, blue: AppSurfaceColor.chatBlue, alpha: 1))
     /// Near-black tint for the sidebar/tab bar/usage bar material — the same
     /// components as `background`, so the two never drift apart.
     static let chromeTint = dynamic(
