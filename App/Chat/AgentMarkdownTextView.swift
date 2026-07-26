@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TillerTerminal
 
 /// NSTextView subclass owning the code-block header overlays. Headers are
 /// rebuilt whenever the attributed text changes and repositioned on every
@@ -102,6 +103,12 @@ struct AgentMarkdownTextView: NSViewRepresentable {
 
     func updateNSView(_ textView: NSTextView, context: Context) {
         guard context.coordinator.lastRenderedSource != markdown else { return }
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("streamCommit", id: sid)
+        defer {
+            SignpostMetrics.endInterval(
+                "streamCommit", state, message: "bytes: \(markdown.utf8.count)")
+        }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         (textView as? MarkdownTextView)?.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown
@@ -133,6 +140,12 @@ struct AgentMarkdownTextView: NSViewRepresentable {
            context.coordinator.measuredWidth == width,
            let cached = context.coordinator.measuredHeight {
             return CGSize(width: width, height: cached)
+        }
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("streamCommit", id: sid)
+        defer {
+            SignpostMetrics.endInterval(
+                "streamCommit", state, message: "width: \(Int(width))")
         }
         container.size = CGSize(width: max(0, width), height: .greatestFiniteMagnitude)
         layoutManager.ensureLayout(for: container)
