@@ -103,12 +103,6 @@ struct AgentMarkdownTextView: NSViewRepresentable {
 
     func updateNSView(_ textView: NSTextView, context: Context) {
         guard context.coordinator.lastRenderedSource != markdown else { return }
-        let sid = SignpostMetrics.makeSignpostID()
-        let state = SignpostMetrics.beginInterval("streamCommit", id: sid)
-        defer {
-            SignpostMetrics.endInterval(
-                "streamCommit", state, message: "bytes: \(markdown.utf8.count)")
-        }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         (textView as? MarkdownTextView)?.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown

@@ -270,6 +270,7 @@ final class ChatController {
 
     func stop() async {
         lifecycleGeneration &+= 1
+        reducer.closeAgentMessage()
         persist()
         pumpTask?.cancel()
         pumpTask = nil
