@@ -18,7 +18,7 @@ public struct SubagentTaskInfo: Equatable, Sendable {
 }
 
 public enum SubagentTasks {
-    /// The subagent spawn a tool call represents, or nil if it is a plain call.
+    /// The subagent spawned by a tool call, or nil if it is a plain call.
     public static func info(for call: ToolCallItem) -> SubagentTaskInfo? {
         guard case .object(let input)? = call.rawInput,
               case .string(let subagentType)? = input["subagent_type"] else { return nil }
