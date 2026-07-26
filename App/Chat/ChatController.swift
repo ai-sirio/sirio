@@ -57,6 +57,18 @@ final class ChatController {
     /// Transcript id the view should scroll to; cleared by the transcript once
     /// it has scrolled. Set by the pending-question bar.
     var scrollTarget: String?
+    /// Bumped once per flushed event batch. The transcript scrolls on this
+    /// rather than on `items.count`, which never changes while a message grows.
+    private(set) var streamTick = 0
+
+    /// Title of the tool call currently in flight, for the working row.
+    var currentActivity: String? {
+        for item in items.reversed() {
+            guard case .toolCall(let call) = item else { continue }
+            if call.status == .pending || call.status == .inProgress { return call.title }
+        }
+        return nil
+    }
     /// Timeline expansion state (work groups and folded turns the user opened).
     var expandedWorkGroups: Set<String> = []
     var unfoldedTurns: Set<String> = []
@@ -520,6 +532,7 @@ final class ChatController {
         let events = pendingEvents
         pendingEvents = []
         for event in events { handle(event) }
+        streamTick &+= 1
     }
 
     private func handle(_ event: ACPSessionEvent) {
