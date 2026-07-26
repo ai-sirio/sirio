@@ -88,6 +88,22 @@ enum AppTheme {
         light: NSColor(srgbRed: 0.88, green: 0.92, blue: 0.98, alpha: 1),
         dark: NSColor(srgbRed: 0.10, green: 0.17, blue: 0.28, alpha: 1))
 
+    /// Chat card surface — one step off the chat background, no border. Every
+    /// card in the transcript uses this instead of `.quaternary`, which
+    /// bypasses the tuned light/dark pairs above.
+    static let cardFill = dynamic(
+        light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
+        dark: NSColor(srgbRed: 0.157, green: 0.165, blue: 0.208, alpha: 1))
+    /// Left accent rails: the card's kind, readable while scrolling.
+    static let railTask = dynamic(
+        light: NSColor(srgbRed: 0.36, green: 0.30, blue: 0.68, alpha: 1),
+        dark: NSColor(srgbRed: 0.49, green: 0.42, blue: 0.84, alpha: 1))
+    static let railQuestion = gitModified
+    static let railEdit = gitStaged
+    static let railTool = dynamic(
+        light: NSColor(srgbRed: 0.55, green: 0.57, blue: 0.65, alpha: 1),
+        dark: NSColor(srgbRed: 0.40, green: 0.42, blue: 0.50, alpha: 1))
+
     /// Height of both bottom chrome bars: the sidebar footer and the usage bar.
     /// They sit in different `HSplitView` columns, so their top dividers line up
     /// only while the two bars are exactly as tall as each other. Sizing either

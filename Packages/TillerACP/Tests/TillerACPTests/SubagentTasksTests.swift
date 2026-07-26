@@ -65,4 +65,20 @@ import Testing
         let decoded = try JSONDecoder().decode(ToolCallItem.self, from: data)
         #expect(decoded.rawInput == call.rawInput)
     }
+
+    @Test func infoExposesSubagentTypeForASingleItem() {
+        var item = ToolCallItem(toolCallId: "t1", title: "Task", kind: .other,
+                                status: .inProgress)
+        item.rawInput = .object(["subagent_type": .string("Explore"),
+                                 "description": .string("Explore repo")])
+        let info = SubagentTasks.info(for: item)
+        #expect(info?.subagentType == "Explore")
+        #expect(info?.title == "Explore repo")
+    }
+
+    @Test func infoIsNilForAPlainToolCall() {
+        let item = ToolCallItem(toolCallId: "t1", title: "Read", kind: .read,
+                                status: .completed)
+        #expect(SubagentTasks.info(for: item) == nil)
+    }
 }
