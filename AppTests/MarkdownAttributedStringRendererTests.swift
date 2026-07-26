@@ -280,6 +280,25 @@ struct MarkdownAttributedStringRendererTests {
         let color = result.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
         #expect(color == NSColor.labelColor.withAlphaComponent(0.85))
     }
+    @Test("completed fixture keeps rich markdown features")
+    func completedFixtureKeepsRichRendering() {
+        let result = MarkdownAttributedStringRenderer.render(ChatStreamFixture.make().finalMessage, isDark: true)
+
+        #expect(result.string.contains("•\tpreserve the visible transcript order"))
+        #expect(result.attribute(.link, at: (result.string as NSString).range(of: "the performance roadmap").location,
+                                 effectiveRange: nil) != nil)
+        let codeLocation = (result.string as NSString).range(of: "let sample = StreamSample").location
+        #expect(result.attribute(CodeBlockStyle.codeBlockAttribute, at: codeLocation, effectiveRange: nil) != nil)
+        #expect(result.attribute(.foregroundColor, at: codeLocation, effectiveRange: nil) != nil)
+        #expect(result.string.contains("Stable fixtures make regressions visible"))
+        let hasInsight = AgentMessageSegmenter.segments(
+            from: ChatStreamFixture.make().finalMessage).contains {
+                if case .insight = $0 { return true }
+                return false
+            }
+        #expect(hasInsight)
+    }
+
     @Test("agent markdown text view installs the code block layout manager")
     func installsCustomLayoutManager() {
         let textView = AgentMarkdownTextView.makeTextView()
