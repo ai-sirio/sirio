@@ -18,6 +18,8 @@ struct TaskCardView: View {
     private var isRunning: Bool {
         item.status == .pending || item.status == .inProgress
     }
+    /// Assumes `children` arrive in execution order — they come straight from
+    /// the transcript, which is append-ordered.
     private var currentChild: ToolCallItem? {
         children.last { $0.status == .pending || $0.status == .inProgress }
             ?? children.last
@@ -32,10 +34,12 @@ struct TaskCardView: View {
                         ToolCallCardView(item: child, controller: controller,
                                          worktree: worktree, appModel: appModel)
                     }
-                } else if isRunning, let currentChild {
+                } else if isRunning {
+                    // A task that has spawned but not yet called anything still
+                    // has to say so: an empty card under a spinner reads as stuck.
                     HStack(spacing: 6) {
                         RunningDots(color: AppTheme.railQuestion)
-                        Text(currentChild.title)
+                        Text(currentChild?.title ?? "Starting")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -77,6 +81,8 @@ struct TaskCardView: View {
             .buttonStyle(.plain)
             .opacity(children.isEmpty ? 0 : 1)
             .disabled(children.isEmpty)
+            .accessibilityLabel("Tool calls")
+            .accessibilityHint(isExpanded ? "Hide" : "Show")
         }
     }
 
