@@ -38,14 +38,18 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
     /// `subagent_type` used to detect subagent spawns.
     public var rawInput: JSONValue?
     public var parentToolCallId: String?
+    /// Optional UI identity used when a persisted or live tool call's raw
+    /// protocol ID collides with another rendered transcript item.
+    public var transcriptID: String?
 
-    public var id: String { toolCallId }
+    public var id: String { transcriptID ?? toolCallId }
 
     public init(toolCallId: String, title: String, kind: ToolKind,
                 status: ToolCallStatus, content: [ToolCallContent] = [],
                 locations: [ToolCallLocation] = [], permission: PermissionState? = nil,
                 terminalOutput: String? = nil, terminalExit: TerminalExitStatus? = nil,
-                rawInput: JSONValue? = nil, parentToolCallId: String? = nil) {
+                rawInput: JSONValue? = nil, parentToolCallId: String? = nil,
+                transcriptID: String? = nil) {
         self.toolCallId = toolCallId
         self.title = title
         self.kind = kind
@@ -57,6 +61,45 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         self.terminalExit = terminalExit
         self.rawInput = rawInput
         self.parentToolCallId = parentToolCallId
+        self.transcriptID = transcriptID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case toolCallId, title, kind, status, content, locations, permission
+        case terminalOutput, terminalExit, rawInput, parentToolCallId, transcriptID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            toolCallId: try container.decode(String.self, forKey: .toolCallId),
+            title: try container.decode(String.self, forKey: .title),
+            kind: try container.decode(ToolKind.self, forKey: .kind),
+            status: try container.decode(ToolCallStatus.self, forKey: .status),
+            content: try container.decode([ToolCallContent].self, forKey: .content),
+            locations: try container.decode([ToolCallLocation].self, forKey: .locations),
+            permission: try container.decodeIfPresent(PermissionState.self, forKey: .permission),
+            terminalOutput: try container.decodeIfPresent(String.self, forKey: .terminalOutput),
+            terminalExit: try container.decodeIfPresent(TerminalExitStatus.self, forKey: .terminalExit),
+            rawInput: try container.decodeIfPresent(JSONValue.self, forKey: .rawInput),
+            parentToolCallId: try container.decodeIfPresent(String.self, forKey: .parentToolCallId),
+            transcriptID: try container.decodeIfPresent(String.self, forKey: .transcriptID))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(toolCallId, forKey: .toolCallId)
+        try container.encode(title, forKey: .title)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(status, forKey: .status)
+        try container.encode(content, forKey: .content)
+        try container.encode(locations, forKey: .locations)
+        try container.encodeIfPresent(permission, forKey: .permission)
+        try container.encodeIfPresent(terminalOutput, forKey: .terminalOutput)
+        try container.encodeIfPresent(terminalExit, forKey: .terminalExit)
+        try container.encodeIfPresent(rawInput, forKey: .rawInput)
+        try container.encodeIfPresent(parentToolCallId, forKey: .parentToolCallId)
+        try container.encodeIfPresent(transcriptID, forKey: .transcriptID)
     }
 
     init(_ call: ToolCall) {

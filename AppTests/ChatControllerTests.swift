@@ -143,6 +143,34 @@ struct ChatControllerTests {
         #expect(await freshDriver.resumeIds == [nil])
     }
 
+    @Test func restoredHistoryAndFreshReducerKeepItemIdsUnique() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = try store.createSession(
+            worktreeId: worktreeId.uuidString, agentId: "claude-acp")
+        try store.setACPSessionId("legacy-token", sessionId: record.id)
+        try store.saveTranscript(sessionId: record.id, items: [
+            .userMessage(id: "user-0", blocks: [.text("old prompt")]),
+            .agentMessage(id: "agent-1", text: "old response", isComplete: true)
+        ])
+        let resumeDriver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "unused"), failsResume: true)
+        let freshDriver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "fresh-token"))
+        var drivers = [resumeDriver, freshDriver]
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in drivers.removeFirst() })
+
+        await controller.start()
+        controller.send(text: "new prompt", mentionPaths: [], images: [])
+
+        let ids = controller.items.map(\.id)
+        #expect(Set(ids).count == ids.count)
+    }
+
     /// Streamed updates are coalesced before hitting the reducer (token-rate
     /// drivers were saturating the main thread); the buffer must not lose or
     /// reorder chunks while batching them.

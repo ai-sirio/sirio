@@ -17,11 +17,14 @@ public struct TranscriptReducer: Sendable, Equatable {
     private var openThoughtIndex: Int?
     private var openUserMessageIndex: Int?
     private var nextOrdinal = 0
+    private var usedIDs: Set<String>
     /// Path (grezzi, come inviati dall'agente) dei tool call kind == .edit
     /// completati nel turno corrente; svuotato a inizio e fine turno.
     private var turnEditPaths: [String] = []
 
-    public init() {}
+    public init(existingIDs: Set<String> = []) {
+        usedIDs = existingIDs
+    }
 
     /// Seeds `contextUsage` from a prior session's last known value, before
     /// any live updates apply — used on worktree remount so the ring shows
@@ -31,8 +34,14 @@ public struct TranscriptReducer: Sendable, Equatable {
     }
 
     private mutating func makeId(_ prefix: String) -> String {
-        defer { nextOrdinal += 1 }
-        return "\(prefix)-\(nextOrdinal)"
+        var id = "\(prefix)-\(nextOrdinal)"
+        while usedIDs.contains(id) {
+            nextOrdinal += 1
+            id = "\(prefix)-\(nextOrdinal)"
+        }
+        nextOrdinal += 1
+        usedIDs.insert(id)
+        return id
     }
 
     private mutating func closeAgentMessage() {
@@ -163,9 +172,12 @@ public struct TranscriptReducer: Sendable, Equatable {
             merged.permission = existing.permission
             merged.terminalOutput = existing.terminalOutput
             merged.terminalExit = existing.terminalExit
+            merged.transcriptID = existing.transcriptID
             items[index] = .toolCall(merged)
             recordEditPaths(of: merged)
         } else {
+            var item = item
+            reservePresentationID(for: &item)
             items.append(.toolCall(item))
             recordEditPaths(of: item)
         }
@@ -184,6 +196,7 @@ public struct TranscriptReducer: Sendable, Equatable {
                                     kind: update.kind ?? .other,
                                     status: update.status ?? .pending)
             item.merge(update)
+            reservePresentationID(for: &item)
             closeOpenStreams()
             items.append(.toolCall(item))
             recordEditPaths(of: item)
@@ -224,6 +237,14 @@ public struct TranscriptReducer: Sendable, Equatable {
         for path in paths where !turnEditPaths.contains(path) {
             turnEditPaths.append(path)
         }
+    }
+
+    private mutating func reservePresentationID(for item: inout ToolCallItem) {
+        guard !usedIDs.contains(item.id) else {
+            item.transcriptID = makeId("tool")
+            return
+        }
+        usedIDs.insert(item.id)
     }
 
     private func toolCallIndex(_ toolCallId: String) -> Int? {

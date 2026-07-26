@@ -93,6 +93,59 @@ import TillerPersistence
         #expect(loaded == [.agentMessage(id: "agent-0", text: "Risposta", isComplete: true)])
     }
 
+    @Test func loadTranscriptNormalizesDuplicateIDsWithoutChangingOrder() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                              now: .init())
+        try store.saveTranscript(sessionId: session.id, items: [
+            .userMessage(id: "user-0", blocks: [.text("first")]),
+            .userMessage(id: "user-0", blocks: [.text("second")]),
+        ], now: .init())
+
+        let loaded = try store.loadTranscript(sessionId: session.id)
+        #expect(Set(loaded.map(\.id)).count == loaded.count)
+        #expect(loaded.compactMap { item in
+            if case .userMessage(_, let blocks) = item {
+                return blocks.compactMap { block in
+                    if case .text(let text) = block { return text }
+                    return nil
+                }
+            }
+            return nil
+        } == [["first"], ["second"]])
+    }
+
+    @Test func loadSaveLoadPreservesNormalizedIDsAndRawToolCallIDs() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                              now: .init())
+        let duplicateToolCalls = [
+            TranscriptItem.toolCall(ToolCallItem(
+                toolCallId: "tc1", title: "first", kind: .read, status: .completed)),
+            TranscriptItem.toolCall(ToolCallItem(
+                toolCallId: "tc1", title: "second", kind: .read, status: .completed)),
+        ]
+        try store.saveTranscript(sessionId: session.id, items: duplicateToolCalls, now: .init())
+        let firstLoad = try store.loadTranscript(sessionId: session.id)
+        try store.saveTranscript(sessionId: session.id, items: firstLoad, now: .init())
+        let secondLoad = try store.loadTranscript(sessionId: session.id)
+
+        #expect(secondLoad.map(\.id) == firstLoad.map(\.id))
+        #expect(secondLoad.compactMap { item in
+            if case .toolCall(let call) = item { return call.toolCallId }
+            return nil
+        } == ["tc1", "tc1"])
+    }
+
+    @Test func legacyToolCallPayloadFallsBackToRawPresentationID() throws {
+        let payload = Data(#"{"toolCallId":"tc1","title":"Read","kind":"read","status":"completed","content":[],"locations":[]}"#.utf8)
+        let item = try JSONDecoder().decode(ToolCallItem.self, from: payload)
+
+        #expect(item.transcriptID == nil)
+        #expect(item.id == "tc1")
+        #expect(item.toolCallId == "tc1")
+    }
+
     @Test func saveTranscriptReplacesAndBumpsActivity() throws {
         let (store, worktreeId) = try makeStore()
         let session = try store.createSession(worktreeId: worktreeId, agentId: "claude",
