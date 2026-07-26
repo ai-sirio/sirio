@@ -1,28 +1,41 @@
 import Foundation
 
-/// Single source of truth for the app's shared dark surface color.
-/// `AppTheme.background` (SwiftUI, App target) and the terminal's Ghostty
-/// theme (TillerTerminal) both derive from these components so the sidebar,
-/// detail pane, and terminal surface never drift out of sync.
+/// Single source of truth for the app's shared dark surface colors.
+/// `AppTheme.background`/`AppTheme.chatSurface` (SwiftUI, App target) and the
+/// terminal's Ghostty theme (TillerTerminal) all derive from these
+/// components so the sidebar, chat pane, and terminal surface never drift
+/// out of sync.
 public enum AppSurfaceColor {
-    /// Near-black chrome (#121216) carrying the same faint indigo tint as
-    /// `terminal*` below — a mathematically neutral gray here read as a
-    /// different color family than every other token in `AppTheme`.
-    /// Luminance is unchanged from the previous #131313, so text contrast
-    /// against the chrome is identical.
-    public static let red: Double = 0.070
-    public static let green: Double = 0.072
-    public static let blue: Double = 0.086
+    /// Warm graphite chrome (#1A1A1E) for the sidebar/titlebar/usage bar —
+    /// only a faint blue lean versus the neutral grays elsewhere in `AppTheme`,
+    /// deliberately less indigo than the chat/terminal surfaces below so it
+    /// reads as a different, warmer color family.
+    public static let red: Double = 0.102
+    public static let green: Double = 0.102
+    public static let blue: Double = 0.118
 
     public static var hex: String {
         hexString(red: red, green: green, blue: blue)
     }
 
-    /// Charcoal surface for terminal and chat panes (#1F1F26) — slightly
-    /// blue-tinted, distinct from the neutral chrome above.
-    public static let terminalRed: Double = 0.122
-    public static let terminalGreen: Double = 0.122
-    public static let terminalBlue: Double = 0.149
+    /// Near-black chat surface (#121216) — the app's darkest, most neutral
+    /// tone, one shade below the chrome above so the chat pane reads as the
+    /// most recessive surface in the window.
+    public static let chatRed: Double = 0.070
+    public static let chatGreen: Double = 0.072
+    public static let chatBlue: Double = 0.086
+
+    public static var chatHex: String {
+        hexString(red: chatRed, green: chatGreen, blue: chatBlue)
+    }
+
+    /// Terminal pane surface (#121216) — matches the chat surface above so
+    /// terminal and chat panes are visually identical. Kept as its own named
+    /// token because it's consumed by a different subsystem: Ghostty's theme
+    /// config (`TillerTerminal`), not SwiftUI (`AppTheme`, App target).
+    public static let terminalRed: Double = chatRed
+    public static let terminalGreen: Double = chatGreen
+    public static let terminalBlue: Double = chatBlue
 
     public static var terminalHex: String {
         hexString(red: terminalRed, green: terminalGreen, blue: terminalBlue)

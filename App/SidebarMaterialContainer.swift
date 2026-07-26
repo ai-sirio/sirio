@@ -41,18 +41,20 @@ private struct SidebarMaterialView: NSViewRepresentable {
 }
 
 /// Translucent surface for the terminal/chat main pane: the same
-/// behind-window blur as the sidebar, tinted with the charcoal surface
-/// color at the shared opacity so it visually matches the terminal's
-/// ghostty `background-opacity`.
+/// behind-window blur as the sidebar, tinted with `tint` at the shared
+/// opacity so it visually matches the terminal's ghostty
+/// `background-opacity`. Defaults to the terminal's charcoal surface;
+/// `ChatPaneView` passes `AppTheme.chatSurface` instead.
 struct MainSurfaceMaterial: View {
+    var tint: Color = AppTheme.terminalSurface
     @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 
     var body: some View {
         if translucencyEnabled {
             SidebarMaterialView()
-                .overlay(AppTheme.terminalSurface.opacity(AppSurfaceColor.translucentSurfaceOpacity))
+                .overlay(tint.opacity(AppSurfaceColor.translucentSurfaceOpacity))
         } else {
-            AppTheme.terminalSurface
+            tint
         }
     }
 }
