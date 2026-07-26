@@ -450,7 +450,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     }
 
     private func makeUserPromptLine(_ blocks: [ContentBlock]) throws -> Data {
-        let content = try JSONValue.encoding(promptBlocks(blocks))
+        let content = JSONValue.array(wireBlocks(promptBlocks(blocks)))
         return makeLine(.object([
             "type": .string("user"),
             "message": .object([
@@ -474,6 +474,32 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             blocks.insert(.text(prefix), at: 0)
         }
         return blocks
+    }
+
+    /// Claude Code forwards `message.content` to the Messages API unchanged,
+    /// so only its content tags may go out: a `resource_link` comes back as a
+    /// 400, and an image in ACP's shape (`mimeType`/`data`) kills the CLI
+    /// before it ever sends the request. Links become `@path` mentions, the
+    /// shape the CLI's own input uses.
+    private func wireBlocks(_ blocks: [ContentBlock]) -> [JSONValue] {
+        blocks.compactMap { block in
+            switch block {
+            case .text(let text):
+                .object(["type": .string("text"), "text": .string(text)])
+            case .resourceLink(let uri, let name):
+                .object(["type": .string("text"),
+                         "text": .string("@" + (URL(string: uri)?.path ?? name))])
+            case .resource(_, let text):
+                .object(["type": .string("text"), "text": .string(text)])
+            case .image(let mimeType, let data):
+                .object(["type": .string("image"),
+                         "source": .object(["type": .string("base64"),
+                                            "media_type": .string(mimeType),
+                                            "data": .string(data)])])
+            case .unknown:
+                nil
+            }
+        }
     }
 
     private func effortPrefix(_ effort: String) -> String {

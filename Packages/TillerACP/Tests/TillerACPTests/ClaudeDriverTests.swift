@@ -199,6 +199,46 @@ import Testing
         await driver.stop()
     }
 
+    /// Claude Code forwards `message.content` to the Messages API verbatim,
+    /// so ACP-only blocks have to be rewritten before they hit the wire:
+    /// `resource_link` is answered with a 400, and an ACP-shaped image makes
+    /// the CLI exit without any output.
+    @Test func acpOnlyBlocksAreRewrittenForTheMessagesAPI() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let promptTask = Task {
+            try await driver.prompt([
+                .text("hi"),
+                .resourceLink(uri: "file:///tmp/w/App/A%20B.swift", name: "A B.swift"),
+                .resource(uri: "file:///tmp/w/note.md", text: "inline note"),
+                .image(mimeType: "image/png", data: "AAA"),
+                .unknown(type: "future_block")
+            ])
+        }
+        let sent = try await mock.waitForSent(count: 2)
+        let content = try jsonValue(sent[1])["message"]?["content"]?.arrayValue
+
+        #expect(content?.allSatisfy {
+            ["text", "image"].contains($0["type"]?.stringValue ?? "")
+        } == true)
+        #expect(content?.count == 4)
+        #expect(content?[1]["text"]?.stringValue == "@/tmp/w/App/A B.swift")
+        #expect(content?[2]["text"]?.stringValue == "inline note")
+        #expect(content?[3]["source"] == .object([
+            "type": .string("base64"),
+            "media_type": .string("image/png"),
+            "data": .string("AAA")
+        ]))
+
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1"}"#)
+        _ = try await promptTask.value
+        await driver.stop()
+    }
+
     @Test func canUseToolRoundTrip() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
