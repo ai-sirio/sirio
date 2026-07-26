@@ -75,6 +75,7 @@
 		830B3F78ADC1E051982B8FE9 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 2B6E1D46AC2DF993DECA02BD /* README.md */; };
 		8311E035D440CD440001F2F9 /* TimelineRowViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */; };
 		842C39BA681065F69B196900 /* TillerAgents in Frameworks */ = {isa = PBXBuildFile; productRef = 56F2759B5316866B25363AF7 /* TillerAgents */; };
+		842F3DC5D65CE6DC3F608321 /* TaskCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC88E40C5105DC25C7E9A58 /* TaskCardView.swift */; };
 		843D838715C653ED33181B70 /* RightPanelMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754ED987A43572FB14EBB2FD /* RightPanelMode.swift */; };
 		896DB6FB17EDCFBB89C1F6BC /* GitDiffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56A0B2497A79763F2B2707AD /* GitDiffView.swift */; };
 		8A4A2707324A17F3BE027B92 /* ChatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5309B32D170F4FF73CE6BE24 /* ChatCard.swift */; };
@@ -236,6 +237,7 @@
 		B9B25C0EB88CB059E939346F /* AgentSkillInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSkillInstaller.swift; sourceTree = "<group>"; };
 		BA9A53AFFA17AAC600C15585 /* AgentsPanelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsPanelModel.swift; sourceTree = "<group>"; };
 		BD047B77D2E168922ADC710C /* WorktreeStatusGlyph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeStatusGlyph.swift; sourceTree = "<group>"; };
+		BDC88E40C5105DC25C7E9A58 /* TaskCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskCardView.swift; sourceTree = "<group>"; };
 		BE99F2EBC89020C876AA77E7 /* RunningDots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningDots.swift; sourceTree = "<group>"; };
 		BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRoute.swift; sourceTree = "<group>"; };
 		C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerSendTests.swift; sourceTree = "<group>"; };
@@ -398,6 +400,7 @@
 				8E7BCB7765ABEE79057FA44C /* ModelPickerPopover.swift */,
 				A3592EBDE2DC633F0652BF83 /* PlanCardView.swift */,
 				B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */,
+				BDC88E40C5105DC25C7E9A58 /* TaskCardView.swift */,
 				D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */,
 				E78AB8A516CF2F33D8CAFF4E /* TillerMarkdownTheme.swift */,
 				3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */,
@@ -744,6 +747,7 @@
 				73A38617B2049BD55B5D772B /* SystemPermissionProbe.swift in Sources */,
 				8D9D1C05D835E0BA7A7B0D14 /* TabBarView.swift in Sources */,
 				2C7FB8280112816D5F6D5F3A /* TabDragPayload.swift in Sources */,
+				842F3DC5D65CE6DC3F608321 /* TaskCardView.swift in Sources */,
 				C4108D9D49F385613BAFD87B /* TerminalContextMenuProvider.swift in Sources */,
 				977D87D1FD9197E63FAE48E9 /* TerminalOutputView.swift in Sources */,
 				7CE9B2261C82392303742787 /* TillerApp.swift in Sources */,

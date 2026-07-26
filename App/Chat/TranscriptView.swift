@@ -81,8 +81,15 @@ struct TranscriptView: View {
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
-            ToolCallCardView(item: toolCall, controller: controller,
-                             worktree: worktree, appModel: appModel)
+            if let info = SubagentTasks.info(for: toolCall) {
+                TaskCardView(info: info, item: toolCall,
+                             children: grouped.children(of: toolCall.toolCallId),
+                             controller: controller, worktree: worktree,
+                             appModel: appModel)
+            } else {
+                ToolCallCardView(item: toolCall, controller: controller,
+                                 worktree: worktree, appModel: appModel)
+            }
         case .plan(_, let entries):
             PlanCardView(entries: entries,
                          approval: grouped.pendingPlanApproval,
