@@ -44,7 +44,7 @@ public struct TranscriptReducer: Sendable, Equatable {
         return id
     }
 
-    private mutating func closeAgentMessage() {
+    public mutating func closeAgentMessage() {
         if let index = openAgentMessageIndex,
            case .agentMessage(let id, let text, _) = items[index] {
             items[index] = .agentMessage(id: id, text: text, isComplete: true)

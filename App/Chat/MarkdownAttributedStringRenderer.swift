@@ -12,6 +12,17 @@ import TillerTerminal
 /// only ever sees plain prose markdown.
 @MainActor
 enum MarkdownAttributedStringRenderer {
+    static private(set) var renderCount = 0
+    static let bodyFont = NSFont.systemFont(ofSize: bodySize)
+    static let bodyColor = NSColor.labelColor.withAlphaComponent(0.82)
+    static var bodyAttributes: [NSAttributedString.Key: Any] {
+        [.font: bodyFont, .foregroundColor: bodyColor]
+    }
+
+    static func resetRenderCount() {
+        renderCount = 0
+    }
+
 
     static let bodySize: CGFloat = 13
     static let codeSize: CGFloat = 12
@@ -23,6 +34,7 @@ enum MarkdownAttributedStringRenderer {
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
 
     static func render(_ markdown: String, isDark: Bool = MarkdownAppearance.isDark) -> NSAttributedString {
+        renderCount += 1
         let sid = SignpostMetrics.makeSignpostID()
         let state = SignpostMetrics.beginInterval("markdownRender", id: sid)
         defer {
@@ -36,7 +48,7 @@ enum MarkdownAttributedStringRenderer {
         guard let parsed = try? AttributedString(markdown: markdown, options: options) else {
             return NSAttributedString(
                 string: markdown,
-                attributes: [.font: NSFont.systemFont(ofSize: bodySize)])
+                attributes: bodyAttributes)
         }
         return render(parsed, isDark: isDark)
     }
@@ -153,10 +165,10 @@ enum MarkdownAttributedStringRenderer {
     private static func attributes(
         for run: AttributedString.Runs.Run,
         blockIndex: Int) -> [NSAttributedString.Key: Any] {
-        var font = NSFont.systemFont(ofSize: bodySize)
+        var font = bodyFont
         // Body prose is muted relative to headings, so headings keep
         // reading as the visual anchor of a reply.
-        var color: NSColor = .labelColor.withAlphaComponent(0.82)
+        var color: NSColor = bodyColor
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = 4.5
         var attrs: [NSAttributedString.Key: Any] = [:]
