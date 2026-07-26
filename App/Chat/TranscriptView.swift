@@ -24,9 +24,10 @@ struct TranscriptView: View {
 
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(grouped.roots) { item in
                         itemView(item, meta: nil, grouped: grouped)
+                            .padding(.top, Self.topSpacing(for: item))
                             .id(item.id)
                     }
                     if controller.state == .prompting {
@@ -61,6 +62,17 @@ struct TranscriptView: View {
                 }
                 controller.scrollTarget = nil
             }
+        }
+    }
+
+    /// Vertical rhythm: a new user turn gets room, cards in a run stay tight,
+    /// dividers keep their own breathing space.
+    private static func topSpacing(for item: TranscriptItem) -> CGFloat {
+        switch item {
+        case .userMessage: 20
+        case .turnDivider: 14
+        case .agentMessage, .thought: 12
+        case .toolCall, .plan, .editSummary, .systemNotice: 6
         }
     }
 
@@ -189,7 +201,7 @@ struct TranscriptView: View {
             Label(name, systemImage: "doc")
                 .font(.caption)
         case .image:
-            Label("Immagine", systemImage: "photo")
+            Label("Image", systemImage: "photo")
                 .font(.caption)
         case .resource, .unknown:
             EmptyView()
