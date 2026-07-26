@@ -9,6 +9,16 @@ import os
     #expect(state == nil)
 }
 
+@Test func phaseOneIntervalsRemainDisabledWhenGateIsOff() {
+    #expect(SignpostMetrics.beginInterval("markdownRender") == nil)
+    #expect(SignpostMetrics.beginInterval("streamCommit") == nil)
+    #expect(SignpostMetrics.beginInterval("streamLayout") == nil)
+    #expect(SignpostMetrics.beginInterval("transcriptPersist") == nil)
+    #expect(SignpostMetrics.beginInterval("processScan") == nil)
+    #expect(SignpostMetrics.beginInterval("panelRefresh") == nil)
+    #expect(SignpostMetrics.beginInterval("bootstrapInteractive") == nil)
+}
+
 @Test func endIntervalIsNoopWhenStateIsNil() {
     // Passing nil state should not crash or throw.
     SignpostMetrics.endInterval("test", nil)

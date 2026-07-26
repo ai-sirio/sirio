@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import TillerACP
 import TillerCore
+import TillerTerminal
 
 /// Drives one chat tab: owns the agent child process (via AgentDriver),
 /// folds events into the transcript, persists at settle points, and
@@ -583,7 +584,11 @@ final class ChatController {
 
     private func persist() {
         guard let store, let sessionRecordId else { return }
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("transcriptPersist", id: sid)
         try? store.saveTranscript(sessionId: sessionRecordId, items: items)
+        SignpostMetrics.endInterval(
+            "transcriptPersist", state, message: "items: \(items.count)")
         onPersist?()
     }
 

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TillerTerminal
 
 /// Converts a markdown string to an `NSAttributedString` styled to match
 /// `TillerMarkdownTheme`, for rendering inside a single `NSTextView` so
@@ -22,6 +23,12 @@ enum MarkdownAttributedStringRenderer {
         [1: (12, 4), 2: (10, 4), 3: (8, 2)]
 
     static func render(_ markdown: String, isDark: Bool = MarkdownAppearance.isDark) -> NSAttributedString {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("markdownRender", id: sid)
+        defer {
+            SignpostMetrics.endInterval(
+                "markdownRender", state, message: "bytes: \(markdown.utf8.count)")
+        }
         let options = AttributedString.MarkdownParsingOptions(
             allowsExtendedAttributes: true,
             interpretedSyntax: .full,
