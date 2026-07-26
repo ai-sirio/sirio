@@ -81,8 +81,8 @@ struct ChatPaneView: View {
                     actionTitle: "OK") {}
             }
             captureLayout(.approvalPanel) {
-                ComposerApprovalPanel(permissions: controller.composerPermissions,
-                                      controller: controller)
+                PendingQuestionBar(permissions: controller.composerPermissions,
+                                   controller: controller)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .layoutPriority(1)

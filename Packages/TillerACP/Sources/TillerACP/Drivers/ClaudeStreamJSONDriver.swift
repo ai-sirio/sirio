@@ -53,6 +53,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var cancelRequested = false
     private var effort: String?
 
+    public nonisolated var supportsStructuredAnswers: Bool { true }
+
     public init(transport: any ACPTransport, permissionMode: PermissionMode,
                 model: String?, resumeSessionId: String?, effort: String? = nil,
                 pinnedSessionId: String? = nil) {
@@ -184,19 +186,21 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
 
     public func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
         let id = requestIdString(requestId)
-        let behavior: String
+        var payload: [String: JSONValue]
         switch outcome {
         case .selected(let optionId):
-            behavior = optionId.hasPrefix("allow") ? "allow" : "deny"
+            payload = ["behavior": .string(optionId.hasPrefix("allow") ? "allow" : "deny")]
+        case .answered(_, let updatedInput):
+            payload = ["behavior": .string("allow"), "updatedInput": updatedInput]
         case .cancelled:
-            behavior = "deny"
+            payload = ["behavior": .string("deny")]
         }
         let response = JSONValue.object([
             "type": .string("control_response"),
             "response": .object([
                 "request_id": .string(id),
                 "subtype": .string("success"),
-                "response": .object(["behavior": .string(behavior)])
+                "response": .object(payload)
             ])
         ])
         try? await transport.send(line: makeLine(response))
@@ -232,7 +236,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
 
         case .assistant(let assistant):
             for block in assistant.message.content {
-                handleAssistantBlock(block)
+                handleAssistantBlock(block,
+                                     parentToolUseId: assistant.parentToolUseId)
             }
 
         case .user(let user):
@@ -297,11 +302,17 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         }
     }
 
-    private func handleAssistantBlock(_ block: ClaudeContentBlock) {
+    /// `parentToolUseId` is non-nil for blocks produced *inside* a subagent.
+    /// Its tool calls nest under the spawning Task; its prose is intermediate
+    /// chatter and is dropped — the final report arrives as the tool result.
+    private func handleAssistantBlock(_ block: ClaudeContentBlock,
+                                      parentToolUseId: String?) {
         switch block {
         case .text(let text):
+            guard parentToolUseId == nil else { return }
             eventContinuation.yield(.update(.agentMessageChunk(.text(text))))
         case .thinking(let thinking):
+            guard parentToolUseId == nil else { return }
             eventContinuation.yield(.update(.agentThoughtChunk(.text(thinking))))
         case .toolUse(let toolUse):
             eventContinuation.yield(.update(.toolCall(ToolCall(
@@ -309,7 +320,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                 title: toolTitle(name: toolUse.name, input: toolUse.input),
                 kind: toolKind(for: toolUse.name),
                 status: .inProgress,
-                rawInput: toolUse.input))))
+                rawInput: toolUse.input,
+                parentToolCallId: parentToolUseId))))
         case .toolResult, .unknown:
             break
         }

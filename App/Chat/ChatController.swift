@@ -54,6 +54,21 @@ final class ChatController {
     /// Following ("Segui l'agente"): default off, non persistito.
     var isFollowing = false
     var onFollowLocation: ((String) -> Void)?
+    /// Transcript id the view should scroll to; cleared by the transcript once
+    /// it has scrolled. Set by the pending-question bar.
+    var scrollTarget: String?
+    /// Bumped once per flushed event batch. The transcript scrolls on this
+    /// rather than on `items.count`, which never changes while a message grows.
+    private(set) var streamTick = 0
+
+    /// Title of the tool call currently in flight, for the working row.
+    var currentActivity: String? {
+        for item in items.reversed() {
+            guard case .toolCall(let call) = item else { continue }
+            if call.status == .pending || call.status == .inProgress { return call.title }
+        }
+        return nil
+    }
     /// Timeline expansion state (work groups and folded turns the user opened).
     var expandedWorkGroups: Set<String> = []
     var unfoldedTurns: Set<String> = []
@@ -61,6 +76,9 @@ final class ChatController {
     private static let followThrottle: TimeInterval = 0.5
 
     var items: [TranscriptItem] { restored + reducer.items }
+    /// Roots + children + pending plan approval. Recomputed on every access;
+    /// callers should read it once per redraw rather than once per row.
+    var grouped: ToolCallTree.Grouped { ToolCallTree.group(items: items) }
     var timelineRows: [TimelineRow] {
         TimelineBuilder.rows(items: items, state: TimelineState(
             expandedWorkGroups: expandedWorkGroups,
@@ -86,12 +104,7 @@ final class ChatController {
         ComposerPermissions.extract(from: items)
     }
     var hasPlanAwaitingApproval: Bool {
-        timelineRows.contains { row in
-            if case .proposedPlan(_, _, .some(let approval)) = row {
-                return approval.isPending
-            }
-            return false
-        }
+        grouped.pendingPlanApproval?.isPending == true
     }
 
     private var driver: (any AgentDriver)?
@@ -417,6 +430,27 @@ final class ChatController {
         }
     }
 
+    /// Answers a question card. Uses the structured channel when the driver
+    /// supports it, so the agent learns *which* option was chosen; otherwise
+    /// falls back to the plain allow/reject the permission gate already uses.
+    func answerQuestion(_ question: ChatQuestion, optionId: String) async {
+        guard let driver else { return }
+        let option = question.options.first { $0.id == optionId }
+        if driver.supportsStructuredAnswers, option?.isRejection != true,
+           !question.prompt.isEmpty {
+            reducer.permissionResolved(requestId: question.requestId,
+                                       resolution: .selected(optionId: optionId))
+            await driver.answerPermission(
+                requestId: question.requestId,
+                outcome: .answered(optionId: optionId,
+                                   updatedInput: .object(["choice": .string(optionId)])))
+            onStatusChange?(.running)
+            persist()
+        } else {
+            await answerPermission(requestId: question.requestId, optionId: optionId)
+        }
+    }
+
     func answerPermission(requestId: JSONRPCID, optionId: String?) async {
         if let optionId {
             reducer.permissionResolved(requestId: requestId,
@@ -498,6 +532,7 @@ final class ChatController {
         let events = pendingEvents
         pendingEvents = []
         for event in events { handle(event) }
+        streamTick &+= 1
     }
 
     private func handle(_ event: ACPSessionEvent) {

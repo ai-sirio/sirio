@@ -11,6 +11,7 @@ struct TranscriptView: View {
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
 
     // Stopgap: timeline-row rendering (work groups, turn folds, 700pt column)
     // is disabled — three main-thread layout storms were sampled with it
@@ -19,11 +20,14 @@ struct TranscriptView: View {
     // storm is isolated offline; `rowView` and the row views stay compiled
     // for that follow-up.
     var body: some View {
+        let grouped = controller.grouped
+
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(controller.items) { item in
-                        itemView(item, meta: nil)
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(grouped.roots) { item in
+                        itemView(item, meta: nil, grouped: grouped)
+                            .padding(.top, Self.topSpacing(for: item))
                             .id(item.id)
                     }
                     if controller.state == .prompting {
@@ -34,29 +38,49 @@ struct TranscriptView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
             }
+            .scrollPosition($scrollPosition)
+            // Streaming growth: follow only while the user has not taken over
+            // the scroll. No geometry reads — `isPositionedByUser` is the
+            // scroll view's own state.
+            .onChange(of: controller.streamTick) {
+                guard !scrollPosition.isPositionedByUser else { return }
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+            // A new item re-pins only when the user just sent something —
+            // an agent's new tool call must not yank the view while reading.
             .onChange(of: controller.items.count) {
+                guard let last = controller.items.last,
+                      case .userMessage = last else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    scrollPosition.scrollTo(edge: .bottom)
                 }
+            }
+            .onChange(of: controller.scrollTarget) {
+                guard let target = controller.scrollTarget else { return }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(target, anchor: .center)
+                }
+                controller.scrollTarget = nil
             }
         }
     }
 
-    /// Pending plan-mode approval (kind .switchMode): excluded from the
-    /// composer panel, so the plan card must keep offering the buttons.
-    private var pendingPlanApproval: PermissionState? {
-        for item in controller.items {
-            if case .toolCall(let call) = item, call.kind == .switchMode,
-               call.permission?.isPending == true { return call.permission }
+    /// Vertical rhythm: a new user turn gets room, cards in a run stay tight,
+    /// dividers keep their own breathing space.
+    private static func topSpacing(for item: TranscriptItem) -> CGFloat {
+        switch item {
+        case .userMessage: 20
+        case .turnDivider: 14
+        case .agentMessage, .thought: 12
+        case .toolCall, .plan, .editSummary, .systemNotice: 6
         }
-        return nil
     }
 
     @ViewBuilder
-    private func rowView(_ row: TimelineRow) -> some View {
+    private func rowView(_ row: TimelineRow, grouped: ToolCallTree.Grouped) -> some View {
         switch row {
         case .message(let item, let meta):
-            itemView(item, meta: meta)
+            itemView(item, meta: meta, grouped: grouped)
         case .work(let groupId, let entries, let isExpanded):
             WorkGroupView(groupId: groupId, entries: entries,
                           isExpanded: isExpanded, controller: controller,
@@ -67,14 +91,15 @@ struct TranscriptView: View {
         case .turnDivider(_, let at):
             turnDivider(at)
         case .proposedPlan(_, let entries, let approval):
-            planCard(entries, approval: approval)
+            PlanCardView(entries: entries, approval: approval, controller: controller)
         case .working:
             thinkingRow
         }
     }
 
     @ViewBuilder
-    private func itemView(_ item: TranscriptItem, meta: TimelineRow.MessageMeta?) -> some View {
+    private func itemView(_ item: TranscriptItem, meta: TimelineRow.MessageMeta?,
+                          grouped: ToolCallTree.Grouped) -> some View {
         switch item {
         case .userMessage(_, let blocks):
             userBubble(blocks)
@@ -88,10 +113,24 @@ struct TranscriptView: View {
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
-            ToolCallCardView(item: toolCall, controller: controller,
-                             worktree: worktree, appModel: appModel)
+            let question = ChatQuestion.from(toolCall)
+            let subagent = SubagentTasks.info(for: toolCall)
+            if let question, !question.options.isEmpty,
+               !(question.isResolved && subagent != nil) {
+                QuestionCardView(question: question, controller: controller)
+            } else if let subagent {
+                TaskCardView(info: subagent, item: toolCall,
+                             children: grouped.children(of: toolCall.toolCallId),
+                             controller: controller, worktree: worktree,
+                             appModel: appModel)
+            } else {
+                ToolCallCardView(item: toolCall, controller: controller,
+                                 worktree: worktree, appModel: appModel)
+            }
         case .plan(_, let entries):
-            planCard(entries, approval: pendingPlanApproval)
+            PlanCardView(entries: entries,
+                         approval: grouped.pendingPlanApproval,
+                         controller: controller)
         case .turnDivider(_, let date):
             turnDivider(date)
         case .editSummary(_, let paths):
@@ -127,13 +166,15 @@ struct TranscriptView: View {
 
     // MARK: - Thinking indicator
 
-    /// Live status while a turn is in flight; driven by `controller.state`
-    /// rather than a per-message completion flag so it can't get stuck once
-    /// the turn actually ends.
+    /// Live status while a turn is in flight. Naming the current tool call
+    /// turns a mute spinner into an answer to "what is it doing?".
     private var thinkingRow: some View {
         HStack(spacing: 6) {
-            RunningDots(color: .orange)
-            Text("Thinking").font(.caption).foregroundStyle(.orange)
+            RunningDots(color: AppTheme.railQuestion)
+            Text(controller.currentActivity ?? "Thinking")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
     }
 
@@ -160,7 +201,7 @@ struct TranscriptView: View {
             Label(name, systemImage: "doc")
                 .font(.caption)
         case .image:
-            Label("Immagine", systemImage: "photo")
+            Label("Image", systemImage: "photo")
                 .font(.caption)
         case .resource, .unknown:
             EmptyView()
@@ -208,46 +249,6 @@ struct TranscriptView: View {
         return "\(total / 60)m \(String(format: "%02d", total % 60))s"
     }
 
-    // MARK: - Plan
-
-    private func planCard(_ entries: [PlanEntry], approval: PermissionState?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label("Plan", systemImage: "checklist")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: entry.status == "completed"
-                          ? "checkmark.circle.fill"
-                          : entry.status == "in_progress" ? "circle.dotted" : "circle")
-                        .foregroundStyle(entry.status == "completed" ? .green : .secondary)
-                        .font(.caption)
-                    Text(entry.content).font(.callout)
-                }
-            }
-            if let approval, approval.isPending {
-                HStack(spacing: 8) {
-                    ForEach(approval.options, id: \.optionId) { option in
-                        Button(option.name) {
-                            Task {
-                                await controller.answerPermission(
-                                    requestId: approval.requestId,
-                                    optionId: option.optionId)
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(option.kind == .allowOnce || option.kind == .allowAlways
-                              ? .green : .red)
-                        .controlSize(.small)
-                    }
-                }
-                .padding(.top, 4)
-            }
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
-    }
 }
 
 /// Collapsed-by-default "> Thought" row; the chevron rotates when expanded.

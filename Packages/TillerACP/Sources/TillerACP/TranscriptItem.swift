@@ -37,6 +37,7 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
     /// Raw tool input as reported by the agent; carries the Task tool's
     /// `subagent_type` used to detect subagent spawns.
     public var rawInput: JSONValue?
+    public var parentToolCallId: String?
 
     public var id: String { toolCallId }
 
@@ -44,7 +45,7 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
                 status: ToolCallStatus, content: [ToolCallContent] = [],
                 locations: [ToolCallLocation] = [], permission: PermissionState? = nil,
                 terminalOutput: String? = nil, terminalExit: TerminalExitStatus? = nil,
-                rawInput: JSONValue? = nil) {
+                rawInput: JSONValue? = nil, parentToolCallId: String? = nil) {
         self.toolCallId = toolCallId
         self.title = title
         self.kind = kind
@@ -55,12 +56,13 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         self.terminalOutput = terminalOutput
         self.terminalExit = terminalExit
         self.rawInput = rawInput
+        self.parentToolCallId = parentToolCallId
     }
 
     init(_ call: ToolCall) {
         self.init(toolCallId: call.toolCallId, title: call.title, kind: call.kind,
                   status: call.status, content: call.content, locations: call.locations,
-                  rawInput: call.rawInput)
+                  rawInput: call.rawInput, parentToolCallId: call.parentToolCallId)
     }
 
     /// Merges the non-nil fields of a partial update.
@@ -71,6 +73,7 @@ public struct ToolCallItem: Sendable, Equatable, Codable, Identifiable {
         if let content = update.content { self.content = content }
         if let locations = update.locations { self.locations = locations }
         if let rawInput = update.rawInput { self.rawInput = rawInput }
+        if let parent = update.parentToolCallId { parentToolCallId = parent }
         if let meta = update.terminalMeta {
             if let chunk = meta.terminalOutput {
                 terminalOutput = (terminalOutput ?? "") + chunk.data
