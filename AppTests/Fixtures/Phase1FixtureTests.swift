@@ -3,6 +3,57 @@ import Testing
 import TillerACP
 import TillerPersistence
 import TillerCore
+private struct BootstrapProjectSnapshot: Equatable {
+    let id: UUID
+    let name: String
+    let relativePath: String
+}
+
+private struct BootstrapWorktreeSnapshot: Equatable {
+    let id: UUID
+    let projectId: UUID
+    let branch: String
+    let relativePath: String
+    let isPrimary: Bool
+}
+
+private struct BootstrapSnapshot: Equatable {
+    let projects: [BootstrapProjectSnapshot]
+    let worktrees: [BootstrapWorktreeSnapshot]
+}
+
+private func bootstrapSnapshot(_ fixture: BootstrapFixture) -> BootstrapSnapshot {
+    let rootPath = fixture.rootDirectory.standardizedFileURL.path
+    let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+    func relativePath(_ path: String) -> String {
+        let absolutePath = URL(fileURLWithPath: path).standardizedFileURL.path
+        return absolutePath.hasPrefix(prefix)
+            ? String(absolutePath.dropFirst(prefix.count))
+            : absolutePath
+    }
+
+    return BootstrapSnapshot(
+        projects: fixture.projects.map {
+            BootstrapProjectSnapshot(
+                id: $0.id,
+                name: $0.name,
+                relativePath: relativePath($0.rootPath)
+            )
+        },
+        worktrees: fixture.worktrees.values
+            .flatMap { $0 }
+            .map {
+                BootstrapWorktreeSnapshot(
+                    id: $0.id,
+                    projectId: $0.projectId,
+                    branch: $0.branch,
+                    relativePath: relativePath($0.path),
+                    isPrimary: $0.isPrimary
+                )
+            }
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+    )
+}
 
 @Test func chatStreamFixtureIsDeterministicAndByteComplete() {
     let first = ChatStreamFixture.make()
@@ -49,6 +100,31 @@ import TillerCore
 
     let second = try BootstrapFixture.make()
     defer { second.remove() }
-    #expect(first.projects == second.projects)
-    #expect(first.worktrees == second.worktrees)
+    #expect(bootstrapSnapshot(first) == bootstrapSnapshot(second))
+}
+
+@Test func bootstrapFixturesCanCoexist() throws {
+    let first = try BootstrapFixture.make()
+    defer { first.remove() }
+    let second = try BootstrapFixture.make()
+    defer { second.remove() }
+
+    #expect(first.rootDirectory != second.rootDirectory)
+    #expect(FileManager.default.fileExists(atPath: first.rootDirectory.path))
+    #expect(FileManager.default.fileExists(atPath: first.databasePath))
+    #expect(FileManager.default.fileExists(atPath: second.rootDirectory.path))
+    #expect(FileManager.default.fileExists(atPath: second.databasePath))
+    #expect(first.projects.allSatisfy {
+        FileManager.default.fileExists(atPath: $0.rootPath)
+    })
+    #expect(second.projects.allSatisfy {
+        FileManager.default.fileExists(atPath: $0.rootPath)
+    })
+    #expect(first.worktrees.values.flatMap { $0 }.allSatisfy {
+        FileManager.default.fileExists(atPath: $0.path)
+    })
+    #expect(second.worktrees.values.flatMap { $0 }.allSatisfy {
+        FileManager.default.fileExists(atPath: $0.path)
+    })
+    #expect(bootstrapSnapshot(first) == bootstrapSnapshot(second))
 }

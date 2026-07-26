@@ -12,6 +12,7 @@ import os
 @Test func phaseOneIntervalsRemainDisabledWhenGateIsOff() {
     #expect(SignpostMetrics.beginInterval("markdownRender") == nil)
     #expect(SignpostMetrics.beginInterval("streamCommit") == nil)
+    #expect(SignpostMetrics.beginInterval("streamLayout") == nil)
     #expect(SignpostMetrics.beginInterval("transcriptPersist") == nil)
     #expect(SignpostMetrics.beginInterval("processScan") == nil)
     #expect(SignpostMetrics.beginInterval("panelRefresh") == nil)

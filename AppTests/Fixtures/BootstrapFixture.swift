@@ -2,7 +2,7 @@ import Foundation
 import TillerCore
 import TillerPersistence
 
-struct BootstrapFixture: Equatable, Sendable {
+struct BootstrapFixture: Sendable {
     let rootDirectory: URL
     let databasePath: String
     let projects: [Project]
@@ -10,8 +10,10 @@ struct BootstrapFixture: Equatable, Sendable {
 
     static func make() throws -> Self {
         let rootDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tiller-phase1-bootstrap-fixture", isDirectory: true)
-        try? FileManager.default.removeItem(at: rootDirectory)
+            .appendingPathComponent(
+                "tiller-phase1-bootstrap-fixture-\(UUID().uuidString)",
+                isDirectory: true
+            )
         try FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
 
         let databasePath = rootDirectory.appendingPathComponent("tiller.sqlite").path
@@ -80,9 +82,6 @@ struct BootstrapFixture: Equatable, Sendable {
         try? FileManager.default.removeItem(at: rootDirectory)
     }
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.projects == rhs.projects && lhs.worktrees == rhs.worktrees
-    }
 
     private static func stableUUID(_ value: Int) -> UUID {
         UUID(uuidString: String(format: "00000000-0000-4000-8000-%012d", value))!
