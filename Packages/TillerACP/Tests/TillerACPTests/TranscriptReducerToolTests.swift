@@ -7,6 +7,45 @@ import Testing
         PermissionOption(optionId: "n", name: "Reject", kind: .rejectOnce),
     ]
 
+    @Test func externalToolCallIDCollisionKeepsRenderedIDsUniqueAndUpdatesByRawID() {
+        let restored = TranscriptItem.toolCall(ToolCallItem(
+            toolCallId: "tc1", title: "old", kind: .read, status: .completed))
+        var reducer = TranscriptReducer(existingIDs: [restored.id])
+        reducer.apply(.toolCall(ToolCall(
+            toolCallId: "tc1", title: "new", kind: .read, status: .inProgress)))
+        reducer.apply(.toolCallUpdate(ToolCallUpdate(toolCallId: "tc1", status: .completed)))
+
+        let items = [restored] + reducer.items
+        #expect(Set(items.map(\.id)).count == items.count)
+        guard case .toolCall(let live) = reducer.items[0] else {
+            Issue.record("expected live tool call"); return
+        }
+        #expect(live.toolCallId == "tc1")
+        #expect(live.status == .completed)
+    }
+
+    @Test func repeatedToolCallKeepsCollisionSafePresentationID() {
+        let restored = TranscriptItem.toolCall(ToolCallItem(
+            toolCallId: "tc1", title: "old", kind: .read, status: .completed))
+        var reducer = TranscriptReducer(existingIDs: [restored.id])
+        reducer.apply(.toolCall(ToolCall(
+            toolCallId: "tc1", title: "new", kind: .read, status: .inProgress)))
+        let initialID = reducer.items[0].id
+
+        reducer.apply(.toolCall(ToolCall(
+            toolCallId: "tc1", title: "final", kind: .read, status: .completed)))
+        reducer.apply(.toolCallUpdate(ToolCallUpdate(toolCallId: "tc1", status: .failed)))
+
+        guard case .toolCall(let live) = reducer.items[0] else {
+            Issue.record("expected live tool call"); return
+        }
+        #expect(initialID != "tc1")
+        #expect(live.id == initialID)
+        #expect(live.toolCallId == "tc1")
+        #expect(live.status == .failed)
+        #expect(Set(([restored] + reducer.items).map(\.id)).count == 2)
+    }
+
     @Test func toolCallLifecycleUpdatesInPlace() {
         var reducer = TranscriptReducer()
         reducer.apply(.toolCall(ToolCall(toolCallId: "tc1", title: "Read A.swift",

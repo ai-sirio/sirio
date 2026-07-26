@@ -127,7 +127,7 @@ public struct ChatSessionStore: Sendable {
                 .fetchAll(db)
         }
         let decoder = JSONDecoder()
-        return records.compactMap { record in
+        let decoded: [TranscriptItem] = records.compactMap { record in
             guard let item = try? decoder.decode(TranscriptItem.self, from: record.payload)
             else { return nil }
             // Persisted transcripts are finished turns; normalize agent messages
@@ -138,6 +138,7 @@ public struct ChatSessionStore: Sendable {
             }
             return item
         }
+        return decoded.normalizedTranscriptIDs()
     }
 }
 
@@ -153,6 +154,45 @@ extension TranscriptItem {
         case .turnDivider: "turnDivider"
         case .editSummary: "editSummary"
         case .systemNotice: "systemNotice"
+        }
+    }
+}
+
+private extension Array where Element == TranscriptItem {
+    func normalizedTranscriptIDs() -> [TranscriptItem] {
+        var usedIDs: Set<String> = []
+        return map { item in
+            guard usedIDs.contains(item.id) else {
+                usedIDs.insert(item.id)
+                return item
+            }
+
+            var duplicateOrdinal = 1
+            var normalizedID = "\(item.id)-duplicate-\(duplicateOrdinal)"
+            while usedIDs.contains(normalizedID) {
+                duplicateOrdinal += 1
+                normalizedID = "\(item.id)-duplicate-\(duplicateOrdinal)"
+            }
+            usedIDs.insert(normalizedID)
+            return item.withTranscriptID(normalizedID)
+        }
+    }
+}
+
+private extension TranscriptItem {
+    func withTranscriptID(_ id: String) -> TranscriptItem {
+        switch self {
+        case .userMessage(_, let blocks): return .userMessage(id: id, blocks: blocks)
+        case .agentMessage(_, let text, let isComplete):
+            return .agentMessage(id: id, text: text, isComplete: isComplete)
+        case .thought(_, let text): return .thought(id: id, text: text)
+        case .toolCall(var item):
+            item.transcriptID = id
+            return .toolCall(item)
+        case .plan(_, let entries): return .plan(id: id, entries: entries)
+        case .turnDivider(_, let at): return .turnDivider(id: id, at: at)
+        case .editSummary(_, let paths): return .editSummary(id: id, paths: paths)
+        case .systemNotice(_, let text): return .systemNotice(id: id, text: text)
         }
     }
 }

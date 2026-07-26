@@ -156,6 +156,7 @@ final class ChatController {
         if let record, sessionRecordId == nil,
            let stored = try? store?.loadTranscript(sessionId: record.id) {
             restored = stored
+            reducer = TranscriptReducer(existingIDs: Set(stored.map(\.id)))
         }
         if let record, let used = record.contextUsageUsed, let size = record.contextUsageSize {
             reducer.restoreContextUsage(ContextUsage(used: used, size: size))
