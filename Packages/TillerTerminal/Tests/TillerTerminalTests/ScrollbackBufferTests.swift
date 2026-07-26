@@ -132,3 +132,115 @@ import Foundation
     let tail = await buffer.tail(10000)
     #expect(tail == Data("hello world".utf8))
 }
+
+// MARK: - Reference model
+
+/// Naive model of the ring buffer: keep everything, expose the last
+/// `capacity` bytes. Slow but obviously correct — used to diff the real
+/// implementation byte for byte.
+private struct ReferenceScrollback {
+    let capacity: Int
+    private var all = Data()
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    mutating func append(_ data: Data) {
+        guard capacity > 0 else { return }
+        all.append(data)
+        if all.count > capacity {
+            all = Data(all.suffix(capacity))
+        }
+    }
+
+    func snapshot() -> Data { all }
+
+    func tail(_ maxBytes: Int) -> Data {
+        guard maxBytes > 0 else { return Data() }
+        return Data(all.suffix(maxBytes))
+    }
+}
+
+/// Deterministic generator so the differential test is reproducible.
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
+@Test func ringBufferMatchesReferenceModelAcrossRandomAppends() async {
+    let capacity = 64
+    let buffer = ScrollbackBuffer(capacity: capacity)
+    var reference = ReferenceScrollback(capacity: capacity)
+    var generator = SeededGenerator(seed: 0x5EED_1234)
+    var nextByte: UInt8 = 0
+
+    for _ in 0..<300 {
+        let size = Int.random(in: 0...200, using: &generator)
+        var chunk = Data(capacity: size)
+        for _ in 0..<size {
+            chunk.append(nextByte)
+            nextByte &+= 1
+        }
+        await buffer.append(chunk)
+        reference.append(chunk)
+
+        #expect(await buffer.snapshot() == reference.snapshot())
+        for window in [1, 7, 63, 64, 65, 1000] {
+            #expect(await buffer.tail(window) == reference.tail(window))
+        }
+    }
+}
+
+@Test func ringBufferAppendSizesNotDivisibleByCapacity() async {
+    let capacity = 10
+    let buffer = ScrollbackBuffer(capacity: capacity)
+    var reference = ReferenceScrollback(capacity: capacity)
+    var nextByte: UInt8 = 0
+
+    for _ in 0..<50 {
+        var chunk = Data()
+        for _ in 0..<3 {
+            chunk.append(nextByte)
+            nextByte &+= 1
+        }
+        await buffer.append(chunk)
+        reference.append(chunk)
+        #expect(await buffer.snapshot() == reference.snapshot())
+    }
+}
+
+@Test func ringBufferPreservesSentinelOrderAfterHeavyOutput() async {
+    let capacity = 1024
+    let buffer = ScrollbackBuffer(capacity: capacity)
+    await buffer.append(Data("<<START>>".utf8))
+    for line in 1...5000 {
+        await buffer.append(Data("line \(line)\n".utf8))
+    }
+    await buffer.append(Data("<<END>>".utf8))
+
+    let snapshot = await buffer.snapshot()
+    #expect(snapshot.count == capacity)
+    let text = String(decoding: snapshot, as: UTF8.self)
+    #expect(text.hasSuffix("<<END>>"))
+    #expect(!text.contains("<<START>>"))
+
+    // Line numbers still appear in ascending order, with no gaps, in the
+    // window that survived.
+    let numbers = text
+        .split(separator: "\n")
+        .compactMap { segment -> Int? in
+            guard segment.hasPrefix("line ") else { return nil }
+            return Int(segment.dropFirst("line ".count))
+        }
+    #expect(numbers.count > 1)
+    #expect(numbers == Array(numbers.sorted()))
+    #expect(zip(numbers, numbers.dropFirst()).allSatisfy { $1 == $0 + 1 })
+}

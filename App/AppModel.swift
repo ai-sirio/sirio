@@ -329,7 +329,7 @@ final class AppModel {
             notifier.onActivatePane = { [weak self] id in
                 Task { await self?.focusPane(paneId: id) }
             }
-            usage.start()
+            usage.updatePolling()
         } catch {
             lastError = "Database error: \(error)"
         }

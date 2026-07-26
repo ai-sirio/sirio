@@ -33,16 +33,26 @@ public actor ScrollbackBuffer {
             count = capacity
             return
         }
-        // Normal case: copy into ring.
-        for byte in data {
-            let idx = (head + count) % capacity
-            storage[idx] = byte
-            if count < capacity {
-                count += 1
-            } else {
-                head = (head + 1) % capacity
+        // Normal case: the destination is at most two contiguous regions —
+        // from the write cursor to the end of storage, then from the start
+        // after the wrap. Copy them in bulk instead of byte by byte.
+        let writeStart = (head + count) % capacity
+        let firstChunk = min(data.count, capacity - writeStart)
+        let secondChunk = data.count - firstChunk
+        data.withUnsafeBytes { src in
+            storage.withUnsafeMutableBytes { dst in
+                UnsafeMutableRawBufferPointer(rebasing: dst[writeStart..<writeStart + firstChunk])
+                    .copyBytes(from: UnsafeRawBufferPointer(rebasing: src[..<firstChunk]))
+                if secondChunk > 0 {
+                    UnsafeMutableRawBufferPointer(rebasing: dst[..<secondChunk])
+                        .copyBytes(from: UnsafeRawBufferPointer(rebasing: src[firstChunk...]))
+                }
             }
         }
+        // Bytes beyond capacity evict the oldest ones by advancing `head`.
+        let evicted = max(0, count + data.count - capacity)
+        head = (head + evicted) % capacity
+        count = min(count + data.count, capacity)
     }
 
     public func snapshot() -> Data {
