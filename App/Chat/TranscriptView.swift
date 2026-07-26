@@ -41,6 +41,13 @@ struct TranscriptView: View {
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
+            .onChange(of: controller.scrollTarget) {
+                guard let target = controller.scrollTarget else { return }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(target, anchor: .center)
+                }
+                controller.scrollTarget = nil
+            }
         }
     }
 
@@ -81,8 +88,13 @@ struct TranscriptView: View {
         case .thought(_, let text):
             ThoughtRow(text: text)
         case .toolCall(let toolCall):
-            if let info = SubagentTasks.info(for: toolCall) {
-                TaskCardView(info: info, item: toolCall,
+            let question = ChatQuestion.from(toolCall)
+            let subagent = SubagentTasks.info(for: toolCall)
+            if let question, !question.options.isEmpty,
+               !(question.isResolved && subagent != nil) {
+                QuestionCardView(question: question, controller: controller)
+            } else if let subagent {
+                TaskCardView(info: subagent, item: toolCall,
                              children: grouped.children(of: toolCall.toolCallId),
                              controller: controller, worktree: worktree,
                              appModel: appModel)
