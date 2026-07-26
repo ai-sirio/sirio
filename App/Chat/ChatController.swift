@@ -54,6 +54,9 @@ final class ChatController {
     /// Following ("Segui l'agente"): default off, non persistito.
     var isFollowing = false
     var onFollowLocation: ((String) -> Void)?
+    /// Transcript id the view should scroll to; cleared by the transcript once
+    /// it has scrolled. Set by the pending-question bar.
+    var scrollTarget: String?
     /// Timeline expansion state (work groups and folded turns the user opened).
     var expandedWorkGroups: Set<String> = []
     var unfoldedTurns: Set<String> = []
@@ -412,6 +415,27 @@ final class ChatController {
             selectedEffort = previous
             persistSessionSettings()
             promptError = Self.describePromptError(error)
+        }
+    }
+
+    /// Answers a question card. Uses the structured channel when the driver
+    /// supports it, so the agent learns *which* option was chosen; otherwise
+    /// falls back to the plain allow/reject the permission gate already uses.
+    func answerQuestion(_ question: ChatQuestion, optionId: String) async {
+        guard let driver else { return }
+        let option = question.options.first { $0.id == optionId }
+        if driver.supportsStructuredAnswers, option?.isRejection != true,
+           !question.prompt.isEmpty {
+            reducer.permissionResolved(requestId: question.requestId,
+                                       resolution: .selected(optionId: optionId))
+            await driver.answerPermission(
+                requestId: question.requestId,
+                outcome: .answered(optionId: optionId,
+                                   updatedInput: .object(["choice": .string(optionId)])))
+            onStatusChange?(.running)
+            persist()
+        } else {
+            await answerPermission(requestId: question.requestId, optionId: optionId)
         }
     }
 
