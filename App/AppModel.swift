@@ -101,6 +101,31 @@ final class AppModel {
 
     /// Agent lifecycle status, pane→agent mapping, and title-derived detection.
     var agentActivity = AgentActivityModel()
+    private var processScanCoordinator = ProcessScanCoordinator()
+
+    typealias ForegroundProcessScanner = @Sendable (
+        UUID
+    ) async -> ForegroundProcessScanResult?
+    private let foregroundProcessScanner: ForegroundProcessScanner
+
+    private static func makeForegroundProcessScanner(
+        paneRegistry: PaneRegistry
+    ) -> ForegroundProcessScanner {
+        { paneId in
+            guard let pid = await paneRegistry.shellPid(paneId: paneId) else {
+                return nil
+            }
+            let agentId = ForegroundProcessAgent.identify(shellPid: pid)
+            let processTree = agentId == nil
+                ? []
+                : ForegroundProcessAgent.processTree(shellPid: pid)
+            return ForegroundProcessScanResult(
+                agentId: agentId,
+                processTree: processTree
+            )
+        }
+    }
+
 
     /// Highest-priority agent status among all panes in a worktree's tree.
     /// Priority: error > needs-input > running > done. Returns nil if no agent panes.
@@ -196,7 +221,8 @@ final class AppModel {
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
         },
         controlTabPersister: ControlTabPersister? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        foregroundProcessScanner: ForegroundProcessScanner? = nil
     ) {
         self.paneRegistry = paneRegistry
         self.registrationTimeoutMs = registrationTimeoutMs
@@ -204,6 +230,8 @@ final class AppModel {
         self.activateApplication = activateApplication
         self.controlTabPersister = controlTabPersister
         self.defaults = defaults
+        self.foregroundProcessScanner = foregroundProcessScanner
+            ?? Self.makeForegroundProcessScanner(paneRegistry: paneRegistry)
         let installStore = AgentInstallStore(
             rootDirectory: FileManager.default.urls(
                 for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1395,11 +1423,16 @@ final class AppModel {
         return controller
     }
 
+    func paneClosed(paneId: UUID) {
+        processScanCoordinator.paneClosed(paneId: paneId)
+        agentActivity.paneClosed(paneId: paneId)
+        paneProcessTrees[paneId] = nil
+    }
+
     func teardownChatController(tabId: UUID) {
         guard let controller = chatControllers[tabId] else { return }
         chatControllers[tabId] = nil
-        agentActivity.paneClosed(paneId: tabId)
-        paneProcessTrees[tabId] = nil
+        paneClosed(paneId: tabId)
         Task { await controller.stop() }
     }
 
@@ -1648,14 +1681,10 @@ final class AppModel {
             checkForegroundAgent(paneId: paneId)
             return
         }
-        if agentActivity.processOwnedPanes.contains(paneId) {
-            // Re-confirm the process is still alive; clears the badge when
-            // the agent exits back to the shell prompt.
-            checkForegroundAgent(paneId: paneId)
-        }
-        // Refresh the subagent process snapshot for any registered pane
-        // (spawn-, title- and process-owned alike) — content output means
-        // the agent is active and its child tree may have changed.
+        // For process-owned panes this reconfirms that the agent is still
+        // alive; for every registered pane it refreshes the child snapshot.
+        // Content output means the agent is active and its child tree may
+        // have changed.
         checkForegroundAgent(paneId: paneId)
         guard let status = ScreenManifest.detect(tailText: tailText, agentId: agentId) else { return }
         guard let t = agentActivity.applyContentSignal(paneId: paneId, status: status, now: Date()) else { return }
@@ -1665,20 +1694,67 @@ final class AppModel {
     /// Layer D driver: resolves the pane's shell child processes off-main
     /// and registers (or clears) the pane's agent accordingly.
     private func checkForegroundAgent(paneId: UUID) {
+        guard case .start(let generation) = processScanCoordinator.requestScan(
+            paneId: paneId
+        ) else {
+            return
+        }
+
+        let scanner = foregroundProcessScanner
         Task.detached {
-            guard let pid = await PaneRegistry.shared.shellPid(paneId: paneId) else { return }
-            let agentId = ForegroundProcessAgent.identify(shellPid: pid)
-            let tree = agentId != nil ? ForegroundProcessAgent.processTree(shellPid: pid) : []
+            let result = await scanner(paneId)
             await MainActor.run { [weak self] in
-                guard let self else { return }
-                if let agentId {
-                    self.agentActivity.processIdentified(paneId: paneId, agentId: agentId, now: Date())
-                    self.paneProcessTrees[paneId] = tree
+                self?.completeForegroundAgentScan(
+                    paneId: paneId,
+                    generation: generation,
+                    result: result
+                )
+            }
+        }
+    }
+
+    private func completeForegroundAgentScan(
+        paneId: UUID,
+        generation: Int,
+        result: ForegroundProcessScanResult?
+    ) {
+        guard !processScanCoordinator.isResultStale(
+            paneId: paneId,
+            generation: generation
+        ) else {
+            _ = processScanCoordinator.finishScan(
+                paneId: paneId,
+                generation: generation
+            )
+            return
+        }
+
+        if let result {
+            let resolvedTree: [ProcessNode]? = result.agentId.map {
+                _ in result.processTree
+            }
+            let agentChanged = agentActivity.agentId(paneId: paneId) != result.agentId
+            let treeChanged = paneProcessTrees[paneId] != resolvedTree
+            if agentChanged || treeChanged {
+                if let agentId = result.agentId {
+                    agentActivity.processIdentified(
+                        paneId: paneId,
+                        agentId: agentId,
+                        now: Date()
+                    )
+                    paneProcessTrees[paneId] = result.processTree
                 } else {
-                    self.agentActivity.processGone(paneId: paneId)
-                    self.paneProcessTrees[paneId] = nil
+                    agentActivity.processGone(paneId: paneId)
+                    paneProcessTrees[paneId] = nil
                 }
             }
+        }
+
+        if processScanCoordinator.finishScan(
+            paneId: paneId,
+            generation: generation
+        ) {
+            checkForegroundAgent(paneId: paneId)
         }
     }
 
