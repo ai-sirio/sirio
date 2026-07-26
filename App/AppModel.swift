@@ -259,6 +259,16 @@ final class AppModel {
     private let sessionRestoreLogger = Logger(subsystem: "dev.tiller", category: "session-restore")
 
     func bootstrap() async {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("bootstrapInteractive", id: sid)
+        var bootstrapEnded = false
+        defer {
+            if !bootstrapEnded {
+                SignpostMetrics.endInterval(
+                    "bootstrapInteractive", state,
+                    message: "projects: \(projects.count), worktrees: \(worktrees.values.reduce(0) { $0 + $1.count })")
+            }
+        }
         do {
             let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("Tiller", isDirectory: true)
@@ -302,6 +312,10 @@ final class AppModel {
                     )
                 }
             }
+            bootstrapEnded = true
+            SignpostMetrics.endInterval(
+                "bootstrapInteractive", state,
+                message: "projects: \(projects.count), worktrees: \(worktrees.values.reduce(0) { $0 + $1.count })")
             let storedOpenIds = (UserDefaults.standard.stringArray(forKey: AppSettings.openWorktreeIdsKey) ?? [])
                 .compactMap(UUID.init)
             openWorktreeIds = storedOpenIds.filter { id in

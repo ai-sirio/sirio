@@ -1,6 +1,7 @@
 import Foundation
 import TillerAgents
 import TillerCore
+import TillerTerminal
 
 /// Layer D: identifies which catalog agent (if any) is running inside a
 /// pane's shell by inspecting the shell's child processes — the only signal
@@ -15,7 +16,13 @@ enum ForegroundProcessAgent {
     /// in catalog order. Called off the main thread; libproc calls are
     /// cheap (microseconds) but this still runs only on content signals.
     static func identify(shellPid: pid_t) -> String? {
+        let sid = SignpostMetrics.makeSignpostID()
+        let state = SignpostMetrics.beginInterval("processScan", id: sid)
         let names = childProcessNames(of: shellPid)
+        defer {
+            SignpostMetrics.endInterval(
+                "processScan", state, message: "processes: \(names.count)")
+        }
         guard !names.isEmpty else { return nil }
         return AgentCatalog.all.map(\.id).first { names.contains($0) }
     }
