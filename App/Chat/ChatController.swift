@@ -19,6 +19,7 @@ final class ChatController {
     private let worktreeId: UUID
     private let worktreePath: String
     private let store: ChatSessionStore?
+    private let persistenceCoordinator: PersistenceCoordinator?
     private let installStore: AgentInstallStore
     typealias DriverFactory = (
         String, String, AgentInstallStore, PermissionMode, String?, String?, String?
@@ -50,7 +51,7 @@ final class ChatController {
     var mcpWarning: String?
     private var reducer = TranscriptReducer()
     var onStatusChange: ((AgentStatus) -> Void)?
-    /// Test hook: fires once per actual `persist()` write.
+    /// Test hook: fires once per persistence snapshot enqueued.
     @ObservationIgnored var onPersist: (() -> Void)?
     /// Following ("Segui l'agente"): default off, non persistito.
     var isFollowing = false
@@ -118,10 +119,12 @@ final class ChatController {
     private var selectedEffort: String?
     private var forceNewSession = false
     private var lifecycleGeneration = 0
+    @ObservationIgnored private var persistenceEnqueueTask: Task<Void, Never>?
 
     init(tabId: UUID, agentId: String, worktreeId: UUID,
          worktreePath: String, store: ChatSessionStore?,
          installStore: AgentInstallStore,
+         persistenceCoordinator: PersistenceCoordinator? = nil,
          startNewConversation: Bool = false,
          driverFactory: @escaping DriverFactory = {
              agentId, worktreePath, installStore, permissionMode, model, effort, resumeSessionId in
@@ -135,6 +138,23 @@ final class ChatController {
         self.worktreeId = worktreeId
         self.worktreePath = worktreePath
         self.store = store
+        self.persistenceCoordinator = persistenceCoordinator ?? store.map { store in
+            PersistenceCoordinator(
+                transcriptWriter: { sessionId, items in
+                    let sid = SignpostMetrics.makeSignpostID()
+                    let state = SignpostMetrics.beginInterval("transcriptPersist", id: sid)
+                    defer {
+                        SignpostMetrics.endInterval(
+                            "transcriptPersist", state,
+                            message: "items: \(items.count)")
+                    }
+                    try store.saveTranscript(sessionId: sessionId, items: items)
+                },
+                scrollbackWriter: { _, _, _ in
+                    preconditionFailure(
+                        "ChatController fallback persistence coordinator cannot persist scrollback")
+                })
+        }
         self.installStore = installStore
         self.driverFactory = driverFactory
         self.forceNewSession = startNewConversation
@@ -272,6 +292,12 @@ final class ChatController {
         lifecycleGeneration &+= 1
         reducer.closeAgentMessage()
         persist()
+        if let persistenceEnqueueTask {
+            await persistenceEnqueueTask.value
+        }
+        if let persistenceCoordinator, let sessionRecordId {
+            await persistenceCoordinator.flush(sessionId: sessionRecordId)
+        }
         pumpTask?.cancel()
         pumpTask = nil
         pendingEvents = []
@@ -279,6 +305,10 @@ final class ChatController {
         if let driver { await driver.stop() }
         driver = nil
         if state != .needsAuth { state = .disconnected(message: nil) }
+    }
+    /// Waits only for snapshots already queued by `persist()`.
+    func drainPendingPersistence() async {
+        await persistenceEnqueueTask?.value
     }
 
     func newConversation() async {
@@ -579,27 +609,25 @@ final class ChatController {
             return text
         }
         return "\(error)"
-    }
 
+    }
     // MARK: - Persistence
 
-    private func persist() {
-        guard let store, let sessionRecordId else { return }
-        let sid = SignpostMetrics.makeSignpostID()
-        let state = SignpostMetrics.beginInterval("transcriptPersist", id: sid)
-        try? store.saveTranscript(sessionId: sessionRecordId, items: items)
-        SignpostMetrics.endInterval(
-            "transcriptPersist", state, message: "items: \(items.count)")
+    func persist() {
+        guard let sessionRecordId, let persistenceCoordinator else { return }
+        let snapshot = items
+        let previous = persistenceEnqueueTask
+        persistenceEnqueueTask = Task { [persistenceCoordinator] in
+            _ = await previous?.value
+            await persistenceCoordinator.enqueueTranscript(
+                sessionId: sessionRecordId, items: snapshot)
+        }
         onPersist?()
     }
 
-    /// Tool-heavy turns resolve several tool calls in a tight burst; each one
-    /// used to call `persist()` synchronously (full transcript serialization
-    /// on the main thread), so the burst serialized N times back to back.
-    /// This coalesces bursts into one write, still shorter than a user
-    /// noticing turn-to-turn lag, and other call sites (turn end, stop,
-    /// permission answer) keep calling `persist()` directly at their settle
-    /// points.
+    /// Tool-heavy turns resolve several tool calls in a tight burst. This
+    /// coalesces snapshots before the persistence actor writes them, while
+    /// the 800 ms debounce keeps the existing settle-point optimization.
     private static let persistDebounceInterval: Duration = .milliseconds(800)
     @ObservationIgnored private var persistScheduled = false
 

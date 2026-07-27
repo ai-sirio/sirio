@@ -1,7 +1,7 @@
 import AppKit
 import TillerCore
 
-/// Intercetta il quit graceful per flushare lo scrollback dei pane vivi
+/// Intercetta il quit graceful per flushare scrollback e transcript
 /// prima che il processo termini. `.terminateLater` è l'unico meccanismo
 /// AppKit che fa attendere un lavoro async (actor snapshot + write GRDB).
 final class AppDelegate: NSObject, NSApplicationDelegate {
