@@ -96,7 +96,7 @@ untouched; chat and terminal stay independent surfaces.
 | --- | --- |
 | `tool_execution_start` (`toolName`, `args`) | `.update(.toolCall)` status `.inProgress`; `kind`: `read→read`, `edit`/`write→edit`, `bash→execute`, `grep`/`find`/`ls→search`, else `other`; `locations` from path-like args |
 | `tool_execution_update` (`partialResult`, cumulative) | `.update(.toolCallUpdate)` — replace textual content (no delta math needed) |
-| `tool_execution_end` (`result`, `isError`) | `.update(.toolCallUpdate)` status `.completed`/`.failed`; for `edit`, `details.diff` → `.diff(path:oldText:newText:)` content (native diff rendering in `EditSummaryCardView`) |
+| `tool_execution_end` (`result`, `isError`) | `.update(.toolCallUpdate)` status `.completed`/`.failed`; for `edit`, the retained `args.edits[]` supplies `.diff(path:oldText:newText:)` entries; for `write`, retained `args.content` supplies `.diff(path:oldText:nil,newText:)` (native rendering in `EditSummaryCardView`); `result.details.diff` remains a textual fallback |
 
 ### Turn lifecycle
 
@@ -104,7 +104,8 @@ untouched; chat and terminal stay independent surfaces.
 | --- | --- |
 | `prompt` response `success: true` | prompt accepted; events stream asynchronously |
 | `prompt` response `success: false` | driver's `prompt()` throws (error surfaced in chat) |
-| `agent_end` / `agent_settled` | `.turnEnded(.endTurn)`; resolves the pending `prompt()` continuation |
+| `agent_end` | updates low-level run state only; never closes the canonical turn because retry, compaction or queued continuation may follow |
+| `agent_settled` | `.turnEnded(.endTurn)`; resolves the pending `prompt()` continuation only when Pi guarantees no automatic continuation remains |
 | `cancel()` → `abort` command | `.turnEnded(.cancelled)` |
 | `compaction_start/end`, `auto_retry_start/end` | informational thought chunks ("⟳ Compacting context…", "↻ Retrying…") |
 | `extension_error` | error thought chunk + stderr log |
@@ -130,7 +131,8 @@ server-side; the client tracks no timeouts.
 - On `connect`: `get_state` (current model + thinking level) and
   `get_available_models` → `SessionHandle.models = SessionModelState(currentModelId:,
   availableModels:)` with `ModelInfo(modelId: "provider/id", …)`.
-- `setModel("provider/id")` → `set_model`.
+- `setModel("provider/id")` splits on the first `/` and sends
+  `{ "type": "set_model", "provider": "provider", "modelId": "id" }`.
 - `get_available_thinking_levels` → `SessionConfigOption(id: "effort", choices:
   off/minimal/low/medium/high[/xhigh/max])` in `SessionHandle.configOptions`;
   `setConfigOption(id: "effort", value:)` → `set_thinking_level`.
@@ -170,6 +172,9 @@ server-side; the client tracks no timeouts.
   requests, compaction, abort, dirty exit) → expected `ACPSessionEvent` sequence.
 - **Command correlation:** out-of-order `response` ids matched to the right pending
   command; `prompt` `success:false` surfaces as an error.
+- **Settlement ordering:** `agent_end { willRetry: true }` does not finish the
+  canonical turn; only the later `agent_settled` resolves `prompt()` and emits
+  `.turnEnded`, after all streamed updates.
 - **Question roundtrip:** `extension_ui_request` in → canonical permission event
   out → `answerPermission` writes the correct `extension_ui_response`.
 - **Session args:** resume builds `--session <ref>`; fresh chats do not.
