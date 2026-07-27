@@ -152,3 +152,33 @@ struct HoverIconButtonStyle: ButtonStyle {
         }
     }
 }
+
+/// Pointer-down feedback for the flat tappable rows (sidebar rows, tab bar
+/// items): a tint that appears the instant the mouse goes down, so a press
+/// reads as immediate instead of waiting for the release to commit.
+/// `DragGesture(minimumDistance: 0)` recognizes at mouse-down on macOS and is
+/// simultaneous with the row's own tap/drag gestures, so commit behavior
+/// (mouse-up) is unchanged. The tint is a non-hit-tested overlay matching the
+/// shared 7pt row pill.
+struct PressFeedback: ViewModifier {
+    @State private var pressed = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.primary.opacity(pressed ? 0.08 : 0))
+                    .allowsHitTesting(false)
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in if !pressed { pressed = true } }
+                    .onEnded { _ in pressed = false }
+            )
+    }
+}
+
+extension View {
+    /// Instant mouse-down tint for rows that commit on mouse-up.
+    func pressFeedback() -> some View { modifier(PressFeedback()) }
+}
