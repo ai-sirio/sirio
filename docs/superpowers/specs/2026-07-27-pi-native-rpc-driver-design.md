@@ -47,8 +47,9 @@ exactly the pattern established by the other three native drivers.
    other driver — Pi's `.jsonl` files are never parsed by Tiller.
 7. **Out of scope (YAGNI):** session fork/clone/tree navigation, `export_html`,
    the client-initiated `bash` RPC command, MCP server forwarding (Pi reads its own
-   `settings.json`), multiline `extension_ui_request(method: "editor")`, subagent
-   cards (not built into Pi), `set_session_name`, queue-mode commands
+   `settings.json`), multiline `extension_ui_request(method: "editor")` (the
+   driver replies `cancelled: true` immediately so Pi cannot block), subagent cards
+   (not built into Pi), `set_session_name`, queue-mode commands
    (`set_steering_mode` / `set_follow_up_mode`).
 
 ## Architecture
