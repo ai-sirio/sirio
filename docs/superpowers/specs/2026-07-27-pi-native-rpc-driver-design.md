@@ -23,10 +23,11 @@ exactly the pattern established by the other three native drivers.
    second codebase, a build step and a distribution problem for zero user-visible
    gain. A compiled-SDK sidecar remains a future option for features RPC cannot
    reach (in-process custom tools); not needed for anything in this spec.
-2. **Reuse the canonical pipeline unchanged.** The driver maps Pi's RPC events into
-   the existing `ACPSessionEvent`/`SessionUpdate` stream. Chat UI
-   (`ChatController`, `TimelineBuilder`, `TranscriptView`, `ToolCallCardView`,
-   `QuestionCardView`, `ModelPickerPopover`) is not modified.
+2. **Reuse the canonical pipeline.** The driver maps Pi's RPC events into the
+   existing `ACPSessionEvent`/`SessionUpdate` stream. Timeline, transcript, tool
+   cards and model picker stay unchanged. The only canonical/UI extension is a
+   small free-text answer mode in `ChatQuestion` + `QuestionCardView`, required by
+   Pi's `extension_ui_request(method: "input")`.
 3. **Questions come from Pi's Extension UI sub-protocol** (`select` / `confirm` /
    `input` extension_ui_requests, e.g. from the `ask_user_question` tool) and are
    rendered with the existing question/permission cards. Pi intentionally has **no
@@ -46,8 +47,9 @@ exactly the pattern established by the other three native drivers.
    other driver — Pi's `.jsonl` files are never parsed by Tiller.
 7. **Out of scope (YAGNI):** session fork/clone/tree navigation, `export_html`,
    the client-initiated `bash` RPC command, MCP server forwarding (Pi reads its own
-   `settings.json`), subagent cards (not built into Pi), `set_session_name`,
-   queue-mode commands (`set_steering_mode` / `set_follow_up_mode`).
+   `settings.json`), multiline `extension_ui_request(method: "editor")`, subagent
+   cards (not built into Pi), `set_session_name`, queue-mode commands
+   (`set_steering_mode` / `set_follow_up_mode`).
 
 ## Architecture
 
@@ -75,6 +77,11 @@ ChatController ──► AgentDriverFactory.makeDriver(agentId: "pi", …)
 - `Packages/TillerACP/Sources/TillerACP/AgentDriverFactory.swift` — `"pi"` becomes a
   native id: `transportKind → .native`, `nativeBinary → "pi"`, new `case` in
   `makeNativeDriver` building `PiRPCDriver` over a `ProcessTransport`.
+- `Packages/TillerACP/Sources/TillerACP/ChatQuestion.swift` — add canonical
+  free-text answer metadata (placeholder/prefill) parsed from synthetic Pi input
+  requests; ordinary permission and option questions remain unchanged.
+- `App/Chat/QuestionCardView.swift` and `App/Chat/ChatController.swift` — render and
+  submit free-text answers through the existing `PermissionOutcome.answered` path.
 - `App/AcpAgentCenter.swift` — add `"pi"` to `nativeAgentIDs` so Pi appears in
   Settings (availability probe on the `pi` binary) and in the "New Chat" menu.
 
@@ -111,8 +118,10 @@ untouched; chat and terminal stay independent surfaces.
 | `extension_error` | error thought chunk + stderr log |
 | process exit / stream close | `.disconnected` |
 
-Prompts sent **while streaming** use `streamingBehavior: "steer"` (Pi rejects a
-plain `prompt` during streaming), matching the other drivers' mid-turn behaviour.
+Prompts sent **while streaming** use `streamingBehavior: "steer"` because Pi
+rejects a plain prompt in that state. Slash-prefixed extension commands are the
+exception: they remain `prompt` commands without `streamingBehavior` so Pi can run
+them immediately (the dedicated `steer` command rejects extension commands).
 
 ### Questions (Extension UI → existing cards)
 
@@ -120,7 +129,7 @@ plain `prompt` during streaming), matching the other drivers' mid-turn behaviour
 | --- | --- | --- |
 | `select` (title, options, timeout?) | `.permissionRequested` with one option per choice | `extension_ui_response { id, value: <chosen option> }` or `{ cancelled: true }` |
 | `confirm` (title, message) | `.permissionRequested` with Yes/No options | `{ id, confirmed: true | false }` |
-| `input` (title, placeholder) | question card with free-text answer | `{ id, value: <text> }` |
+| `input` (title, placeholder) | question card with canonical text field | `{ id, value: <text> }` |
 
 `supportsStructuredAnswers = true`. A `turnEnded` arriving before an answer expires
 the card (existing reducer behaviour). Pi auto-resolves timed-out requests
