@@ -502,7 +502,7 @@ Non mantenere task timer e wake-up quando nessun provider usage è abilitato.
 | 5 | Process probe single-flight | P1 | S | 1 | TODO |
 | 6 | Right panel single-flight | P2 | M | 1 | TODO |
 | 7 | Snapshot derivato della chat | P2 | M | 2 | TODO |
-| 8 | Bootstrap progressivo | P3 | L | 1 e gate misurato | TODO |
+| 8 | Bootstrap progressivo | P3 | L | 1 e gate misurato | FATTO (variante minima: riordino, non loader off-MainActor) — time-to-interactive -39% mediano, 6/7 vittorie appaiate; vedi docs/superpowers/notes/baseline-2026-07-17.md |
 | 9 | Stop polling usage inattivo | P3 | S | 1 | TODO |
 
 Le fasi 2-6 possono essere sviluppate su branch separati dopo la baseline. La

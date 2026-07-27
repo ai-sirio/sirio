@@ -336,57 +336,48 @@ final class AppModel {
                 })
             projects = try await store.loadAll()
             let ctl = tillerctlPath()
+            // Publish the sidebar tree first: one DB read per project, and
+            // resolving the stored selection needs the worktrees present.
             for project in projects {
-                let list = try await store.worktrees(of: project.id)
-                worktrees[project.id] = list
-                for worktree in list {
-                    // Repair hook configs frozen on a tillerctl path that no
-                    // longer exists (pre-shim builds, cleaned DerivedData).
-                    ClaudeHookMigrator.migrateFile(
-                        atPath: worktree.path + "/.claude/settings.local.json",
-                        tillerctlPath: ctl
-                    )
-                    let loaded = try await store.loadTabs(of: worktree.id)
-                    // Tab markdown il cui file è sparito tra le sessioni: scartate in silenzio.
-                    let restoredTabs = loaded.tabs.filter { tab in
-                        guard let url = tab.markdownFileURL else { return true }
-                        return FileManager.default.fileExists(atPath: url.path)
-                    }
-                    tabs[worktree.id] = restoredTabs
-                    activeTabId[worktree.id] = loaded.activeTabId.flatMap { active in
-                        restoredTabs.contains { $0.id == active } ? active : nil
-                    } ?? restoredTabs.first?.id
-                    for tab in restoredTabs {
-                        guard let chatAgentId = tab.chatAgentId else { continue }
-                        agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
-                    }
-                    await restoreAgentSessions(
-                        for: worktree,
-                        paneIds: Set(restoredTabs.flatMap { $0.leafIds })
-                    )
-                }
+                worktrees[project.id] = try await store.worktrees(of: project.id)
             }
-            bootstrapEnded = true
-            SignpostMetrics.endInterval(
-                "bootstrapInteractive", state,
-                message: "projects: \(projects.count), worktrees: \(worktrees.values.reduce(0) { $0 + $1.count })")
             let storedOpenIds = (UserDefaults.standard.stringArray(forKey: AppSettings.openWorktreeIdsKey) ?? [])
                 .compactMap(UUID.init)
+            let storedSelectedId = UserDefaults.standard.string(forKey: AppSettings.selectedWorktreeIdKey)
+                .flatMap(UUID.init)
+            let order = BootstrapRestoreOrder.partition(
+                worktrees: projects.flatMap { worktrees[$0.id] ?? [] },
+                openWorktreeIds: storedOpenIds,
+                selectedWorktreeId: storedSelectedId
+            )
+            for worktree in order.priority {
+                await restoreWorktree(worktree, tillerctlPath: ctl)
+            }
             openWorktreeIds = storedOpenIds.filter { id in
                 worktree(byId: id) != nil
             }
-            let storedSelectedId = UserDefaults.standard.string(forKey: AppSettings.selectedWorktreeIdKey)
-                .flatMap(UUID.init)
             if let storedSelectedId, openWorktreeIds.contains(storedSelectedId) {
                 selectedWorktree = worktree(byId: storedSelectedId)
             } else {
                 selectedWorktree = openWorktreeIds.first.flatMap { worktree(byId: $0) }
             }
+            bootstrapEnded = true
+            SignpostMetrics.endInterval(
+                "bootstrapInteractive", state,
+                message: "projects: \(projects.count), worktrees: \(worktrees.values.reduce(0) { $0 + $1.count })")
+            // Worktrees nobody is waiting on: restored after the first paint,
+            // so time-to-interactive tracks the open panes, not the sidebar size.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                for worktree in order.deferred {
+                    await self.restoreWorktree(worktree, tillerctlPath: ctl)
+                }
+                self.launchSnapshot = LaunchSnapshot(
+                    tabs: self.tabs, paneCommands: self.paneCommands,
+                    openWorktreeIds: self.openWorktreeIds
+                )
+            }
             refreshGitDetection()
-            launchSnapshot = LaunchSnapshot(
-                tabs: tabs, paneCommands: paneCommands,
-                openWorktreeIds: openWorktreeIds
-            )
             if AppSettings.controlSocketEnabled(
                 defaultsValue: UserDefaults.standard.object(forKey: AppSettings.controlSocketEnabledKey) as? Bool,
                 env: ProcessInfo.processInfo.environment
@@ -401,6 +392,45 @@ final class AppModel {
         } catch {
             lastError = "Database error: \(error)"
         }
+    }
+
+    /// Restores one worktree's tabs, chat agent ids and agent sessions.
+    /// A worktree the user already populated is left alone, so a deferred
+    /// restore never clobbers panes created while it was still in flight.
+    private func restoreWorktree(_ worktree: Worktree, tillerctlPath ctl: String) async {
+        guard let store else { return }
+        if let existing = tabs[worktree.id], !existing.isEmpty { return }
+        // Repair hook configs frozen on a tillerctl path that no
+        // longer exists (pre-shim builds, cleaned DerivedData).
+        ClaudeHookMigrator.migrateFile(
+            atPath: worktree.path + "/.claude/settings.local.json",
+            tillerctlPath: ctl
+        )
+        let loaded: (tabs: [WorkspaceTab], activeTabId: UUID?)
+        do {
+            loaded = try await store.loadTabs(of: worktree.id)
+        } catch {
+            // One unreadable worktree must not cost the others their layout.
+            sessionRestoreLogger.warning("restore: loadTabs failed for worktree \(worktree.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
+            return
+        }
+        // Tab markdown il cui file è sparito tra le sessioni: scartate in silenzio.
+        let restoredTabs = loaded.tabs.filter { tab in
+            guard let url = tab.markdownFileURL else { return true }
+            return FileManager.default.fileExists(atPath: url.path)
+        }
+        tabs[worktree.id] = restoredTabs
+        activeTabId[worktree.id] = loaded.activeTabId.flatMap { active in
+            restoredTabs.contains { $0.id == active } ? active : nil
+        } ?? restoredTabs.first?.id
+        for tab in restoredTabs {
+            guard let chatAgentId = tab.chatAgentId else { continue }
+            agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
+        }
+        await restoreAgentSessions(
+            for: worktree,
+            paneIds: Set(restoredTabs.flatMap { $0.leafIds })
+        )
     }
 
     // MARK: - Control socket
