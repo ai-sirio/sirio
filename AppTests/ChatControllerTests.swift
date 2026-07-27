@@ -66,7 +66,7 @@ struct ChatControllerTests {
                 if case .agentMessage(_, "stub response", _) = $0 { return true }
                 return false
             }) { break }
-            await Task.yield()
+            try await Task.sleep(for: .milliseconds(20))
         }
 
         #expect(await driver.promptCount == 1)
