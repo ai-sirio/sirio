@@ -7,7 +7,7 @@ struct ChatTranscriptSource: @MainActor TranscriptSource {
     let controller: ChatController
 
     func recentText() -> String? {
-        Self.extractText(from: controller.items)
+        Self.extractText(from: controller.presentationSnapshot.items)
     }
 
     static func extractText(from items: [TranscriptItem]) -> String? {

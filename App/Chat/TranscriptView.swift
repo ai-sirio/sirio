@@ -20,13 +20,14 @@ struct TranscriptView: View {
     // storm is isolated offline; `rowView` and the row views stay compiled
     // for that follow-up.
     var body: some View {
-        let grouped = controller.grouped
+        let snapshot = controller.presentationSnapshot
+        let grouped = snapshot.grouped
 
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(grouped.roots) { item in
-                        itemView(item, meta: nil, grouped: grouped)
+                        itemView(item, meta: nil, grouped: grouped, snapshot: snapshot)
                             .padding(.top, Self.topSpacing(for: item))
                             .id(item.id)
                     }
@@ -48,8 +49,8 @@ struct TranscriptView: View {
             }
             // A new item re-pins only when the user just sent something —
             // an agent's new tool call must not yank the view while reading.
-            .onChange(of: controller.items.count) {
-                guard let last = controller.items.last,
+            .onChange(of: snapshot.items.count) {
+                guard let last = snapshot.items.last,
                       case .userMessage = last else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
                     scrollPosition.scrollTo(edge: .bottom)
@@ -80,7 +81,8 @@ struct TranscriptView: View {
     private func rowView(_ row: TimelineRow, grouped: ToolCallTree.Grouped) -> some View {
         switch row {
         case .message(let item, let meta):
-            itemView(item, meta: meta, grouped: grouped)
+            itemView(item, meta: meta, grouped: grouped,
+                     snapshot: controller.presentationSnapshot)
         case .work(let groupId, let entries, let isExpanded):
             WorkGroupView(groupId: groupId, entries: entries,
                           isExpanded: isExpanded, controller: controller,
@@ -99,17 +101,18 @@ struct TranscriptView: View {
 
     @ViewBuilder
     private func itemView(_ item: TranscriptItem, meta: TimelineRow.MessageMeta?,
-                          grouped: ToolCallTree.Grouped) -> some View {
+                          grouped: ToolCallTree.Grouped,
+                          snapshot: ChatPresentationSnapshot) -> some View {
         switch item {
         case .userMessage(_, let blocks):
             userBubble(blocks)
-        case .agentMessage(_, let text, let isComplete):
+        case .agentMessage(let id, let text, let isComplete):
             switch AgentMessagePresentation.mode(isComplete: isComplete) {
             case .streaming:
                 StreamingAgentTextView(text: text)
             case .rich:
                 VStack(alignment: .leading, spacing: 4) {
-                    agentMessage(text)
+                    agentMessage(id: id, snapshot: snapshot)
                     if let meta, meta.showsCopyButton || meta.duration != nil {
                         messageMetaRow(meta, text: text)
                     }
@@ -156,9 +159,9 @@ struct TranscriptView: View {
     /// Splits out `★ Insight ───` callouts into their own card, so they read
     /// as an aside rather than getting stuck inside the single markdown
     /// NSTextView with the rest of the reply (see `AgentMessageSegmenter`).
-    private func agentMessage(_ text: String) -> some View {
+    private func agentMessage(id: String, snapshot: ChatPresentationSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(AgentMessageSegmenter.segments(from: text).enumerated()), id: \.offset) { _, segment in
+            ForEach(Array(snapshot.segments(for: id).enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .prose(let chunk):
                     AgentMarkdownTextView(markdown: chunk)
@@ -176,7 +179,7 @@ struct TranscriptView: View {
     private var thinkingRow: some View {
         HStack(spacing: 6) {
             RunningDots(color: AppTheme.railQuestion)
-            Text(controller.currentActivity ?? "Thinking")
+            Text(controller.presentationSnapshot.currentActivity ?? "Thinking")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
