@@ -67,7 +67,7 @@ struct ProcessScanCoordinatorTests {
         #expect(coordinator.isResultStale(paneId: paneId, generation: 2) == false)
     }
 
-    @Test func closedPaneDropsStateAndRejectsResults() {
+    @Test func closedPaneDropsStateAndAllowsReopen() {
         var coordinator = ProcessScanCoordinator()
         let paneId = UUID()
 
@@ -75,7 +75,31 @@ struct ProcessScanCoordinatorTests {
         coordinator.paneClosed(paneId: paneId)
 
         #expect(coordinator.isResultStale(paneId: paneId, generation: 1))
-        #expect(coordinator.requestScan(paneId: paneId) == .ignore)
+        #expect(coordinator.trackedPaneCount == 0)
+        #expect(coordinator.requestScan(paneId: paneId) == .start(generation: 2))
+    }
+
+    @Test func inFlightResultRemainsStaleAfterPaneReopens() {
+        var coordinator = ProcessScanCoordinator()
+        let paneId = UUID()
+
+        _ = coordinator.requestScan(paneId: paneId)
+        coordinator.paneClosed(paneId: paneId)
+        #expect(coordinator.requestScan(paneId: paneId) == .start(generation: 2))
+
+        #expect(coordinator.isResultStale(paneId: paneId, generation: 1))
+        #expect(coordinator.isResultStale(paneId: paneId, generation: 2) == false)
+    }
+
+    @Test func closingPanesDoesNotRetainState() {
+        var coordinator = ProcessScanCoordinator()
+
+        for _ in 0..<20 {
+            let paneId = UUID()
+            _ = coordinator.requestScan(paneId: paneId)
+            coordinator.paneClosed(paneId: paneId)
+            #expect(coordinator.trackedPaneCount == 0)
+        }
     }
 
     @Test func panesHaveIndependentInFlightScans() {
@@ -84,9 +108,9 @@ struct ProcessScanCoordinatorTests {
         let secondPane = UUID()
 
         #expect(coordinator.requestScan(paneId: firstPane) == .start(generation: 1))
-        #expect(coordinator.requestScan(paneId: secondPane) == .start(generation: 1))
+        #expect(coordinator.requestScan(paneId: secondPane) == .start(generation: 2))
         #expect(coordinator.requestScan(paneId: firstPane) == .coalesce)
-        let secondPaneFollowUp = coordinator.finishScan(paneId: secondPane, generation: 1)
+        let secondPaneFollowUp = coordinator.finishScan(paneId: secondPane, generation: 2)
         #expect(secondPaneFollowUp == false)
         #expect(coordinator.isResultStale(paneId: firstPane, generation: 1) == false)
     }
