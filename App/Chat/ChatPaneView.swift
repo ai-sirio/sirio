@@ -37,6 +37,7 @@ struct ChatPaneView: View {
     @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     var body: some View {
+        let snapshot = controller.presentationSnapshot
         VStack(spacing: 0) {
             switch controller.state {
             case .needsAuth:
@@ -74,14 +75,14 @@ struct ChatPaneView: View {
                     controller.mcpWarning = nil
                 }
             }
-            if controller.hasPlanAwaitingApproval {
+            if snapshot.hasPlanAwaitingApproval {
                 banner(
                     "Plan awaiting approval",
                     detail: "Review the proposed plan in the transcript, then approve or reject it.",
                     actionTitle: "OK") {}
             }
             captureLayout(.approvalPanel) {
-                PendingQuestionBar(permissions: controller.composerPermissions,
+                PendingQuestionBar(permissions: snapshot.composerPermissions,
                                    controller: controller)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)

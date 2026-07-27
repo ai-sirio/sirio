@@ -21,7 +21,7 @@ struct ChatComposerView: View {
     private var isPrompting: Bool { controller.state == .prompting }
     private var isConnecting: Bool { controller.state == .connecting }
     private var canInteract: Bool {
-        (controller.state == .ready || isPrompting) && !controller.hasPendingPermission
+        (controller.state == .ready || isPrompting) && !controller.presentationSnapshot.hasPendingPermission
     }
     private var canSend: Bool { canInteract && !document.isEmpty }
 
@@ -58,7 +58,7 @@ struct ChatComposerView: View {
     }
 
     private var editorPlaceholder: String {
-        controller.hasPendingPermission
+        controller.presentationSnapshot.hasPendingPermission
             ? "Waiting for permission response…"
             : isPrompting ? "Type to queue for the next turn…"
             : "Message…"

@@ -2,7 +2,7 @@ import Foundation
 
 /// A slice of an agent's raw markdown reply, split apart so `★ Insight ───`
 /// callouts can render as their own card instead of inline prose.
-enum AgentMessageSegment: Equatable {
+enum AgentMessageSegment: Equatable, Sendable {
     case prose(String)
     case insight(String)
 }

@@ -11,7 +11,7 @@ enum AgentsPanelModel {
         var chatSubagents: [UUID: [ChatSubagentInput]] = [:]
         for tab in tabs where tab.chatAgentId != nil {
             guard let controller = appModel.chatControllers[tab.id] else { continue }
-            chatSubagents[tab.id] = controller.activeSubagentTasks.map {
+            chatSubagents[tab.id] = controller.presentationSnapshot.activeSubagentTasks.map {
                 ChatSubagentInput(id: $0.toolCallId, title: $0.title,
                                   status: agentStatus(for: $0.status))
             }
