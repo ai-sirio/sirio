@@ -108,6 +108,8 @@ public actor PiRPCDriver: AgentDriver {
     private var lastSettlementReason: StopReason = .endTurn
     private var pendingUIRequests: [String: UIRequestKind] = [:]
     private var effortOption: SessionConfigOption?
+    private var toolArguments: [String: JSONValue] = [:]
+    private var toolNames: [String: String] = [:]
 
     private let eventContinuation: AsyncStream<ACPSessionEvent>.Continuation
     public nonisolated let events: AsyncStream<ACPSessionEvent>
@@ -230,16 +232,166 @@ public actor PiRPCDriver: AgentDriver {
             guard let id = response.id,
                   let continuation = pendingResponses.removeValue(forKey: id) else { return }
             continuation.resume(returning: response)
-        case .event(let type, _):
-            switch type {
-            case "agent_start": streamingState.setStreaming(true)
-            case "agent_end": break
-            case "agent_settled": settleCurrentRun()
-            default: break
-            }
+        case .event(let type, let fields):
+            handleEvent(type: type, fields: fields)
         }
     }
 
+    private func handleEvent(type: String, fields: [String: JSONValue]) {
+        switch type {
+        case "agent_start": streamingState.setStreaming(true)
+        case "agent_settled": settleCurrentRun()
+        default: handleMappedEvent(type: type, fields: fields)
+        }
+    }
+}
+
+private extension PiRPCDriver {
+    func handleMappedEvent(type: String, fields: [String: JSONValue]) {
+        switch type {
+        case "message_update": handleMessageUpdate(fields)
+        case "compaction_start": emitThought("⟳ Compacting context…")
+        case "compaction_end": emitThought(compactionMessage(fields))
+        case "auto_retry_start": emitThought(retryStartMessage(fields))
+        case "auto_retry_end": emitThought(retryEndMessage(fields))
+        case "extension_error": emitThought(extensionErrorMessage(fields))
+        case "tool_execution_start": handleToolStart(fields)
+        case "tool_execution_update": handleToolUpdate(fields)
+        case "tool_execution_end": handleToolEnd(fields)
+        default: break
+        }
+    }
+
+    func emitThought(_ text: String) {
+        eventContinuation.yield(.update(.agentThoughtChunk(.text(text))))
+    }
+
+    func handleMessageUpdate(_ fields: [String: JSONValue]) {
+        guard let event = fields["assistantMessageEvent"],
+              let type = event["type"]?.stringValue,
+              let delta = event["delta"]?.stringValue else { return }
+        switch type {
+        case "text_delta": eventContinuation.yield(.update(.agentMessageChunk(.text(delta))))
+        case "thinking_delta": emitThought(delta)
+        default: break
+        }
+    }
+
+    func compactionMessage(_ fields: [String: JSONValue]) -> String {
+        if fields["aborted"]?.boolValue == true { return "Compaction cancelled." }
+        if fields["success"]?.boolValue == true { return "Context compacted." }
+        return fields["errorMessage"]?.stringValue ?? "Compaction failed."
+    }
+
+    func retryStartMessage(_ fields: [String: JSONValue]) -> String {
+        let attempt = fields["attempt"]?.intValue
+        let maxAttempts = fields["maxAttempts"]?.intValue
+        if let attempt, let maxAttempts { return "Retrying (attempt \(attempt)/\(maxAttempts))…" }
+        if let attempt { return "Retrying (attempt \(attempt))…" }
+        return "Retrying…"
+    }
+
+    func retryEndMessage(_ fields: [String: JSONValue]) -> String {
+        if fields["success"]?.boolValue == true { return "Retry succeeded." }
+        return fields["finalError"]?.stringValue ?? "Retry failed."
+    }
+
+    func extensionErrorMessage(_ fields: [String: JSONValue]) -> String {
+        let path = fields["extensionPath"]?.stringValue ?? fields["path"]?.stringValue
+            ?? "unknown extension"
+        let error = fields["error"]?.stringValue ?? fields["message"]?.stringValue
+            ?? "Unknown extension error"
+        return "Extension error (\(path)): \(error)"
+    }
+
+    func toolKind(_ name: String) -> ToolKind {
+        switch name {
+        case "read": .read
+        case "edit", "write": .edit
+        case "bash": .execute
+        case "grep", "find", "ls": .search
+        default: .other
+        }
+    }
+
+    func toolTitle(name: String, args: JSONValue?) -> String {
+        let subject = args?["path"]?.stringValue ?? args?["command"]?.stringValue
+        let label = name.prefix(1).uppercased() + name.dropFirst()
+        return subject.map { "\(label) \($0)" } ?? label
+    }
+
+    func locations(_ args: JSONValue?) -> [ToolCallLocation] {
+        guard let path = args?["path"]?.stringValue else { return [] }
+        return [.init(path: path)]
+    }
+
+    func textBlocks(_ value: JSONValue?) -> [String] {
+        guard let blocks = value?["content"]?.arrayValue else { return [] }
+        return blocks.compactMap { block in
+            guard block["type"]?.stringValue == "text" else { return nil }
+            return block["text"]?.stringValue
+        }
+    }
+
+    func handleToolStart(_ fields: [String: JSONValue]) {
+        guard let id = fields["toolCallId"]?.stringValue,
+              let name = fields["toolName"]?.stringValue else { return }
+        let args = fields["args"]
+        toolArguments[id] = args ?? .object([:])
+        toolNames[id] = name
+        eventContinuation.yield(.update(.toolCall(ToolCall(
+            toolCallId: id, title: toolTitle(name: name, args: args), kind: toolKind(name),
+            status: .inProgress, locations: locations(args), rawInput: args))))
+    }
+
+    func handleToolUpdate(_ fields: [String: JSONValue]) {
+        guard let id = fields["toolCallId"]?.stringValue else { return }
+        let content = textBlocks(fields["partialResult"]).map { ToolCallContent.content(.text($0)) }
+        eventContinuation.yield(.update(.toolCallUpdate(ToolCallUpdate(
+            toolCallId: id, status: .completed, content: content))))
+    }
+
+    func handleToolEnd(_ fields: [String: JSONValue]) {
+        guard let id = fields["toolCallId"]?.stringValue else { return }
+        let name = toolNames[id] ?? fields["toolName"]?.stringValue ?? "tool"
+        let args = toolArguments[id]
+        let status: ToolCallStatus = fields["isError"]?.boolValue == true ? .failed : .completed
+        let result = fields["result"]
+        let content = toolResultContent(name: name, args: args, result: result)
+        eventContinuation.yield(.update(.toolCallUpdate(ToolCallUpdate(
+            toolCallId: id, status: status, content: content))))
+        toolArguments.removeValue(forKey: id)
+        toolNames.removeValue(forKey: id)
+    }
+
+    func toolResultContent(name: String, args: JSONValue?, result: JSONValue?)
+        -> [ToolCallContent] {
+        var malformedEdit = false
+        if name == "edit", let path = args?["path"]?.stringValue,
+           let edits = args?["edits"]?.arrayValue {
+            let diffs = edits.compactMap { edit -> ToolCallContent? in
+                guard let old = edit["oldText"]?.stringValue,
+                      let new = edit["newText"]?.stringValue else { return nil }
+                return .diff(path: path, oldText: old, newText: new)
+            }
+            if diffs.count == edits.count { return diffs }
+            malformedEdit = true
+        } else if name == "edit" {
+            malformedEdit = true
+        }
+        if name == "write", let path = args?["path"]?.stringValue,
+           let content = args?["content"]?.stringValue {
+            return [.diff(path: path, oldText: nil, newText: content)]
+        }
+        if malformedEdit, let diff = result?["details"]?["diff"]?.stringValue {
+            return [.content(.text(diff))]
+        }
+        return textBlocks(result).map { .content(.text($0)) }
+    }
+
+}
+
+extension PiRPCDriver {
     private func finish() {
         guard !finished else { return }
         finished = true
@@ -256,6 +408,8 @@ public actor PiRPCDriver: AgentDriver {
         streamingState.setStreaming(false)
         runActive = false
         cancelRequested = false
+        toolArguments.removeAll()
+        toolNames.removeAll()
         if !stopping { eventContinuation.yield(.disconnected) }
         eventContinuation.finish()
     }

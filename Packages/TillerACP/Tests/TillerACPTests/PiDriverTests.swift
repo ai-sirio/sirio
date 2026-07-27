@@ -405,6 +405,108 @@ private actor BlockedPromptTransport: ACPTransport {
         }
     }
 
+}
+
+extension PiDriverTests {
+    @Test func fixtureMapsTextThinkingEditDiffAndSettledTurn() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        let collector = PiEventCollector()
+        let collecting = collect(driver, into: collector)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+
+        let prompt = Task { try await driver.prompt([.text("edit the file")]) }
+        let sent = try await mock.waitForSent(count: 1)
+        let id = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(id)","type":"response","command":"prompt","success":true}"#)
+
+        let fixtureURL = Bundle.module.url(
+            forResource: "pi-turn", withExtension: "jsonl", subdirectory: "Fixtures")!
+        let lines = try String(contentsOf: fixtureURL, encoding: .utf8)
+            .split(separator: "\n").map(String.init)
+        for line in lines { await mock.emit(line) }
+        #expect(try await prompt.value == .endTurn)
+
+        let events = await collector.values
+        let updates = events.compactMap { event -> SessionUpdate? in
+            guard case .update(let update) = event else { return nil }
+            return update
+        }
+        #expect(updates.contains(.agentThoughtChunk(.text("Check the file"))))
+        #expect(updates.contains(.agentMessageChunk(.text("Updating it."))))
+        let expectedCall = ToolCall(
+            toolCallId: "call-edit", title: "Edit Sources/App.swift", kind: .edit,
+            status: .inProgress, locations: [.init(path: "Sources/App.swift")],
+            rawInput: .object([
+                "path": .string("Sources/App.swift"),
+                "edits": .array([
+                    .object(["oldText": .string("let old = 1"),
+                             "newText": .string("let value = 2")])
+                ])
+            ]))
+        #expect(updates.contains(.toolCall(expectedCall)))
+        let expectedUpdate = ToolCallUpdate(
+            toolCallId: "call-edit", status: .completed,
+            content: [.diff(path: "Sources/App.swift", oldText: "let old = 1",
+                            newText: "let value = 2")])
+        #expect(updates.contains(.toolCallUpdate(expectedUpdate)))
+        #expect(events.contains { if case .turnEnded(.endTurn) = $0 { true } else { false } })
+        collecting.cancel()
+    }
+
+    @Test func cumulativeToolUpdatesReplaceInsteadOfAppend() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        let collector = PiEventCollector()
+        let collecting = collect(driver, into: collector)
+        try await driver.start()
+
+        await mock.emit(#"{"type":"tool_execution_start","toolCallId":"call-bash","toolName":"bash","args":{"command":"printf test"}}"#)
+        await mock.emit(#"{"type":"tool_execution_update","toolCallId":"call-bash","toolName":"bash","args":{"command":"printf test"},"partialResult":{"content":["#
+            + #"{"type":"text","text":"one"}],"details":{}}}"#)
+        await mock.emit(#"{"type":"tool_execution_update","toolCallId":"call-bash","toolName":"bash","args":{"command":"printf test"},"partialResult":{"content":["#
+            + #"{"type":"text","text":"one two"}],"details":{}}}"#)
+        for _ in 0..<100 {
+            if (await collector.values).count >= 3 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        let contents = (await collector.values).compactMap { event -> [ToolCallContent]? in
+            guard case .update(.toolCallUpdate(let update)) = event else { return nil }
+            return update.content
+        }
+        #expect(contents == [[.content(.text("one"))],
+                             [.content(.text("one two"))]])
+        collecting.cancel()
+    }
+
+    @Test func unexpectedEOFDisconnectsButIntentionalStopDoesNot() async throws {
+        let crashTransport = MockTransport()
+        let crashed = PiRPCDriver(transport: crashTransport, model: nil, effort: nil,
+                                  resumeSessionId: nil)
+        var crashEvents = crashed.events.makeAsyncIterator()
+        try await crashed.start()
+        await crashTransport.close()
+        guard case .some(.disconnected) = await crashEvents.next() else {
+            Issue.record("unexpected EOF must emit disconnected")
+            return
+        }
+
+        let stopTransport = MockTransport()
+        let stopped = PiRPCDriver(transport: stopTransport, model: nil, effort: nil,
+                                  resumeSessionId: nil)
+        var stopEvents = stopped.events.makeAsyncIterator()
+        try await stopped.start()
+        await stopped.stop()
+        guard case nil = await stopEvents.next() else {
+            Issue.record("intentional stop must only finish the event stream")
+            return
+        }
+    }
+
     @Test func ordinaryMidStreamPromptSteersButSlashCommandDoesNot() async throws {
         let mock = MockTransport()
         let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
