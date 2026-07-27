@@ -62,6 +62,11 @@ final class ChatController {
     /// Bumped once per flushed event batch. The transcript scrolls on this
     /// rather than on `items.count`, which never changes while a message grows.
     private(set) var streamTick = 0
+    /// Published transcript-derived values reused by all chat views.
+    private(set) var presentationSnapshot = ChatPresentationSnapshot.empty
+    @ObservationIgnored private var presentationCache = ChatPresentationSnapshot.Cache()
+    /// Test hook: fires only when a changed presentation snapshot is published.
+    @ObservationIgnored var onPresentationSnapshotChange: (() -> Void)?
 
     /// Title of the tool call currently in flight, for the working row.
     var currentActivity: String? {
@@ -107,6 +112,16 @@ final class ChatController {
     }
     var hasPlanAwaitingApproval: Bool {
         grouped.pendingPlanApproval?.isPending == true
+    }
+
+    func rebuildPresentationSnapshot() {
+        let result = ChatPresentationSnapshot.build(
+            items: restored + reducer.items,
+            previousCache: presentationCache)
+        presentationCache = result.cache
+        ChatPresentationSnapshot.assignIfChanged(
+            &presentationSnapshot, result.snapshot,
+            onPublish: { [weak self] in self?.onPresentationSnapshotChange?() })
     }
 
     private var driver: (any AgentDriver)?
@@ -178,6 +193,7 @@ final class ChatController {
            let stored = try? store?.loadTranscript(sessionId: record.id) {
             restored = stored
             reducer = TranscriptReducer(existingIDs: Set(stored.map(\.id)))
+            rebuildPresentationSnapshot()
         }
         if let record, let used = record.contextUsageUsed, let size = record.contextUsageSize {
             reducer.restoreContextUsage(ContextUsage(used: used, size: size))
@@ -276,6 +292,7 @@ final class ChatController {
                     sessionId: sessionRecordId)
                 persistSessionSettings()
             }
+            rebuildPresentationSnapshot()
             forceNewSession = false
             state = .ready
         } catch let ACPClientError.agentError(error)
@@ -304,6 +321,7 @@ final class ChatController {
         eventFlushScheduled = false
         if let driver { await driver.stop() }
         driver = nil
+        rebuildPresentationSnapshot()
         if state != .needsAuth { state = .disconnected(message: nil) }
     }
     /// Waits only for snapshots already queued by `persist()`.
@@ -315,6 +333,7 @@ final class ChatController {
         await stop()
         reducer = TranscriptReducer()
         restored = []
+        rebuildPresentationSnapshot()
         queued = []
         sessionRecordId = nil
         selectedModel = nil
@@ -343,6 +362,7 @@ final class ChatController {
             worktreePath: worktreePath)
         guard !blocks.isEmpty else { return }
         reducer.userPrompted(blocks)
+        rebuildPresentationSnapshot()
         if pendingHandoff {
             pendingHandoff = false
             if let preamble = TranscriptHandoff.preamble(items: restored) {
@@ -358,9 +378,11 @@ final class ChatController {
                 let reason = try await driver.prompt(blocks)
                 self.flushPendingEvents()
                 self.reducer.turnEnded(reason)
+                self.rebuildPresentationSnapshot()
             } catch {
                 self.flushPendingEvents()
                 self.reducer.turnEnded(.cancelled)
+                self.rebuildPresentationSnapshot()
                 if self.isDisconnectedError(error) {
                     self.state = .disconnected(message: "\(error)")
                 } else {
@@ -473,6 +495,7 @@ final class ChatController {
            !question.prompt.isEmpty {
             reducer.permissionResolved(requestId: question.requestId,
                                        resolution: .selected(optionId: optionId))
+            rebuildPresentationSnapshot()
             await driver.answerPermission(
                 requestId: question.requestId,
                 outcome: .answered(optionId: optionId,
@@ -488,12 +511,14 @@ final class ChatController {
         if let optionId {
             reducer.permissionResolved(requestId: requestId,
                                        resolution: .selected(optionId: optionId))
+            rebuildPresentationSnapshot()
             await driver?.answerPermission(requestId: requestId,
                                             outcome: .selected(optionId: optionId))
             onStatusChange?(.running)
         } else {
             reducer.permissionResolved(requestId: requestId, resolution: .cancelled)
             await driver?.answerPermission(requestId: requestId, outcome: .cancelled)
+            rebuildPresentationSnapshot()
         }
         persist()
     }
@@ -539,8 +564,9 @@ final class ChatController {
 
     private func enqueue(_ event: ACPSessionEvent) {
         guard case .update = event else {
-            flushPendingEvents()
+            flushPendingEvents(rebuildSnapshot: false)
             handle(event)
+            rebuildPresentationSnapshot()
             return
         }
         pendingEvents.append(event)
@@ -555,7 +581,7 @@ final class ChatController {
         }
     }
 
-    private func flushPendingEvents() {
+    private func flushPendingEvents(rebuildSnapshot: Bool = true) {
         eventFlushScheduled = false
         let actualWait = ContinuousClock.now - pendingFlushRequestedAt
         let overrun = actualWait - pendingFlushDelay
@@ -565,6 +591,7 @@ final class ChatController {
         let events = pendingEvents
         pendingEvents = []
         for event in events { handle(event) }
+        if rebuildSnapshot { rebuildPresentationSnapshot() }
         streamTick &+= 1
     }
 
