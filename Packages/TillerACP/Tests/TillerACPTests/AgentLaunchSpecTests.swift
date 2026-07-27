@@ -38,7 +38,8 @@ import Testing
     @Test func legacyIdsCanonicalize() {
         #expect(AgentIdMigration.canonical("claude") == "claude-acp")
         #expect(AgentIdMigration.canonical("codex") == "codex-acp")
-        #expect(AgentIdMigration.canonical("pi") == "pi-acp")
+        #expect(AgentIdMigration.canonical("pi") == "pi")
+        #expect(AgentIdMigration.canonical("pi-acp") == "pi")
         #expect(AgentIdMigration.canonical("opencode") == "opencode")
         #expect(AgentIdMigration.canonical("claude-acp") == "claude-acp")
         #expect(AgentIdMigration.canonical("omp") == "omp")
@@ -50,16 +51,13 @@ import Testing
                                         arguments: ["-lc", "exec omp acp"]))
     }
 
-    @Test func installedManifestResolvesThroughLoginShell() throws {
+    @Test func legacyPiACPDoesNotResolveThroughACPManifest() throws {
         let store = try tempStore()
         try store.write(InstalledAgentManifest(
             id: "pi-acp", version: "0.60.0",
             executable: "/x/pi-acp", arguments: ["--acp"],
             environment: ["K": "V"]))
-        let spec = AgentLaunchSpec.resolved(id: "pi-acp", installStore: store)
-        #expect(spec?.executable == "/bin/zsh")
-        #expect(spec?.arguments == ["-lc", "exec '/x/pi-acp' '--acp'"])
-        #expect(spec?.environment == ["K": "V"])
+        #expect(AgentLaunchSpec.resolved(id: "pi-acp", installStore: store) == nil)
     }
 
     @Test func manifestPathsWithSpacesAreQuoted() throws {
@@ -69,14 +67,12 @@ import Testing
             executable: "/Application Support/Tiller/acp-agents/pi-acp/pi-acp",
             arguments: ["acp"], environment: [:]))
         let spec = AgentLaunchSpec.resolved(id: "pi-acp", installStore: store)
-        #expect(spec?.arguments ==
-                ["-lc",
-                 "exec '/Application Support/Tiller/acp-agents/pi-acp/pi-acp' 'acp'"])
+        #expect(spec == nil)
     }
 
     @Test func nativeIdsDoNotResolveThroughACPManifests() throws {
         let store = try tempStore()
-        for id in ["claude-acp", "codex-acp", "opencode"] {
+        for id in ["claude-acp", "codex-acp", "opencode", "pi", "pi-acp"] {
             try store.write(InstalledAgentManifest(
                 id: id, version: "1.0.0", executable: "/x/\(id)",
                 arguments: [], environment: [:]))

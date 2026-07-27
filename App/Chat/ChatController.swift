@@ -211,8 +211,12 @@ final class ChatController {
             ? requestedMode : nil
         selectedModel = record?.selectedModel
         selectedEffort = record?.selectedEffort
-        // Resume only a session created by this same agent.
-        let resumeId = (AgentIdMigration.canonical(record?.agentId ?? "") == agentId)
+        // Resume only a session created by this same agent. A persisted
+        // pi-acp record has an ACP token incompatible with Pi RPC, even
+        // though its identity migrates to native Pi.
+        let migratedFromPiACP = record?.agentId == "pi-acp"
+        let resumeId = !migratedFromPiACP
+            && AgentIdMigration.canonical(record?.agentId ?? "") == agentId
             ? record?.acpSessionId : nil
         guard let initialDriver = driverFactory(
             agentId, worktreePath, installStore, requestedMode,

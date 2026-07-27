@@ -144,6 +144,28 @@ struct ChatControllerTests {
         #expect(saved?.transportKind == "native")
     }
 
+    @Test func migratedPiACPSessionStartsFreshWithoutResumingACPToken() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = try store.createSession(
+            worktreeId: worktreeId.uuidString, agentId: "pi-acp")
+        try store.setACPSessionId("legacy-acp-token", sessionId: record.id)
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "fresh-pi"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "pi", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, resumeId in
+                #expect(resumeId == nil)
+                return driver
+            })
+
+        await controller.start()
+
+        #expect(controller.agentId == "pi")
+        #expect(await driver.resumeIds == [nil])
+    }
+
     @Test func resumeFailureKeepsHistoryAndStartsFreshConversation() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
@@ -284,6 +306,9 @@ struct ChatControllerTests {
         try await Task.sleep(for: .milliseconds(900))
         #expect(persistCount >= 1)
     }
+}
+
+extension ChatControllerTests {
     @Test func tabCloseFlushesLastTranscript() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)

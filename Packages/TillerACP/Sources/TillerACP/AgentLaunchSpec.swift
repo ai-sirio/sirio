@@ -33,21 +33,20 @@ public struct AgentLaunchSpec: Sendable, Equatable {
     }
 }
 
-/// Registry ids are canonical (`claude-acp`); Tiller's historical short ids
+/// Registry ids are canonical for ACP agents; Tiller's historical short ids
 /// (persisted in sessions and tabs from earlier versions) map onto them.
 public enum AgentIdMigration {
     public static func canonical(_ id: String) -> String {
         switch id {
         case "claude": "claude-acp"
         case "codex": "codex-acp"
-        case "pi": "pi-acp"
+        case "pi", "pi-acp": "pi"
         default: id
         }
     }
 
     /// Inverse of `canonical`: the AgentCatalog short id for a registry id.
-    /// Chat panes register the canonical id, but adapter lookups
-    /// (auto-naming, display names) key on the catalog's short ids.
+    /// The old Pi ACP registry id remains accepted as an input alias.
     public static func catalogId(_ id: String) -> String {
         switch id {
         case "claude-acp": "claude"
@@ -63,7 +62,7 @@ extension AgentLaunchSpec {
     public static func resolved(id: String,
                                 installStore: AgentInstallStore) -> AgentLaunchSpec? {
         let canonical = AgentIdMigration.canonical(id)
-        if ["claude-acp", "codex-acp", "opencode"].contains(canonical) {
+        if ["claude-acp", "codex-acp", "opencode", "pi"].contains(canonical) {
             return nil
         }
         if canonical == "omp" {
