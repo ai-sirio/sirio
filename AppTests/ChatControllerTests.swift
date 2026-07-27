@@ -548,6 +548,41 @@ struct ChatControllerTests {
 }
 
 @MainActor
+extension ChatControllerTests {
+    @Test func customTextQuestionSendsStructuredAnswer() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let driver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "pi-session"),
+            supportsStructuredAnswers: true)
+        let controller = ChatController(
+            tabId: UUID(), agentId: "pi", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+        await controller.start()
+
+        var call = ToolCallItem(toolCallId: "pi-ui-input", title: "Branch",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "header": .string("Branch"), "question": .string("Branch name"),
+                "options": .array([])
+            ])]),
+            "_tillerTextInput": .object(["placeholder": .string("feature/name")])
+        ])
+        call.permission = PermissionState(requestId: .string("ui-input"), options: [])
+        let question = try #require(ChatQuestion.from(call))
+
+        await controller.answerQuestion(question, text: " feature/pi ")
+
+        #expect(await driver.permissionAnswers.last?.1 == .answered(
+            optionId: "feature/pi",
+            updatedInput: .object(["choice": .string("feature/pi")])))
+    }
+}
+
+@MainActor
 private final class ChatPaneLayoutCapture {
     var frames: [ChatPaneLayoutRole: CGRect] = [:]
 }
@@ -598,6 +633,8 @@ private actor ChatTestDriver: AgentDriver {
     private let failsResume: Bool
     private let promptEvents: [ACPSessionEvent]
     private let holdPromptOpen: Bool
+    nonisolated let supportsStructuredAnswers: Bool
+    private(set) var permissionAnswers: [(JSONRPCID, PermissionOutcome)] = []
     private var promptReleased = false
     private(set) var promptIsOpen = false
     private(set) var promptCount = 0
@@ -606,7 +643,8 @@ private actor ChatTestDriver: AgentDriver {
     private(set) var stopCount = 0
 
     init(handle: SessionHandle, failsResume: Bool = false,
-         promptEvents: [ACPSessionEvent] = [], holdPromptOpen: Bool = false) {
+         promptEvents: [ACPSessionEvent] = [], holdPromptOpen: Bool = false,
+         supportsStructuredAnswers: Bool = false) {
         let (events, continuation) = AsyncStream.makeStream(of: ACPSessionEvent.self)
         self.events = events
         self.continuation = continuation
@@ -614,6 +652,7 @@ private actor ChatTestDriver: AgentDriver {
         self.failsResume = failsResume
         self.promptEvents = promptEvents
         self.holdPromptOpen = holdPromptOpen
+        self.supportsStructuredAnswers = supportsStructuredAnswers
     }
 
     func start() async throws {}
@@ -667,7 +706,6 @@ private actor ChatTestDriver: AgentDriver {
     }
 
     func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
-        _ = requestId
-        _ = outcome
+        permissionAnswers.append((requestId, outcome))
     }
 }

@@ -157,6 +157,46 @@ import Testing
         #expect(question?.isResolved == true)
     }
 
+    @Test func structuredTextQuestionAllowsNoOptionsAndCarriesPlaceholder() throws {
+        var call = ToolCallItem(toolCallId: "pi-ui-input", title: "Enter branch",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "header": .string("Enter branch"),
+                "question": .string("Branch name"),
+                "options": .array([])
+            ])]),
+            "_tillerTextInput": .object([
+                "placeholder": .string("feature/native-pi"),
+                "prefill": .string("feature/")
+            ])
+        ])
+        call.permission = PermissionState(requestId: .string("ui-1"), options: [])
+
+        let question = try #require(ChatQuestion.from(call))
+        #expect(question.options.isEmpty)
+        #expect(question.textInput == .init(
+            placeholder: "feature/native-pi", prefill: "feature/"))
+    }
+
+    @Test func structuredOptionCanBeMarkedAsRejection() throws {
+        var call = ToolCallItem(toolCallId: "pi-ui-select", title: "Choose",
+                                kind: .other, status: .pending)
+        call.rawInput = .object(["questions": .array([.object([
+            "question": .string("Choose"),
+            "options": .array([
+                .object(["id": .string("proceed"), "label": .string("Proceed")]),
+                .object(["id": .string("__cancel__"), "label": .string("Cancel"),
+                         "isRejection": .bool(true)])
+            ])
+        ])])])
+        call.permission = PermissionState(requestId: .string("ui-2"), options: [])
+
+        let question = try #require(ChatQuestion.from(call))
+        #expect(question.options.last?.id == "__cancel__")
+        #expect(question.options.last?.isRejection == true)
+    }
+
     @Test func isNilWithoutAPermission() {
         let call = ToolCallItem(toolCallId: "t1", title: "Read", kind: .read,
                                 status: .completed)

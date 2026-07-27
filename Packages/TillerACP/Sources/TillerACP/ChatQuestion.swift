@@ -4,6 +4,16 @@ import Foundation
 /// `AskUserQuestion`-shaped tool input, or a plain permission request.
 /// Views read this and never touch the raw payloads.
 public struct ChatQuestion: Sendable, Equatable {
+    public struct TextInput: Sendable, Equatable {
+        public var placeholder: String?
+        public var prefill: String?
+
+        public init(placeholder: String? = nil, prefill: String? = nil) {
+            self.placeholder = placeholder
+            self.prefill = prefill
+        }
+    }
+
     public struct Option: Sendable, Equatable, Identifiable {
         public var id: String
         public var label: String
@@ -24,6 +34,7 @@ public struct ChatQuestion: Sendable, Equatable {
     public var header: String
     public var prompt: String
     public var options: [Option]
+    public var textInput: TextInput?
     public var chosenOptionId: String?
     /// The turn ended before anyone answered — the reducer cancels pending
     /// permissions on `turnEnded`. Offering the buttons again would be a lie.
@@ -31,6 +42,13 @@ public struct ChatQuestion: Sendable, Equatable {
 
     public var isAnswered: Bool { chosenOptionId != nil }
     public var isResolved: Bool { isAnswered || isExpired }
+
+    private struct StructuredQuestion {
+        var header: String
+        var prompt: String
+        var options: [Option]
+        var textInput: TextInput?
+    }
 
     public static func from(_ call: ToolCallItem) -> ChatQuestion? {
         guard let permission = call.permission else { return nil }
@@ -46,6 +64,7 @@ public struct ChatQuestion: Sendable, Equatable {
                                 header: structured.header,
                                 prompt: structured.prompt,
                                 options: structured.options,
+                                textInput: structured.textInput,
                                 chosenOptionId: chosen,
                                 isExpired: expired)
         }
@@ -58,6 +77,7 @@ public struct ChatQuestion: Sendable, Equatable {
                 Option(id: $0.optionId, label: $0.name,
                        isRejection: $0.kind == .rejectOnce || $0.kind == .rejectAlways)
             },
+            textInput: nil,
             chosenOptionId: chosen,
             isExpired: expired)
     }
@@ -65,12 +85,17 @@ public struct ChatQuestion: Sendable, Equatable {
     /// `AskUserQuestion` input: `{questions: [{header, question, options: [{label, description}]}]}`.
     /// Only the first question is surfaced; multi-question payloads are rare and
     /// the extra ones would need a second card.
-    private static func structuredQuestion(from rawInput: JSONValue?)
-        -> (header: String, prompt: String, options: [Option])? {
+    private static func structuredQuestion(from rawInput: JSONValue?) -> StructuredQuestion? {
         guard case .object(let input)? = rawInput,
               case .array(let questions)? = input["questions"],
               case .object(let first)? = questions.first,
               case .string(let prompt)? = first["question"] else { return nil }
+        let textInput: TextInput? = if case .object(let metadata)? = input["_tillerTextInput"] {
+            TextInput(placeholder: metadata["placeholder"]?.stringValue,
+                      prefill: metadata["prefill"]?.stringValue)
+        } else {
+            nil
+        }
         let header: String = if case .string(let value)? = first["header"] {
             value
         } else {
@@ -86,7 +111,8 @@ public struct ChatQuestion: Sendable, Equatable {
             } else {
                 nil
             }
-            let baseID = label.isEmpty ? "option-\(index)" : label
+            let baseID = option["id"]?.stringValue ?? (label.isEmpty ? "option-\(index)" : label)
+            let rejection = option["isRejection"]?.boolValue ?? false
             var id = baseID
             if usedIDs.contains(id) {
                 id = "\(baseID)-\(index)"
@@ -97,9 +123,10 @@ public struct ChatQuestion: Sendable, Equatable {
                 }
             }
             usedIDs.insert(id)
-            return Option(id: id, label: label, detail: detail)
+            return Option(id: id, label: label, detail: detail, isRejection: rejection)
         }
-        guard !options.isEmpty else { return nil }
-        return (header, prompt, options)
+        guard !options.isEmpty || textInput != nil else { return nil }
+        return StructuredQuestion(header: header, prompt: prompt, options: options,
+                                  textInput: textInput)
     }
 }
