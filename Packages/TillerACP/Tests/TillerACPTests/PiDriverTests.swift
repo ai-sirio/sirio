@@ -14,6 +14,66 @@ private func collect(_ driver: PiRPCDriver, into collector: PiEventCollector)
     }
 }
 
+private actor BlockedPromptTransport: ACPTransport {
+    private(set) var sent: [Data] = []
+    private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
+    private var pendingLines: [Data] = []
+    private var promptWriteEntered = false
+    private var releasePrompt: CheckedContinuation<Void, Never>?
+
+    func start() {}
+
+    func terminate() async {}
+
+    func send(line: Data) async throws {
+        sent.append(line)
+        let value = try? JSONDecoder().decode(JSONValue.self, from: line)
+        guard value?["type"]?.stringValue == "prompt" else { return }
+        promptWriteEntered = true
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            releasePrompt = continuation
+        }
+    }
+
+    nonisolated func lines() -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            Task { await self.attach(continuation) }
+        }
+    }
+
+    private func attach(_ continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+        self.continuation = continuation
+        for line in pendingLines { continuation.yield(line) }
+        pendingLines = []
+    }
+
+    func emit(_ json: String) {
+        let data = Data(json.utf8)
+        if let continuation { continuation.yield(data) } else { pendingLines.append(data) }
+    }
+
+    func waitForPromptWrite() async throws {
+        for _ in 0..<100 {
+            if promptWriteEntered { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw CancellationError()
+    }
+
+    func releasePromptWrite() {
+        releasePrompt?.resume()
+        releasePrompt = nil
+    }
+
+    func waitForSent(count: Int) async throws -> [Data] {
+        for _ in 0..<100 {
+            if sent.count >= count { return sent }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return sent
+    }
+}
+
 @Suite struct PiDriverTests {
     private func value(_ data: Data) throws -> JSONValue {
         let line = data.last == UInt8(ascii: "\n") ? data.dropLast() : data[...]
@@ -282,6 +342,34 @@ private func collect(_ driver: PiRPCDriver, into collector: PiEventCollector)
         await mock.emit(#"{"type":"agent_settled"}"#)
         #expect(try await initial.value == .cancelled)
         #expect(try await steer.value == .cancelled)
+    }
+
+    @Test func cancelCannotOvertakeBlockedPromptWrite() async throws {
+        let mock = BlockedPromptTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+
+        let prompt = Task { try await driver.prompt([.text("start")]) }
+        try await mock.waitForPromptWrite()
+
+        let cancel = Task { await driver.cancel() }
+        try await Task.sleep(for: .milliseconds(30))
+        let blockedSent = await mock.sent
+        #expect(blockedSent.count == 1)
+        #expect((try value(blockedSent[0]))["type"]?.stringValue == "prompt")
+
+        await mock.releasePromptWrite()
+        let sent = try await mock.waitForSent(count: 2)
+        #expect((try value(sent[0]))["type"]?.stringValue == "prompt")
+        #expect((try value(sent[1]))["type"]?.stringValue == "abort")
+
+        let promptId = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(promptId)","type":"response","command":"prompt","success":true}"#)
+        await mock.emit(#"{"type":"agent_settled"}"#)
+        #expect(try await prompt.value == .cancelled)
+        await cancel.value
     }
 
     @Test func idleCancellationDoesNotLeakIntoNextSettledRun() async throws {

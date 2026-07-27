@@ -17,9 +17,63 @@ private final class PiStreamingState: @unchecked Sendable {
     }
 }
 
-private actor PiCommandSendGate {
+private final class PiCommandSendGate: @unchecked Sendable {
+    private struct Entry: @unchecked Sendable {
+        let line: Data
+        let transport: any ACPTransport
+        let completion: @Sendable (Result<Void, Error>) -> Void
+    }
+
+    private let lock = NSLock()
+    private var queue: [Entry] = []
+    private var isDraining = false
+
+    /// Enqueues synchronously before returning, then drains writes one at a time.
+    /// The synchronous enqueue is important: callers can establish invocation
+    /// order before they suspend waiting for the transport write.
+    func enqueue(
+        _ line: Data,
+        via transport: any ACPTransport,
+        completion: @escaping @Sendable (Result<Void, Error>) -> Void
+    ) {
+        lock.lock()
+        queue.append(Entry(line: line, transport: transport, completion: completion))
+        let shouldStartDraining = !isDraining
+        if shouldStartDraining { isDraining = true }
+        lock.unlock()
+
+        if shouldStartDraining {
+            Task { await drain() }
+        }
+    }
+
     func send(_ line: Data, via transport: any ACPTransport) async throws {
-        try await transport.send(line: line)
+        try await withCheckedThrowingContinuation { continuation in
+            enqueue(line, via: transport) { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
+
+    private func drain() async {
+        while let entry = takeNextEntry() {
+            do {
+                try await entry.transport.send(line: entry.line)
+                entry.completion(.success(()))
+            } catch {
+                entry.completion(.failure(error))
+            }
+        }
+    }
+
+    private func takeNextEntry() -> Entry? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !queue.isEmpty else {
+            isDraining = false
+            return nil
+        }
+        return queue.removeFirst()
     }
 }
 
@@ -118,11 +172,10 @@ public actor PiRPCDriver: AgentDriver {
         let line = try PiWire.command(id: id, type: type, fields: fields)
         return try await withCheckedThrowingContinuation { continuation in
             pendingResponses[id] = continuation
-            let transport = self.transport
-            let sendGate = self.sendGate
-            Task { [weak self] in
-                do { try await sendGate.send(line, via: transport) }
-                catch { await self?.failResponse(id: id, error: error) }
+            sendGate.enqueue(line, via: transport) { [weak self] result in
+                if case .failure(let error) = result {
+                    Task { await self?.failResponse(id: id, error: error) }
+                }
             }
         }
     }
@@ -407,7 +460,7 @@ extension PiRPCDriver {
                     line = try PiWire.extensionUICancel(id: id)
                 }
             }
-            try await transport.send(line: line)
+            try await sendGate.send(line, via: transport)
         } catch {
             eventContinuation.yield(.update(.agentThoughtChunk(
                 .text("Pi UI response failed: \(error.localizedDescription)"))))
