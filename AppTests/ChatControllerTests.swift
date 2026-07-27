@@ -330,6 +330,7 @@ struct ChatControllerTests {
 
         await model.flushLiveScrollback()
 
+        #expect(await driver.stopCount == 0)
         #expect(await writer.scrollbacks(for: paneId) == [data])
         let saved = await writer.allTranscripts().last ?? []
         #expect(saved.contains {
@@ -339,6 +340,125 @@ struct ChatControllerTests {
             return false
         })
     }
+    @Test func quitPersistsPendingControllerEnqueue() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = TestPersistenceWriter()
+        let coordinator = PersistenceCoordinator(
+            transcriptWriter: { sessionId, items in
+                try await writer.write(.transcript(sessionId), value: items)
+            },
+            scrollbackWriter: { _, _, _ in },
+            onError: { _, _ in })
+        let session = try store.createSession(
+            worktreeId: worktreeId.uuidString, agentId: "claude-acp")
+        try store.setACPSessionId("pending", sessionId: session.id)
+        try store.saveTranscript(sessionId: session.id, items: [
+            .agentMessage(id: "seed", text: "seed", isComplete: true)
+        ])
+        let driver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "pending", didResume: true))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            persistenceCoordinator: coordinator,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+        await controller.start()
+        await writer.block(.transcript(session.id))
+        controller.persist()
+        let model = AppModel(
+            paneRegistry: PaneRegistry(),
+            activateApplication: {},
+            persistenceCoordinator: coordinator)
+        model.chatControllers[controller.tabId] = controller
+        let flushTask = Task { await model.flushLiveScrollback() }
+        await writer.waitUntilStarted(.transcript(session.id))
+        await writer.release(.transcript(session.id))
+        await flushTask.value
+
+        let saved = await writer.transcripts(for: session.id)
+        #expect(!saved.isEmpty)
+    }
+
+    @Test func quitFlushesControllerPersistenceConcurrently() async throws {
+        let firstWorktreeId = UUID()
+        let secondWorktreeId = UUID()
+        let (firstStore, firstInstallStore, firstRoot) = try makeChatTestFixture(
+            worktreeId: firstWorktreeId)
+        let (secondStore, secondInstallStore, secondRoot) = try makeChatTestFixture(
+            worktreeId: secondWorktreeId)
+        defer {
+            try? FileManager.default.removeItem(at: firstRoot)
+            try? FileManager.default.removeItem(at: secondRoot)
+        }
+        let firstSession = try firstStore.createSession(
+            worktreeId: firstWorktreeId.uuidString, agentId: "claude-acp")
+        try firstStore.setACPSessionId("first", sessionId: firstSession.id)
+        try firstStore.saveTranscript(sessionId: firstSession.id, items: [
+            .agentMessage(id: "first-seed", text: "seed", isComplete: true)
+        ])
+        let secondSession = try secondStore.createSession(
+            worktreeId: secondWorktreeId.uuidString, agentId: "claude-acp")
+        try secondStore.setACPSessionId("second", sessionId: secondSession.id)
+        try secondStore.saveTranscript(sessionId: secondSession.id, items: [
+            .agentMessage(id: "second-seed", text: "seed", isComplete: true)
+        ])
+        let writer = TestPersistenceWriter()
+        let coordinator = PersistenceCoordinator(
+            transcriptWriter: { sessionId, items in
+                try await writer.write(.transcript(sessionId), value: items)
+            },
+            scrollbackWriter: { _, _, _ in },
+            onError: { _, _ in })
+        let firstDriver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "first", didResume: true))
+        let secondDriver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "second", didResume: true))
+        let firstController = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: firstWorktreeId,
+            worktreePath: firstRoot.path, store: firstStore,
+            installStore: firstInstallStore, persistenceCoordinator: coordinator,
+            driverFactory: { _, _, _, _, _, _, _ in firstDriver })
+        let secondController = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: secondWorktreeId,
+            worktreePath: secondRoot.path, store: secondStore,
+            installStore: secondInstallStore, persistenceCoordinator: coordinator,
+            driverFactory: { _, _, _, _, _, _, _ in secondDriver })
+        await firstController.start()
+        await secondController.start()
+        await writer.block(.transcript(firstSession.id))
+        await writer.block(.transcript(secondSession.id))
+        firstController.persist()
+        secondController.persist()
+
+        let model = AppModel(
+            paneRegistry: PaneRegistry(),
+            activateApplication: {},
+            persistenceCoordinator: coordinator)
+        model.chatControllers[firstController.tabId] = firstController
+        model.chatControllers[secondController.tabId] = secondController
+        let flushTask = Task { await model.flushLiveScrollback() }
+        for _ in 0..<100 {
+            if await writer.hasStarted(.transcript(firstSession.id)),
+               await writer.hasStarted(.transcript(secondSession.id)) {
+                break
+            }
+            await Task.yield()
+        }
+
+        #expect(await writer.hasStarted(.transcript(firstSession.id)))
+        #expect(await writer.hasStarted(.transcript(secondSession.id)))
+
+        await writer.release(.transcript(firstSession.id))
+        await writer.release(.transcript(secondSession.id))
+        await flushTask.value
+        let firstSaved = await writer.transcripts(for: firstSession.id)
+        let secondSaved = await writer.transcripts(for: secondSession.id)
+        #expect(!firstSaved.isEmpty)
+        #expect(!secondSaved.isEmpty)
+    }
+
 
     @Test func pendingPermissionRendersAboveComposerWhilePromptRemainsOpen() async throws {
         let worktreeId = UUID()
@@ -445,6 +565,7 @@ private actor ChatTestDriver: AgentDriver {
     private(set) var promptCount = 0
     private(set) var modeIds: [String] = []
     private(set) var resumeIds: [String?] = []
+    private(set) var stopCount = 0
 
     init(handle: SessionHandle, failsResume: Bool = false,
          promptEvents: [ACPSessionEvent] = [], holdPromptOpen: Bool = false) {
@@ -458,7 +579,10 @@ private actor ChatTestDriver: AgentDriver {
     }
 
     func start() async throws {}
-    func stop() async { continuation.finish() }
+    func stop() async {
+        stopCount += 1
+        continuation.finish()
+    }
 
     nonisolated func emit(_ event: ACPSessionEvent) { continuation.yield(event) }
 

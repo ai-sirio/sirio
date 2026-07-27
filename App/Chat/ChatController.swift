@@ -150,7 +150,10 @@ final class ChatController {
                     }
                     try store.saveTranscript(sessionId: sessionId, items: items)
                 },
-                scrollbackWriter: { _, _, _ in })
+                scrollbackWriter: { _, _, _ in
+                    preconditionFailure(
+                        "ChatController fallback persistence coordinator cannot persist scrollback")
+                })
         }
         self.installStore = installStore
         self.driverFactory = driverFactory
@@ -302,6 +305,10 @@ final class ChatController {
         if let driver { await driver.stop() }
         driver = nil
         if state != .needsAuth { state = .disconnected(message: nil) }
+    }
+    /// Waits only for snapshots already queued by `persist()`.
+    func drainPendingPersistence() async {
+        await persistenceEnqueueTask?.value
     }
 
     func newConversation() async {
@@ -602,11 +609,11 @@ final class ChatController {
             return text
         }
         return "\(error)"
-    }
 
+    }
     // MARK: - Persistence
 
-    private func persist() {
+    func persist() {
         guard let sessionRecordId, let persistenceCoordinator else { return }
         let snapshot = items
         let previous = persistenceEnqueueTask

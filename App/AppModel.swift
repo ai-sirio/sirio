@@ -1344,7 +1344,14 @@ final class AppModel {
             }
         }
         for controller in chatControllers.values {
-            await controller.stop()
+            controller.persist()
+        }
+        await withTaskGroup(of: Void.self) { group in
+            for controller in chatControllers.values {
+                group.addTask {
+                    await controller.drainPendingPersistence()
+                }
+            }
         }
         await persistenceCoordinator?.flushAll()
     }

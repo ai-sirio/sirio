@@ -140,6 +140,9 @@ actor TestPersistenceWriter {
             waiters[key, default: []].append(continuation)
         }
     }
+    func hasStarted(_ key: TestWriteKey) -> Bool {
+        started.contains(key)
+    }
 
     func release(_ key: TestWriteKey) {
         released.insert(key)
