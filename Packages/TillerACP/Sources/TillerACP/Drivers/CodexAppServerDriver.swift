@@ -124,12 +124,19 @@ public actor CodexAppServerDriver: AgentDriver {
             "turn/start", params: turnParams(threadId: threadId, blocks: blocks),
             as: JSONValue.self)
         self.turnId = result["turn"]?["id"]?.stringValue ?? result["turnId"]?.stringValue
-        if !queuedStopReasons.isEmpty { return queuedStopReasons.removeFirst() }
-
-        return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<StopReason, Error>) in
-            promptContinuation = continuation
+        let reason: StopReason
+        if !queuedStopReasons.isEmpty {
+            reason = queuedStopReasons.removeFirst()
+        } else {
+            reason = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<StopReason, Error>) in
+                promptContinuation = continuation
+            }
         }
+        // Last event of the turn: everything the read loop yielded for it is
+        // already in the stream ahead of this.
+        eventContinuation.yield(.turnEnded(reason))
+        return reason
     }
 
     public func cancel() async {

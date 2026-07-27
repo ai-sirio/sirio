@@ -129,13 +129,19 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         let line = try makeUserPromptLine(blocks)
         try await transport.send(line: line)
 
+        let reason: StopReason
         if !queuedResults.isEmpty {
-            return stopReason(for: queuedResults.removeFirst())
+            reason = stopReason(for: queuedResults.removeFirst())
+        } else {
+            reason = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<StopReason, Error>) in
+                promptContinuation = continuation
+            }
         }
-        return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<StopReason, Error>) in
-            promptContinuation = continuation
-        }
+        // Last event of the turn: everything the read loop yielded for it is
+        // already in the stream ahead of this.
+        eventContinuation.yield(.turnEnded(reason))
+        return reason
     }
 
     public func cancel() async {
