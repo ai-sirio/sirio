@@ -7,6 +7,13 @@ import TillerACP
 struct QuestionCardView: View {
     let question: ChatQuestion
     let controller: ChatController
+    @State private var textAnswer: String
+
+    init(question: ChatQuestion, controller: ChatController) {
+        self.question = question
+        self.controller = controller
+        _textAnswer = State(initialValue: question.textInput?.prefill ?? "")
+    }
 
     var body: some View {
         ChatCard(kind: .question, isHighlighted: !question.isAnswered) {
@@ -25,10 +32,38 @@ struct QuestionCardView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 } else {
-                    options
+                    unansweredControls
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var unansweredControls: some View {
+        if let input = question.textInput {
+            HStack(spacing: 6) {
+                TextField(input.placeholder ?? "Type an answer", text: $textAnswer)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { submitTextAnswer() }
+                Button("Send") { submitTextAnswer() }
+                    .disabled(textAnswer.trimmingCharacters(
+                        in: .whitespacesAndNewlines).isEmpty)
+                Button("Cancel", role: .cancel) {
+                    Task {
+                        await controller.answerPermission(
+                            requestId: question.requestId, optionId: nil)
+                    }
+                }
+            }
+        } else {
+            options
+        }
+    }
+
+    private func submitTextAnswer() {
+        let answer = textAnswer
+        guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task { await controller.answerQuestion(question, text: answer) }
     }
 
     private var options: some View {

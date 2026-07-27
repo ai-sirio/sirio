@@ -255,6 +255,7 @@ private extension PiRPCDriver {
         case "auto_retry_start": emitThought(retryStartMessage(fields))
         case "auto_retry_end": emitThought(retryEndMessage(fields))
         case "extension_error": emitThought(extensionErrorMessage(fields))
+        case "extension_ui_request": handleExtensionUIRequest(fields)
         case "tool_execution_start": handleToolStart(fields)
         case "tool_execution_update": handleToolUpdate(fields)
         case "tool_execution_end": handleToolEnd(fields)
@@ -302,6 +303,90 @@ private extension PiRPCDriver {
         let error = fields["error"]?.stringValue ?? fields["message"]?.stringValue
             ?? "Unknown extension error"
         return "Extension error (\(path)): \(error)"
+    }
+
+    func structuredQuestionInput(
+        header: String, prompt: String,
+        options: [(id: String, label: String, isRejection: Bool)],
+        textInput: ChatQuestion.TextInput? = nil
+    ) -> JSONValue {
+        let optionValues = options.map { option in
+            JSONValue.object(["id": .string(option.id), "label": .string(option.label),
+                              "isRejection": .bool(option.isRejection)])
+        }
+        var raw: [String: JSONValue] = ["questions": .array([.object([
+            "header": .string(header), "question": .string(prompt),
+            "options": .array(optionValues)
+        ])])]
+        if let textInput {
+            var metadata: [String: JSONValue] = [:]
+            if let placeholder = textInput.placeholder {
+                metadata["placeholder"] = .string(placeholder)
+            }
+            if let prefill = textInput.prefill { metadata["prefill"] = .string(prefill) }
+            raw["_tillerTextInput"] = .object(metadata)
+        }
+        return .object(raw)
+    }
+
+    func handleExtensionUIRequest(_ fields: [String: JSONValue]) {
+        guard let id = fields["id"]?.stringValue,
+              let method = fields["method"]?.stringValue else { return }
+        let title = fields["title"]?.stringValue ?? "Pi"
+        switch method {
+        case "select":
+            let labels = fields["options"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            let options = labels.map { (id: $0, label: $0, isRejection: false) }
+                + [(id: "__cancel__", label: "Cancel", isRejection: true)]
+            let permissions = labels.map {
+                PermissionOption(optionId: $0, name: $0, kind: .allowOnce)
+            } + [PermissionOption(optionId: "__cancel__", name: "Cancel", kind: .rejectOnce)]
+            emitExtensionUIQuestion(id: id, header: title, prompt: title,
+                                    options: options, permissionOptions: permissions)
+            pendingUIRequests[id] = .select
+        case "confirm":
+            let prompt = fields["message"]?.stringValue ?? title
+            let options: [(id: String, label: String, isRejection: Bool)] = [
+                ("true", "Yes", false), ("false", "No", true)
+            ]
+            let permissions = [
+                PermissionOption(optionId: "true", name: "Yes", kind: .allowOnce),
+                PermissionOption(optionId: "false", name: "No", kind: .rejectOnce)
+            ]
+            emitExtensionUIQuestion(id: id, header: title, prompt: prompt,
+                                    options: options, permissionOptions: permissions)
+            pendingUIRequests[id] = .confirm
+        case "input":
+            let prompt = fields["message"]?.stringValue ?? title
+            let textInput = ChatQuestion.TextInput(
+                placeholder: fields["placeholder"]?.stringValue,
+                prefill: fields["prefill"]?.stringValue)
+            emitExtensionUIQuestion(id: id, header: title, prompt: prompt,
+                                    options: [], permissionOptions: [], textInput: textInput)
+            pendingUIRequests[id] = .input
+        case "editor":
+            do {
+                let line = try PiWire.extensionUICancel(id: id)
+                sendGate.enqueue(line, via: transport) { _ in }
+            } catch { }
+        default:
+            // Fire-and-forget extension UI methods do not have a response.
+            break
+        }
+    }
+
+    func emitExtensionUIQuestion(
+        id: String, header: String, prompt: String,
+        options: [(id: String, label: String, isRejection: Bool)],
+        permissionOptions: [PermissionOption],
+        textInput: ChatQuestion.TextInput? = nil
+    ) {
+        let rawInput = structuredQuestionInput(
+            header: header, prompt: prompt, options: options, textInput: textInput)
+        let toolCall = ToolCallUpdate(toolCallId: "pi-ui-\(id)", title: header,
+                                      kind: .other, status: .pending, rawInput: rawInput)
+        eventContinuation.yield(.permissionRequested(
+            requestId: .string(id), toolCall: toolCall, options: permissionOptions))
     }
 
     func toolKind(_ name: String) -> ToolKind {
@@ -410,6 +495,7 @@ extension PiRPCDriver {
         cancelRequested = false
         toolArguments.removeAll()
         toolNames.removeAll()
+        pendingUIRequests.removeAll()
         if !stopping { eventContinuation.yield(.disconnected) }
         eventContinuation.finish()
     }

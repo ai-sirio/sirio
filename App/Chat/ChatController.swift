@@ -526,6 +526,20 @@ final class ChatController {
         }
     }
 
+    func answerQuestion(_ question: ChatQuestion, text: String) async {
+        let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !answer.isEmpty, let driver else { return }
+        reducer.permissionResolved(requestId: question.requestId,
+                                   resolution: .selected(optionId: answer))
+        rebuildPresentationSnapshot()
+        await driver.answerPermission(
+            requestId: question.requestId,
+            outcome: .answered(optionId: answer,
+                               updatedInput: .object(["choice": .string(answer)])))
+        onStatusChange?(.running)
+        persist()
+    }
+
     func answerPermission(requestId: JSONRPCID, optionId: String?) async {
         if let optionId {
             reducer.permissionResolved(requestId: requestId,

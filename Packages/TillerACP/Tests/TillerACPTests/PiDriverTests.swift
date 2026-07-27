@@ -405,6 +405,92 @@ private actor BlockedPromptTransport: ACPTransport {
         }
     }
 
+    @Test func confirmRequestRoundTripsAsConfirmedBoolean() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        let collector = PiEventCollector()
+        let collecting = collect(driver, into: collector)
+        try await driver.start()
+
+        await mock.emit(#"{"type":"extension_ui_request","id":"ui-confirm","method":"confirm","title":"Clear session?","message":"All messages will be lost."}"#)
+        for _ in 0..<100 {
+            if !(await collector.values).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await driver.answerPermission(requestId: .string("ui-confirm"),
+                                      outcome: .selected(optionId: "true"))
+
+        let sent = try await mock.waitForSent(count: 1)
+        let reply = try value(sent[0])
+        #expect(reply["type"]?.stringValue == "extension_ui_response")
+        #expect(reply["id"]?.stringValue == "ui-confirm")
+        #expect(reply["confirmed"]?.boolValue == true)
+        #expect(reply["value"] == nil)
+        collecting.cancel()
+    }
+
+    @Test func customInputAnswerUsesValueAndEditorIsCancelled() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        let collector = PiEventCollector()
+        let collecting = collect(driver, into: collector)
+        try await driver.start()
+
+        await mock.emit(#"{"type":"extension_ui_request","id":"ui-input","method":"input","title":"Branch","placeholder":"feature/name"}"#)
+        for _ in 0..<100 {
+            if !(await collector.values).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await driver.answerPermission(
+            requestId: .string("ui-input"),
+            outcome: .answered(optionId: "feature/pi",
+                               updatedInput: .object(["choice": .string("feature/pi")])))
+        await mock.emit(#"{"type":"extension_ui_request","id":"ui-editor","method":"editor","title":"Edit text","prefill":"hello"}"#)
+
+        let sent = try await mock.waitForSent(count: 2)
+        #expect((try value(sent[0]))["value"]?.stringValue == "feature/pi")
+        #expect((try value(sent[1]))["cancelled"]?.boolValue == true)
+        collecting.cancel()
+    }
+
+    @Test func selectUsesValueAndCancellationUsesCancelledField() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        let collector = PiEventCollector()
+        let collecting = collect(driver, into: collector)
+        try await driver.start()
+
+        await mock.emit(#"{"type":"extension_ui_request","id":"ui-select","method":"select","title":"Mode","options":["Fast","Safe"]}"#)
+        for _ in 0..<100 {
+            if !(await collector.values).isEmpty { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard case .some(.permissionRequested(_, _, let options)) =
+                (await collector.values).first else {
+            Issue.record("expected canonical select question")
+            return
+        }
+        #expect(options.map(\.optionId) == ["Fast", "Safe", "__cancel__"])
+        #expect(options.last?.kind == .rejectOnce)
+        await driver.answerPermission(requestId: .string("ui-select"),
+                                      outcome: .selected(optionId: "Fast"))
+
+        await mock.emit(#"{"type":"extension_ui_request","id":"ui-cancel","method":"select","title":"Mode","options":["Fast"]}"#)
+        for _ in 0..<100 {
+            if (await collector.values).count >= 2 { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await driver.answerPermission(requestId: .string("ui-cancel"), outcome: .cancelled)
+
+        let sent = try await mock.waitForSent(count: 2)
+        #expect((try value(sent[0]))["value"]?.stringValue == "Fast")
+        #expect((try value(sent[1]))["cancelled"]?.boolValue == true)
+        collecting.cancel()
+    }
+
 }
 
 extension PiDriverTests {
