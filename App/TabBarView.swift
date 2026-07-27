@@ -186,6 +186,7 @@ struct TabBarItem: View {
                     }
                 }
         }
+        .pressFeedback()
         .onHover { hovering = $0 }
         .onTapGesture { model.activateTab(tab.id, in: worktree.id) }
         .contextMenu {
