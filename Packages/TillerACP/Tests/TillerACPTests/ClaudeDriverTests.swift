@@ -43,6 +43,20 @@ import Testing
         return await collector.snapshot()
     }
 
+    /// Waits for the event a test actually cares about. Counting events
+    /// instead couples the test to how many unrelated ones the driver emits.
+    private func waitForEvent(
+        _ collector: EventCollector,
+        where predicate: @Sendable (ACPSessionEvent) -> Bool
+    ) async -> [ACPSessionEvent] {
+        for _ in 0..<200 {
+            let values = await collector.snapshot()
+            if values.contains(where: predicate) { return values }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return await collector.snapshot()
+    }
+
     private func jsonValue(_ data: Data) throws -> JSONValue {
         let line = data.last == UInt8(ascii: "\n") ? data.dropLast() : data[...]
         return try JSONDecoder().decode(JSONValue.self, from: line)
@@ -119,6 +133,39 @@ import Testing
         await driver.stop()
     }
 
+    /// Turn completion has to reach the transcript through the same stream as
+    /// the content it closes. Applied out of band it can overtake chunks the
+    /// consumer has not read yet, and the tail of a reply lands after the
+    /// turn divider instead of inside the message.
+    @Test func turnEndReachesTheStreamAfterTheLastChunk() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let promptTask = Task { try await driver.prompt([.text("hello")]) }
+        _ = try await mock.waitForSent(count: 2)
+        await mock.emit(#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#)
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1"}"#)
+        #expect(try await promptTask.value == .endTurn)
+
+        let events = await waitForEvents(collector, count: 2)
+        let chunkIndex = events.firstIndex {
+            if case .update(.agentMessageChunk(.text("hi"))) = $0 { true } else { false }
+        }
+        let endIndex = events.firstIndex {
+            if case .turnEnded(.endTurn) = $0 { true } else { false }
+        }
+        #expect(chunkIndex != nil)
+        #expect(endIndex != nil)
+        if let chunkIndex, let endIndex { #expect(chunkIndex < endIndex) }
+        eventTask.cancel()
+        await driver.stop()
+    }
+
     @Test func contextUsageProbeAfterResult() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
@@ -142,7 +189,9 @@ import Testing
         await mock.emit(success.replacingOccurrences(of: "__ID__", with: requestId ?? ""))
 
         #expect(try await promptTask.value == .endTurn)
-        let events = await waitForEvents(collector, count: 2)
+        let events = await waitForEvent(collector) {
+            if case .update(.usageUpdate) = $0 { true } else { false }
+        }
         let updates = events.compactMap { event -> SessionUpdate? in
             guard case .update(let update) = event else { return nil }
             return update

@@ -139,12 +139,19 @@ public actor OpenCodeHTTPDriver: AgentDriver {
         _ = try await connection.request(method: "POST",
                                          path: "/session/\(sessionId)/message",
                                          body: body)
-        if !queuedStopReasons.isEmpty { return queuedStopReasons.removeFirst() }
-
-        return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<StopReason, Error>) in
-            promptContinuation = continuation
+        let reason: StopReason
+        if !queuedStopReasons.isEmpty {
+            reason = queuedStopReasons.removeFirst()
+        } else {
+            reason = try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<StopReason, Error>) in
+                promptContinuation = continuation
+            }
         }
+        // Last event of the turn: everything the event loop yielded for it is
+        // already in the stream ahead of this.
+        eventContinuation.yield(.turnEnded(reason))
+        return reason
     }
 
     public func cancel() async {

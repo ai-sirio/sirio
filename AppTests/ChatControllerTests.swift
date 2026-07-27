@@ -80,6 +80,44 @@ struct ChatControllerTests {
         }))
     }
 
+    /// The reply belongs inside the turn it answers, above the divider that
+    /// closes it — even when the last chunk and the turn result arrive back
+    /// to back and the event pump has not drained yet.
+    @Test func agentReplyIsOrderedBeforeTheTurnDivider() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "native-session"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+        await controller.start()
+
+        controller.send(text: "hello", mentionPaths: [], images: [])
+        func index(_ match: (TranscriptItem) -> Bool) -> Int? {
+            controller.items.firstIndex(where: match)
+        }
+        let isReply: (TranscriptItem) -> Bool = {
+            if case .agentMessage(_, "stub response", _) = $0 { return true }
+            return false
+        }
+        let isDivider: (TranscriptItem) -> Bool = {
+            if case .turnDivider = $0 { return true }
+            return false
+        }
+        for _ in 0..<50 {
+            if index(isReply) != nil, index(isDivider) != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let replyIndex = index(isReply)
+        let dividerIndex = index(isDivider)
+        #expect(replyIndex != nil)
+        #expect(dividerIndex != nil)
+        if let replyIndex, let dividerIndex { #expect(replyIndex < dividerIndex) }
+    }
+
     @Test func permissionModeForwardsRawValueAndPersistsSettings() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
@@ -605,6 +643,9 @@ private actor ChatTestDriver: AgentDriver {
         for _ in 0..<10 { await Task.yield() }
         continuation.yield(.update(.agentMessageChunk(.text("stub response"))))
         await Task.yield()
+        // Mirrors the real drivers: the turn closes through the stream, as
+        // the last event behind the updates it terminates.
+        continuation.yield(.turnEnded(.endTurn))
         return .endTurn
     }
 

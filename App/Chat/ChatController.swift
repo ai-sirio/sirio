@@ -126,6 +126,8 @@ final class ChatController {
 
     private var driver: (any AgentDriver)?
     private var pumpTask: Task<Void, Never>?
+    /// Open between `userPrompted` and whichever closes the turn first.
+    @ObservationIgnored private var turnIsOpen = false
     @ObservationIgnored private var pendingEvents: [ACPSessionEvent] = []
     @ObservationIgnored private var eventFlushScheduled = false
     @ObservationIgnored private var lastEventFlush = ContinuousClock.now
@@ -362,6 +364,7 @@ final class ChatController {
             worktreePath: worktreePath)
         guard !blocks.isEmpty else { return }
         reducer.userPrompted(blocks)
+        turnIsOpen = true
         rebuildPresentationSnapshot()
         if pendingHandoff {
             pendingHandoff = false
@@ -375,14 +378,13 @@ final class ChatController {
         Task { [weak self] in
             guard let self, let driver = self.driver else { return }
             do {
-                let reason = try await driver.prompt(blocks)
+                // The turn is closed by the driver's `turnEnded` event, which
+                // the stream delivers behind the updates it terminates.
+                _ = try await driver.prompt(blocks)
                 self.flushPendingEvents()
-                self.reducer.turnEnded(reason)
-                self.rebuildPresentationSnapshot()
             } catch {
                 self.flushPendingEvents()
-                self.reducer.turnEnded(.cancelled)
-                self.rebuildPresentationSnapshot()
+                self.endTurn(.cancelled)
                 if self.isDisconnectedError(error) {
                     self.state = .disconnected(message: "\(error)")
                 } else {
@@ -615,11 +617,23 @@ final class ChatController {
             reducer.permissionRequested(requestId: requestId,
                                         toolCall: toolCall, options: options)
             onStatusChange?(.needsInput)
+        case .turnEnded(let reason):
+            endTurn(reason)
         case .disconnected:
             if state != .needsAuth, !isDisconnected {
                 state = .disconnected(message: "Agent process terminated")
             }
         }
+    }
+
+    /// Closes the open turn exactly once. The driver's `turnEnded` event is
+    /// the normal path; the prompt's error path closes turns the driver never
+    /// got to finish, and one of the two always arrives second.
+    private func endTurn(_ reason: StopReason) {
+        guard turnIsOpen else { return }
+        turnIsOpen = false
+        reducer.turnEnded(reason)
+        rebuildPresentationSnapshot()
     }
 
     private func isDisconnectedError(_ error: Error) -> Bool {

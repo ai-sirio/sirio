@@ -17,6 +17,10 @@ public enum ACPSessionEvent: Sendable {
     case update(SessionUpdate)
     case permissionRequested(requestId: JSONRPCID, toolCall: ToolCallUpdate,
                              options: [PermissionOption])
+    /// The turn a `prompt` call opened is over. Drivers emit this as the last
+    /// event of the turn, so consumers close it behind the updates they have
+    /// already read rather than ahead of ones still in the stream.
+    case turnEnded(StopReason)
     case disconnected
 }
 
@@ -113,6 +117,7 @@ public actor ACPSession {
         let result = try await client.request(
             "session/prompt", params: PromptParams(sessionId: sessionId, prompt: blocks),
             as: PromptResult.self)
+        eventContinuation.yield(.turnEnded(result.stopReason))
         return result.stopReason
     }
 
