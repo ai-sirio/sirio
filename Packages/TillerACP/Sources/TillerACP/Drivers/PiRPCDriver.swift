@@ -1,5 +1,28 @@
 import Foundation
 
+private final class PiStreamingState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var streaming = false
+
+    var isStreaming: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return streaming
+    }
+
+    func setStreaming(_ value: Bool) {
+        lock.lock()
+        streaming = value
+        lock.unlock()
+    }
+}
+
+private actor PiCommandSendGate {
+    func send(_ line: Data, via transport: any ACPTransport) async throws {
+        try await transport.send(line: line)
+    }
+}
+
 public enum PiRPCDriverError: Error, Sendable, Equatable {
     case notStarted
     case notConnected
@@ -15,10 +38,12 @@ public actor PiRPCDriver: AgentDriver {
     private let requestedModel: String?
     private let requestedEffort: String?
     private let requestedResumeSessionId: String?
+    private let streamingState = PiStreamingState()
+    private let sendGate = PiCommandSendGate()
     private var started = false
     private var finished = false
     private var stopping = false
-    private var isStreaming = false
+    private var runActive = false
     private var cancelRequested = false
     private var sessionId: String?
     private var nextRequestNumber = 1
@@ -63,9 +88,14 @@ public actor PiRPCDriver: AgentDriver {
 
     public func start() async throws {
         guard !started else { return }
+        guard !finished, !stopping else { throw PiRPCDriverError.disconnected }
         try await transport.start()
         started = true
-        readTask = Task { [weak self] in await self?.readLoop() }
+        let transport = self.transport
+        let streamingState = self.streamingState
+        readTask = Task { [weak self] in
+            await self?.readLoop(transport: transport, streamingState: streamingState)
+        }
     }
 
     public func stop() async {
@@ -83,13 +113,15 @@ public actor PiRPCDriver: AgentDriver {
     private func sendCommand(_ type: String,
                              fields: [String: JSONValue] = [:]) async throws -> PiWire.Response {
         guard started else { throw PiRPCDriverError.notStarted }
+        guard !finished, !stopping else { throw PiRPCDriverError.disconnected }
         let id = makeRequestId()
         let line = try PiWire.command(id: id, type: type, fields: fields)
         return try await withCheckedThrowingContinuation { continuation in
             pendingResponses[id] = continuation
             let transport = self.transport
+            let sendGate = self.sendGate
             Task { [weak self] in
-                do { try await transport.send(line: line) }
+                do { try await sendGate.send(line, via: transport) }
                 catch { await self?.failResponse(id: id, error: error) }
             }
         }
@@ -107,20 +139,36 @@ public actor PiRPCDriver: AgentDriver {
         pendingResponses.removeValue(forKey: id)?.resume(throwing: error)
     }
 
-    private func readLoop() async {
+    private nonisolated func readLoop(transport: any ACPTransport,
+                                      streamingState: PiStreamingState) async {
         do {
             for try await line in transport.lines() {
                 guard !Task.isCancelled else { break }
-                do { handle(try PiWire.decode(line)) }
-                catch {
-                    eventContinuation.yield(.update(.agentThoughtChunk(
-                        .text("Pi RPC decode error: \(error.localizedDescription)"))))
+                do {
+                    let message = try PiWire.decode(line)
+                    // Update the state used for prompt classification in the
+                    // reader before handing the message back to the driver actor.
+                    if case .event(let type, _) = message {
+                        switch type {
+                        case "agent_start": streamingState.setStreaming(true)
+                        case "agent_settled": streamingState.setStreaming(false)
+                        default: break
+                        }
+                    }
+                    await self.handle(message)
+                } catch {
+                    await self.reportDecodeError(error)
                 }
             }
         } catch {
             // Transport failure and EOF share the same session-level finish path.
         }
-        finish()
+        await self.finish()
+    }
+
+    private func reportDecodeError(_ error: Error) {
+        eventContinuation.yield(.update(.agentThoughtChunk(
+            .text("Pi RPC decode error: \(error.localizedDescription)"))))
     }
 
     private func handle(_ message: PiWire.Message) {
@@ -131,7 +179,7 @@ public actor PiRPCDriver: AgentDriver {
             continuation.resume(returning: response)
         case .event(let type, _):
             switch type {
-            case "agent_start": isStreaming = true
+            case "agent_start": streamingState.setStreaming(true)
             case "agent_end": break
             case "agent_settled": settleCurrentRun()
             default: break
@@ -152,6 +200,9 @@ public actor PiRPCDriver: AgentDriver {
         for continuation in prompts {
             continuation.resume(throwing: PiRPCDriverError.disconnected)
         }
+        streamingState.setStreaming(false)
+        runActive = false
+        cancelRequested = false
         if !stopping { eventContinuation.yield(.disconnected) }
         eventContinuation.finish()
     }
@@ -239,26 +290,37 @@ public actor PiRPCDriver: AgentDriver {
         var fields: [String: JSONValue] = ["message": .string(message)]
         if !images.isEmpty { fields["images"] = .array(images) }
         let slashCommand = message.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
-        if isStreaming && !slashCommand { fields["streamingBehavior"] = .string("steer") }
+        if streamingState.isStreaming && !slashCommand {
+            fields["streamingBehavior"] = .string("steer")
+        }
         return fields
     }
 
     public func prompt(_ blocks: [ContentBlock]) async throws -> StopReason {
-        // Give the single reader a chance to apply an event emitted immediately
-        // before this prompt (notably agent_start for a steering prompt).
-        for _ in 0..<3 { await Task.yield() }
         guard sessionId != nil else { throw PiRPCDriverError.notConnected }
         let observedSettlement = settlementSequence
-        let response = try await sendCommand("prompt", fields: promptFields(blocks))
-        _ = try requireSuccess(response)
-        if settlementSequence != observedSettlement { return lastSettlementReason }
-        return try await withCheckedThrowingContinuation { continuation in
-            promptContinuations.append(continuation)
+        let wasIdle = !runActive
+        runActive = true
+        do {
+            let response = try await sendCommand("prompt", fields: promptFields(blocks))
+            _ = try requireSuccess(response)
+            if settlementSequence != observedSettlement { return lastSettlementReason }
+            return try await withCheckedThrowingContinuation { continuation in
+                promptContinuations.append(continuation)
+            }
+        } catch {
+            if wasIdle { runActive = false }
+            throw error
         }
     }
 
     private func settleCurrentRun() {
-        isStreaming = false
+        guard runActive || !promptContinuations.isEmpty else {
+            cancelRequested = false
+            return
+        }
+        streamingState.setStreaming(false)
+        runActive = false
         settlementSequence += 1
         let reason: StopReason = cancelRequested ? .cancelled : .endTurn
         cancelRequested = false
@@ -270,10 +332,15 @@ public actor PiRPCDriver: AgentDriver {
     }
 
     public func cancel() async {
+        guard started, !finished, !stopping, runActive else { return }
         cancelRequested = true
-        guard started else { return }
-        Task { [weak self] in
-            do { _ = try await self?.sendCommand("abort") } catch { }
+        do {
+            let line = try PiWire.command(id: makeRequestId(), type: "abort")
+            // Await the serialized send so a following prompt cannot overtake it.
+            try await sendGate.send(line, via: transport)
+        } catch {
+            // Cancellation remains represented by the next settled event even
+            // when the transport rejects the best-effort abort write.
         }
     }
 
@@ -309,6 +376,9 @@ public actor PiRPCDriver: AgentDriver {
         _ = modeId
     }
 
+}
+
+extension PiRPCDriver {
     public func answerPermission(requestId: JSONRPCID,
                                  outcome: PermissionOutcome) async {
         guard case .string(let id) = requestId,
@@ -355,4 +425,22 @@ public actor PiRPCDriver: AgentDriver {
     }
 
     var hasPendingPromptForTesting: Bool { !promptContinuations.isEmpty }
+
+    // Test seam: waits for the reader's confirmed event state, not scheduler turns.
+    func waitForStreamingForTesting() async throws {
+        for _ in 0..<100 {
+            if streamingState.isStreaming { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw CancellationError()
+    }
+
+    // Test seam: waits until EOF has completed the driver's lifecycle.
+    func waitForFinishForTesting() async throws {
+        for _ in 0..<100 {
+            if finished { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw CancellationError()
+    }
 }

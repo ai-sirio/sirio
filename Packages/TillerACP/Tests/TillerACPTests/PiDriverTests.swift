@@ -215,8 +215,7 @@ private func collect(_ driver: PiRPCDriver, into collector: PiEventCollector)
         let initialId = try requestId(sent[0])
         await mock.emit(#"{"id":"\#(initialId)","type":"response","command":"prompt","success":true}"#)
         await mock.emit(#"{"type":"agent_start"}"#)
-        // Let the transport reader apply agent_start before steering.
-        await Task.yield()
+        try await driver.waitForStreamingForTesting()
 
         let steer = Task { try await driver.prompt([.text("change direction")]) }
         sent = try await mock.waitForSent(count: 2)
@@ -239,6 +238,85 @@ private func collect(_ driver: PiRPCDriver, into collector: PiEventCollector)
         collecting.cancel()
     }
 
+    @Test func confirmedAgentStartStateIsUsedForSteering() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+        await mock.emit(#"{"type":"agent_start"}"#)
+        try await driver.waitForStreamingForTesting()
+
+        let prompt = Task { try await driver.prompt([.text("steer now")]) }
+        let sent = try await mock.waitForSent(count: 1)
+        #expect((try value(sent[0]))["streamingBehavior"]?.stringValue == "steer")
+        let id = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(id)","type":"response","command":"prompt","success":true}"#)
+        await mock.emit(#"{"type":"agent_settled"}"#)
+        #expect(try await prompt.value == .endTurn)
+    }
+
+    @Test func cancelIsSentBeforeFollowingPromptAndAppliesToActiveRun() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+
+        let initial = Task { try await driver.prompt([.text("start")]) }
+        var sent = try await mock.waitForSent(count: 1)
+        let initialId = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(initialId)","type":"response","command":"prompt","success":true}"#)
+        await mock.emit(#"{"type":"agent_start"}"#)
+        try await driver.waitForStreamingForTesting()
+
+        await driver.cancel()
+        sent = try await mock.waitForSent(count: 2)
+        #expect((try value(sent[1]))["type"]?.stringValue == "abort")
+
+        let steer = Task { try await driver.prompt([.text("change")]) }
+        sent = try await mock.waitForSent(count: 3)
+        #expect((try value(sent[2]))["streamingBehavior"]?.stringValue == "steer")
+        let steerId = try requestId(sent[2])
+        await mock.emit(#"{"id":"\#(steerId)","type":"response","command":"prompt","success":true}"#)
+        await mock.emit(#"{"type":"agent_settled"}"#)
+        #expect(try await initial.value == .cancelled)
+        #expect(try await steer.value == .cancelled)
+    }
+
+    @Test func idleCancellationDoesNotLeakIntoNextSettledRun() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+
+        await driver.cancel()
+        let prompt = Task { try await driver.prompt([.text("fresh run")]) }
+        let sent = try await mock.waitForSent(count: 1)
+        let id = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(id)","type":"response","command":"prompt","success":true}"#)
+        await mock.emit(#"{"type":"agent_settled"}"#)
+        #expect(try await prompt.value == .endTurn)
+    }
+
+    @Test func promptAfterEOFIsRejectedAsDisconnected() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+        await mock.close()
+        try await driver.waitForFinishForTesting()
+
+        do {
+            _ = try await driver.prompt([.text("after eof")])
+            Issue.record("prompt after EOF unexpectedly succeeded")
+        } catch let error as PiRPCDriverError {
+            #expect(error == .disconnected)
+        }
+    }
+
     @Test func ordinaryMidStreamPromptSteersButSlashCommandDoesNot() async throws {
         let mock = MockTransport()
         let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
@@ -246,6 +324,7 @@ private func collect(_ driver: PiRPCDriver, into collector: PiEventCollector)
         try await driver.start()
         await driver.markConnectedForTesting(sessionId: "session")
         await mock.emit(#"{"type":"agent_start"}"#)
+        try await driver.waitForStreamingForTesting()
 
         let ordinary = Task { try await driver.prompt([.text("change direction")]) }
         var sent = try await mock.waitForSent(count: 1)
@@ -256,6 +335,7 @@ private func collect(_ driver: PiRPCDriver, into collector: PiEventCollector)
         _ = try await ordinary.value
 
         await mock.emit(#"{"type":"agent_start"}"#)
+        try await driver.waitForStreamingForTesting()
         let slash = Task { try await driver.prompt([.text("/fix-tests")]) }
         sent = try await mock.waitForSent(count: 2)
         #expect((try value(sent[1]))["streamingBehavior"] == nil)
