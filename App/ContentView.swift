@@ -317,7 +317,13 @@ struct ContentView: View {
                                     )
                                 }
                             case .chat:
-                                if isVisible, let controller = model.chatController(for: tab, in: worktree) {
+                                // A chat that was opened once (controller exists) stays
+                                // mounted like terminal/markdown tabs: remounting on every
+                                // switch rebuilt the whole transcript view and read as a
+                                // visible stall. Never-opened chats still mount only when
+                                // visible, so their agent doesn't start eagerly.
+                                if let controller = model.chatControllers[tab.id]
+                                    ?? (isVisible ? model.chatController(for: tab, in: worktree) : nil) {
                                     ChatPaneView(controller: controller, worktree: worktree,
                                                  appModel: model)
                                 } else if isVisible {
