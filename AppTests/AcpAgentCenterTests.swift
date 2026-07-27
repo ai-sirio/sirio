@@ -24,13 +24,14 @@ struct AcpAgentCenterTests {
 
         await center.refresh(force: true)
 
-        for id in ["claude-acp", "codex-acp", "opencode"] {
+        for id in ["claude-acp", "codex-acp", "opencode", "pi"] {
             #expect(center.statuses[id] == .builtin(available: true))
         }
         #expect(Set(center.rows.map(\.id)).isSuperset(
-            of: ["claude-acp", "codex-acp", "opencode"]))
+            of: ["claude-acp", "codex-acp", "opencode", "pi"]))
         #expect(Set(center.installedAgents.map(\.id)).isSuperset(
-            of: ["claude-acp", "codex-acp", "opencode"]))
+            of: ["claude-acp", "codex-acp", "opencode", "pi"]))
+        #expect(center.displayName(for: "pi") == "Pi")
     }
 
     @Test func missingNativeBinaryShowsRequiresPathHintAndSkipsInstallState() async throws {
@@ -57,6 +58,25 @@ struct AcpAgentCenterTests {
         #expect(center.rows.first(where: { $0.id == "codex-acp" })?.description
                 == "Requires codex on PATH")
         #expect(!center.installedAgents.contains { $0.id == "codex-acp" })
+    }
+
+    @Test func missingPiBinaryShowsRequiresPathHintAndSkipsInstallState() async throws {
+        let store = try tempStore()
+        defer { try? FileManager.default.removeItem(at: store.rootDirectory) }
+
+        let center = makeCenter(
+            store: store,
+            registryJSON: """
+            {"version":"test","agents":[]}
+            """,
+            pathProbe: { $0 != "pi" })
+
+        await center.refresh(force: true)
+
+        #expect(center.statuses["pi"] == .builtin(available: false))
+        #expect(center.rows.first(where: { $0.id == "pi" })?.description
+                == "Requires pi on PATH")
+        #expect(!center.installedAgents.contains { $0.id == "pi" })
     }
 
     @Test func availableNativeBinaryHidesManifestUpdateState() async throws {

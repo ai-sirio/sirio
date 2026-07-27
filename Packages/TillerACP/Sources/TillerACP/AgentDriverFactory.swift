@@ -10,7 +10,7 @@ public enum AgentTransportKind: String, Sendable, Codable {
 public enum AgentDriverFactory {
     public static func transportKind(for agentId: String) -> AgentTransportKind {
         switch AgentIdMigration.canonical(agentId) {
-        case "claude-acp", "codex-acp", "opencode": .native
+        case "claude-acp", "codex-acp", "opencode", "pi": .native
         default: .acp
         }
     }
@@ -23,6 +23,7 @@ public enum AgentDriverFactory {
         case "claude-acp": "claude"
         case "codex-acp": "codex"
         case "opencode": "opencode"
+        case "pi": "pi"
         default: ""
         }
     }
@@ -94,6 +95,14 @@ public enum AgentDriverFactory {
                 cwd: worktreePath, onStderrLine: onStderrLine)
             return OpenCodeHTTPDriver(
                 connection: connection, permissionMode: permissionMode,
+                resumeSessionId: resumeSessionId)
+
+        case "pi":
+            let transport = PiRPCDriver.launchTransport(
+                worktreePath: worktreePath, model: model,
+                resumeSessionId: resumeSessionId, onStderrLine: onStderrLine)
+            return PiRPCDriver(
+                transport: transport, model: model, effort: effort,
                 resumeSessionId: resumeSessionId)
 
         default:

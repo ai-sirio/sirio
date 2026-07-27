@@ -27,8 +27,9 @@ import Testing
         #expect(AgentDriverFactory.transportKind(for: "claude-acp") == .native)
         #expect(AgentDriverFactory.transportKind(for: "codex-acp") == .native)
         #expect(AgentDriverFactory.transportKind(for: "opencode") == .native)
+        #expect(AgentDriverFactory.transportKind(for: "pi") == .native)
+        #expect(AgentDriverFactory.transportKind(for: "pi-acp") == .native)
         #expect(AgentDriverFactory.transportKind(for: "omp") == .acp)
-        #expect(AgentDriverFactory.transportKind(for: "pi-acp") == .acp)
         #expect(AgentDriverFactory.transportKind(for: "gemini") == .acp)
     }
 
@@ -36,6 +37,14 @@ import Testing
         #expect(AgentDriverFactory.nativeBinary(for: "claude-acp") == "claude")
         #expect(AgentDriverFactory.nativeBinary(for: "codex") == "codex")
         #expect(AgentDriverFactory.nativeBinary(for: "opencode") == "opencode")
+        #expect(AgentDriverFactory.nativeBinary(for: "pi") == "pi")
+        #expect(AgentDriverFactory.nativeBinary(for: "pi-acp") == "pi")
+    }
+
+    @Test(arguments: ["pi", "pi-acp"])
+    func piFactoryReturnsNativeDriverWhenCLIIsAvailable(agentId: String) throws {
+        let driver = makeDriver(agentId: agentId, store: try tempStore())
+        #expect(driver is PiRPCDriver)
     }
 
     @Test func claudeFactoryReturnsNativeDriverWhenCLIIsAvailable() throws {
