@@ -47,6 +47,22 @@ import Testing
         }
     }
 
+    @Test func staticEffortOptionsExposesMinimalLowMediumHigh() async throws {
+        let mock = MockTransport()
+        let driver = CodexAppServerDriver(client: ACPClient(transport: mock),
+                                          permissionMode: .ask,
+                                          model: nil, effort: nil,
+                                          resumeConversationId: nil)
+        let options = await driver.staticEffortOptions()
+        #expect(options?.id == "effort")
+        #expect(options?.currentValue == nil)
+        #expect(options?.options?.map(\.value) == ["minimal", "low", "medium", "high"])
+
+        await driver.setEffort("minimal")
+        let updated = await driver.staticEffortOptions()
+        #expect(updated?.currentValue == "minimal")
+    }
+
     @Test func fixtureTurnMapsToOrderedCanonicalUpdates() async throws {
         let mock = MockTransport()
         let driver = CodexAppServerDriver(client: ACPClient(transport: mock),

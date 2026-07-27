@@ -221,6 +221,20 @@ import Testing
         await driver.stop()
     }
 
+    @Test func staticEffortOptionsExposesLowMediumHigh() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let options = await driver.staticEffortOptions()
+        #expect(options?.id == "effort")
+        #expect(options?.currentValue == nil)
+        #expect(options?.options?.map(\.value) == ["low", "medium", "high"])
+
+        await driver.setEffort("high")
+        let updated = await driver.staticEffortOptions()
+        #expect(updated?.currentValue == "high")
+    }
+
     @Test func effortPrefixInjectedIntoPrompt() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,

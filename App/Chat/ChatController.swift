@@ -31,8 +31,13 @@ final class ChatController {
     private(set) var state: ChatState = .idle
     private(set) var modes: SessionModeState?
     private(set) var models: SessionModelState?
-    /// OpenCode-only reasoning-effort select; nil for agents without it.
+    /// Reasoning-effort select; nil for agents without one.
     private(set) var effortOption: SessionConfigOption?
+    /// True when `effortOption` came from `driver.staticEffortOptions()`
+    /// (Claude's prompt prefix, Codex's native field) rather than from the
+    /// agent's own `configOptions` echo (OpenCode) — decides which transport
+    /// `setEffort` uses.
+    private var effortIsStatic = false
     /// True when the agent exposes the model as a `configOptions` select;
     /// drives the `setModel` transport (`set_config_option` vs `set_model`).
     private var hasModelConfigOption = false
@@ -269,7 +274,13 @@ final class ChatController {
             modes = handle.modes
             models = handle.models
             hasModelConfigOption = handle.configOptions.contains { $0.id == "model" }
-            effortOption = handle.configOptions.first { $0.id == "effort" }
+            if let dynamicEffort = handle.configOptions.first(where: { $0.id == "effort" }) {
+                effortOption = dynamicEffort
+                effortIsStatic = false
+            } else {
+                effortOption = await driver?.staticEffortOptions()
+                effortIsStatic = effortOption != nil
+            }
             selectedModel = models?.currentModelId ?? selectedModel
             selectedEffort = effortOption?.currentValue ?? selectedEffort
             didResume = handle.didResume
@@ -468,6 +479,12 @@ final class ChatController {
     func setEffort(_ value: String) async {
         let previous = effortOption?.currentValue
         effortOption?.currentValue = value
+        guard !effortIsStatic else {
+            await driver?.setEffort(value)
+            selectedEffort = value
+            persistSessionSettings()
+            return
+        }
         do {
             if let updated = try await driver?.setConfigOption(
                 id: "effort", value: value) {

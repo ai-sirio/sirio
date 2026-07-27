@@ -162,8 +162,22 @@ public actor CodexAppServerDriver: AgentDriver {
 
     /// Not part of AgentDriver yet, but used by the chat controller's Codex
     /// effort setting and applied to the next turn/start request.
-    public func setEffort(_ effort: String?) {
+    public func setEffort(_ effort: String?) async {
         self.effort = effort
+    }
+
+    /// Codex sends this straight through as the native `effort` turn param;
+    /// values match OpenAI's reasoning_effort enum.
+    private static let effortLevels: [SessionConfigOption.Choice] = [
+        .init(value: "minimal", name: "Minimal"),
+        .init(value: "low", name: "Low"),
+        .init(value: "medium", name: "Medium"),
+        .init(value: "high", name: "High")
+    ]
+
+    public func staticEffortOptions() async -> SessionConfigOption? {
+        SessionConfigOption(id: "effort", name: "Effort",
+                             currentValue: effort, options: Self.effortLevels)
     }
 
     public func setConfigOption(id: String, value: String) async throws
