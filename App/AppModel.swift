@@ -222,7 +222,8 @@ final class AppModel {
         },
         controlTabPersister: ControlTabPersister? = nil,
         defaults: UserDefaults = .standard,
-        foregroundProcessScanner: ForegroundProcessScanner? = nil
+        foregroundProcessScanner: ForegroundProcessScanner? = nil,
+        persistenceCoordinator: PersistenceCoordinator? = nil
     ) {
         self.paneRegistry = paneRegistry
         self.registrationTimeoutMs = registrationTimeoutMs
@@ -230,6 +231,7 @@ final class AppModel {
         self.activateApplication = activateApplication
         self.controlTabPersister = controlTabPersister
         self.defaults = defaults
+        self.persistenceCoordinator = persistenceCoordinator
         self.foregroundProcessScanner = foregroundProcessScanner
             ?? Self.makeForegroundProcessScanner(paneRegistry: paneRegistry)
         let installStore = AgentInstallStore(
@@ -282,6 +284,7 @@ final class AppModel {
 
     private var store: ProjectStore?
     private var database: AppDatabase?
+    private var persistenceCoordinator: PersistenceCoordinator?
     var agentAccounts: AgentAccountStore?
 
     private let sessionRestoreLogger = Logger(subsystem: "dev.tiller", category: "session-restore")
@@ -307,7 +310,30 @@ final class AppModel {
             self.store = store
             self.database = db
             self.agentAccounts = AgentAccountStore(database: db)
-            self.chatStore = ChatSessionStore(database: db)
+            let chatStore = ChatSessionStore(database: db)
+            self.chatStore = chatStore
+            self.persistenceCoordinator = PersistenceCoordinator(
+                transcriptWriter: { sessionId, items in
+                    let sid = SignpostMetrics.makeSignpostID()
+                    let state = SignpostMetrics.beginInterval(
+                        "transcriptPersist", id: sid)
+                    defer {
+                        SignpostMetrics.endInterval(
+                            "transcriptPersist", state,
+                            message: "items: \(items.count)")
+                    }
+                    try chatStore.saveTranscript(sessionId: sessionId, items: items)
+                },
+                scrollbackWriter: { worktreeId, paneId, data in
+                    try db.write { database in
+                        try PaneScrollbackRecord(
+                            paneId: paneId.uuidString,
+                            worktreeId: worktreeId.uuidString,
+                            data: data,
+                            updatedAt: Date()
+                        ).save(database)
+                    }
+                })
             projects = try await store.loadAll()
             let ctl = tillerctlPath()
             for project in projects {
@@ -1294,14 +1320,10 @@ final class AppModel {
 
     // MARK: - Scrollback persistence
 
-    func saveScrollback(worktreeId: UUID, paneId: UUID, data: Data) {
-        guard let database, !data.isEmpty else { return }
-        try? database.write { db in
-            try PaneScrollbackRecord(
-                paneId: paneId.uuidString, worktreeId: worktreeId.uuidString,
-                data: data, updatedAt: Date()
-            ).save(db)
-        }
+    func saveScrollback(worktreeId: UUID, paneId: UUID, data: Data) async {
+        guard !data.isEmpty, let persistenceCoordinator else { return }
+        await persistenceCoordinator.enqueueScrollback(
+            worktreeId: worktreeId, paneId: paneId, data: data)
     }
 
     func loadScrollback(paneId: UUID) -> Data? {
@@ -1316,10 +1338,22 @@ final class AppModel {
     /// snapshot e sono saltati; saveScrollback salta i blob vuoti.
     func flushLiveScrollback() async {
         for target in scrollbackFlushTargets(tabs: tabs) {
-            if let data = await PaneRegistry.shared.snapshot(paneId: target.paneId) {
-                saveScrollback(worktreeId: target.worktreeId, paneId: target.paneId, data: data)
+            if let data = await paneRegistry.snapshot(paneId: target.paneId) {
+                await saveScrollback(
+                    worktreeId: target.worktreeId, paneId: target.paneId, data: data)
             }
         }
+        for controller in chatControllers.values {
+            controller.persist()
+        }
+        await withTaskGroup(of: Void.self) { group in
+            for controller in chatControllers.values {
+                group.addTask {
+                    await controller.drainPendingPersistence()
+                }
+            }
+        }
+        await persistenceCoordinator?.flushAll()
     }
 
     /// Upserts the agent-native session ref for a pane. Fire-and-forget like
@@ -1411,6 +1445,7 @@ final class AppModel {
             tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
             worktreePath: worktree.path, store: chatStore,
             installStore: agentInstallStore,
+            persistenceCoordinator: persistenceCoordinator,
             startNewConversation: startNewConversation)
         controller.onStatusChange = { [weak self] status in
             guard let self else { return }
