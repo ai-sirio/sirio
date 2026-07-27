@@ -246,6 +246,99 @@ struct ChatControllerTests {
         try await Task.sleep(for: .milliseconds(900))
         #expect(persistCount >= 1)
     }
+    @Test func tabCloseFlushesLastTranscript() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = TestPersistenceWriter()
+        let coordinator = PersistenceCoordinator(
+            transcriptWriter: { sessionId, items in
+                try await writer.write(.transcript(sessionId), value: items)
+            },
+            scrollbackWriter: { _, _, _ in },
+            onError: { _, _ in })
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "tab-close"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            persistenceCoordinator: coordinator,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+        await controller.start()
+        driver.emit(.update(.agentMessageChunk(.text("last transcript"))))
+        for _ in 0..<100 where controller.items.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let model = AppModel(activateApplication: {})
+        model.chatControllers[controller.tabId] = controller
+        model.teardownChatController(tabId: controller.tabId)
+        for _ in 0..<100 where await writer.allTranscripts().isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let saved = await writer.allTranscripts().last ?? []
+        #expect(saved.contains {
+            if case .agentMessage(_, let text, _) = $0 {
+                return text == "last transcript"
+            }
+            return false
+        })
+    }
+
+    @Test func quitFlushesLastTranscriptAndScrollback() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let writer = TestPersistenceWriter()
+        let coordinator = PersistenceCoordinator(
+            transcriptWriter: { sessionId, items in
+                try await writer.write(.transcript(sessionId), value: items)
+            },
+            scrollbackWriter: { _, paneId, data in
+                try await writer.write(.scrollback(paneId), value: data)
+            },
+            onError: { _, _ in })
+        let chatTabId = UUID()
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "quit"))
+        let controller = ChatController(
+            tabId: chatTabId, agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            persistenceCoordinator: coordinator,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+        await controller.start()
+        driver.emit(.update(.agentMessageChunk(.text("last transcript"))))
+        for _ in 0..<100 where controller.items.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let paneId = UUID()
+        let data = Data("last scrollback".utf8)
+        let registry = PaneRegistry()
+        let buffer = ScrollbackBuffer()
+        await buffer.append(data)
+        await registry.register(
+            paneId: paneId, pty: PtyProcess { _ in }, scrollback: buffer)
+        let model = AppModel(
+            paneRegistry: registry,
+            activateApplication: {},
+            persistenceCoordinator: coordinator)
+        model.tabs[worktreeId] = [
+            WorkspaceTab(id: chatTabId, title: "Chat", content: .chat(agentId: "claude-acp")),
+            WorkspaceTab(id: UUID(), title: "Terminal 1", tree: .leaf(id: paneId))
+        ]
+        model.chatControllers[chatTabId] = controller
+
+        await model.flushLiveScrollback()
+
+        #expect(await writer.scrollbacks(for: paneId) == [data])
+        let saved = await writer.allTranscripts().last ?? []
+        #expect(saved.contains {
+            if case .agentMessage(_, let text, _) = $0 {
+                return text == "last transcript"
+            }
+            return false
+        })
+    }
 
     @Test func pendingPermissionRendersAboveComposerWhilePromptRemainsOpen() async throws {
         let worktreeId = UUID()

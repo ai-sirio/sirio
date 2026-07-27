@@ -15,6 +15,7 @@
 		0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */; };
 		0C2C39CB89F5865BD49E2AB5 /* AgentsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */; };
 		142E0076C556DA1AF44A1B24 /* ComposerDocumentObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E0B8485FF4CF181492A047 /* ComposerDocumentObservationTests.swift */; };
+		152DA4894A9BF39F083BB014 /* PersistenceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1E1AA34D8ECCA379739EB1 /* PersistenceCoordinator.swift */; };
 		153AF8225BF7E8493C6014ED /* RightPanelFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FECC85A6C80C762EA41F963 /* RightPanelFixture.swift */; };
 		1A0AA30587BDFB6593034A29 /* OllamaCloudUsageFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49151B264C9CB940952FCDAB /* OllamaCloudUsageFetcher.swift */; };
 		1A529420B5030FAC4937506B /* AgentSkillInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B25C0EB88CB059E939346F /* AgentSkillInstaller.swift */; };
@@ -71,6 +72,7 @@
 		70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */; };
 		71D3778396F3D2C1A933DA72 /* SlashCommandSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */; };
 		71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */; };
+		71F6548CDE4DDE996575A40F /* PersistenceCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85CD54B2B351F4452AAAA407 /* PersistenceCoordinatorTests.swift */; };
 		73A38617B2049BD55B5D772B /* SystemPermissionProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04B70914CB8B69AABCCE4C40 /* SystemPermissionProbe.swift */; };
 		76B712FC6C4121A72F3FCA1E /* RightPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7F5ABE295C5749A082FD8FA /* RightPanelView.swift */; };
 		778067675E9E63867EB07193 /* SidebarMaterialContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF0D154EEEE15E023D3BC9A1 /* SidebarMaterialContainer.swift */; };
@@ -231,8 +233,10 @@
 		844693D2B1409A3195820CDE /* RightPanelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelModel.swift; sourceTree = "<group>"; };
 		84F98EF0C9277586AF581624 /* WorktreeRunningAgentsBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeRunningAgentsBadge.swift; sourceTree = "<group>"; };
 		85A5C3AA116AA28E06BD93F9 /* AgentNotifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentNotifier.swift; sourceTree = "<group>"; };
+		85CD54B2B351F4452AAAA407 /* PersistenceCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceCoordinatorTests.swift; sourceTree = "<group>"; };
 		866723990A8B4959A49960C3 /* TillerPersistence */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerPersistence; path = Packages/TillerPersistence; sourceTree = SOURCE_ROOT; };
 		86A6DD70988B7ADCD96FC243 /* TillerGit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerGit; path = Packages/TillerGit; sourceTree = SOURCE_ROOT; };
+		8A1E1AA34D8ECCA379739EB1 /* PersistenceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceCoordinator.swift; sourceTree = "<group>"; };
 		8B09A03733A33C9FDC925A05 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8CA8A3554D0E570418867DE9 /* ComposerChipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerChipTests.swift; sourceTree = "<group>"; };
 		8DB60BAAD4CE10123E09FB38 /* AutoNamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoNamer.swift; sourceTree = "<group>"; };
@@ -481,6 +485,7 @@
 				9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */,
 				49151B264C9CB940952FCDAB /* OllamaCloudUsageFetcher.swift */,
 				089712CC679CF6D60EAEF02A /* OpenCodeGoUsageFetcher.swift */,
+				8A1E1AA34D8ECCA379739EB1 /* PersistenceCoordinator.swift */,
 				DD759862FB54F692A6E17229 /* ProcessScanCoordinator.swift */,
 				6FA9BFA1A8C9B14562E393FD /* ProjectSettingsSheet.swift */,
 				BE99F2EBC89020C876AA77E7 /* RunningDots.swift */,
@@ -541,6 +546,7 @@
 				C586A88693846D775479C9BB /* ForegroundProcessTreeTests.swift */,
 				ECA70E0E64ED452E4CB5A0B2 /* MarkdownAttributedStringRendererTests.swift */,
 				67737A516872D92DD67ADE11 /* OpenChatTabTests.swift */,
+				85CD54B2B351F4452AAAA407 /* PersistenceCoordinatorTests.swift */,
 				91615B6A3402CA154DD6DD53 /* ProcessScanCoordinatorTests.swift */,
 				F26842C9CF6C1B7558321445 /* RightPanelDirectoryStatusTests.swift */,
 				E7C527C8AC93385A92EB8002 /* SlashCommandSelectionTests.swift */,
@@ -778,6 +784,7 @@
 				AFF7D6FE7AB16BB4581029ED /* PendingQuestionBar.swift in Sources */,
 				614368A068530D558CDE3D41 /* PermissionsOnboardingSheet.swift in Sources */,
 				CE3124078D172C6FAFAD4631 /* PermissionsSettingsView.swift in Sources */,
+				152DA4894A9BF39F083BB014 /* PersistenceCoordinator.swift in Sources */,
 				31A47B2EC680554D9708A54C /* PlanCardView.swift in Sources */,
 				A38D9E0C45032CF55CA50406 /* ProcessScanCoordinator.swift in Sources */,
 				5E1080487320188F215B9A4B /* ProjectSettingsSheet.swift in Sources */,
@@ -842,6 +849,7 @@
 				22F552DB348684BE2F046E6B /* ForegroundProcessTreeTests.swift in Sources */,
 				5057E70080B555E2390F80E1 /* MarkdownAttributedStringRendererTests.swift in Sources */,
 				AE217E1957BB981E22D78418 /* OpenChatTabTests.swift in Sources */,
+				71F6548CDE4DDE996575A40F /* PersistenceCoordinatorTests.swift in Sources */,
 				56F6326918B120798BBFB105 /* Phase1FixtureTests.swift in Sources */,
 				2A10CA3A51372EFDB2BAD131 /* ProcessScanCoordinatorTests.swift in Sources */,
 				1B814263398A7E565A93EBFB /* RightPanelDirectoryStatusTests.swift in Sources */,
