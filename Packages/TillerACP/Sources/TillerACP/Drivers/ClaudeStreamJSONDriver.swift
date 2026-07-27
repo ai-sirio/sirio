@@ -179,8 +179,21 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         guard isSuccessful(response) else { throw requestError(from: response) }
     }
 
-    public func setEffort(_ effort: String?) {
+    public func setEffort(_ effort: String?) async {
         self.effort = effort
+    }
+
+    /// Claude has no native effort concept; these levels only ever surface
+    /// as the `effortPrefix` string prepended to the next prompt.
+    private static let effortLevels: [SessionConfigOption.Choice] = [
+        .init(value: "low", name: "Low"),
+        .init(value: "medium", name: "Medium"),
+        .init(value: "high", name: "High")
+    ]
+
+    public func staticEffortOptions() async -> SessionConfigOption? {
+        SessionConfigOption(id: "effort", name: "Effort",
+                             currentValue: effort, options: Self.effortLevels)
     }
 
     public func setConfigOption(id: String, value: String) async throws
