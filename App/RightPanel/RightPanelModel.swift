@@ -11,6 +11,58 @@ struct FileExplorerRow: Identifiable, Equatable {
     var id: String { node.id }
 }
 
+struct AdaptiveDebounce: Sendable {
+    static let baseDelay = Duration.milliseconds(250)
+    static let maximumDelay = Duration.seconds(1)
+    private static let burstWindow: TimeInterval = 0.5
+
+    private let clock: @Sendable () -> Date
+    private var lastEventAt: Date?
+    private(set) var currentDelay = Self.baseDelay
+
+    init(clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.clock = clock
+    }
+
+    mutating func recordEvent() -> Duration {
+        let now = clock()
+        if let lastEventAt,
+           now.timeIntervalSince(lastEventAt) <= Self.burstWindow {
+            currentDelay = min(currentDelay + .milliseconds(250), Self.maximumDelay)
+        } else {
+            currentDelay = Self.baseDelay
+        }
+        self.lastEventAt = now
+        return currentDelay
+    }
+
+    mutating func reset() {
+        lastEventAt = nil
+        currentDelay = Self.baseDelay
+    }
+}
+
+struct RightPanelLoaders: Sendable {
+    typealias DirectoryLoader = @Sendable (String, URL) async throws -> [FileTreeNode]
+    typealias StatusLoader = @Sendable (String) async throws -> GitStatusSnapshot
+    typealias DiffLoader = @Sendable (GitStatusEntry, String) async throws -> GitFileDiff
+
+    let directory: DirectoryLoader
+    let status: StatusLoader
+    let diff: DiffLoader
+
+    static let live = Self(
+        directory: { key, rootURL in
+            try FileTreeLoader.children(at: key, rootURL: rootURL)
+        },
+        status: { path in
+            try await GitStatus.load(in: path)
+        },
+        diff: { entry, path in
+            try await GitDiff.load(entry: entry, in: path)
+        })
+}
+
 @MainActor @Observable
 final class RightPanelModel {
     private(set) var worktree: Worktree?
@@ -31,6 +83,21 @@ final class RightPanelModel {
     var gitError: String?
     var diffError: String?
     var monitorError: String?
+
+    private let loaders: RightPanelLoaders
+    private let monitoringEnabled: Bool
+    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshInFlight = false
+    @ObservationIgnored private var pendingForceAllLoadedDirectories = false
+    @ObservationIgnored private var adaptiveDebounce = AdaptiveDebounce()
+
+    init(
+        loaders: RightPanelLoaders = .live,
+        monitoringEnabled: Bool = true
+    ) {
+        self.loaders = loaders
+        self.monitoringEnabled = monitoringEnabled
+    }
 
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var monitor: FileSystemEventMonitor?
@@ -76,6 +143,11 @@ final class RightPanelModel {
         monitorTask = nil
         debounceTask?.cancel()
         debounceTask = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshInFlight = false
+        pendingForceAllLoadedDirectories = false
+        adaptiveDebounce.reset()
         monitor?.stop()
         monitor = nil
         pendingPaths.removeAll()
@@ -109,22 +181,44 @@ extension RightPanelModel {
         withAnimation(.easeOut(duration: 0.18)) {
             expandedDirectories.insert(path)
         }
-        if childrenByDirectory[path] == nil { await loadDirectory(path, token: generation) }
+        if childrenByDirectory[path] == nil {
+            await loadDirectory(path, token: generation)
+        }
     }
 
     func refresh() async {
-        await refresh(changedPaths: [], token: generation, forceAllLoadedDirectories: true)
+        let token = generation
+        let task = startRefresh(
+            changedPaths: [], token: token, forceAllLoadedDirectories: true)
+        await task?.value
+        guard token == generation else { return }
+    }
+
+    func refresh(
+        changedPaths: [String], forceAllLoadedDirectories: Bool
+    ) async {
+        let token = generation
+        let task = startRefresh(
+            changedPaths: changedPaths,
+            token: token,
+            forceAllLoadedDirectories: forceAllLoadedDirectories)
+        await task?.value
+        guard token == generation else { return }
     }
 
     private func loadInitial(token: Int) async {
         guard let rootURL, let worktree else { return }
         filesLoading = true
         gitLoading = isGitRepository
+        let directoryLoader = loaders.directory
+        let statusLoader = loaders.status
+        let repositoryPath = worktree.path
+        let shouldLoadStatus = isGitRepository
         let fileTask = Task.detached(priority: .userInitiated) {
-            try FileTreeLoader.children(at: "", rootURL: rootURL)
+            try await directoryLoader("", rootURL)
         }
         let statusTask = Task {
-            isGitRepository ? try await GitStatus.load(in: worktree.path) : .empty
+            shouldLoadStatus ? try await statusLoader(repositoryPath) : .empty
         }
 
         do {
@@ -150,23 +244,63 @@ extension RightPanelModel {
         gitLoading = false
     }
 
+    private struct DirectoryLoadResult: Sendable {
+        let key: String
+        let nodes: [FileTreeNode]?
+        let error: String?
+    }
+
     private func loadDirectory(_ key: String, token: Int) async {
         guard let rootURL else { return }
-        do {
-            let nodes = try await Task.detached(priority: .userInitiated) {
-                try FileTreeLoader.children(at: key, rootURL: rootURL)
-            }.value
-            guard token == generation else { return }
-            childrenByDirectory[key] = nodes
-            directoryErrors[key] = nil
-        } catch {
-            guard token == generation else { return }
-            directoryErrors[key] = error.localizedDescription
+        await loadDirectories([key], rootURL: rootURL, token: token)
+    }
+
+    private func loadDirectories(
+        _ keys: [String], rootURL: URL, token: Int
+    ) async {
+        let directoryLoader = loaders.directory
+        let results = await withTaskGroup(of: DirectoryLoadResult.self) { group in
+            for key in keys {
+                group.addTask {
+                    await Task.detached(priority: .userInitiated) {
+                        do {
+                            return DirectoryLoadResult(
+                                key: key,
+                                nodes: try await directoryLoader(key, rootURL),
+                                error: nil)
+                        } catch {
+                            return DirectoryLoadResult(
+                                key: key,
+                                nodes: nil,
+                                error: error.localizedDescription)
+                        }
+                    }.value
+                }
+            }
+            var results: [DirectoryLoadResult] = []
+            while let result = await group.next() {
+                results.append(result)
+            }
+            return results
         }
+        guard token == generation else { return }
+
+        var nextChildren = childrenByDirectory
+        var nextErrors = directoryErrors
+        for result in results {
+            if let nodes = result.nodes {
+                nextChildren[result.key] = nodes
+                nextErrors[result.key] = nil
+            } else {
+                nextErrors[result.key] = result.error
+            }
+        }
+        childrenByDirectory = nextChildren
+        directoryErrors = nextErrors
     }
 
     private func startMonitor(token: Int) async {
-        guard let rootURL, let worktree else { return }
+        guard monitoringEnabled, let rootURL, let worktree else { return }
         monitorError = nil
         var roots = [rootURL]
         if isGitRepository {
@@ -190,20 +324,91 @@ extension RightPanelModel {
         }
     }
 
+    func scheduleRefresh(paths: [String]) {
+        scheduleRefresh(paths: paths, token: generation)
+    }
+
     private func scheduleRefresh(paths: [String], token: Int) {
         guard token == generation else { return }
         pendingPaths.formUnion(paths)
+        let delay = adaptiveDebounce.recordEvent()
         debounceTask?.cancel()
+        guard !refreshInFlight else { return }
         debounceTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(250))
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
             guard !Task.isCancelled, let self, token == self.generation else { return }
-            let paths = Array(self.pendingPaths)
-            self.pendingPaths.removeAll()
-            await self.refresh(changedPaths: paths, token: token, forceAllLoadedDirectories: false)
+            self.debounceTask = nil
+            self.startPendingRefresh(token: token)
         }
     }
 
-    private func refresh(
+    private func startPendingRefresh(token: Int) {
+        guard token == generation, !refreshInFlight else { return }
+        guard !pendingPaths.isEmpty || pendingForceAllLoadedDirectories else { return }
+        let paths = Array(pendingPaths)
+        let forceAllLoadedDirectories = pendingForceAllLoadedDirectories
+        pendingPaths.removeAll()
+        pendingForceAllLoadedDirectories = false
+        _ = startRefresh(
+            changedPaths: paths,
+            token: token,
+            forceAllLoadedDirectories: forceAllLoadedDirectories)
+    }
+
+    private func startRefresh(
+        changedPaths: [String], token: Int, forceAllLoadedDirectories: Bool
+    ) -> Task<Void, Never>? {
+        guard token == generation else { return nil }
+        guard !refreshInFlight else {
+            pendingPaths.formUnion(changedPaths)
+            pendingForceAllLoadedDirectories =
+                pendingForceAllLoadedDirectories || forceAllLoadedDirectories
+            return nil
+        }
+        refreshInFlight = true
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefresh(
+                changedPaths: changedPaths,
+                token: token,
+                forceAllLoadedDirectories: forceAllLoadedDirectories)
+            await self.finishRefresh(token: token)
+        }
+        refreshTask = task
+        return task
+    }
+
+    private func finishRefresh(token: Int) {
+        guard token == generation else { return }
+        refreshInFlight = false
+        refreshTask = nil
+        if !pendingPaths.isEmpty || pendingForceAllLoadedDirectories {
+            scheduleFollowUpRefresh(token: token)
+        } else {
+            adaptiveDebounce.reset()
+        }
+    }
+
+    private func scheduleFollowUpRefresh(token: Int) {
+        debounceTask?.cancel()
+        let delay = adaptiveDebounce.currentDelay
+        debounceTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self, token == self.generation else { return }
+            self.debounceTask = nil
+            self.startPendingRefresh(token: token)
+        }
+    }
+
+    private func performRefresh(
         changedPaths: [String], token: Int, forceAllLoadedDirectories: Bool
     ) async {
         let sid = SignpostMetrics.makeSignpostID()
@@ -213,6 +418,8 @@ extension RightPanelModel {
                 "panelRefresh", state, message: "paths: \(changedPaths.count)")
         }
         guard token == generation, let rootURL, let worktree else { return }
+        let selectedPathBefore = selectedDiffPath
+        let selectedEntryBefore = selectedEntry
         let loadedKeys = childrenByDirectory.keys.filter { key in
             if forceAllLoadedDirectories || changedPaths.isEmpty { return true }
             let directory = key.isEmpty ? rootURL.path : rootURL.appendingPathComponent(key).path
@@ -220,18 +427,41 @@ extension RightPanelModel {
                 changed == directory || changed.hasPrefix(directory + "/")
                     || directory.hasPrefix(changed + "/")
             }
-        }
-        for key in loadedKeys { await loadDirectory(key, token: token) }
-        guard token == generation, isGitRepository else { return }
+        }.sorted()
+        await loadDirectories(loadedKeys, rootURL: rootURL, token: token)
+        guard token == generation else { return }
+        guard isGitRepository else { return }
         do {
-            let snapshot = try await GitStatus.load(in: worktree.path)
+            let snapshot = try await loaders.status(worktree.path)
             guard token == generation else { return }
             apply(snapshot)
             gitError = nil
-            if let selected = selectedEntry, diff != nil { await loadDiff(selected) }
+            guard token == generation else { return }
+            let selectedChanged = selectedPathBefore != selectedDiffPath
+                || selectedEntryBefore != selectedEntry
+            let selectedAffected = selectedEntry.map {
+                changedPathsAffecting($0.path, changedPaths: changedPaths, rootURL: rootURL)
+            } ?? false
+            if selectedChanged || selectedAffected, let selectedEntry {
+                await loadDiff(selectedEntry)
+                guard token == generation else { return }
+            }
         } catch {
             guard token == generation else { return }
             gitError = error.localizedDescription
+        }
+    }
+
+    private func changedPathsAffecting(
+        _ path: GitPath, changedPaths: [String], rootURL: URL
+    ) -> Bool {
+        let selectedPath = rootURL.appendingPathComponent(path.value).path
+        return changedPaths.contains { changed in
+            let changedPath = changed.hasPrefix("/")
+                ? URL(fileURLWithPath: changed).standardizedFileURL.path
+                : rootURL.appendingPathComponent(changed).standardizedFileURL.path
+            return selectedPath == changedPath
+                || selectedPath.hasPrefix(changedPath + "/")
         }
     }
 }
@@ -291,10 +521,11 @@ extension RightPanelModel {
     private func loadDiff(_ entry: GitStatusEntry) async {
         guard let worktree else { return }
         let token = generation
+        let diffLoader = loaders.diff
         diffLoading = true
         defer { if token == generation { diffLoading = false } }
         do {
-            let loaded = try await GitDiff.load(entry: entry, in: worktree.path)
+            let loaded = try await diffLoader(entry, worktree.path)
             guard token == generation, selectedDiffPath == entry.path else { return }
             diff = loaded
             diffError = nil
@@ -314,12 +545,10 @@ extension RightPanelModel {
         do {
             try await operation(worktree.path)
             gitError = nil
-            await refresh(changedPaths: [], token: generation,
-                          forceAllLoadedDirectories: true)
+            await refresh(changedPaths: [], forceAllLoadedDirectories: true)
         } catch {
             gitError = error.localizedDescription
-            await refresh(changedPaths: [], token: generation,
-                          forceAllLoadedDirectories: true)
+            await refresh(changedPaths: [], forceAllLoadedDirectories: true)
         }
     }
 }
