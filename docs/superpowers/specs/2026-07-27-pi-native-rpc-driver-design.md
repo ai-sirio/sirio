@@ -118,7 +118,7 @@ plain `prompt` during streaming), matching the other drivers' mid-turn behaviour
 | Pi request | Canonical emission | `answerPermission` reply |
 | --- | --- | --- |
 | `select` (title, options, timeout?) | `.permissionRequested` with one option per choice | `extension_ui_response { id, value: <chosen option> }` or `{ cancelled: true }` |
-| `confirm` (title, message) | `.permissionRequested` with Yes/No options | `{ id, value: "Yes" | "No" }` |
+| `confirm` (title, message) | `.permissionRequested` with Yes/No options | `{ id, confirmed: true | false }` |
 | `input` (title, placeholder) | question card with free-text answer | `{ id, value: <text> }` |
 
 `supportsStructuredAnswers = true`. A `turnEnded` arriving before an answer expires
@@ -142,8 +142,11 @@ server-side; the client tracks no timeouts.
 - After connect, `get_state` yields the session ref → `SessionHandle.sessionId`;
   `ChatSessionStore` stores it in `acpSessionId` as for other agents.
 - Resume: `connect(cwd:, resumeSessionId:)` launches `pi --mode rpc --session <ref>`
-  and returns `didResume: true`; the visible transcript reloads from Tiller's DB
-  (`saveTranscript`/`loadTranscript`).
+  (`--session <path|id>` accepts a session file path or partial UUID) and returns
+  `didResume: true`; the visible transcript reloads from Tiller's DB
+  (`saveTranscript`/`loadTranscript`). The `--session` + `--mode rpc` combination
+  is verified empirically in the first implementation task; fallback is the
+  `switch_session` RPC command right after start.
 
 ### Slash commands
 
