@@ -15,26 +15,30 @@ struct ProcessScanCoordinator {
     }
 
     private var states: [UUID: PaneState] = [:]
-    private var closedPanes: Set<UUID> = []
+    private var nextGeneration = 0
+    var trackedPaneCount: Int { states.count }
 
     mutating func requestScan(paneId: UUID) -> Decision {
-        guard !closedPanes.contains(paneId) else { return .ignore }
-
         if var state = states[paneId] {
             guard state.inFlightGeneration != nil else {
-                state.generation += 1
-                state.inFlightGeneration = state.generation
+                nextGeneration += 1
+                state.generation = nextGeneration
+                state.inFlightGeneration = nextGeneration
                 states[paneId] = state
-                return .start(generation: state.generation)
+                return .start(generation: nextGeneration)
             }
             state.hasPendingFollowUp = true
             states[paneId] = state
             return .coalesce
         }
 
-        let state = PaneState(generation: 1, inFlightGeneration: 1)
+        nextGeneration += 1
+        let state = PaneState(
+            generation: nextGeneration,
+            inFlightGeneration: nextGeneration
+        )
         states[paneId] = state
-        return .start(generation: 1)
+        return .start(generation: nextGeneration)
     }
 
     /// Finishes the current generation. The caller starts the next generation
@@ -56,11 +60,10 @@ struct ProcessScanCoordinator {
 
     mutating func paneClosed(paneId: UUID) {
         states[paneId] = nil
-        closedPanes.insert(paneId)
     }
 
     func isResultStale(paneId: UUID, generation: Int) -> Bool {
-        guard !closedPanes.contains(paneId), let state = states[paneId] else {
+        guard let state = states[paneId] else {
             return true
         }
         return generation != state.generation
