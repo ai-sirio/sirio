@@ -23,6 +23,12 @@ struct ContentView: View {
     private var rightPanelVisible = AppSettings.defaultRightPanelVisible
     @AppStorage(AppSettings.rightPanelWidthKey)
     private var rightPanelWidth = AppSettings.defaultRightPanelWidth
+    /// Live panel width driving the divider-cover overlay. The persisted
+    /// value follows debounced: writing @AppStorage per geometry tick (every
+    /// animation frame / divider-drag event) spammed UserDefaults and
+    /// re-invalidated every @AppStorage reader in the window mid-animation.
+    @State private var liveRightPanelWidth = CGFloat(AppSettings.defaultRightPanelWidth)
+    @State private var persistRightPanelWidthTask: Task<Void, Never>?
     @AppStorage(AppSettings.rightPanelModeKey)
     private var rightPanelModeRaw = RightPanelMode.files.rawValue
     @State private var rightPanelModel = RightPanelModel()
@@ -210,7 +216,14 @@ struct ContentView: View {
                     maxWidth: CGFloat(AppSettings.rightPanelWidthRange.upperBound),
                     maxHeight: .infinity)
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                    rightPanelWidth = AppSettings.clampRightPanelWidth(Double(width))
+                    let clamped = AppSettings.clampRightPanelWidth(Double(width))
+                    liveRightPanelWidth = CGFloat(clamped)
+                    persistRightPanelWidthTask?.cancel()
+                    persistRightPanelWidthTask = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        guard !Task.isCancelled else { return }
+                        rightPanelWidth = clamped
+                    }
                 }
             }
         }
@@ -229,7 +242,7 @@ struct ContentView: View {
             if rightPanelVisible {
                 SidebarMaterialContainer()
                     .frame(width: 2)
-                    .offset(x: -CGFloat(rightPanelWidth))
+                    .offset(x: -liveRightPanelWidth)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
             }
