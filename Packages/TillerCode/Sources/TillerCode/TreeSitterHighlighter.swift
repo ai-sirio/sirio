@@ -63,6 +63,11 @@ public enum TreeSitterHighlighter {
         }
     }
 
+    /// CodeEditLanguages 0.1.20 appends `Resources` to `Bundle.module.resourceURL`,
+    /// which SwiftPM already resolves to the Resources directory. The resulting
+    /// `/Resources/Resources/` makes `TreeSitterModel.shared.query(for:)` nil for every language.
+    /// Repair only that segment via public `CodeLanguage.queryURL` and
+    /// `SwiftTreeSitter.Query(language:url:)`; failures stay silent. Delete once fixed upstream.
     private static func fallbackQuery(
         for language: TillerCodeLanguage,
         parserLanguage: Language
