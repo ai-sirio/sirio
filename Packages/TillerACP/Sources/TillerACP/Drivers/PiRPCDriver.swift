@@ -348,7 +348,7 @@ private extension PiRPCDriver {
         guard let id = fields["toolCallId"]?.stringValue else { return }
         let content = textBlocks(fields["partialResult"]).map { ToolCallContent.content(.text($0)) }
         eventContinuation.yield(.update(.toolCallUpdate(ToolCallUpdate(
-            toolCallId: id, status: .completed, content: content))))
+            toolCallId: id, content: content))))
     }
 
     func handleToolEnd(_ fields: [String: JSONValue]) {

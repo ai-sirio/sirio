@@ -474,12 +474,13 @@ extension PiDriverTests {
             try await Task.sleep(for: .milliseconds(1))
         }
 
-        let contents = (await collector.values).compactMap { event -> [ToolCallContent]? in
+        let updates = (await collector.values).compactMap { event -> ToolCallUpdate? in
             guard case .update(.toolCallUpdate(let update)) = event else { return nil }
-            return update.content
+            return update
         }
-        #expect(contents == [[.content(.text("one"))],
-                             [.content(.text("one two"))]])
+        #expect(updates.map(\.content) == [[.content(.text("one"))],
+                                           [.content(.text("one two"))]])
+        #expect(updates.allSatisfy { $0.status != .completed })
         collecting.cancel()
     }
 
