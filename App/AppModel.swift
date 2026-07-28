@@ -24,6 +24,9 @@ final class AppModel {
     /// Progetti espansi (non persistito).
     var expandedProjectIds: Set<UUID> = []
 
+    /// Riga attualmente trascinata, per il riordino con anteprima dal vivo.
+    var draggingRow: DraggedRow?
+
     var selectedWorktree: Worktree? {
         didSet {
             let sid = SignpostMetrics.makeSignpostID()
@@ -1062,11 +1065,92 @@ final class AppModel {
     /// & drop di tab bar e sidebar; l'ordine persiste nello snapshot già
     /// serializzato da persistTabs.
     func moveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) {
-        guard let list = tabs[worktreeId] else { return }
-        let moved = TabOrdering.moving(list, id: tabId, before: targetId)
-        guard moved.map(\.id) != list.map(\.id) else { return }
-        tabs[worktreeId] = moved
+        guard previewMoveTab(tabId, before: targetId, in: worktreeId) else { return }
         persistTabs(for: worktreeId)
+    }
+
+    /// Applies the reorder to the live list without persisting, so the rows
+    /// can shift under the pointer while the drag is still in flight.
+    /// Returns whether the order actually changed.
+    @discardableResult
+    func previewMoveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) -> Bool {
+        guard let list = tabs[worktreeId] else { return false }
+        let moved = TabOrdering.moving(list, id: tabId, before: targetId)
+        guard moved.map(\.id) != list.map(\.id) else { return false }
+        tabs[worktreeId] = moved
+        return true
+    }
+
+    /// Reorders a project in the sidebar and persists the new manual order.
+    @discardableResult
+    func previewMoveProject(_ projectId: UUID, before targetId: UUID?) -> Bool {
+        let moved = ManualOrder.moving(projects, id: projectId, before: targetId)
+        guard moved.map(\.id) != projects.map(\.id) else { return false }
+        projects = moved
+        return true
+    }
+
+    func persistProjectOrder() {
+        guard let store else { return }
+        let order = projects.map(\.id)
+        Task { try? await store.saveProjectOrder(order) }
+    }
+
+    /// Reorders a worktree inside its project. The stored array is the manual
+    /// order; the sidebar floats urgent rows on top of it at render time.
+    @discardableResult
+    func previewMoveWorktree(_ worktreeId: UUID, before targetId: UUID?, in projectId: UUID) -> Bool {
+        guard let list = worktrees[projectId] else { return false }
+        let moved = ManualOrder.moving(list, id: worktreeId, before: targetId)
+        guard moved.map(\.id) != list.map(\.id) else { return false }
+        worktrees[projectId] = moved
+        return true
+    }
+
+    /// Hover during a drag: moves the dragged row before `targetId` in the
+    /// live model, so the list under the pointer already shows the outcome.
+    /// A drag from another list (or onto itself) is ignored.
+    func previewDrag(before targetId: UUID, in scope: ReorderScope) {
+        guard let dragged = draggingRow, dragged.scope == scope, dragged.id != targetId else { return }
+        switch scope {
+        case .projects:
+            previewMoveProject(dragged.id, before: targetId)
+        case .worktrees(let projectId):
+            previewMoveWorktree(dragged.id, before: targetId, in: projectId)
+        case .tabs(let worktreeId):
+            previewMoveTab(dragged.id, before: targetId, in: worktreeId)
+        }
+    }
+
+    /// Hover past the last row of a list (the empty space in the tab bar):
+    /// the dragged row previews at the end.
+    func previewDragToEnd(in scope: ReorderScope) {
+        guard let dragged = draggingRow, dragged.scope == scope else { return }
+        switch scope {
+        case .projects:
+            previewMoveProject(dragged.id, before: nil)
+        case .worktrees(let projectId):
+            previewMoveWorktree(dragged.id, before: nil, in: projectId)
+        case .tabs(let worktreeId):
+            previewMoveTab(dragged.id, before: nil, in: worktreeId)
+        }
+    }
+
+    /// Drop: the order is already applied, so this only writes it down.
+    func endRowDrag() {
+        defer { draggingRow = nil }
+        guard let dragged = draggingRow else { return }
+        switch dragged.scope {
+        case .projects: persistProjectOrder()
+        case .worktrees(let projectId): persistWorktreeOrder(for: projectId)
+        case .tabs(let worktreeId): persistTabs(for: worktreeId)
+        }
+    }
+
+    func persistWorktreeOrder(for projectId: UUID) {
+        guard let store else { return }
+        let order = (worktrees[projectId] ?? []).map(\.id)
+        Task { try? await store.saveWorktreeOrder(projectId: projectId, order: order) }
     }
     /// Chiude tutte le tab del worktree tranne quella indicata. Passa dal
     /// percorso closeTab singolo: le conferme markdown-dirty appaiono una

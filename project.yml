@@ -78,11 +78,11 @@ targets:
         SUEnableAutomaticChecks: true
         SUScheduledCheckInterval: 86400
         SUAutomaticallyUpdate: false
-        # UTType(exportedAs:) in TabDragPayload.swift only resolves if the type
-        # is declared here — an undeclared UTI makes every tab drop bounce.
+        # UTType(exportedAs:) in RowReorder.swift only resolves if the type is
+        # declared here — an undeclared UTI makes every row drop bounce.
         UTExportedTypeDeclarations:
-          - UTTypeIdentifier: it.tiller.tab-drag
-            UTTypeDescription: Tiller Tab
+          - UTTypeIdentifier: it.tiller.row-drag
+            UTTypeDescription: Tiller Row
             UTTypeConformsTo:
               - public.data
             UTTypeTagSpecification: {}

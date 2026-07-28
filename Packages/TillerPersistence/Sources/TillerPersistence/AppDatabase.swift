@@ -168,6 +168,19 @@ public final class AppDatabase: Sendable {
                 WHERE agentId IN ('claude-acp', 'codex-acp', 'opencode', 'claude', 'codex')
                 """)
         }
+        migrator.registerMigration("v14") { db in
+            // Manual sidebar order for projects and worktrees. Backfilled from
+            // rowid so every existing row keeps the order the user sees today
+            // instead of collapsing into an arbitrary tie at 0.
+            try db.alter(table: "project") { t in
+                t.add(column: "orderIdx", .integer).notNull().defaults(to: 0)
+            }
+            try db.alter(table: "worktree") { t in
+                t.add(column: "orderIdx", .integer).notNull().defaults(to: 0)
+            }
+            try db.execute(sql: "UPDATE project SET orderIdx = rowid")
+            try db.execute(sql: "UPDATE worktree SET orderIdx = rowid")
+        }
         return migrator
     }
 }

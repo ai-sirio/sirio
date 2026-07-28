@@ -50,6 +50,43 @@ import GRDB
     }
 }
 
+/// v14 backfills the manual sidebar order from rowid, so rows that predate the
+/// feature keep the order the user already sees instead of tying at 0 and
+/// coming back in whatever order SQLite happens to pick.
+@Test func v14BackfillsManualOrderFromInsertionOrder() throws {
+    // Arrange: three projects and two worktrees inserted before v14 exists.
+    let queue = try DatabaseQueue()
+    try AppDatabase.migrator.migrate(queue, upTo: "v13")
+    try queue.write { db in
+        for (id, name) in [("p1", "first"), ("p2", "second"), ("p3", "third")] {
+            try db.execute(sql: """
+                INSERT INTO project (id, name, rootPath, createdAt)
+                VALUES (?, ?, '/tmp/test', '2026-07-07 12:00:00')
+                """, arguments: [id, name])
+        }
+        for (id, branch) in [("w1", "main"), ("w2", "feat")] {
+            try db.execute(sql: """
+                INSERT INTO worktree (id, projectId, branch, path, createdAt)
+                VALUES (?, 'p1', ?, '/tmp/test/src', '2026-07-07 12:00:00')
+                """, arguments: [id, branch])
+        }
+    }
+
+    // Act
+    try AppDatabase.migrator.migrate(queue, upTo: "v14")
+
+    // Assert: distinct, strictly increasing indices in insertion order.
+    try queue.read { db in
+        let projectIds = try String.fetchAll(db, sql: "SELECT id FROM project ORDER BY orderIdx")
+        #expect(projectIds == ["p1", "p2", "p3"])
+        let indices = try Int.fetchAll(db, sql: "SELECT orderIdx FROM project ORDER BY orderIdx")
+        #expect(Set(indices).count == indices.count)
+
+        let worktreeIds = try String.fetchAll(db, sql: "SELECT id FROM worktree ORDER BY orderIdx")
+        #expect(worktreeIds == ["w1", "w2"])
+    }
+}
+
 /// The migrator must apply all migrations in registration order so that a
 /// database created today can be migrated from any intermediate version.
 @Test func migrationsAreOrderedAndComplete() throws {
@@ -59,7 +96,7 @@ import GRDB
     let identifiers = try queue.read { db in
         try AppDatabase.migrator.appliedMigrations(db)
     }
-    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13"])
+    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14"])
 }
 
 /// Applying migrations one at a time (stepwise) must produce the same final
@@ -81,6 +118,7 @@ import GRDB
     try AppDatabase.migrator.migrate(queueA, upTo: "v11")
     try AppDatabase.migrator.migrate(queueA, upTo: "v12")
     try AppDatabase.migrator.migrate(queueA, upTo: "v13")
+    try AppDatabase.migrator.migrate(queueA, upTo: "v14")
 
     // Queue B: direct to head
     let queueB = try DatabaseQueue()

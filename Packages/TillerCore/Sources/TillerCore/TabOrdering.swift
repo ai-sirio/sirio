@@ -8,20 +8,7 @@ public enum TabOrdering {
     public static func moving(
         _ list: [WorkspaceTab], id: UUID, before targetId: UUID?
     ) -> [WorkspaceTab] {
-        guard id != targetId,
-              let sourceIndex = list.firstIndex(where: { $0.id == id })
-        else { return list }
-        if let targetId, !list.contains(where: { $0.id == targetId }) { return list }
-        var result = list
-        let tab = result.remove(at: sourceIndex)
-        // Il target va ricercato dopo la rimozione: se la sorgente stava
-        // prima del target, l'indice del target è slittato di uno.
-        if let targetId, let targetIndex = result.firstIndex(where: { $0.id == targetId }) {
-            result.insert(tab, at: targetIndex)
-        } else {
-            result.append(tab)
-        }
-        return result
+        ManualOrder.moving(list, id: id, before: targetId)
     }
 
     /// Indice successivo/precedente con wrap-around; `current == nil` parte
