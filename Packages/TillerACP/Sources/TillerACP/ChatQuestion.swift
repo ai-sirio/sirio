@@ -36,12 +36,22 @@ public struct ChatQuestion: Sendable, Equatable {
     public var options: [Option]
     public var textInput: TextInput?
     public var chosenOptionId: String?
+    /// Built from a structured `AskUserQuestion`-shaped input rather than a raw
+    /// permission gate, so the chosen option can be sent back as a value the
+    /// agent understands. Do not infer this from `prompt` being non-empty —
+    /// Pi's `ui/select` repeats its header there and the prompt is dropped.
+    public var isStructured: Bool = false
     /// The turn ended before anyone answered — the reducer cancels pending
     /// permissions on `turnEnded`. Offering the buttons again would be a lie.
     public var isExpired: Bool
 
     public var isAnswered: Bool { chosenOptionId != nil }
     public var isResolved: Bool { isAnswered || isExpired }
+    /// Whether the card offers any way to answer. Pi's `ui/input` requests
+    /// carry a text field and no options, so option count alone would hide
+    /// them — and a hidden question deadlocks the composer, which stays
+    /// locked while the permission is pending.
+    public var hasControls: Bool { !options.isEmpty || textInput != nil }
 
     private struct StructuredQuestion {
         var header: String
@@ -66,6 +76,7 @@ public struct ChatQuestion: Sendable, Equatable {
                                 options: structured.options,
                                 textInput: structured.textInput,
                                 chosenOptionId: chosen,
+                                isStructured: true,
                                 isExpired: expired)
         }
         return ChatQuestion(
@@ -101,6 +112,12 @@ public struct ChatQuestion: Sendable, Equatable {
         } else {
             prompt
         }
+        // Pi sends `header` and `question` set to the same string for
+        // `ui/select`, and a missing header falls back to the question above —
+        // either way the card would print the same sentence twice.
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        let body = header.trimmingCharacters(in: whitespace)
+            == prompt.trimmingCharacters(in: whitespace) ? "" : prompt
         guard case .array(let rawOptions)? = first["options"] else { return nil }
         var usedIDs = Set<String>()
         let options: [Option] = rawOptions.enumerated().compactMap { index, value in
@@ -126,7 +143,7 @@ public struct ChatQuestion: Sendable, Equatable {
             return Option(id: id, label: label, detail: detail, isRejection: rejection)
         }
         guard !options.isEmpty || textInput != nil else { return nil }
-        return StructuredQuestion(header: header, prompt: prompt, options: options,
+        return StructuredQuestion(header: header, prompt: body, options: options,
                                   textInput: textInput)
     }
 }

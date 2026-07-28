@@ -32,7 +32,7 @@ struct TranscriptView: View {
                             .id(item.id)
                     }
                     if controller.state == .prompting {
-                        thinkingRow
+                        thinkingRow.padding(.top, 14)
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
@@ -40,15 +40,16 @@ struct TranscriptView: View {
                 .padding(.vertical, 14)
             }
             .scrollPosition($scrollPosition)
-            // Streaming growth: follow only while the user has not taken over
-            // the scroll. No geometry reads — `isPositionedByUser` is the
-            // scroll view's own state.
+            // Do not observe live scroll geometry here: the observation reads
+            // the LazyVStack geometry while that same stack is laying out,
+            // which can create an AttributeGraph invalidation loop. Rely on
+            // ScrollPosition's user-ownership signal instead.
             .onChange(of: controller.streamTick) {
                 guard !scrollPosition.isPositionedByUser else { return }
                 scrollPosition.scrollTo(edge: .bottom)
             }
-            // A new item re-pins only when the user just sent something —
-            // an agent's new tool call must not yank the view while reading.
+            // A new item re-pins only when the user just sent something — an
+            // agent's tool call must not yank the view while they are reading.
             .onChange(of: snapshot.items.count) {
                 guard let last = snapshot.items.last,
                       case .userMessage = last else { return }
@@ -73,7 +74,11 @@ struct TranscriptView: View {
         case .userMessage: 20
         case .turnDivider: 14
         case .agentMessage, .thought: 12
-        case .toolCall, .plan, .editSummary, .systemNotice: 6
+        // A question is addressed to the reader, not a step in a run of tool
+        // calls — it gets the room a turn boundary gets.
+        case .toolCall(let call):
+            ChatQuestion.from(call)?.hasControls == true ? 16 : 6
+        case .plan, .editSummary, .systemNotice: 6
         }
     }
 
@@ -123,7 +128,7 @@ struct TranscriptView: View {
         case .toolCall(let toolCall):
             let question = ChatQuestion.from(toolCall)
             let subagent = SubagentTasks.info(for: toolCall)
-            if let question, !question.options.isEmpty,
+            if let question, question.hasControls,
                !(question.isResolved && subagent != nil) {
                 QuestionCardView(question: question, controller: controller)
             } else if let subagent {

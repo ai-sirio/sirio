@@ -25,6 +25,18 @@ struct PermissionModeTests {
         #expect(PermissionMode.supported(byDriverFor: "opencode")
             == [.ask, .acceptEdits, .fullAuto])
         #expect(PermissionMode.supported(byDriverFor: "omp").isEmpty) // ACP: no dropdown
+        // Native, but its RPC has no mode call and its CLI no mode flag.
+        #expect(PermissionMode.supported(byDriverFor: "pi").isEmpty)
+    }
+
+    @Test func thePillIsHiddenForDriversWithoutModes() {
+        #expect(PermissionMode.pillSelection(forAgent: "pi", requested: .ask) == nil)
+        #expect(PermissionMode.pillSelection(forAgent: "omp", requested: .ask) == nil)
+        #expect(PermissionMode.pillSelection(forAgent: "claude-acp", requested: .plan)
+            == .plan)
+        // A persisted mode the driver dropped falls back instead of vanishing.
+        #expect(PermissionMode.pillSelection(forAgent: "codex-acp", requested: .plan)
+            == .ask)
     }
 
     @Test func bridgesToSessionMode() {
