@@ -276,14 +276,15 @@ public actor ProjectStore {
                         kind: "code", filePath: fileURL.path,
                         titleIsAutoNamed: tab.titleIsAutoNamed
                     )
-                case .chat(let agentId):
+                case .chat(let agentId, let sessionId):
                     record = TerminalTabRecord(
                         id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
                         title: tab.title, orderIdx: idx,
                         isActive: tab.id == activeTabId,
                         treeJSON: "", updatedAt: Date(),
                         kind: "chat", chatAgentId: agentId,
-                        titleIsAutoNamed: tab.titleIsAutoNamed
+                        titleIsAutoNamed: tab.titleIsAutoNamed,
+                        chatSessionId: sessionId
                     )
                 }
                 try record.insert(db)
@@ -327,7 +328,7 @@ public actor ProjectStore {
                     guard let agentId = record.chatAgentId else { continue }
                     tabs.append(WorkspaceTab(
                         id: id, title: record.title,
-                        content: .chat(agentId: agentId),
+                        content: .chat(agentId: agentId, sessionId: record.chatSessionId),
                         titleIsAutoNamed: record.titleIsAutoNamed))
                 default:
                     guard let tree = try? decoder.decode(SplitTree.self, from: Data(record.treeJSON.utf8)) else {

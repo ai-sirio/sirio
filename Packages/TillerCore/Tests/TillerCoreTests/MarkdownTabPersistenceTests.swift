@@ -27,6 +27,26 @@ import TillerPersistence
     #expect(loaded.activeTabId == code.id)
 }
 
+@Test func chatTabRoundTripsItsSessionId() async throws {
+    let db = try AppDatabase.inMemory()
+    let store = ProjectStore(database: db)
+    let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
+    let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
+
+    let bound = WorkspaceTab(id: UUID(), title: "Chat",
+                             content: .chat(agentId: "claude-acp", sessionId: "s-1"))
+    let legacy = WorkspaceTab(id: UUID(), title: "Chat",
+                              content: .chat(agentId: "claude-acp", sessionId: nil))
+    try await store.saveTabs(worktreeId: worktree.id, tabs: [bound, legacy],
+                             activeTabId: bound.id)
+
+    let loaded = try await store.loadTabs(of: worktree.id)
+
+    #expect(loaded.tabs == [bound, legacy])
+    #expect(loaded.tabs.first?.chatSessionId == "s-1")
+    #expect(loaded.tabs.last?.chatSessionId == nil)
+}
+
 @Test func markdownRecordWithoutFilePathIsSkipped() async throws {
     let db = try AppDatabase.inMemory()
     let store = ProjectStore(database: db)

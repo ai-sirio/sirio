@@ -1540,7 +1540,7 @@ final class AppModel {
     func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
         rememberChatAgent(agentId)
         let tab = WorkspaceTab(id: UUID(), title: "Chat",
-                               content: .chat(agentId: agentId))
+                               content: .chat(agentId: agentId, sessionId: nil))
         selectedWorktree = worktree
         tabs[worktree.id, default: []].append(tab)
         activeTabId[worktree.id] = tab.id
