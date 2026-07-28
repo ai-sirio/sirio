@@ -30,6 +30,64 @@ public struct ChatSessionStore: Sendable {
         }
     }
 
+    /// History for the worktree, newest first. Sessions with no persisted turn
+    /// are excluded: they carry nothing to show and the agent side cannot
+    /// resume them either.
+    public func sessions(worktreeId: String) throws -> [ChatSessionRecord] {
+        try database.read { db in
+            try ChatSessionRecord
+                .filter(Column("worktreeId") == worktreeId)
+                .filter(sql: "EXISTS (SELECT 1 FROM chatItem WHERE chatItem.sessionId = chatSession.id)")
+                .order(Column("lastActivityAt").desc)
+                .fetchAll(db)
+        }
+    }
+
+    /// Mirrors the tab's auto-generated title so the history row stays
+    /// readable once the tab is gone.
+    public func setTitle(_ title: String, sessionId: String) throws {
+        try database.write { db in
+            guard var record = try ChatSessionRecord.fetchOne(db, key: sessionId) else { return }
+            record.title = title
+            try record.update(db)
+        }
+    }
+
+    public func deleteSession(id: String) throws {
+        try database.write { db in
+            try ChatItemRecord.filter(Column("sessionId") == id).deleteAll(db)
+            _ = try ChatSessionRecord.deleteOne(db, key: id)
+        }
+    }
+
+    /// Drops a session that never got a turn — the row a chat tab leaves
+    /// behind when it is closed without being used.
+    public func deleteIfEmpty(sessionId: String) throws {
+        try database.write { db in
+            let hasItems = try ChatItemRecord
+                .filter(Column("sessionId") == sessionId).fetchCount(db) > 0
+            guard !hasItems else { return }
+            _ = try ChatSessionRecord.deleteOne(db, key: sessionId)
+        }
+    }
+
+    /// Retention: keeps the `keeping` most recent sessions of a worktree.
+    /// `keeping <= 0` means unlimited and does nothing.
+    public func prune(worktreeId: String, keeping: Int) throws {
+        guard keeping > 0 else { return }
+        try database.write { db in
+            let doomed = try ChatSessionRecord
+                .filter(Column("worktreeId") == worktreeId)
+                .order(Column("lastActivityAt").desc)
+                .fetchAll(db)
+                .dropFirst(keeping)
+                .map(\.id)
+            guard !doomed.isEmpty else { return }
+            try ChatItemRecord.filter(doomed.contains(Column("sessionId"))).deleteAll(db)
+            _ = try ChatSessionRecord.deleteAll(db, keys: doomed)
+        }
+    }
+
     public func createSession(worktreeId: String, agentId: String,
                               now: Date = Date()) throws -> ChatSessionRecord {
         let record = ChatSessionRecord(
