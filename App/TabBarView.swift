@@ -76,6 +76,8 @@ struct TabBarView: View {
                 .help("All tabs")
             }
 
+            ChatHistoryMenu(model: model, worktree: worktree)
+
             Menu {
                 NewTabMenuItems(model: model, worktree: worktree)
             } label: {

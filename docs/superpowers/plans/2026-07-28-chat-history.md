@@ -1276,7 +1276,12 @@ git commit -m "feat: keep restored chats detached until the user sends a message
 - Modify: `App/AppModel.swift` (history/open/delete methods)
 - Modify: `App/TabBarView.swift:79-89`
 
-Both new source files land under `App/`, already a source directory in `project.yml`. Do **not** run `xcodegen generate` for this task.
+This task adds new source files, so `xcodegen generate` **is** required before
+they compile: `project.pbxproj` lists files explicitly, and a file that exists on
+disk but is not registered produces `cannot find type … in scope` at build time —
+or, worse, a test selector that exits green having run zero tests. Run it once
+after creating the three files, and commit the regenerated `project.pbxproj`
+along with them. Never hand-edit that file.
 
 **Interfaces:**
 - Consumes: `ChatSessionStore.sessions(worktreeId:)`, `deleteSession(id:)` (Task 3); `WorkspaceTab.chatSessionId` (Task 4); `chatController(for:in:startDetached:)` (Task 6).
