@@ -1541,6 +1541,54 @@ final class AppModel {
         persistTabs(for: worktree.id)
     }
 
+    /// History rows for the worktree's chat menu, newest first.
+    func chatHistory(for worktree: Worktree) -> [ChatHistoryRow] {
+        guard let chatStore else { return [] }
+        let sessions = (try? chatStore.sessions(worktreeId: worktree.id.uuidString)) ?? []
+        return ChatHistoryRows.make(
+            sessions: sessions,
+            displayName: { [agentCenter] id in agentCenter.displayName(for: id) },
+            timeFormatter: { date in
+                date.formatted(date: .abbreviated, time: .shortened)
+            })
+    }
+
+    /// Focus the tab already showing this conversation, or open it in a new
+    /// detached tab.
+    func openChatSession(sessionId: String, in worktree: Worktree) {
+        if let existing = (tabs[worktree.id] ?? []).first(where: {
+            $0.chatSessionId == sessionId
+        }) {
+            focusTab(tabId: existing.id, in: worktree)
+            return
+        }
+        guard let chatStore, let record = try? chatStore.session(id: sessionId)
+        else { return }
+        let agentId = AgentIdMigration.canonical(record.agentId)
+        let trimmed = record.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let tab = WorkspaceTab(
+            id: UUID(),
+            title: trimmed.isEmpty ? "Chat" : trimmed,
+            content: .chat(agentId: agentId, sessionId: sessionId))
+        selectedWorktree = worktree
+        tabs[worktree.id, default: []].append(tab)
+        activeTabId[worktree.id] = tab.id
+        // Identity without status: a detached chat has no process to report on.
+        agentActivity.registerAgentId(paneId: tab.id, agentId: agentId)
+        persistTabs(for: worktree.id)
+        _ = chatController(for: tab, in: worktree, startDetached: true)
+    }
+
+    /// Deletes a conversation and closes the tab rendering it, if any.
+    func deleteChatSession(sessionId: String, in worktree: Worktree) {
+        if let open = (tabs[worktree.id] ?? []).first(where: {
+            $0.chatSessionId == sessionId
+        }) {
+            closeTab(open.id, in: worktree)
+        }
+        try? chatStore?.deleteSession(id: sessionId)
+    }
+
     @discardableResult
     func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
         rememberChatAgent(agentId)
