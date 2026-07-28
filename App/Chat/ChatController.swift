@@ -289,7 +289,7 @@ final class ChatController {
             selectedEffort = effortOption?.currentValue ?? selectedEffort
             didResume = handle.didResume
             if handle.didResume, let record {
-                restored = []
+                if handle.didReplayHistory { restored = [] }
                 sessionRecordId = record.id
                 try? store?.setACPSessionId(handle.sessionId, sessionId: record.id)
             } else if let sessionRecordId {

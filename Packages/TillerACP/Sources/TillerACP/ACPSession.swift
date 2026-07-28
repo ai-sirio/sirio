@@ -10,6 +10,11 @@ public struct SessionHandle: Sendable, Equatable {
     /// OpenCode's non-model tunables (effort, …); empty for standard agents.
     public var configOptions: [SessionConfigOption]
     public var didResume: Bool
+    /// The agent re-sent that conversation, so our persisted copy must be
+    /// dropped to avoid rendering it twice. True only for ACP `session/load`:
+    /// the native drivers restore context inside their own CLI without
+    /// reprinting it, and clearing our copy there leaves an empty chat.
+    public var didReplayHistory: Bool = false
 }
 
 /// Session-level happenings the view model consumes.
@@ -96,7 +101,7 @@ public actor ACPSession {
                                  agentCapabilities: initialize.agentCapabilities,
                                  modes: loaded.modes, models: loaded.resolvedModels,
                                  configOptions: loaded.configOptions ?? [],
-                                 didResume: true)
+                                 didResume: true, didReplayHistory: true)
         }
 
         let created = try await client.request(
