@@ -273,6 +273,21 @@ struct MarkdownAttributedStringRendererTests {
         #expect(keywordColor != literalColor)
     }
 
+@MainActor
+@Test func swiftCodeBlockHighlightsKeywordAndStringDifferently() throws {
+    let rendered = MarkdownAttributedStringRenderer.render(
+        "```swift\nlet value = \"hello\"\n```",
+        appearance: .init(isDark: true, isStreaming: false))
+    let source = rendered.string as NSString
+    let keywordRange = source.range(of: "let")
+    let stringRange = source.range(of: "\"hello\"")
+    let keyword = try #require(rendered.attribute(
+        .foregroundColor, at: keywordRange.location, effectiveRange: nil) as? NSColor)
+    let string = try #require(rendered.attribute(
+        .foregroundColor, at: stringRange.location, effectiveRange: nil) as? NSColor)
+    #expect(keyword != string)
+}
+
     @Test("unknown fence language keeps monochrome foreground")
     func unknownLanguageStaysMonochrome() {
         let result = MarkdownAttributedStringRenderer.render("```zzznotalang\nplain\n```", isDark: true)

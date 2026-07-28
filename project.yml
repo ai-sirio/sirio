@@ -37,9 +37,6 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.8.0
-  Highlightr:
-    url: https://github.com/raspu/Highlightr
-    from: 2.2.0
 targets:
   Tiller:
     type: application
@@ -67,7 +64,6 @@ targets:
       - package: MarkdownUI
       - package: TillerGit
       - package: Sparkle
-      - package: Highlightr
     info:
       path: App/Info.plist
       properties:
