@@ -53,10 +53,6 @@ enum MarkdownAttributedStringRenderer {
         return render(parsed, isDark: isDark)
     }
 
-    static func render(_ markdown: String, appearance: MarkdownAppearance) -> NSAttributedString {
-        render(markdown, isDark: appearance.isDark)
-    }
-
     /// `AttributedString(markdown:)` does not insert a literal newline
     /// between blocks — block structure is expressed only through each
     /// run's `presentationIntent`, and the caller is expected to detect
@@ -250,15 +246,7 @@ enum MarkdownAttributedStringRenderer {
 }
 
 @MainActor
-struct MarkdownAppearance {
-    let isDark: Bool
-    let isStreaming: Bool
-
-    init(isDark: Bool, isStreaming: Bool) {
-        self.isDark = isDark
-        self.isStreaming = isStreaming
-    }
-
+enum MarkdownAppearance {
     static var isDark: Bool {
         NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }

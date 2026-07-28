@@ -277,7 +277,7 @@ struct MarkdownAttributedStringRendererTests {
 @Test func swiftCodeBlockHighlightsKeywordAndStringDifferently() throws {
     let rendered = MarkdownAttributedStringRenderer.render(
         "```swift\nlet value = \"hello\"\n```",
-        appearance: .init(isDark: true, isStreaming: false))
+        isDark: true)
     let source = rendered.string as NSString
     let keywordRange = source.range(of: "let")
     let stringRange = source.range(of: "\"hello\"")

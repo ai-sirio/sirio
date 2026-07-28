@@ -15,9 +15,12 @@ public final class CodeDocument {
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
 
     public init(fileURL: URL) throws {
-        self.fileURL = fileURL.standardizedFileURL
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            let content = try String(contentsOf: fileURL, encoding: .utf8)
+        let url = fileURL.standardizedFileURL
+        self.fileURL = url
+        // Check and read through the standardized URL — the raw one may carry `..`
+        // or symlink segments that resolve differently from what is stored.
+        if FileManager.default.fileExists(atPath: url.path) {
+            let content = try String(contentsOf: url, encoding: .utf8)
             text = content
             savedText = content
             fileDeleted = false
