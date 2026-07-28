@@ -181,6 +181,29 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "UPDATE project SET orderIdx = rowid")
             try db.execute(sql: "UPDATE worktree SET orderIdx = rowid")
         }
+        migrator.registerMigration("v15") { db in
+            try db.alter(table: "chatSession") { t in
+                t.add(column: "title", .text)
+            }
+            try db.alter(table: "terminalTab") { t in
+                t.add(column: "chatSessionId", .text)
+            }
+            // Bind each worktree's active chat tab to its most recent non-empty
+            // session. Empty sessions are skipped for the same reason
+            // latestSession skipped them: the agent cannot resume one either.
+            // Other legacy chat tabs stay NULL and open a fresh session — the
+            // ambiguity is settled once here rather than re-guessed on every launch.
+            try db.execute(sql: """
+                UPDATE terminalTab SET chatSessionId = (
+                    SELECT s.id FROM chatSession s
+                    WHERE s.worktreeId = terminalTab.worktreeId
+                      AND EXISTS (SELECT 1 FROM chatItem i WHERE i.sessionId = s.id)
+                    ORDER BY s.lastActivityAt DESC
+                    LIMIT 1
+                )
+                WHERE kind = 'chat' AND isActive = 1
+                """)
+        }
         return migrator
     }
 }
