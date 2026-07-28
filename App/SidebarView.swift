@@ -51,7 +51,10 @@ struct SidebarView: View {
                                             }
                                         }
 
-                                    let tabs = model.tabs[worktree.id] ?? []
+                                    // File tabs (markdown/code) stay out of the tree: the
+                                    // sidebar lists agents and terminals, and the tab bar
+                                    // already exposes every open file.
+                                    let tabs = (model.tabs[worktree.id] ?? []).filter { $0.fileURL == nil }
                                     ForEach(tabs) { tab in
                                         let tabIsLast = tab.id == tabs.last?.id
                                         TabRow(model: model, worktree: worktree, tab: tab,
