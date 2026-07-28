@@ -27,10 +27,13 @@ struct SidebarView: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(filteredProjects) { project in
                             ProjectRow(model: model, project: project, onSettings: { settingsProject = $0 })
+                                .reorderable(model: model, id: project.id, scope: .projects)
 
                             if model.isProjectExpanded(project) {
-                                ForEach(AttentionSort.sorted(model.worktrees[project.id] ?? [], statusOf: model.statusForWorktree)) { worktree in
+                                ForEach(AttentionSort.urgentFirst(model.worktrees[project.id] ?? [], statusOf: model.statusForWorktree)) { worktree in
                                     WorktreeRow(model: model, worktree: worktree)
+                                        .reorderable(model: model, id: worktree.id,
+                                                     scope: .worktrees(projectId: project.id))
                                         .contextMenu {
                                             Button("New Terminal") {
                                                 model.newShellTab(in: worktree)
@@ -498,7 +501,6 @@ private struct TabRow: View {
     @State private var confirmingClose = false
     @State private var draftTitle = ""
     @FocusState private var renameFieldFocused: Bool
-    @State private var dropTargeted = false
 
     private var isSelected: Bool {
         model.selectedWorktree?.id == worktree.id
@@ -585,22 +587,7 @@ private struct TabRow: View {
                 }
             }
         }
-        .draggable(TabDragPayload(tabId: tab.id, worktreeId: worktree.id))
-        .dropDestination(for: TabDragPayload.self) { payloads, _ in
-            guard let payload = payloads.first,
-                  payload.worktreeId == worktree.id,
-                  payload.tabId != tab.id else { return false }
-            model.moveTab(payload.tabId, before: tab.id, in: worktree.id)
-            return true
-        } isTargeted: { dropTargeted = $0 }
-        .overlay(alignment: .top) {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(AppTheme.selectionRing)
-                    .frame(height: 2)
-                    .padding(.leading, 44)
-            }
-        }
+        .reorderable(model: model, id: tab.id, scope: .tabs(worktreeId: worktree.id))
         .alert("Close terminal?", isPresented: $confirmingClose) {
             Button("Cancel", role: .cancel) {}
             Button("Close", role: .destructive) { model.closeTab(tab.id, in: worktree) }

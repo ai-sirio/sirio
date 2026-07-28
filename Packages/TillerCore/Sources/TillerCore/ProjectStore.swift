@@ -16,7 +16,10 @@ public actor ProjectStore {
  
     public func loadAll() throws -> [Project] {
         try database.read { db in
-            try ProjectRecord.fetchAll(db).compactMap { record in
+            try ProjectRecord
+                .order(Column("orderIdx"), Column("createdAt"))
+                .fetchAll(db)
+                .compactMap { record in
                 // ids are written by this store as UUID().uuidString;
                 // non-parsing rows indicate external corruption and are skipped
                 guard let id = UUID(uuidString: record.id) else {
@@ -38,6 +41,7 @@ public actor ProjectStore {
         try database.read { db in
             try WorktreeRecord
                 .filter(Column("projectId") == projectId.uuidString)
+                .order(Column("orderIdx"), Column("createdAt"))
                 .fetchAll(db)
                 .compactMap { record in
                     // ids are written by this store as UUID().uuidString;
@@ -64,10 +68,47 @@ public actor ProjectStore {
         try database.write { db in
             try ProjectRecord(
                 id: project.id.uuidString, name: name,
-                rootPath: rootPath, createdAt: Date()
+                rootPath: rootPath, createdAt: Date(),
+                orderIdx: try Self.nextOrderIdx(db, table: "project")
             ).insert(db)
         }
         return project
+    }
+
+    /// One past the highest `orderIdx` in `table`, so a new row lands at the
+    /// bottom of the sidebar instead of jumping to the top of a reordered list.
+    private static func nextOrderIdx(_ db: Database, table: String, projectId: UUID? = nil) throws -> Int {
+        let sql = projectId == nil
+            ? "SELECT COALESCE(MAX(orderIdx), -1) + 1 FROM \(table)"
+            : "SELECT COALESCE(MAX(orderIdx), -1) + 1 FROM \(table) WHERE projectId = ?"
+        let arguments: StatementArguments = projectId.map { [$0.uuidString] } ?? []
+        return try Int.fetchOne(db, sql: sql, arguments: arguments) ?? 0
+    }
+
+    /// Rewrites the manual sidebar order of projects. Ids not present in the
+    /// table are skipped; rows missing from `order` keep the index they had,
+    /// so a stale list can never drop a project out of the sidebar.
+    public func saveProjectOrder(_ order: [UUID]) throws {
+        try database.write { db in
+            for (idx, id) in order.enumerated() {
+                try db.execute(
+                    sql: "UPDATE project SET orderIdx = ? WHERE id = ?",
+                    arguments: [idx, id.uuidString]
+                )
+            }
+        }
+    }
+
+    /// Rewrites the manual sidebar order of one project's worktrees.
+    public func saveWorktreeOrder(projectId: UUID, order: [UUID]) throws {
+        try database.write { db in
+            for (idx, id) in order.enumerated() {
+                try db.execute(
+                    sql: "UPDATE worktree SET orderIdx = ? WHERE id = ? AND projectId = ?",
+                    arguments: [idx, id.uuidString, projectId.uuidString]
+                )
+            }
+        }
     }
  
     public func removeProject(_ id: UUID) throws {
@@ -128,7 +169,8 @@ public actor ProjectStore {
         try database.write { db in
             try WorktreeRecord(
                 id: worktree.id.uuidString, projectId: projectId.uuidString,
-                branch: branch, path: path, createdAt: Date()
+                branch: branch, path: path, createdAt: Date(),
+                orderIdx: try Self.nextOrderIdx(db, table: "worktree", projectId: projectId)
             ).insert(db)
         }
         return worktree

@@ -14,18 +14,20 @@ public struct ProjectRecord: Codable, FetchableRecord, PersistableRecord, Sendab
     public var avatarImage: Data?
     public var defaultWorktreeBase: String?
     public var worktreeLocationOverride: String?
+    public var orderIdx: Int
 
     public init(
         id: String, name: String, rootPath: String, createdAt: Date, colorHex: String? = nil,
         displayName: String? = nil, iconKind: String = "icon", iconValue: String? = nil,
         avatarImage: Data? = nil, defaultWorktreeBase: String? = nil,
-        worktreeLocationOverride: String? = nil
+        worktreeLocationOverride: String? = nil, orderIdx: Int = 0
     ) {
         self.id = id; self.name = name; self.rootPath = rootPath; self.createdAt = createdAt
         self.colorHex = colorHex
         self.displayName = displayName; self.iconKind = iconKind; self.iconValue = iconValue
         self.avatarImage = avatarImage; self.defaultWorktreeBase = defaultWorktreeBase
         self.worktreeLocationOverride = worktreeLocationOverride
+        self.orderIdx = orderIdx
     }
 }
 
@@ -39,12 +41,15 @@ public struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Senda
     public var comment: String?
     public var commentUpdatedAt: Date?
     public var isPrimary: Bool
+    public var orderIdx: Int
 
     public init(id: String, projectId: String, branch: String, path: String, createdAt: Date,
-                comment: String? = nil, commentUpdatedAt: Date? = nil, isPrimary: Bool = false) {
+                comment: String? = nil, commentUpdatedAt: Date? = nil, isPrimary: Bool = false,
+                orderIdx: Int = 0) {
         self.id = id; self.projectId = projectId; self.branch = branch
         self.path = path; self.createdAt = createdAt
         self.comment = comment; self.commentUpdatedAt = commentUpdatedAt; self.isPrimary = isPrimary
+        self.orderIdx = orderIdx
     }
 }
 
