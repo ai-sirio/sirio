@@ -336,7 +336,9 @@ struct ContentView: View {
                                 // visible stall. Never-opened chats still mount only when
                                 // visible, so their agent doesn't start eagerly.
                                 if let controller = model.chatControllers[tab.id]
-                                    ?? (isVisible ? model.chatController(for: tab, in: worktree) : nil) {
+                                    ?? (isVisible ? model.chatController(
+                                            for: tab, in: worktree,
+                                            startDetached: true) : nil) {
                                     ChatPaneView(controller: controller, worktree: worktree,
                                                  appModel: model)
                                 } else if isVisible {

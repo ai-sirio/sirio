@@ -151,6 +151,7 @@ struct ComposerControlBar: View {
         case .ready: "ready"
         case .prompting: "working"
         case .connecting: "connecting…"
+        case .detached: "idle"
         default: "offline"
         }
     }
