@@ -171,13 +171,14 @@ struct ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: record.id,
             driverFactory: { _, _, _, _, _, _, _ in driver })
 
         await controller.start()
         await controller.setPermissionMode(.acceptEdits)
 
         #expect(await driver.modeIds == ["acceptEdits"])
-        let saved = try store.latestSession(worktreeId: worktreeId.uuidString)
+        let saved = try store.session(id: record.id)
         #expect(saved?.permissionMode == "acceptEdits")
         #expect(saved?.transportKind == "native")
     }
@@ -267,6 +268,7 @@ struct ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "pi", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: record.id,
             driverFactory: { _, _, _, _, _, _, resumeId in
                 #expect(resumeId == nil)
                 return driver
@@ -296,6 +298,7 @@ struct ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: record.id,
             driverFactory: { _, _, _, _, _, _, _ in drivers.removeFirst() })
 
         await controller.start()
@@ -331,6 +334,7 @@ struct ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: record.id,
             driverFactory: { _, _, _, _, _, _, _ in driver })
 
         await controller.start()
@@ -357,6 +361,7 @@ struct ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: record.id,
             driverFactory: { _, _, _, _, _, _, _ in driver })
 
         await controller.start()
@@ -383,6 +388,7 @@ struct ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: record.id,
             driverFactory: { _, _, _, _, _, _, _ in drivers.removeFirst() })
 
         await controller.start()
@@ -587,7 +593,7 @@ extension ChatControllerTests {
         let controller = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
             worktreePath: root.path, store: store, installStore: installStore,
-            persistenceCoordinator: coordinator,
+            sessionId: session.id, persistenceCoordinator: coordinator,
             driverFactory: { _, _, _, _, _, _, _ in driver })
         await controller.start()
         await writer.block(.transcript(session.id))
@@ -643,12 +649,14 @@ extension ChatControllerTests {
         let firstController = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: firstWorktreeId,
             worktreePath: firstRoot.path, store: firstStore,
-            installStore: firstInstallStore, persistenceCoordinator: coordinator,
+            installStore: firstInstallStore, sessionId: firstSession.id,
+            persistenceCoordinator: coordinator,
             driverFactory: { _, _, _, _, _, _, _ in firstDriver })
         let secondController = ChatController(
             tabId: UUID(), agentId: "claude-acp", worktreeId: secondWorktreeId,
             worktreePath: secondRoot.path, store: secondStore,
-            installStore: secondInstallStore, persistenceCoordinator: coordinator,
+            installStore: secondInstallStore, sessionId: secondSession.id,
+            persistenceCoordinator: coordinator,
             driverFactory: { _, _, _, _, _, _, _ in secondDriver })
         await firstController.start()
         await secondController.start()
