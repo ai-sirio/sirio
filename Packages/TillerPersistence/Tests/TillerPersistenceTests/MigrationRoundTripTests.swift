@@ -96,7 +96,7 @@ import GRDB
     let identifiers = try queue.read { db in
         try AppDatabase.migrator.appliedMigrations(db)
     }
-    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14"])
+    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15"])
 }
 
 /// Applying migrations one at a time (stepwise) must produce the same final
@@ -119,6 +119,7 @@ import GRDB
     try AppDatabase.migrator.migrate(queueA, upTo: "v12")
     try AppDatabase.migrator.migrate(queueA, upTo: "v13")
     try AppDatabase.migrator.migrate(queueA, upTo: "v14")
+    try AppDatabase.migrator.migrate(queueA, upTo: "v15")
 
     // Queue B: direct to head
     let queueB = try DatabaseQueue()
@@ -154,4 +155,58 @@ private func normalizeSQL(_ sql: String) -> String {
         .components(separatedBy: .whitespacesAndNewlines)
         .filter { !$0.isEmpty }
         .joined(separator: " ")
+}
+
+/// v15 binds each worktree's active chat tab to that worktree's most recent
+/// non-empty session, so a restored tab loads its own transcript instead of
+/// guessing at runtime. Sessions with no items are skipped: the agent side
+/// cannot resume them either.
+@Test func v15BindsActiveChatTabToLatestNonEmptySession() throws {
+    let queue = try DatabaseQueue()
+    try AppDatabase.migrator.migrate(queue, upTo: "v14")
+    try queue.write { db in
+        try db.execute(sql: """
+            INSERT INTO project (id, name, rootPath, createdAt)
+            VALUES ('p1', 'proj', '/tmp/p', '2026-07-01 10:00:00')
+            """)
+        try db.execute(sql: """
+            INSERT INTO worktree (id, projectId, branch, path, createdAt)
+            VALUES ('w1', 'p1', 'main', '/tmp/p', '2026-07-01 10:00:00')
+            """)
+        // Older session WITH items — the one a resume can actually use.
+        try db.execute(sql: """
+            INSERT INTO chatSession (id, worktreeId, agentId, createdAt, lastActivityAt)
+            VALUES ('s-used', 'w1', 'claude-acp', '2026-07-01 10:00:00', '2026-07-01 11:00:00')
+            """)
+        try db.execute(sql: """
+            INSERT INTO chatItem (sessionId, ordinal, kind, payload)
+            VALUES ('s-used', 0, 'agentMessage', X'7B7D')
+            """)
+        // Newer session with NO items — must be ignored.
+        try db.execute(sql: """
+            INSERT INTO chatSession (id, worktreeId, agentId, createdAt, lastActivityAt)
+            VALUES ('s-empty', 'w1', 'claude-acp', '2026-07-01 12:00:00', '2026-07-01 12:00:00')
+            """)
+        try db.execute(sql: """
+            INSERT INTO terminalTab (id, worktreeId, title, orderIdx, isActive, treeJSON,
+                                     updatedAt, kind, chatAgentId)
+            VALUES ('t-active', 'w1', 'Chat', 0, 1, '', '2026-07-01 12:00:00', 'chat', 'claude-acp')
+            """)
+        try db.execute(sql: """
+            INSERT INTO terminalTab (id, worktreeId, title, orderIdx, isActive, treeJSON,
+                                     updatedAt, kind, chatAgentId)
+            VALUES ('t-other', 'w1', 'Chat', 1, 0, '', '2026-07-01 12:00:00', 'chat', 'claude-acp')
+            """)
+    }
+
+    try AppDatabase.migrator.migrate(queue)
+
+    try queue.read { db in
+        let active = try Row.fetchOne(db, sql: "SELECT * FROM terminalTab WHERE id = 't-active'")
+        #expect(active?["chatSessionId"] as? String == "s-used")
+        let other = try Row.fetchOne(db, sql: "SELECT * FROM terminalTab WHERE id = 't-other'")
+        #expect(other?["chatSessionId"] as? String == nil)
+        let session = try Row.fetchOne(db, sql: "SELECT * FROM chatSession WHERE id = 's-used'")
+        #expect(session?["title"] as? String == nil)
+    }
 }

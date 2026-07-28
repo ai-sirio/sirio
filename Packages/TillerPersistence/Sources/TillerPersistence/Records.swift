@@ -78,17 +78,22 @@ public struct TerminalTabRecord: Codable, FetchableRecord, PersistableRecord, Se
     public var kind: String
     public var filePath: String?
     public var chatAgentId: String?
+    /// Chat session this tab renders. NULL for non-chat tabs and for legacy
+    /// chat tabs that predate v15 and had no session to adopt.
+    public var chatSessionId: String?
     public var titleIsAutoNamed: Bool
 
     public init(id: String, worktreeId: String, title: String, orderIdx: Int,
                 isActive: Bool, treeJSON: String, updatedAt: Date,
                 kind: String = "terminal", filePath: String? = nil,
-                chatAgentId: String? = nil, titleIsAutoNamed: Bool = true) {
+                chatAgentId: String? = nil, titleIsAutoNamed: Bool = true,
+                chatSessionId: String? = nil) {
         self.id = id; self.worktreeId = worktreeId; self.title = title
         self.orderIdx = orderIdx; self.isActive = isActive
         self.treeJSON = treeJSON; self.updatedAt = updatedAt
         self.kind = kind; self.filePath = filePath; self.chatAgentId = chatAgentId
         self.titleIsAutoNamed = titleIsAutoNamed
+        self.chatSessionId = chatSessionId
     }
 }
 
@@ -143,18 +148,23 @@ public struct ChatSessionRecord: Codable, FetchableRecord, PersistableRecord, Se
     public var selectedModel: String?
     public var selectedEffort: String?
     public var transportKind: String
+    /// Mirror of the tab's auto-generated title, so history rows stay
+    /// readable after the tab is closed. NULL until auto-naming runs.
+    public var title: String?
 
     public init(id: String, worktreeId: String, agentId: String,
                 acpSessionId: String? = nil, createdAt: Date, lastActivityAt: Date,
                 contextUsageUsed: Int? = nil, contextUsageSize: Int? = nil,
                 permissionMode: String? = nil, selectedModel: String? = nil,
-                selectedEffort: String? = nil, transportKind: String = "acp") {
+                selectedEffort: String? = nil, transportKind: String = "acp",
+                title: String? = nil) {
         self.id = id; self.worktreeId = worktreeId; self.agentId = agentId
         self.acpSessionId = acpSessionId
         self.createdAt = createdAt; self.lastActivityAt = lastActivityAt
         self.contextUsageUsed = contextUsageUsed; self.contextUsageSize = contextUsageSize
         self.permissionMode = permissionMode; self.selectedModel = selectedModel
         self.selectedEffort = selectedEffort; self.transportKind = transportKind
+        self.title = title
     }
 }
 
