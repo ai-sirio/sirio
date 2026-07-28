@@ -104,6 +104,7 @@ final class RightPanelModel {
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
     @ObservationIgnored private var debounceTask: Task<Void, Never>?
     @ObservationIgnored private var pendingPaths: Set<String> = []
+    @ObservationIgnored private var prefetchingPaths: Set<String> = []
 
     var rootURL: URL? {
         worktree.map { URL(fileURLWithPath: $0.path, isDirectory: true).standardizedFileURL }
@@ -151,6 +152,7 @@ final class RightPanelModel {
         monitor?.stop()
         monitor = nil
         pendingPaths.removeAll()
+        prefetchingPaths.removeAll()
         worktree = nil
         isGitRepository = false
         childrenByDirectory = [:]
@@ -184,6 +186,8 @@ extension RightPanelModel {
         if childrenByDirectory[path] == nil {
             await loadDirectory(path, token: generation)
         }
+        guard let rootURL else { return }
+        prefetchChildren(of: path, rootURL: rootURL, token: generation)
     }
 
     func refresh() async {
@@ -226,6 +230,7 @@ extension RightPanelModel {
             guard token == generation else { return }
             childrenByDirectory[""] = nodes
             filesError = nil
+            prefetchChildren(of: "", rootURL: rootURL, token: token)
         } catch {
             guard token == generation else { return }
             filesError = error.localizedDescription
@@ -253,6 +258,25 @@ extension RightPanelModel {
     private func loadDirectory(_ key: String, token: Int) async {
         guard let rootURL else { return }
         await loadDirectories([key], rootURL: rootURL, token: token)
+    }
+
+    private func prefetchChildren(of key: String, rootURL: URL, token: Int) {
+        guard let nodes = childrenByDirectory[key] else { return }
+        // One level of lookahead keeps clicks cache-hits without crawling the tree.
+        let candidates = nodes.compactMap { node -> String? in
+            guard node.kind.isDirectory,
+                  childrenByDirectory[node.relativePath] == nil,
+                  !prefetchingPaths.contains(node.relativePath) else {
+                return nil
+            }
+            return node.relativePath
+        }
+        guard !candidates.isEmpty else { return }
+        prefetchingPaths.formUnion(candidates)
+        Task {
+            await loadDirectories(candidates, rootURL: rootURL, token: token)
+            prefetchingPaths.subtract(candidates)
+        }
     }
 
     private func loadDirectories(
