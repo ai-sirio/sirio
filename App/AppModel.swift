@@ -346,6 +346,7 @@ final class AppModel {
             for project in projects {
                 worktrees[project.id] = try await store.worktrees(of: project.id)
             }
+            pruneChatHistory()
             let storedOpenIds = (UserDefaults.standard.stringArray(forKey: AppSettings.openWorktreeIdsKey) ?? [])
                 .compactMap(UUID.init)
             let storedSelectedId = UserDefaults.standard.string(forKey: AppSettings.selectedWorktreeIdKey)
@@ -1551,6 +1552,17 @@ final class AppModel {
             timeFormatter: { date in
                 date.formatted(date: .abbreviated, time: .shortened)
             })
+    }
+
+    /// Applies the retention limit once per launch. Missing preference means
+    /// the default; 0 means unlimited and prune() returns immediately.
+    private func pruneChatHistory() {
+        guard let chatStore else { return }
+        let stored = defaults.object(forKey: AppSettings.chatHistoryRetentionKey) as? Int
+        let keeping = stored ?? AppSettings.defaultChatHistoryRetention
+        for worktree in worktrees.values.flatMap({ $0 }) {
+            try? chatStore.prune(worktreeId: worktree.id.uuidString, keeping: keeping)
+        }
     }
 
     /// Focus the tab already showing this conversation, or open it in a new

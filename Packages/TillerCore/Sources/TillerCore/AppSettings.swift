@@ -83,6 +83,11 @@ public enum AppSettings {
     /// opt-in only since eviction terminates a worktree's PTYs.
     public static let maxMountedWorktreesKey = "session.maxMountedWorktrees"
 
+    /// UserDefaults key for how many chat conversations to keep per worktree.
+    /// 0 means unlimited. Pruning runs once at bootstrap.
+    public static let chatHistoryRetentionKey = "chat.history.retentionCount"
+    public static let defaultChatHistoryRetention = 50
+
     /// UserDefaults key for the os_signpost metrics gate. Default: off.
     /// Enable via `defaults write dev.tiller debug.signpostMetrics -bool YES`.
     public static let signpostMetricsKey = "debug.signpostMetrics"
