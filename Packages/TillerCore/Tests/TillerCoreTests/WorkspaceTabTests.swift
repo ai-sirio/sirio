@@ -17,13 +17,26 @@ import Foundation
     #expect(tab.leafIds == [])
     #expect(tab.terminalTree == nil)
     #expect(tab.markdownFileURL == url)
+    #expect(tab.fileURL == url)
 }
 
-@Test func nextShellTitleIgnoresMarkdownTabs() {
+@Test func codeTabHasNoLeavesAndExposesSharedFileURL() {
+    let url = URL(fileURLWithPath: "/tmp/App.swift")
+    let tab = WorkspaceTab(id: UUID(), title: "App.swift", content: .code(fileURL: url))
+    #expect(tab.leafIds.isEmpty)
+    #expect(tab.activityPaneIds.isEmpty)
+    #expect(tab.markdownFileURL == nil)
+    #expect(tab.codeFileURL == url)
+    #expect(tab.fileURL == url)
+}
+
+@Test func nextShellTitleIgnoresMarkdownAndCodeTabs() {
     let existing = [
         WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID())),
         WorkspaceTab(id: UUID(), title: "README.md",
-                     content: .markdown(fileURL: URL(fileURLWithPath: "/tmp/README.md")))
+                     content: .markdown(fileURL: URL(fileURLWithPath: "/tmp/README.md"))),
+        WorkspaceTab(id: UUID(), title: "App.swift",
+                     content: .code(fileURL: URL(fileURLWithPath: "/tmp/App.swift")))
     ]
     #expect(WorkspaceTab.nextShellTitle(existing: existing) == "Terminale 2")
 }
@@ -36,6 +49,7 @@ import Foundation
     #expect(tab.leafIds == [])
     #expect(tab.terminalTree == nil)
     #expect(tab.markdownFileURL == nil)
+    #expect(tab.codeFileURL == nil)
     #expect(tab.activityPaneIds == [id])
 }
 

@@ -41,13 +41,13 @@ struct TillerApp: App {
             // "Chiudi tab" (⌘W) prima del Close di sistema, quindi ⌘W
             // chiude la tab, non la finestra.
             CommandGroup(after: .newItem) {
-                Button("Nuova tab") { model.newShellTabInSelected() }
+                Button("New Tab") { model.newShellTabInSelected() }
                     .keyboardShortcut("t", modifiers: .command)
-                Button("Chiudi tab") { model.closeActiveTab() }
+                Button("Close Tab") { model.closeActiveTab() }
                     .keyboardShortcut("w", modifiers: .command)
-                Button("Salva") { model.saveActiveMarkdownDocument() }
+                Button("Save") { model.saveActiveDocument() }
                     .keyboardShortcut("s", modifiers: .command)
-                Button("Apri file…") { model.openMarkdownFilePanel() }
+                Button("Open File…") { model.openMarkdownFilePanel() }
                     .keyboardShortcut("o", modifiers: .command)
             }
             CommandMenu("History") {
@@ -57,13 +57,13 @@ struct TillerApp: App {
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             }
             CommandMenu("Tab") {
-                Button("Tab successiva") { model.cycleTab(forward: true) }
+                    Button("Next Tab") { model.cycleTab(forward: true) }
                     .keyboardShortcut(.tab, modifiers: .control)
-                Button("Tab precedente") { model.cycleTab(forward: false) }
+                    Button("Previous Tab") { model.cycleTab(forward: false) }
                     .keyboardShortcut(.tab, modifiers: [.control, .shift])
                 Divider()
                 ForEach(1...9, id: \.self) { number in
-                    Button(number == 9 ? "Ultima tab" : "Tab \(number)") {
+                    Button(number == 9 ? "Last Tab" : "Tab \(number)") {
                         model.selectTab(number: number)
                     }
                     .keyboardShortcut(
@@ -76,13 +76,13 @@ struct TillerApp: App {
                     .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .sidebar) {
-                Button(sidebarVisible ? "Nascondi Sidebar" : "Mostra Sidebar") {
+                Button(sidebarVisible ? "Hide Sidebar" : "Show Sidebar") {
                     sidebarVisible.toggle()
                 }
                 .keyboardShortcut("s", modifiers: [.control, .command])
                 Button(rightPanelVisible
-                       ? "Nascondi pannello destro"
-                       : "Mostra pannello destro") {
+                       ? "Hide Right Panel"
+                       : "Show Right Panel") {
                     rightPanelVisible.toggle()
                 }
                 .keyboardShortcut("i", modifiers: [.control, .command])
