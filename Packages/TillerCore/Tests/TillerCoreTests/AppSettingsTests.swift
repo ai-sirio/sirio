@@ -89,3 +89,8 @@ import Testing
     #expect(AppSettings.summarizerAgentId(defaultsValue: "codex") == "codex")
     #expect(AppSettings.summarizerAgentIdKey == "autoNaming.summarizerAgentId")
 }
+
+@Test func chatHistoryRetentionKeyAndDefault() {
+    #expect(AppSettings.chatHistoryRetentionKey == "chat.history.retentionCount")
+    #expect(AppSettings.defaultChatHistoryRetention == 50)
+}

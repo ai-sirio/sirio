@@ -13,6 +13,8 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.resumeAgentSessionsKey) private var resumeAgentSessions = true
     @AppStorage(AppSettings.controlSocketEnabledKey) private var controlSocketEnabled = true
     @AppStorage(AppSettings.maxMountedWorktreesKey) private var maxMountedWorktrees = 0
+    @AppStorage(AppSettings.chatHistoryRetentionKey)
+    private var chatHistoryRetention = AppSettings.defaultChatHistoryRetention
     @AppStorage(AppSettings.autoNamingEnabledKey) private var autoNamingEnabled = false
     @AppStorage(AppSettings.summarizerAgentIdKey)
     private var summarizerAgentId = AppSettings.defaultSummarizerAgentId
@@ -53,6 +55,19 @@ struct GeneralSettingsView: View {
                     Text("The agent CLI that generates tab titles. Falls back to the session's own agent when it fails.")
                 }
                 .disabled(!autoNamingEnabled)
+            }
+            Section("Chat history") {
+                Toggle(isOn: Binding(
+                    get: { chatHistoryRetention > 0 },
+                    set: { chatHistoryRetention = $0 ? AppSettings.defaultChatHistoryRetention : 0 }
+                )) {
+                    Text("Limit stored chats")
+                    Text("Keeps only the most recent conversations per worktree. Older ones are deleted at launch.")
+                }
+                if chatHistoryRetention > 0 {
+                    Stepper("Keep \(chatHistoryRetention) chats per worktree",
+                            value: $chatHistoryRetention, in: 5...500, step: 5)
+                }
             }
             Section("Performance") {
                 Toggle(isOn: Binding(
