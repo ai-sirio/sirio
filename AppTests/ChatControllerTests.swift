@@ -47,6 +47,44 @@ struct ChatControllerTests {
         #expect(controller.items.isEmpty)
     }
 
+    @Test func chatTabLoadsItsOwnSessionNotTheWorktreeLatest() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mine = try store.createSession(worktreeId: worktreeId.uuidString,
+                                           agentId: "claude-acp",
+                                           now: Date(timeIntervalSince1970: 100))
+        try store.saveTranscript(sessionId: mine.id, items: [
+            .agentMessage(id: "mine", text: "my conversation", isComplete: true)
+        ], now: Date(timeIntervalSince1970: 100))
+        // A newer session in the same worktree: the old lookup would pick this one.
+        let other = try store.createSession(worktreeId: worktreeId.uuidString,
+                                            agentId: "claude-acp",
+                                            now: Date(timeIntervalSince1970: 900))
+        try store.saveTranscript(sessionId: other.id, items: [
+            .agentMessage(id: "other", text: "someone else's", isComplete: true)
+        ], now: Date(timeIntervalSince1970: 900))
+
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "live"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: mine.id,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        await controller.start()
+
+        #expect(controller.sessionId == mine.id)
+        #expect(controller.items.contains { item in
+            if case .agentMessage(_, let text, _) = item { return text == "my conversation" }
+            return false
+        })
+        #expect(!controller.items.contains { item in
+            if case .agentMessage(_, let text, _) = item { return text == "someone else's" }
+            return false
+        })
+    }
+
     @Test func driverSeamReachesReadyForwardsPromptAndFoldsEvents() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
@@ -509,7 +547,8 @@ extension ChatControllerTests {
             activateApplication: {},
             persistenceCoordinator: coordinator)
         model.tabs[worktreeId] = [
-            WorkspaceTab(id: chatTabId, title: "Chat", content: .chat(agentId: "claude-acp")),
+            WorkspaceTab(id: chatTabId, title: "Chat",
+                         content: .chat(agentId: "claude-acp", sessionId: nil)),
             WorkspaceTab(id: UUID(), title: "Terminal 1", tree: .leaf(id: paneId))
         ]
         model.chatControllers[chatTabId] = controller
