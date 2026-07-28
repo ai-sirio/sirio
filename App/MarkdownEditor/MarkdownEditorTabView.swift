@@ -59,7 +59,7 @@ struct MarkdownEditorTabView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             if isHuge {
-                Text("File grande — preview manuale")
+                Text("Large file — manual preview")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
             }
@@ -67,7 +67,7 @@ struct MarkdownEditorTabView: View {
             Picker("", selection: $mode) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .tag(EditorMode.code)
-                    .help("Codice")
+                    .help("Code")
                 Image(systemName: "doc.richtext")
                     .tag(EditorMode.preview)
                     .help("Preview")
@@ -82,10 +82,10 @@ struct MarkdownEditorTabView: View {
     private var conflictBanner: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text("File modificato su disco.")
+            Text("File changed on disk.")
             Spacer()
-            Button("Ricarica") { document.reloadFromDisk() }
-            Button("Mantieni") { document.keepLocalBuffer() }
+            Button("Reload") { document.reloadFromDisk() }
+            Button("Keep") { document.keepLocalBuffer() }
         }
         .font(.system(size: 12))
         .padding(8)
@@ -95,7 +95,7 @@ struct MarkdownEditorTabView: View {
     private var deletedBanner: some View {
         HStack {
             Image(systemName: "trash").foregroundStyle(.red)
-            Text("File eliminato su disco. ⌘S lo ricrea.")
+            Text("File deleted on disk. Cmd-S recreates it.")
             Spacer()
         }
         .font(.system(size: 12))
