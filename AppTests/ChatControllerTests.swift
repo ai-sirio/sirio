@@ -277,6 +277,55 @@ struct ChatControllerTests {
         #expect(await freshDriver.resumeIds == [nil])
     }
 
+    @Test func nativeResumeKeepsPersistedTranscript() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = try store.createSession(worktreeId: worktreeId.uuidString,
+                                             agentId: "claude-acp")
+        try store.setACPSessionId("agent-session", sessionId: record.id)
+        try store.saveTranscript(sessionId: record.id, items: [
+            .agentMessage(id: "old-message", text: "from last launch", isComplete: true)
+        ])
+        // Native driver: resumes the session but never replays it.
+        let driver = ChatTestDriver(handle: makeChatTestHandle(
+            sessionId: "agent-session", didResume: true, didReplayHistory: false))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        await controller.start()
+
+        #expect(controller.items.contains { item in
+            if case .agentMessage(_, let text, _) = item { return text == "from last launch" }
+            return false
+        })
+    }
+
+    @Test func acpReplayDropsPersistedTranscript() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = try store.createSession(worktreeId: worktreeId.uuidString,
+                                             agentId: "claude-acp")
+        try store.setACPSessionId("agent-session", sessionId: record.id)
+        try store.saveTranscript(sessionId: record.id, items: [
+            .agentMessage(id: "old-message", text: "from last launch", isComplete: true)
+        ])
+        // ACP session/load replays the conversation itself — ours would duplicate it.
+        let driver = ChatTestDriver(handle: makeChatTestHandle(
+            sessionId: "agent-session", didResume: true, didReplayHistory: true))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        await controller.start()
+
+        #expect(controller.items.isEmpty)
+    }
+
     @Test func restoredHistoryAndFreshReducerKeepItemIdsUnique() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
@@ -716,9 +765,11 @@ private func makeChatTestFixture(worktreeId: UUID) throws
     return (ChatSessionStore(database: database), AgentInstallStore(rootDirectory: installRoot), root)
 }
 
-private func makeChatTestHandle(sessionId: String, didResume: Bool = false) -> SessionHandle {
+private func makeChatTestHandle(sessionId: String, didResume: Bool = false,
+                                didReplayHistory: Bool = false) -> SessionHandle {
     SessionHandle(sessionId: sessionId, agentCapabilities: AgentCapabilities(), modes: nil,
-                  models: nil, configOptions: [], didResume: didResume)
+                  models: nil, configOptions: [], didResume: didResume,
+                  didReplayHistory: didReplayHistory)
 }
 
 private enum ChatTestDriverError: Error {
