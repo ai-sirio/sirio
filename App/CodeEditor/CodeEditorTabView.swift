@@ -41,6 +41,10 @@ struct CodeEditorTabView: View {
             // down, it reaches above the scroll view and — `NSView.clipsToBounds`
             // being false by default since macOS 14 — paints over the tab bar.
             .clipped()
+            // The text view does add an I-beam cursor rect (`TextView.resetCursorRects`),
+            // but SwiftUI's pointer-style machinery outranks the cursor rects of the
+            // AppKit views it hosts, so the pointer has to be declared on this side.
+            .pointerStyle(.horizontalText)
         }
         .background(AppTheme.background)
     }
