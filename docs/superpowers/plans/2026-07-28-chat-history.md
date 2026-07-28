@@ -27,11 +27,19 @@ cd Packages/TillerACP && swift test --filter chatHistoryExcludesEmptySessions
 # App target tests — target is TillerTests, selector is the struct name
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 
 # Whole gate
 Scripts/ci.sh
 ```
+
+Two flags on every `xcodebuild` line here are load-bearing, not decoration:
+`-skipPackagePluginValidation` gets past the SwiftLint package plugin, which
+otherwise refuses to run, and `ENABLE_DEBUG_DYLIB=NO` avoids the Xcode 16 debug
+dylib that hangs this app's test host in dyld **before test discovery** — which
+looks like a stuck run, not a failure. Two SwiftLint failures from third-party
+CodeEdit packages are expected noise; the binary still links.
 
 `TillerTerminal`'s PTY tests are flaky under parallel load. If `ci.sh` fails only there, rerun before blaming these changes.
 
@@ -142,6 +150,7 @@ Add to `struct ChatControllerTests` in `AppTests/ChatControllerTests.swift`:
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 ```
 
@@ -200,6 +209,7 @@ In `App/Chat/ChatController.swift`, replace lines 291-294:
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 ```
 
@@ -719,7 +729,8 @@ Expected: PASS, including `saveAndLoadRoundTripsTerminalAndMarkdownTabs`.
 
 ```bash
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build
+  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation build
 ```
 
 Expected: BUILD SUCCEEDED.
@@ -793,6 +804,7 @@ Add to `struct ChatControllerTests` in `AppTests/ChatControllerTests.swift`:
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 ```
 
@@ -974,6 +986,7 @@ Replace `applyAutoTitle` (line 1057):
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 cd Packages/TillerACP && swift test --filter ChatSessionStoreTests
 ```
@@ -1068,6 +1081,7 @@ Add to `struct ChatControllerTests`:
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 ```
 
@@ -1239,6 +1253,7 @@ In `App/ContentView.swift:339`, the lazy build for a restored tab becomes detach
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests
 ```
 
@@ -1335,6 +1350,7 @@ import TillerPersistence
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatHistoryRowsTests
 ```
 
@@ -1381,6 +1397,7 @@ enum ChatHistoryRows {
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatHistoryRowsTests
 ```
 
@@ -1522,6 +1539,7 @@ In `App/TabBarView.swift`, insert the menu immediately before the existing `+` `
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatHistoryRowsTests \
   -only-testing:TillerTests/ChatControllerTests
 ```
@@ -1643,6 +1661,7 @@ and a section after `Section("Automation")`:
 Scripts/ci.sh
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  ENABLE_DEBUG_DYLIB=NO -skipPackagePluginValidation \
   -only-testing:TillerTests/ChatControllerTests \
   -only-testing:TillerTests/ChatHistoryRowsTests
 ```
