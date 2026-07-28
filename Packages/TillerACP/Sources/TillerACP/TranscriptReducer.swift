@@ -215,6 +215,16 @@ public struct TranscriptReducer: Sendable, Equatable {
         items[index] = .toolCall(item)
     }
 
+    /// Expires questions that can no longer be answered after disconnect.
+    public mutating func cancelPendingPermissions() {
+        for index in items.indices {
+            guard case .toolCall(var item) = items[index],
+                  item.permission?.isPending == true else { continue }
+            item.permission?.resolution = .cancelled
+            items[index] = .toolCall(item)
+        }
+    }
+
     /// Records the user's (or cancellation's) answer to a permission request.
     public mutating func permissionResolved(requestId: JSONRPCID,
                                             resolution: PermissionState.Resolution) {

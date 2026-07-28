@@ -47,6 +47,32 @@ import Testing
         #expect(driver is PiRPCDriver)
     }
 
+    @Test func piFactoryForwardsNativeConfigurationAndSuppressesLegacyResumeToken() async throws {
+        let store = try tempStore()
+        let legacy = try #require(makeConfiguredDriver(
+            agentId: "pi-acp", store: store, resumeSessionId: "legacy-acp-token"))
+        let native = try #require(makeConfiguredDriver(
+            agentId: "pi", store: store, resumeSessionId: "native-session"))
+
+        #expect(await legacy.piConfigurationForTesting() == (
+            model: "anthropic/sonnet", effort: "high", resumeSessionId: nil))
+        #expect(await native.piConfigurationForTesting() == (
+            model: "anthropic/sonnet", effort: "high", resumeSessionId: "native-session"))
+        let legacyCommand = (await legacy.piLaunchArgumentsForTesting()).joined(separator: " ")
+        let nativeCommand = (await native.piLaunchArgumentsForTesting()).joined(separator: " ")
+        #expect(legacyCommand.contains("--session") == false)
+        #expect(nativeCommand.contains("--session") == true)
+    }
+
+    private func makeConfiguredDriver(
+        agentId: String, store: AgentInstallStore, resumeSessionId: String?
+    ) -> PiRPCDriver? {
+        AgentDriverFactory.makeDriver(
+            agentId: agentId, worktreePath: "/tmp", installStore: store,
+            permissionMode: .ask, model: "anthropic/sonnet", effort: "high",
+            resumeSessionId: resumeSessionId, pathProbe: { _ in true }) as? PiRPCDriver
+    }
+
     @Test func claudeFactoryReturnsNativeDriverWhenCLIIsAvailable() throws {
         let driver = makeDriver(agentId: "claude-acp", store: try tempStore())
         #expect(driver is ClaudeStreamJSONDriver)

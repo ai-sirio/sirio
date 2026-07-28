@@ -372,6 +372,63 @@ private actor BlockedPromptTransport: ACPTransport {
         await cancel.value
     }
 
+    @Test func rejectedCancelledPromptDoesNotLeakCancellationIntoNextRun() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
+                                 resumeSessionId: nil)
+        try await driver.start()
+        await driver.markConnectedForTesting(sessionId: "session")
+
+        let rejected = Task { try await driver.prompt([.text("reject me")]) }
+        var sent = try await mock.waitForSent(count: 1)
+        await driver.cancel()
+        sent = try await mock.waitForSent(count: 2)
+        #expect((try value(sent[1]))["type"]?.stringValue == "abort")
+        let promptId = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(promptId)","type":"response","command":"prompt","success":false,"error":"rejected"}"#)
+        do {
+            _ = try await rejected.value
+            Issue.record("rejected prompt unexpectedly succeeded")
+        } catch { }
+
+        let next = Task { try await driver.prompt([.text("fresh run")]) }
+        sent = try await mock.waitForSent(count: 3)
+        let nextId = try requestId(sent[2])
+        await mock.emit(#"{"id":"\#(nextId)","type":"response","command":"prompt","success":true}"#)
+        await mock.emit(#"{"type":"agent_settled"}"#)
+        #expect(try await next.value == .endTurn)
+    }
+
+    @Test func connectRequestedEffortOverridesPersistedThinkingLevel() async throws {
+        let mock = MockTransport()
+        let driver = PiRPCDriver(transport: mock, model: nil, effort: "high",
+                                 resumeSessionId: nil)
+        try await driver.start()
+        let connect = Task {
+            try await driver.connect(cwd: "/tmp", resumeSessionId: nil, mcpServers: [])
+        }
+
+        var sent = try await mock.waitForSent(count: 1)
+        let stateId = try requestId(sent[0])
+        await mock.emit(#"{"id":"\#(stateId)","type":"response","command":"get_state","success":true,"data":{"thinkingLevel":"medium","sessionFile":"session"}}"#)
+        sent = try await mock.waitForSent(count: 2)
+        let settingId = try requestId(sent[1])
+        #expect((try value(sent[1]))["level"]?.stringValue == "high")
+        await mock.emit(#"{"id":"\#(settingId)","type":"response","command":"set_thinking_level","success":true}"#)
+        sent = try await mock.waitForSent(count: 3)
+        let modelsId = try requestId(sent[2])
+        await mock.emit(#"{"id":"\#(modelsId)","type":"response","command":"get_available_models","success":true,"data":{"models":[]}}"#)
+        sent = try await mock.waitForSent(count: 4)
+        let levelsId = try requestId(sent[3])
+        await mock.emit(#"{"id":"\#(levelsId)","type":"response","command":"get_available_thinking_levels","success":true,"data":{"levels":["medium","high"]}}"#)
+        sent = try await mock.waitForSent(count: 5)
+        let commandsId = try requestId(sent[4])
+        await mock.emit(#"{"id":"\#(commandsId)","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}"#)
+
+        let handle = try await connect.value
+        #expect(handle.configOptions.first?.currentValue == "high")
+    }
+
     @Test func idleCancellationDoesNotLeakIntoNextSettledRun() async throws {
         let mock = MockTransport()
         let driver = PiRPCDriver(transport: mock, model: nil, effort: nil,
