@@ -43,6 +43,10 @@ public struct ChatSessionStore: Sendable {
         }
     }
 
+    public func session(id: String) throws -> ChatSessionRecord? {
+        try database.read { db in try ChatSessionRecord.fetchOne(db, key: id) }
+    }
+
     /// Mirrors the tab's auto-generated title so the history row stays
     /// readable once the tab is gone.
     public func setTitle(_ title: String, sessionId: String) throws {

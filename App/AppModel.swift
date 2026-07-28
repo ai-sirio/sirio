@@ -1059,6 +1059,11 @@ final class AppModel {
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, tabs[worktreeId]?[idx].titleIsAutoNamed == true else { return }
         tabs[worktreeId]?[idx].title = trimmed
+        // The history row outlives the tab, so the title has to live on the
+        // session too — no extra summarizer call, same string.
+        if let sessionId = tabs[worktreeId]?[idx].chatSessionId {
+            try? chatStore?.setTitle(trimmed, sessionId: sessionId)
+        }
         persistTabs(for: worktreeId)
     }
     /// Riordina la tab prima di `targetId` (nil = in coda). Usato dal drag
@@ -1539,8 +1544,12 @@ final class AppModel {
     @discardableResult
     func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
         rememberChatAgent(agentId)
+        // The session row exists from the start so the tab knows which
+        // conversation it owns even before the first turn is persisted.
+        let sessionId = try? chatStore?.createSession(
+            worktreeId: worktree.id.uuidString, agentId: agentId).id
         let tab = WorkspaceTab(id: UUID(), title: "Chat",
-                               content: .chat(agentId: agentId, sessionId: nil))
+                               content: .chat(agentId: agentId, sessionId: sessionId))
         selectedWorktree = worktree
         tabs[worktree.id, default: []].append(tab)
         activeTabId[worktree.id] = tab.id
@@ -1565,6 +1574,7 @@ final class AppModel {
             tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
             worktreePath: worktree.path, store: chatStore,
             installStore: agentInstallStore,
+            sessionId: tab.chatSessionId,
             persistenceCoordinator: persistenceCoordinator,
             startNewConversation: startNewConversation)
         controller.onStatusChange = { [weak self] status in
@@ -1588,6 +1598,10 @@ final class AppModel {
         guard let controller = chatControllers[tabId] else { return }
         chatControllers[tabId] = nil
         paneClosed(paneId: tabId)
+        // A chat closed before its first turn leaves a row nothing can show.
+        if let sessionId = controller.sessionId {
+            try? chatStore?.deleteIfEmpty(sessionId: sessionId)
+        }
         Task { await controller.stop() }
     }
 

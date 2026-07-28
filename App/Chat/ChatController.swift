@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import TillerACP
 import TillerCore
+import TillerPersistence
 import TillerTerminal
 
 /// Drives one chat tab: owns the agent child process (via AgentDriver),
@@ -136,7 +137,10 @@ final class ChatController {
     @ObservationIgnored private var pendingEvents: [ACPSessionEvent] = []
     @ObservationIgnored private var eventFlushScheduled = false
     @ObservationIgnored private var lastEventFlush = ContinuousClock.now
-    private var sessionRecordId: String?
+    /// The chat session record this controller renders. Assigned by the owning
+    /// tab; created on first connect only for legacy tabs that arrived without one.
+    private(set) var sessionRecordId: String?
+    var sessionId: String? { sessionRecordId }
     private var selectedModel: String?
     private var selectedEffort: String?
     private var forceNewSession = false
@@ -146,6 +150,7 @@ final class ChatController {
     init(tabId: UUID, agentId: String, worktreeId: UUID,
          worktreePath: String, store: ChatSessionStore?,
          installStore: AgentInstallStore,
+         sessionId: String? = nil,
          persistenceCoordinator: PersistenceCoordinator? = nil,
          startNewConversation: Bool = false,
          driverFactory: @escaping DriverFactory = {
@@ -178,6 +183,7 @@ final class ChatController {
                 })
         }
         self.installStore = installStore
+        self.sessionRecordId = sessionId
         self.driverFactory = driverFactory
         self.forceNewSession = startNewConversation
     }
@@ -188,36 +194,43 @@ final class ChatController {
         guard state == .idle || isDisconnected else { return }
         let generation = lifecycleGeneration
 
-        var record = try? store?.latestSession(worktreeId: worktreeId.uuidString)
-        if forceNewSession { record = nil }
+        // The tab owns its session. A nil id means a legacy tab from before
+        // v15: it starts empty and adopts the session created on connect.
+        let stored = sessionRecordId.flatMap { id -> ChatSessionRecord? in
+            guard let store else { return nil }
+            return try? store.session(id: id)
+        }
+        if forceNewSession { sessionRecordId = nil }
+        let resumable = forceNewSession ? nil : stored
         // First start of a reopened chat: adopt the session's last-used agent.
-        if let record, sessionRecordId == nil, restored.isEmpty, reducer.items.isEmpty {
-            agentId = AgentIdMigration.canonical(record.agentId)
+        if let resumable, restored.isEmpty, reducer.items.isEmpty {
+            agentId = AgentIdMigration.canonical(resumable.agentId)
         }
         state = .connecting
 
-        if let record, sessionRecordId == nil,
-           let stored = try? store?.loadTranscript(sessionId: record.id) {
-            restored = stored
-            reducer = TranscriptReducer(existingIDs: Set(stored.map(\.id)))
+        if let resumable, restored.isEmpty, reducer.items.isEmpty,
+           let transcript = try? store?.loadTranscript(sessionId: resumable.id) {
+            restored = transcript
+            reducer = TranscriptReducer(existingIDs: Set(transcript.map(\.id)))
             rebuildPresentationSnapshot()
         }
-        if let record, let used = record.contextUsageUsed, let size = record.contextUsageSize {
+        if let resumable, let used = resumable.contextUsageUsed,
+           let size = resumable.contextUsageSize {
             reducer.restoreContextUsage(ContextUsage(used: used, size: size))
         }
 
-        let requestedMode = PermissionMode(rawValue: record?.permissionMode ?? "") ?? .ask
+        let requestedMode = PermissionMode(rawValue: resumable?.permissionMode ?? "") ?? .ask
         permissionMode = PermissionMode.pillSelection(forAgent: agentId,
                                                       requested: requestedMode)
-        selectedModel = record?.selectedModel
-        selectedEffort = record?.selectedEffort
+        selectedModel = resumable?.selectedModel
+        selectedEffort = resumable?.selectedEffort
         // Resume only a session created by this same agent. A persisted
         // pi-acp record has an ACP token incompatible with Pi RPC, even
         // though its identity migrates to native Pi.
-        let migratedFromPiACP = record?.agentId == "pi-acp"
+        let migratedFromPiACP = resumable?.agentId == "pi-acp"
         let resumeId = !migratedFromPiACP
-            && AgentIdMigration.canonical(record?.agentId ?? "") == agentId
-            ? record?.acpSessionId : nil
+            && AgentIdMigration.canonical(resumable?.agentId ?? "") == agentId
+            ? resumable?.acpSessionId : nil
         guard let initialDriver = driverFactory(
             agentId, worktreePath, installStore, requestedMode,
             selectedModel, selectedEffort, resumeId) else {
@@ -288,10 +301,10 @@ final class ChatController {
             selectedModel = models?.currentModelId ?? selectedModel
             selectedEffort = effortOption?.currentValue ?? selectedEffort
             didResume = handle.didResume
-            if handle.didResume, let record {
+            if handle.didResume, let resumable {
                 if handle.didReplayHistory { restored = [] }
-                sessionRecordId = record.id
-                try? store?.setACPSessionId(handle.sessionId, sessionId: record.id)
+                sessionRecordId = resumable.id
+                try? store?.setACPSessionId(handle.sessionId, sessionId: resumable.id)
             } else if let sessionRecordId {
                 // Agent switch reuses the existing record for transcript continuity.
                 try? store?.setACPSessionId(handle.sessionId, sessionId: sessionRecordId)
