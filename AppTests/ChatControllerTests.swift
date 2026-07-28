@@ -144,6 +144,48 @@ struct ChatControllerTests {
         #expect(saved?.transportKind == "native")
     }
 
+    @Test func failedFreshConnectStopsAndDiscardsStartedDriver() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let driver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "unused"), failsConnect: true)
+        let controller = ChatController(
+            tabId: UUID(), agentId: "pi", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        await controller.start()
+
+        #expect(controller.state == .disconnected(message: "connectFailed"))
+        #expect(await driver.stopCount == 1)
+    }
+
+    @Test func directDisconnectExpiresPendingQuestion() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "pi-session"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "pi", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+        await controller.start()
+        driver.emit(.permissionRequested(
+            requestId: .string("ui-question"),
+            toolCall: ToolCallUpdate(toolCallId: "pi-ui-ui-question", title: "Question",
+                                     kind: .other, status: .pending), options: []))
+        for _ in 0..<50 where !controller.hasPendingPermission {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(controller.hasPendingPermission)
+        driver.emit(.disconnected)
+        for _ in 0..<50 where controller.hasPendingPermission {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(!controller.hasPendingPermission)
+    }
+
     @Test func migratedPiACPSessionStartsFreshWithoutResumingACPToken() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
@@ -649,6 +691,7 @@ private func makeChatTestHandle(sessionId: String, didResume: Bool = false) -> S
 
 private enum ChatTestDriverError: Error {
     case resumeFailed
+    case connectFailed
 }
 
 private actor ChatTestDriver: AgentDriver {
@@ -656,6 +699,7 @@ private actor ChatTestDriver: AgentDriver {
     private let continuation: AsyncStream<ACPSessionEvent>.Continuation
     private let handle: SessionHandle
     private let failsResume: Bool
+    private let failsConnect: Bool
     private let promptEvents: [ACPSessionEvent]
     private let holdPromptOpen: Bool
     nonisolated let supportsStructuredAnswers: Bool
@@ -668,6 +712,7 @@ private actor ChatTestDriver: AgentDriver {
     private(set) var stopCount = 0
 
     init(handle: SessionHandle, failsResume: Bool = false,
+         failsConnect: Bool = false,
          promptEvents: [ACPSessionEvent] = [], holdPromptOpen: Bool = false,
          supportsStructuredAnswers: Bool = false) {
         let (events, continuation) = AsyncStream.makeStream(of: ACPSessionEvent.self)
@@ -675,6 +720,7 @@ private actor ChatTestDriver: AgentDriver {
         self.continuation = continuation
         self.handle = handle
         self.failsResume = failsResume
+        self.failsConnect = failsConnect
         self.promptEvents = promptEvents
         self.holdPromptOpen = holdPromptOpen
         self.supportsStructuredAnswers = supportsStructuredAnswers
@@ -694,6 +740,7 @@ private actor ChatTestDriver: AgentDriver {
         _ = mcpServers
         resumeIds.append(resumeSessionId)
         if failsResume, resumeSessionId != nil { throw ChatTestDriverError.resumeFailed }
+        if failsConnect { throw ChatTestDriverError.connectFailed }
         return handle
     }
 

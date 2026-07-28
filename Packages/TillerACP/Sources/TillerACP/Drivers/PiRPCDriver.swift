@@ -524,7 +524,7 @@ extension PiRPCDriver {
         let thinkingResponse = try await sendCommand("get_available_thinking_levels")
         let thinkingData = try requireSuccess(thinkingResponse)
         let levels = thinkingData?["levels"]?.arrayValue?.compactMap(\.stringValue) ?? []
-        let thinkingValue = stateThinking ?? requestedEffort
+        let thinkingValue = requestedEffort ?? stateThinking
         if thinkingValue != nil || !levels.isEmpty {
             effortOption = SessionConfigOption(
                 id: "effort", name: "Thinking", currentValue: thinkingValue,
@@ -602,7 +602,12 @@ extension PiRPCDriver {
                 promptContinuations.append(continuation)
             }
         } catch {
-            if wasIdle { runActive = false }
+            if wasIdle {
+                runActive = false
+                // No settlement can belong to a prompt rejected before it
+                // started; do not carry its cancellation into the next run.
+                cancelRequested = false
+            }
             throw error
         }
     }
@@ -705,6 +710,17 @@ extension PiRPCDriver {
             eventContinuation.yield(.update(.agentThoughtChunk(
                 .text("Pi UI response failed: \(error.localizedDescription)"))))
         }
+    }
+
+    // Test seams for factory wiring coverage.
+    func piConfigurationForTesting() -> (
+        model: String?, effort: String?, resumeSessionId: String?
+    ) {
+        (requestedModel, requestedEffort, requestedResumeSessionId)
+    }
+
+    func piLaunchArgumentsForTesting() -> [String] {
+        (transport as? ProcessTransport)?.arguments ?? []
     }
 
     // Test seam: avoids four-command connect setup in event-only tests.

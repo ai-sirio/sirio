@@ -314,12 +314,22 @@ final class ChatController {
             state = .ready
         } catch let ACPClientError.agentError(error)
             where error.message.lowercased().contains("auth") {
+            await cleanupFailedStart(generation: generation)
             guard generation == lifecycleGeneration else { return }
             state = .needsAuth
         } catch {
+            await cleanupFailedStart(generation: generation)
             guard generation == lifecycleGeneration else { return }
             state = .disconnected(message: "\(error)")
         }
+    }
+
+    private func cleanupFailedStart(generation: Int) async {
+        guard generation == lifecycleGeneration else { return }
+        pumpTask?.cancel()
+        pumpTask = nil
+        if let driver { await driver.stop() }
+        driver = nil
     }
 
     func stop() async {
@@ -655,6 +665,7 @@ final class ChatController {
         case .turnEnded(let reason):
             endTurn(reason)
         case .disconnected:
+            reducer.cancelPendingPermissions()
             if state != .needsAuth, !isDisconnected {
                 state = .disconnected(message: "Agent process terminated")
             }

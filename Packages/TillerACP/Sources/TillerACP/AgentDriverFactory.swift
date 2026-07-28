@@ -38,7 +38,9 @@ public enum AgentDriverFactory {
         resumeSessionId: String?,
         pathProbe: @Sendable (String) -> Bool = defaultPathProbe
     ) -> (any AgentDriver)? {
-        let canonicalId = AgentIdMigration.canonical(agentId)
+        let rawAgentId = agentId
+        let canonicalId = AgentIdMigration.canonical(rawAgentId)
+        let nativeResumeSessionId = rawAgentId == "pi-acp" ? nil : resumeSessionId
 
         if transportKind(for: canonicalId) == .native {
             let binary = nativeBinary(for: canonicalId)
@@ -46,7 +48,7 @@ public enum AgentDriverFactory {
             return makeNativeDriver(
                 agentId: canonicalId, worktreePath: worktreePath,
                 permissionMode: permissionMode, model: model, effort: effort,
-                resumeSessionId: resumeSessionId)
+                resumeSessionId: nativeResumeSessionId)
         }
 
         guard let spec = AgentLaunchSpec.resolved(id: canonicalId,
