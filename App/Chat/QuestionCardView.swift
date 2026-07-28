@@ -17,12 +17,13 @@ struct QuestionCardView: View {
 
     var body: some View {
         ChatCard(kind: .question, isHighlighted: !question.isAnswered) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text(question.header)
-                    .font(.callout.weight(.medium))
+                    .font(.system(size: 15, weight: .semibold))
+                    .textSelection(.enabled)
                 if !question.prompt.isEmpty {
                     Text(question.prompt)
-                        .font(.system(size: 13))
+                        .font(.system(size: 14))
                         .textSelection(.enabled)
                 }
                 if let chosen = question.chosenOptionId {
@@ -41,9 +42,10 @@ struct QuestionCardView: View {
     @ViewBuilder
     private var unansweredControls: some View {
         if let input = question.textInput {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 TextField(input.placeholder ?? "Type an answer", text: $textAnswer)
                     .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 14))
                     .onSubmit { submitTextAnswer() }
                 Button("Send") { submitTextAnswer() }
                     .disabled(textAnswer.trimmingCharacters(
@@ -55,6 +57,7 @@ struct QuestionCardView: View {
                     }
                 }
             }
+            .controlSize(.large)
         } else {
             options
         }
@@ -67,21 +70,27 @@ struct QuestionCardView: View {
     }
 
     private var options: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(question.options) { option in
                 Button {
                     Task { await controller.answerQuestion(question, optionId: option.id) }
                 } label: {
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(option.label)
+                            .font(.system(size: 14))
+                            .multilineTextAlignment(.leading)
                         if let detail = option.detail {
-                            Text(detail).font(.caption2).foregroundStyle(.secondary)
+                            Text(detail).font(.caption).foregroundStyle(.secondary)
                         }
                     }
+                    // Full-width rows: the options are the answer, not a
+                    // toolbar, and a wrapped label needs the room.
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 5)
                 }
                 .buttonStyle(.bordered)
                 .tint(option.isRejection ? AppTheme.gitConflict : AppTheme.railQuestion)
-                .controlSize(.small)
+                .controlSize(.large)
             }
         }
     }

@@ -207,8 +207,8 @@ final class ChatController {
         }
 
         let requestedMode = PermissionMode(rawValue: record?.permissionMode ?? "") ?? .ask
-        permissionMode = AgentDriverFactory.transportKind(for: agentId) == .native
-            ? requestedMode : nil
+        permissionMode = PermissionMode.pillSelection(forAgent: agentId,
+                                                      requested: requestedMode)
         selectedModel = record?.selectedModel
         selectedEffort = record?.selectedEffort
         // Resume only a session created by this same agent. A persisted
@@ -527,7 +527,7 @@ final class ChatController {
         guard let driver else { return }
         let option = question.options.first { $0.id == optionId }
         if driver.supportsStructuredAnswers, option?.isRejection != true,
-           !question.prompt.isEmpty {
+           question.isStructured {
             reducer.permissionResolved(requestId: question.requestId,
                                        resolution: .selected(optionId: optionId))
             rebuildPresentationSnapshot()

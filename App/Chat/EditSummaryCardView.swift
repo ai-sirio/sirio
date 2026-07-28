@@ -3,9 +3,9 @@ import TillerACP
 import TillerCore
 import TillerGit
 
-/// Card di fine turno "N file modificati": ogni riga apre il diff nel right
-/// panel; "Ripristina" scarta le modifiche del file via git (con conferma).
-/// Visibilità post-hoc + undo — il permission gate resta la difesa preventiva.
+/// End-of-turn "N files changed" card: each row opens the file in the editor,
+/// "Revert" discards that file's changes via git (with a confirmation).
+/// Post-hoc visibility + undo — the permission gate stays the preventive defence.
 struct EditSummaryCardView: View {
     let paths: [String]
     let worktree: Worktree
@@ -56,20 +56,14 @@ struct EditSummaryCardView: View {
     private func row(_ path: String) -> some View {
         HStack(spacing: 8) {
             Button {
-                appModel.requestChatFollow(path: path, worktreeId: worktree.id)
+                appModel.openFileReference(path, in: worktree)
             } label: {
                 Label((path as NSString).lastPathComponent,
-                      systemImage: "arrow.up.forward.square")
+                      systemImage: "chevron.left.forwardslash.chevron.right")
                     .font(.caption)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.tint)
-            Button {
-                appModel.openFileReference(path, in: worktree)
-            } label: {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-            }
-            .buttonStyle(.plain)
+            .foregroundStyle(AppTheme.fileLink)
             .help("Open in editor")
             Spacer()
             if revertedPaths.contains(path) {

@@ -100,6 +100,9 @@ enum AppTheme {
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
         dark: NSColor(srgbRed: 0.157, green: 0.165, blue: 0.208, alpha: 1))
+    /// Clickable file paths in the transcript. `.tint` bypasses the tuned
+    /// light/dark pairs and reads as a dark blue on the chat surface.
+    static let fileLink = gitUntracked
     /// Left accent rails: the card's kind, readable while scrolling.
     static let railTask = dynamic(
         light: NSColor(srgbRed: 0.36, green: 0.30, blue: 0.68, alpha: 1),

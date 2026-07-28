@@ -42,6 +42,46 @@ import Testing
         #expect(question?.options.allSatisfy { !$0.isRejection } == true)
     }
 
+    @Test func dropsThePromptWhenItOnlyRepeatsTheHeader() {
+        // Pi sends `header: title, prompt: title` for `ui/select`, and an absent
+        // header falls back to the question text — both make the card print the
+        // same sentence twice.
+        var call = ToolCallItem(toolCallId: "t1", title: "AskUserQuestion",
+                                kind: .other, status: .pending)
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "header": .string("  What next? "),
+                "question": .string("What next?"),
+                "options": .array([.object(["label": .string("Ship it")])]),
+            ])]),
+        ])
+        call.permission = PermissionState(requestId: .string("r1"), options: [])
+        #expect(ChatQuestion.from(call)?.prompt.isEmpty == true)
+
+        call.rawInput = .object([
+            "questions": .array([.object([
+                "question": .string("Which backend?"),
+                "options": .array([.object(["label": .string("SQLite")])]),
+            ])]),
+        ])
+        let noHeader = ChatQuestion.from(call)
+        #expect(noHeader?.header == "Which backend?")
+        #expect(noHeader?.prompt.isEmpty == true)
+        // A dropped prompt must not demote the answer to a raw permission:
+        // the structured channel is what tells the agent which option won.
+        #expect(noHeader?.isStructured == true)
+    }
+
+    @Test func onlyStructuredInputsAnswerOnTheStructuredChannel() {
+        var call = ToolCallItem(toolCallId: "t1", title: "Write config.toml",
+                                kind: .edit, status: .pending)
+        call.permission = PermissionState(
+            requestId: .string("r1"),
+            options: [PermissionOption(optionId: "allow", name: "Allow",
+                                       kind: .allowOnce)])
+        #expect(ChatQuestion.from(call)?.isStructured == false)
+    }
+
     @Test func disambiguatesRepeatedStructuredOptionLabels() {
         var call = ToolCallItem(toolCallId: "t1", title: "AskUserQuestion",
                                 kind: .other, status: .pending)
@@ -177,6 +217,22 @@ import Testing
         #expect(question.options.isEmpty)
         #expect(question.textInput == .init(
             placeholder: "feature/native-pi", prefill: "feature/"))
+        // Pi's `ui/input` carries no options: the text field is the only way to
+        // answer, so the card still has to be shown.
+        #expect(question.hasControls)
+    }
+
+    @Test func hasControlsWithOptionsButNotWithoutAnyWayToAnswer() throws {
+        var call = ToolCallItem(toolCallId: "t1", title: "Bash", kind: .execute,
+                                status: .pending)
+        call.permission = PermissionState(
+            requestId: .string("r1"),
+            options: [PermissionOption(optionId: "allow", name: "Allow",
+                                       kind: .allowOnce)])
+        #expect(try #require(ChatQuestion.from(call)).hasControls)
+
+        call.permission = PermissionState(requestId: .string("r1"), options: [])
+        #expect(try #require(ChatQuestion.from(call)).hasControls == false)
     }
 
     @Test func structuredOptionCanBeMarkedAsRejection() throws {

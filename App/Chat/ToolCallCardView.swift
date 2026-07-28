@@ -21,6 +21,7 @@ struct ToolCallCardView: View {
                 if expanded || isPermissionPending {
                     contentBody
                 }
+                dismissControl
             }
         }
     }
@@ -66,6 +67,22 @@ struct ToolCallCardView: View {
         case .failed:
             Image(systemName: "xmark.circle.fill")
                 .foregroundStyle(.red).font(.caption)
+        }
+    }
+
+    /// A permission the question card cannot render — no options, no text
+    /// field — would otherwise wait forever, and the composer stays locked
+    /// while it does. The escape hatch keeps that unrecoverable.
+    @ViewBuilder
+    private var dismissControl: some View {
+        if isPermissionPending, ChatQuestion.from(item)?.hasControls != true,
+           let requestId = item.permission?.requestId {
+            Button("Dismiss") {
+                Task { await controller.answerPermission(requestId: requestId,
+                                                         optionId: nil) }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 
