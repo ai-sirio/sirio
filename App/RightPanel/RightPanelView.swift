@@ -54,7 +54,7 @@ struct RightPanelView: View {
                         }
                     }
                 },
-                secondaryButton: .cancel(Text("Annulla")))
+                secondaryButton: .cancel(Text("Cancel")))
         }
     }
 
@@ -101,6 +101,7 @@ struct RightPanelView: View {
                     case .diff:
                         GitDiffView(
                             panelModel: panelModel,
+                            onOpenFile: { url in appModel.openFileTab(fileURL: url, in: worktree) },
                             requestDiscard: { pendingDiscard = $0 })
                     case .status:
                         GitStatusView(
@@ -108,6 +109,12 @@ struct RightPanelView: View {
                             onOpenDiff: { entry in
                                 modeRaw = RightPanelMode.diff.rawValue
                                 Task { await panelModel.selectDiff(entry) }
+                            },
+                            onOpenFile: { entry in
+                                guard let root = panelModel.rootURL else { return }
+                                appModel.openFileTab(
+                                    fileURL: root.appendingPathComponent(entry.path.value),
+                                    in: worktree)
                             },
                             requestDiscard: { pendingDiscard = $0 })
                     }

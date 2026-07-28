@@ -199,7 +199,11 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
-                      let url = urls.first else { return false }
+                      let url = urls.first(where: {
+                          guard $0.isFileURL else { return false }
+                          return (try? $0.resourceValues(
+                              forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                      }) else { return false }
                 model.openFileTab(fileURL: url, in: worktree)
                 return true
             }
@@ -295,7 +299,7 @@ struct ContentView: View {
                                         command: { model.paneCommand(paneId: $0) },
                                         onTitleChange: { id, title in model.handleTitleChange(paneId: id, title: title) },
                                         onContentSignal: { id, tail in model.handleContentSignal(paneId: id, tailText: tail) },
-                                        onOpenURL: { _, url in model.handleTerminalOpenURL(url, in: worktree) }
+                                        onOpenURL: { _, url in model.openFileReference(url, in: worktree) }
                                     ),
                                     menuProvider: { paneId, proxy in
                                         menuProvider.items(for: paneId, proxy: proxy)

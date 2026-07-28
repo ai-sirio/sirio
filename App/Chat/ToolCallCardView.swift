@@ -93,7 +93,7 @@ struct ToolCallCardView: View {
             HStack(spacing: 8) {
                 ForEach(Array(item.locations.enumerated()), id: \.offset) { _, location in
                     Button {
-                        appModel.handleTerminalOpenURL(location.path, in: worktree)
+                        appModel.openFileReference(location.path, in: worktree)
                     } label: {
                         Label((location.path as NSString).lastPathComponent,
                               systemImage: "arrow.up.forward.square")
@@ -118,6 +118,13 @@ struct ToolCallCardView: View {
                 Text((path as NSString).lastPathComponent)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
+                Button {
+                    appModel.openFileReference(path, in: worktree)
+                } label: {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                }
+                .buttonStyle(.plain)
+                .help("Open in editor")
                 Text("+\(stats.added)")
                     .font(.caption2).foregroundStyle(AppTheme.diffAddition)
                 Text("−\(stats.removed)")
@@ -133,7 +140,7 @@ struct ToolCallCardView: View {
             }
             if hidden > 0 {
                 Button {
-                    appModel.handleTerminalOpenURL(path, in: worktree)
+                    appModel.openFileReference(path, in: worktree)
                 } label: {
                     Text("\(hidden) more lines — open file")
                         .font(.caption2)
