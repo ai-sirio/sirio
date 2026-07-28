@@ -6,7 +6,8 @@ public enum TabContent: Equatable, Sendable {
     case terminal(SplitTree)
     case markdown(fileURL: URL)
     case code(fileURL: URL)
-    case chat(agentId: String)
+    /// `sessionId` identifies the chat conversation rendered by the tab.
+    case chat(agentId: String, sessionId: String? = nil)
 }
 
 /// Una tab dentro un worktree. L'identità della tab è stabile; title e
@@ -60,7 +61,13 @@ public struct WorkspaceTab: Identifiable, Equatable, Sendable {
 
     /// Agent id when this is a chat tab.
     public var chatAgentId: String? {
-        if case .chat(let agentId) = content { return agentId }
+        if case .chat(let agentId, _) = content { return agentId }
+        return nil
+    }
+
+    /// Chat session this tab renders, when it has one.
+    public var chatSessionId: String? {
+        if case .chat(_, let sessionId) = content { return sessionId }
         return nil
     }
 
