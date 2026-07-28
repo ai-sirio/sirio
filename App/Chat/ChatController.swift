@@ -328,7 +328,9 @@ final class ChatController {
         guard generation == lifecycleGeneration else { return }
         pumpTask?.cancel()
         pumpTask = nil
-        if let driver { await driver.stop() }
+        guard let failedDriver = driver else { return }
+        await failedDriver.stop()
+        guard generation == lifecycleGeneration, driver === failedDriver else { return }
         driver = nil
     }
 

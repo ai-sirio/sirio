@@ -161,6 +161,38 @@ struct ChatControllerTests {
         #expect(await driver.stopCount == 1)
     }
 
+    @Test func staleFailedStartCleanupDoesNotClearReplacementDriver() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let failedDriver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "failed"),
+            failsConnect: true, holdFirstStop: true)
+        let replacementDriver = ChatTestDriver(
+            handle: makeChatTestHandle(sessionId: "replacement"))
+        var drivers = [failedDriver, replacementDriver]
+        let controller = ChatController(
+            tabId: UUID(), agentId: "pi", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            driverFactory: { _, _, _, _, _, _, _ in drivers.removeFirst() })
+
+        let failedStart = Task { await controller.start() }
+        await failedDriver.waitUntilStopStarted()
+
+        await controller.stop()
+        await controller.start()
+        #expect(controller.state == .ready)
+
+        await failedDriver.releaseStop()
+        await failedStart.value
+
+        controller.send(text: "replacement remains managed", mentionPaths: [], images: [])
+        for _ in 0..<50 where await replacementDriver.promptCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await replacementDriver.promptCount == 1)
+    }
+
     @Test func directDisconnectExpiresPendingQuestion() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
@@ -702,9 +734,12 @@ private actor ChatTestDriver: AgentDriver {
     private let failsConnect: Bool
     private let promptEvents: [ACPSessionEvent]
     private let holdPromptOpen: Bool
+    private let holdFirstStop: Bool
     nonisolated let supportsStructuredAnswers: Bool
     private(set) var permissionAnswers: [(JSONRPCID, PermissionOutcome)] = []
     private var promptReleased = false
+    private var stopStarted = false
+    private var stopReleased = false
     private(set) var promptIsOpen = false
     private(set) var promptCount = 0
     private(set) var modeIds: [String] = []
@@ -714,7 +749,7 @@ private actor ChatTestDriver: AgentDriver {
     init(handle: SessionHandle, failsResume: Bool = false,
          failsConnect: Bool = false,
          promptEvents: [ACPSessionEvent] = [], holdPromptOpen: Bool = false,
-         supportsStructuredAnswers: Bool = false) {
+         holdFirstStop: Bool = false, supportsStructuredAnswers: Bool = false) {
         let (events, continuation) = AsyncStream.makeStream(of: ACPSessionEvent.self)
         self.events = events
         self.continuation = continuation
@@ -723,14 +758,25 @@ private actor ChatTestDriver: AgentDriver {
         self.failsConnect = failsConnect
         self.promptEvents = promptEvents
         self.holdPromptOpen = holdPromptOpen
+        self.holdFirstStop = holdFirstStop
         self.supportsStructuredAnswers = supportsStructuredAnswers
     }
 
     func start() async throws {}
     func stop() async {
         stopCount += 1
+        if holdFirstStop, stopCount == 1 {
+            stopStarted = true
+            while !stopReleased { await Task.yield() }
+        }
         continuation.finish()
     }
+
+    func waitUntilStopStarted() async {
+        while !stopStarted { await Task.yield() }
+    }
+
+    func releaseStop() { stopReleased = true }
 
     nonisolated func emit(_ event: ACPSessionEvent) { continuation.yield(event) }
 
