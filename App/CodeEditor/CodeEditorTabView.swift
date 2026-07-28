@@ -67,7 +67,7 @@ struct CodeEditorTabView: View {
     private var deletedBanner: some View {
         HStack {
             Image(systemName: "trash").foregroundStyle(.red)
-            Text("File deleted on disk. Cmd-S recreates it.")
+            Text("File deleted on disk. ⌘S recreates it.")
             Spacer()
         }
         .font(.system(size: 12))
