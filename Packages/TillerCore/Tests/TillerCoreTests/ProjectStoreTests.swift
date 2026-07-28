@@ -206,7 +206,7 @@ import TillerPersistence
     let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
     let tab = WorkspaceTab(id: UUID(), title: "Claude Code",
-                           content: .chat(agentId: "claude"))
+                           content: .chat(agentId: "claude", sessionId: nil))
     try await store.saveTabs(worktreeId: worktree.id, tabs: [tab], activeTabId: tab.id)
     let loaded = try await store.loadTabs(of: worktree.id)
     #expect(loaded.tabs.count == 1)

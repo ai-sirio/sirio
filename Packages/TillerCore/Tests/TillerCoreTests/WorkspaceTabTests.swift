@@ -44,7 +44,7 @@ import Foundation
 @Test func chatTabExposesAgentIdAndActivityPane() {
     let id = UUID()
     let tab = WorkspaceTab(id: id, title: "Claude Code",
-                           content: .chat(agentId: "claude"))
+                           content: .chat(agentId: "claude", sessionId: nil))
     #expect(tab.chatAgentId == "claude")
     #expect(tab.leafIds == [])
     #expect(tab.terminalTree == nil)
