@@ -23,11 +23,17 @@ public struct GitFileDiff: Equatable, Sendable {
     public let deletions: Int
     public let isBinary: Bool
     public let isSubmodule: Bool
+    public let oldText: String?
+    public let newText: String?
 }
 
 public enum GitDiff {
     public static let outputLimits = GitOutputLimits(
         maxBytes: 5 * 1024 * 1024,
+        maxLines: 20_000)
+
+    private static let snapshotLimits = GitOutputLimits(
+        maxBytes: 500_000,
         maxLines: 20_000)
 
     public static func load(entry: GitStatusEntry, in repoPath: String) async throws -> GitFileDiff {
@@ -49,10 +55,26 @@ public enum GitDiff {
                 in: repoPath,
                 limits: outputLimits)
         }
-        return try parse(result.stdoutString, path: entry.path)
+        let oldPath = entry.originalPath ?? entry.path
+        let oldText = hasHead && !entry.isUntracked
+            ? await headText(path: oldPath, repoPath: repoPath)
+            : nil
+        let newURL = URL(fileURLWithPath: repoPath, isDirectory: true)
+            .appendingPathComponent(entry.path.value)
+        let newText = readUTF8(at: newURL)
+        return try parse(
+            result.stdoutString,
+            path: entry.path,
+            oldText: oldText,
+            newText: newText)
     }
 
-    public static func parse(_ patch: String, path: GitPath) throws -> GitFileDiff {
+    public static func parse(
+        _ patch: String,
+        path: GitPath,
+        oldText: String? = nil,
+        newText: String? = nil
+    ) throws -> GitFileDiff {
         let rawLines = patch.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var lines: [GitDiffLine] = []
         var oldLine: Int?
@@ -107,7 +129,25 @@ public enum GitDiff {
             }
         }
         return GitFileDiff(path: path, lines: lines, additions: additions,
-                           deletions: deletions, isBinary: isBinary, isSubmodule: isSubmodule)
+                           deletions: deletions, isBinary: isBinary, isSubmodule: isSubmodule,
+                           oldText: oldText, newText: newText)
+    }
+
+    private static func readUTF8(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count <= snapshotLimits.maxBytes else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func headText(
+        path: GitPath,
+        repoPath: String
+    ) async -> String? {
+        guard let result = try? await GitRunner.runCaptured(
+            ["show", "HEAD:\(path.value)"],
+            in: repoPath,
+            limits: snapshotLimits) else { return nil }
+        return String(data: result.stdout, encoding: .utf8)
     }
 
     private static func hunkStarts(_ line: String) -> (old: Int, new: Int)? {
