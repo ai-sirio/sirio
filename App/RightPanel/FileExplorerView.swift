@@ -43,7 +43,7 @@ struct FileExplorerView: View {
                 } description: {
                     Text(error)
                 } actions: {
-                    Button("Riprova") { Task { await panelModel.refresh() } }
+                    Button("Retry") { Task { await panelModel.refresh() } }
                 }
             } else {
                 ScrollView {
@@ -117,10 +117,10 @@ struct FileExplorerView: View {
             }
         }
         .contextMenu {
-            Button("Apri") { open(node) }
+            Button("Open") { open(node) }
                 .disabled(node.kind.isDirectory)
-            Button("Mostra nel Finder") { reveal(node) }
-            Button("Copia percorso") { copyPath(node) }
+            Button("Show in Finder") { reveal(node) }
+            Button("Copy path") { copyPath(node) }
         }
         .overlay(alignment: .bottomLeading) {
             if let error = panelModel.directoryErrors[node.relativePath] {
@@ -158,11 +158,7 @@ struct FileExplorerView: View {
     private func open(_ node: FileTreeNode) {
         guard let root = panelModel.rootURL else { return }
         let url = node.url(relativeTo: root)
-        if MarkdownFileLink.isMarkdown(url) {
-            appModel.openMarkdownTab(fileURL: url, in: worktree)
-        } else {
-            NSWorkspace.shared.open(url)
-        }
+        appModel.openFileTab(fileURL: url, in: worktree)
     }
 
     private func reveal(_ node: FileTreeNode) {

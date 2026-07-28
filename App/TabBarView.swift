@@ -65,7 +65,7 @@ struct TabBarView: View {
                 }
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
-                .help("Tutte le tab")
+                .help("All tabs")
             }
 
             Menu {
@@ -77,7 +77,7 @@ struct TabBarView: View {
             }
             .buttonStyle(.plain)
             .menuIndicator(.hidden)
-            .help("Nuova tab (⌘T)")
+            .help("New tab (⌘T)")
             .padding(.trailing, 8)
         }
         .frame(height: 32)
@@ -141,7 +141,7 @@ struct TabBarItem: View {
                     }
             }
 
-            if model.markdownDocuments[tab.id]?.isDirty == true {
+            if model.isDocumentDirty(tabId: tab.id) {
                 Circle().fill(.secondary).frame(width: 5, height: 5)
             }
 
@@ -160,7 +160,7 @@ struct TabBarItem: View {
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())
-                .help("Chiudi tab (⌘W)")
+                .help("Close tab (⌘W)")
             } else {
                 // Placeholder della × per evitare che la tab cambi larghezza
                 // in hover (jitter durante il mouse-over).
@@ -190,16 +190,16 @@ struct TabBarItem: View {
         .onHover { hovering = $0 }
         .onTapGesture { model.activateTab(tab.id, in: worktree.id) }
         .contextMenu {
-            Button("Rinomina") {
+            Button("Rename") {
                 draftTitle = tab.title
                 renaming = true
                 renameFieldFocused = true
             }
             Divider()
-            Button("Chiudi") { model.closeTab(tab.id, in: worktree) }
-            Button("Chiudi altre") { model.closeOtherTabs(tab.id, in: worktree) }
+            Button("Close") { model.closeTab(tab.id, in: worktree) }
+            Button("Close Others") { model.closeOtherTabs(tab.id, in: worktree) }
                 .disabled((model.tabs[worktree.id]?.count ?? 0) <= 1)
-            Button("Chiudi a destra") { model.closeTabsToRight(of: tab.id, in: worktree) }
+            Button("Close Tabs to the Right") { model.closeTabsToRight(of: tab.id, in: worktree) }
                 .disabled(model.tabs[worktree.id]?.last?.id == tab.id)
     }
         .draggable(TabDragPayload(tabId: tab.id, worktreeId: worktree.id))

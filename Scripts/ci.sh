@@ -12,15 +12,23 @@ swift build --package-path Packages/TillerControl --product tillerctl
 # distributed — avoids requiring a "Mac Development" cert on CI runners
 # that only carry the Developer ID Application cert used for releases.
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build | tail -5
+  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  -skipPackagePluginValidation -skipMacroValidation build | tail -5
 
 # --- Parallel package tests ---
+# TillerTerminal is excluded from the parallel batch and run on its own afterwards.
+# Its PtyProcessTests spawn real PTYs and assert on wall-clock deadlines and on output
+# arriving within a timeout, so they fail whenever the machine is saturated — and this
+# batch saturates it. They pass consistently when run alone.
 tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
 trap 'rm -rf "$tmpdir"' EXIT
+
+serial_pkg=TillerTerminal
 
 : > "$tmpdir/jobs"
 for pkg in Packages/*/; do
     name=${pkg%/}; name=${name##*/}
+    [ "$name" = "$serial_pkg" ] && continue
     {
         cd "$pkg"
         set +e
@@ -40,6 +48,11 @@ while IFS=: read -r pid name; do
         failed_names="$failed_names $name"
     fi
 done < "$tmpdir/jobs"
+
+if [ -d "Packages/$serial_pkg" ]; then
+    echo "==> swift test: Packages/$serial_pkg/ (serial — timing-sensitive PTY tests)"
+    ( cd "Packages/$serial_pkg" && swift test ) || failed_names="$failed_names $serial_pkg"
+fi
 
 if [ -n "$failed_names" ]; then
     echo "FAILED packages:$failed_names"

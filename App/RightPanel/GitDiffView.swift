@@ -1,9 +1,11 @@
 import AppKit
 import SwiftUI
+import TillerCode
 import TillerGit
 
 struct GitDiffView: View {
     @Bindable var panelModel: RightPanelModel
+    let onOpenFile: (URL) -> Void
     let requestDiscard: (PendingGitDiscard) -> Void
 
     var body: some View {
@@ -38,6 +40,13 @@ struct GitDiffView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Refresh Diff")
+                if let url = selectedFileURL {
+                    Button { onOpenFile(url) } label: {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in editor")
+                }
             }
             .padding(8)
             Divider()
@@ -52,9 +61,9 @@ struct GitDiffView: View {
                 } description: {
                     Text(error)
                 } actions: {
-                    Button("Riprova") { Task { await panelModel.ensureDiffLoaded() } }
+                    Button("Retry") { Task { await panelModel.ensureDiffLoaded() } }
                     if let url = selectedFileURL {
-                        Button("Apri file") { NSWorkspace.shared.open(url) }
+                        Button("Open file") { onOpenFile(url) }
                     }
                 }
             } else if let diff = panelModel.diff {
@@ -62,7 +71,7 @@ struct GitDiffView: View {
                     ContentUnavailableView(
                         "Binary diff unavailable", systemImage: "doc.richtext")
                 } else {
-                    UnifiedDiffPane(lines: diff.lines)
+                    UnifiedDiffPane(diff: diff, fileURL: selectedFileURL)
                 }
                 actionBar
             }
@@ -128,12 +137,29 @@ struct GitDiffView: View {
 }
 
 private struct UnifiedDiffPane: View {
-    let lines: [GitDiffLine]
+    let diff: GitFileDiff
+    let fileURL: URL?
+
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var highlights: DiffHighlights?
+
+    private struct HighlightRequest: Hashable {
+        let path: String?
+        let oldHash: Int?
+        let newHash: Int?
+    }
+
+    private var requestID: HighlightRequest {
+        HighlightRequest(
+            path: fileURL?.standardizedFileURL.path,
+            oldHash: diff.oldText?.hashValue,
+            newHash: diff.newText?.hashValue)
+    }
 
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(lines) { line in
+                ForEach(diff.lines) { line in
                     switch line.kind {
                     case .metadata:
                         EmptyView()
@@ -153,6 +179,13 @@ private struct UnifiedDiffPane: View {
             .padding(.vertical, 4)
         }
         .frame(maxHeight: .infinity)
+        .task(id: requestID) {
+            guard let fileURL else { highlights = nil; return }
+            highlights = await DiffHighlightCache.shared.highlights(
+                path: fileURL,
+                oldText: diff.oldText,
+                newText: diff.newText)
+        }
     }
 
     private func lineRow(_ line: GitDiffLine) -> some View {
@@ -163,15 +196,44 @@ private struct UnifiedDiffPane: View {
             Text(line.newLineNumber.map(String.init) ?? "")
                 .frame(width: 38, alignment: .trailing)
                 .foregroundStyle(AppTheme.meta)
-            Text(line.text)
+            codeText(for: line)
                 .textSelection(.enabled)
-                .foregroundStyle(foreground(for: line))
                 .padding(.leading, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.system(size: 11, design: .monospaced))
         .padding(.vertical, 1)
         .background(background(for: line))
+    }
+
+    private func ranges(for line: GitDiffLine) -> [SyntaxHighlightRange]? {
+        switch line.kind {
+        case .deletion:
+            guard let number = line.oldLineNumber,
+                  let map = highlights?.old else { return nil }
+            return map.ranges(forLine: number)
+        case .addition, .context:
+            guard let number = line.newLineNumber,
+                  let map = highlights?.new else { return nil }
+            return map.ranges(forLine: number)
+        case .hunk, .metadata:
+            return nil
+        }
+    }
+
+    @ViewBuilder
+    private func codeText(for line: GitDiffLine) -> some View {
+        if let ranges = ranges(for: line) {
+            Text(AttributedCodeRenderer.renderLine(
+                line.text,
+                ranges: ranges,
+                theme: .tiller(isDark: colorScheme == .dark),
+                font: .monospacedSystemFont(ofSize: 11, weight: .regular)))
+        } else {
+            Text(line.text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(foreground(for: line))
+        }
     }
 
     private func foreground(for line: GitDiffLine) -> Color {

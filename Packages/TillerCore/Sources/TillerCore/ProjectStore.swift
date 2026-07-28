@@ -224,6 +224,16 @@ public actor ProjectStore {
                         kind: "markdown", filePath: fileURL.path,
                         titleIsAutoNamed: tab.titleIsAutoNamed
                     )
+                case .code(let fileURL):
+                    // treeJSON resta vuoto perché la colonna è notNull dalla v3.
+                    record = TerminalTabRecord(
+                        id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
+                        title: tab.title, orderIdx: idx,
+                        isActive: tab.id == activeTabId,
+                        treeJSON: "", updatedAt: Date(),
+                        kind: "code", filePath: fileURL.path,
+                        titleIsAutoNamed: tab.titleIsAutoNamed
+                    )
                 case .chat(let agentId):
                     record = TerminalTabRecord(
                         id: tab.id.uuidString, worktreeId: worktreeId.uuidString,
@@ -262,6 +272,14 @@ public actor ProjectStore {
                     }
                     tabs.append(WorkspaceTab(id: id, title: record.title,
                                              content: .markdown(fileURL: URL(fileURLWithPath: path)),
+                                             titleIsAutoNamed: record.titleIsAutoNamed))
+                case "code":
+                    guard let path = record.filePath else {
+                        logger.warning("loadTabs: code tab '\(record.id)' missing filePath — skip")
+                        continue
+                    }
+                    tabs.append(WorkspaceTab(id: id, title: record.title,
+                                             content: .code(fileURL: URL(fileURLWithPath: path)),
                                              titleIsAutoNamed: record.titleIsAutoNamed))
                 case "chat":
                     guard let agentId = record.chatAgentId else { continue }

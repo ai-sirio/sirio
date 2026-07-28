@@ -5,6 +5,7 @@ import Foundation
 public enum TabContent: Equatable, Sendable {
     case terminal(SplitTree)
     case markdown(fileURL: URL)
+    case code(fileURL: URL)
     case chat(agentId: String)
 }
 
@@ -45,6 +46,18 @@ public struct WorkspaceTab: Identifiable, Equatable, Sendable {
         return nil
     }
 
+    public var fileURL: URL? {
+        switch content {
+        case .markdown(let url), .code(let url): url
+        case .terminal, .chat: nil
+        }
+    }
+
+    public var codeFileURL: URL? {
+        if case .code(let url) = content { return url }
+        return nil
+    }
+
     /// Agent id when this is a chat tab.
     public var chatAgentId: String? {
         if case .chat(let agentId) = content { return agentId }
@@ -56,7 +69,7 @@ public struct WorkspaceTab: Identifiable, Equatable, Sendable {
     public var activityPaneIds: [UUID] {
         switch content {
         case .terminal: leafIds
-        case .markdown: []
+        case .markdown, .code: []
         case .chat: [id]
         }
     }

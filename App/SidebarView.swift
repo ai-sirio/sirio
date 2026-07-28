@@ -390,7 +390,7 @@ private struct WorktreeRow: View {
                 }
                 .buttonStyle(.plain)
                 .menuIndicator(.hidden)
-                .help("Nuova tab (⌘T)")
+                .help("New tab (⌘T)")
             }
 
             let runningAgentIds = model.runningAgentIds(for: worktree)
@@ -534,7 +534,7 @@ private struct TabRow: View {
                         renaming = true
                         renameFieldFocused = true
                     }
-                if model.markdownDocuments[tab.id]?.isDirty == true {
+                if model.isDocumentDirty(tabId: tab.id) {
                     Circle().fill(.secondary).frame(width: 5, height: 5)
                 }
             }
@@ -550,7 +550,7 @@ private struct TabRow: View {
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())
-                .help("Chiudi tab (⌘W)")
+                .help("Close tab (⌘W)")
             }
         }
         .padding(.vertical, 4)
@@ -568,7 +568,7 @@ private struct TabRow: View {
             model.activateTab(tab.id, in: worktree.id)
         }
         .contextMenu {
-            Button("Rinomina") {
+            Button("Rename") {
                 draftTitle = tab.title
                 renaming = true
                 renameFieldFocused = true
@@ -578,10 +578,10 @@ private struct TabRow: View {
                     TerminalPaneMenu(model: model, paneId: paneId, confirmingClose: $confirmingClose)
                 } else {
                     Divider()
-                    Button("Chiudi tab…", role: .destructive) { confirmingClose = true }
+                    Button("Close Tab…", role: .destructive) { confirmingClose = true }
                 }
             } else {
-                Button("Chiudi") {
+                Button("Close") {
                     model.closeTab(tab.id, in: worktree)
                 }
             }
@@ -602,11 +602,11 @@ private struct TabRow: View {
                     .padding(.leading, 44)
             }
         }
-        .alert("Chiudere il terminale?", isPresented: $confirmingClose) {
-            Button("Annulla", role: .cancel) {}
-            Button("Chiudi", role: .destructive) { model.closeTab(tab.id, in: worktree) }
+        .alert("Close terminal?", isPresented: $confirmingClose) {
+            Button("Cancel", role: .cancel) {}
+            Button("Close", role: .destructive) { model.closeTab(tab.id, in: worktree) }
         } message: {
-            Text("Il processo in esecuzione verrà terminato.")
+            Text("The running process will be terminated.")
         }
     }
 
@@ -677,11 +677,11 @@ private struct PaneRow: View {
         .contextMenu {
             TerminalPaneMenu(model: model, paneId: paneId, confirmingClose: $confirmingClose)
         }
-        .alert("Chiudere il terminale?", isPresented: $confirmingClose) {
-            Button("Annulla", role: .cancel) {}
-            Button("Chiudi", role: .destructive) { model.closeTerminal(paneId: paneId) }
+        .alert("Close terminal?", isPresented: $confirmingClose) {
+            Button("Cancel", role: .cancel) {}
+            Button("Close", role: .destructive) { model.closeTerminal(paneId: paneId) }
         } message: {
-            Text("Il processo in esecuzione verrà terminato.")
+            Text("The running process will be terminated.")
         }
     }
 
@@ -709,10 +709,10 @@ private struct TerminalPaneMenu: View {
             Button("Split orizzontale") { model.split(paneId: paneId, axis: .vertical) }
             Button("Split verticale") { model.split(paneId: paneId, axis: .horizontal) }
             if model.canAdoptPane(paneId) {
-                Button("Affianca al terminale corrente") { model.adoptPane(paneId) }
+                Button("Attach to Current Terminal") { model.adoptPane(paneId) }
             }
             Divider()
-            Button("Chiudi terminale…", role: .destructive) { confirmingClose = true }
+            Button("Close Terminal…", role: .destructive) { confirmingClose = true }
         }
     }
 }

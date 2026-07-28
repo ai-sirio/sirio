@@ -7,10 +7,10 @@ import TillerTerminal
 import TillerControl
 import TillerAgents
 import TillerACP
+import TillerCode
 import AppKit
 import UserNotifications
 import OSLog
-import UniformTypeIdentifiers
 
 @MainActor
 @Observable
@@ -54,7 +54,9 @@ final class AppModel {
                 self?.worktree(byId: id).flatMap { self?.statusForWorktree($0) } ?? nil
             },
             hasUnsavedWork: { [weak self] id in
-                (self?.tabs[id] ?? []).contains { self?.markdownDocuments[$0.id]?.isDirty == true }
+                (self?.tabs[id] ?? []).contains {
+                    self?.isDocumentDirty(tabId: $0.id) == true
+                }
             }
         )
         guard !evicted.isEmpty else { return }
@@ -829,7 +831,7 @@ final class AppModel {
                 let tabsBeingRemoved = tabs[worktree.id] ?? []
                 tabs[worktree.id] = nil
                 for tab in tabsBeingRemoved {
-                    teardownMarkdownDocument(tabId: tab.id)
+                    teardownDocument(tabId: tab.id)
                     teardownChatController(tabId: tab.id)
                 }
                 activeTabId[worktree.id] = nil
@@ -928,7 +930,7 @@ final class AppModel {
             tabs[worktree.id] = nil
             paneCaches[worktree.id] = nil
             for tab in tabsBeingRemoved {
-                teardownMarkdownDocument(tabId: tab.id)
+                teardownDocument(tabId: tab.id)
                 teardownChatController(tabId: tab.id)
             }
             activeTabId[worktree.id] = nil
@@ -1005,15 +1007,18 @@ final class AppModel {
     /// the empty-state view; the user creates a new tab via ⌘T or the
     /// sidebar "+" menu.
     func closeTab(_ tabId: UUID, in worktree: Worktree) {
-        if let doc = markdownDocuments[tabId], doc.isDirty {
-            guard resolveDirtyClose(doc) else { return }
+        if let document = markdownDocuments[tabId], document.isDirty {
+            guard resolveDirtyClose(fileURL: document.fileURL, save: document.save) else { return }
+        }
+        if let document = codeDocuments[tabId], document.isDirty {
+            guard resolveDirtyClose(fileURL: document.fileURL, save: document.save) else { return }
         }
         guard var list = tabs[worktree.id] else { return }
         if let closing = list.first(where: { $0.id == tabId }) {
             deleteAgentSessionRefs(paneIds: closing.leafIds)
         }
         list.removeAll { $0.id == tabId }
-        teardownMarkdownDocument(tabId: tabId)
+        teardownDocument(tabId: tabId)
         teardownChatController(tabId: tabId)
         // Allow empty tab list — the worktree can have zero tabs.
         // The user creates a new tab via ⌘T or the sidebar "+" menu.
@@ -1425,11 +1430,12 @@ final class AppModel {
     /// panel's terminal subagent tree. In-memory only.
     var paneProcessTrees: [UUID: [ProcessNode]] = [:]
 
-    // MARK: - Markdown editor
+    // MARK: - File editor
 
     /// Documenti aperti, keyed su tab.id. Vivono qui (non nella view) perché
     /// le view SwiftUI muoiono al cambio tab e perderebbero il buffer.
     var markdownDocuments: [UUID: MarkdownDocument] = [:]
+    var codeDocuments: [UUID: CodeDocument] = [:]
     var chatControllers: [UUID: ChatController] = [:]
     var chatStore: ChatSessionStore?
     /// Tiller-managed ACP agent installs (Settings → Agents).
@@ -1508,13 +1514,17 @@ final class AppModel {
         }
     }
 
+    func isDocumentDirty(tabId: UUID) -> Bool {
+        markdownDocuments[tabId]?.isDirty == true || codeDocuments[tabId]?.isDirty == true
+    }
+
     /// Funnel unico per tutti i canali di apertura (cmd+click, drop, ⌘O).
     /// Dedup per fileURL: se il file è già aperto nel worktree attiva quella tab.
     @discardableResult
-    func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> WorkspaceTab? {
+    func openFileTab(fileURL: URL, in worktree: Worktree) -> WorkspaceTab? {
         let url = fileURL.standardizedFileURL
         if let existing = tabs[worktree.id]?.first(where: {
-            $0.markdownFileURL?.standardizedFileURL == url
+            $0.fileURL?.standardizedFileURL == url
         }) {
             selectedWorktree = worktree
             activeTabId[worktree.id] = existing.id
@@ -1522,18 +1532,40 @@ final class AppModel {
             return existing
         }
         do {
-            let doc = try MarkdownDocument(fileURL: url)
-            let tab = WorkspaceTab(id: UUID(), title: url.lastPathComponent,
+            let tab: WorkspaceTab
+            if MarkdownFileLink.isMarkdown(url) {
+                let document = try MarkdownDocument(fileURL: url)
+                tab = WorkspaceTab(id: UUID(), title: url.lastPathComponent,
                                    content: .markdown(fileURL: url))
-            markdownDocuments[tab.id] = doc
+                markdownDocuments[tab.id] = document
+            } else {
+                let document = try CodeDocument(fileURL: url)
+                tab = WorkspaceTab(id: UUID(), title: url.lastPathComponent,
+                                   content: .code(fileURL: url))
+                codeDocuments[tab.id] = document
+            }
             selectedWorktree = worktree
             tabs[worktree.id, default: []].append(tab)
             activeTabId[worktree.id] = tab.id
             persistTabs(for: worktree.id)
             return tab
         } catch {
-            lastError = "Apertura \(url.lastPathComponent) fallita: \(error.localizedDescription)"
+            lastError = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
+            NSWorkspace.shared.open(url)
             return nil
+        }
+    }
+
+    @discardableResult
+    func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> WorkspaceTab? {
+        openFileTab(fileURL: fileURL, in: worktree)
+    }
+
+    func openFileReference(_ raw: String, in worktree: Worktree) {
+        if let fileURL = FileLink.resolve(raw, worktreePath: worktree.path) {
+            openFileTab(fileURL: fileURL, in: worktree)
+        } else if let url = URL(string: raw) {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -1546,52 +1578,72 @@ final class AppModel {
         return doc
     }
 
-    /// ⌘S: salva il documento della tab attiva, se è markdown. No-op altrimenti.
-    func saveActiveMarkdownDocument() {
+    func codeDocument(for tab: WorkspaceTab) -> CodeDocument? {
+        guard let url = tab.codeFileURL else { return nil }
+        if let document = codeDocuments[tab.id] { return document }
+        guard let document = try? CodeDocument(fileURL: url) else { return nil }
+        codeDocuments[tab.id] = document
+        return document
+    }
+
+    /// ⌘S: salva il documento della tab attiva, se è un documento aperto.
+    func saveActiveDocument() {
         guard let worktree = selectedWorktree,
-              let tab = activeTab(for: worktree.id),
-              let doc = markdownDocuments[tab.id] else { return }
-        do { try doc.save() }
-        catch { lastError = "Salvataggio \(doc.fileURL.lastPathComponent) fallito: \(error.localizedDescription)" }
+              let tab = activeTab(for: worktree.id) else { return }
+        do {
+            if let document = markdownDocuments[tab.id] {
+                try document.save()
+            } else if let document = codeDocuments[tab.id] {
+                try document.save()
+            }
+        } catch {
+            lastError = "Could not save \(tab.fileURL?.lastPathComponent ?? tab.title): "
+                + error.localizedDescription
+        }
+    }
+
+    func saveActiveMarkdownDocument() {
+        saveActiveDocument()
     }
 
     /// Link attivato (cmd+click) in un pane del terminale: file markdown →
     /// tab editor nel worktree del pane; tutto il resto → apertura di sistema.
     func handleTerminalOpenURL(_ raw: String, in worktree: Worktree) {
-        if let fileURL = MarkdownFileLink.resolve(raw, worktreePath: worktree.path) {
-            openMarkdownTab(fileURL: fileURL, in: worktree)
-        } else if let url = URL(string: raw) {
-            NSWorkspace.shared.open(url)
-        }
+        openFileReference(raw, in: worktree)
     }
 
-    /// File > Apri file… (⌘O): NSOpenPanel filtrato su markdown, nel worktree selezionato.
-    func openMarkdownFilePanel() {
+    /// File > Open File… (⌘O): NSOpenPanel in the selected worktree.
+    func openFilePanel() {
         guard let worktree = selectedWorktree else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = MarkdownFileLink.extensions
-            .compactMap { UTType(filenameExtension: $0) }
         panel.directoryURL = URL(fileURLWithPath: worktree.path)
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        openMarkdownTab(fileURL: url, in: worktree)
+        openFileTab(fileURL: url, in: worktree)
+    }
+
+    func openMarkdownFilePanel() {
+        openFilePanel()
     }
 
     /// Alert modale per chiusura con modifiche non salvate.
     /// true = procedere con la chiusura.
-    private func resolveDirtyClose(_ doc: MarkdownDocument) -> Bool {
+    private func resolveDirtyClose(
+        fileURL: URL,
+        save: () throws -> Void
+    ) -> Bool {
         let alert = NSAlert()
-        alert.messageText = "Salvare le modifiche a \(doc.fileURL.lastPathComponent)?"
-        alert.informativeText = "Le modifiche andranno perse se non le salvi."
-        alert.addButton(withTitle: "Salva")
-        alert.addButton(withTitle: "Non salvare")
-        alert.addButton(withTitle: "Annulla")
+        alert.messageText = "Save changes to \(fileURL.lastPathComponent)?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            do { try doc.save(); return true }
+            do { try save(); return true }
             catch {
-                lastError = "Salvataggio fallito: \(error.localizedDescription)"
+                lastError = "Save failed: \(error.localizedDescription)"
                 return false
             }
         case .alertSecondButtonReturn:
@@ -1601,9 +1653,11 @@ final class AppModel {
         }
     }
 
-    private func teardownMarkdownDocument(tabId: UUID) {
+    private func teardownDocument(tabId: UUID) {
         markdownDocuments[tabId]?.stopWatching()
         markdownDocuments[tabId] = nil
+        codeDocuments[tabId]?.stopWatching()
+        codeDocuments[tabId] = nil
     }
     func paneCommand(paneId: UUID) -> String? { paneCommands[paneId] }
 
@@ -1867,6 +1921,8 @@ final class AppModel {
                 paneId: paneId, worktree: worktree, agentId: catalogAgentId
             )
         case .markdown:
+            source = nil
+        case .code:
             source = nil
         }
         guard let source, let text = source.recentText() else { return }
