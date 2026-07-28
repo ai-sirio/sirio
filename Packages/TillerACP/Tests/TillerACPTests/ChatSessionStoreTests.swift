@@ -242,6 +242,97 @@ import TillerPersistence
         #expect(try store.latestSession(worktreeId: worktreeId)?.acpSessionId == nil)
     }
 
+    @Test func chatHistoryExcludesEmptySessions() throws {
+        let (store, worktreeId) = try makeStore()
+        let used = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                           now: Date(timeIntervalSince1970: 100))
+        try store.saveTranscript(sessionId: used.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 100))
+        _ = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                    now: Date(timeIntervalSince1970: 200))
+
+        let history = try store.sessions(worktreeId: worktreeId)
+
+        #expect(history.map(\.id) == [used.id])
+    }
+
+    @Test func chatHistoryOrdersByMostRecentActivity() throws {
+        let (store, worktreeId) = try makeStore()
+        let older = try store.createSession(worktreeId: worktreeId, agentId: "claude",
+                                            now: Date(timeIntervalSince1970: 100))
+        try store.saveTranscript(sessionId: older.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 100))
+        let newer = try store.createSession(worktreeId: worktreeId, agentId: "codex",
+                                            now: Date(timeIntervalSince1970: 200))
+        try store.saveTranscript(sessionId: newer.id, items: sampleItems,
+                                 now: Date(timeIntervalSince1970: 200))
+
+        let history = try store.sessions(worktreeId: worktreeId)
+
+        #expect(history.map(\.id) == [newer.id, older.id])
+    }
+
+    @Test func setTitleIsReadBackOnTheSession() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude")
+        try store.saveTranscript(sessionId: session.id, items: sampleItems)
+
+        try store.setTitle("Fix the parser", sessionId: session.id)
+
+        #expect(try store.sessions(worktreeId: worktreeId).first?.title == "Fix the parser")
+    }
+
+    @Test func deleteSessionRemovesItsTranscript() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude")
+        try store.saveTranscript(sessionId: session.id, items: sampleItems)
+
+        try store.deleteSession(id: session.id)
+
+        #expect(try store.sessions(worktreeId: worktreeId).isEmpty)
+        #expect(try store.loadTranscript(sessionId: session.id).isEmpty)
+    }
+
+    @Test func deleteIfEmptyKeepsSessionsThatHaveTurns() throws {
+        let (store, worktreeId) = try makeStore()
+        let empty = try store.createSession(worktreeId: worktreeId, agentId: "claude")
+        let used = try store.createSession(worktreeId: worktreeId, agentId: "claude")
+        try store.saveTranscript(sessionId: used.id, items: sampleItems)
+
+        try store.deleteIfEmpty(sessionId: empty.id)
+        try store.deleteIfEmpty(sessionId: used.id)
+
+        #expect(try store.sessions(worktreeId: worktreeId).map(\.id) == [used.id])
+        #expect(try store.latestSession(worktreeId: worktreeId)?.id == used.id)
+    }
+
+    @Test func pruneKeepsTheMostRecentSessions() throws {
+        let (store, worktreeId) = try makeStore()
+        var ids: [String] = []
+        for tick in 1...4 {
+            let session = try store.createSession(
+                worktreeId: worktreeId, agentId: "claude",
+                now: Date(timeIntervalSince1970: TimeInterval(tick * 100)))
+            try store.saveTranscript(sessionId: session.id, items: sampleItems,
+                                     now: Date(timeIntervalSince1970: TimeInterval(tick * 100)))
+            ids.append(session.id)
+        }
+
+        try store.prune(worktreeId: worktreeId, keeping: 2)
+
+        #expect(try store.sessions(worktreeId: worktreeId).map(\.id) == [ids[3], ids[2]])
+    }
+
+    @Test func pruneWithZeroKeepsEverything() throws {
+        let (store, worktreeId) = try makeStore()
+        let session = try store.createSession(worktreeId: worktreeId, agentId: "claude")
+        try store.saveTranscript(sessionId: session.id, items: sampleItems)
+
+        try store.prune(worktreeId: worktreeId, keeping: 0)
+
+        #expect(try store.sessions(worktreeId: worktreeId).count == 1)
+    }
+
 
     @Test func kindLabelsAreDistinct() {
         let labels = sampleItems.map(\.kindLabel)
