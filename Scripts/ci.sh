@@ -12,7 +12,8 @@ swift build --package-path Packages/TillerControl --product tillerctl
 # distributed — avoids requiring a "Mac Development" cert on CI runners
 # that only carry the Developer ID Application cert used for releases.
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build | tail -5
+  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  -skipPackagePluginValidation -skipMacroValidation build | tail -5
 
 # --- Parallel package tests ---
 tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
