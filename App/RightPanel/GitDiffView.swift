@@ -4,6 +4,7 @@ import TillerGit
 
 struct GitDiffView: View {
     @Bindable var panelModel: RightPanelModel
+    let onOpenFile: (URL) -> Void
     let requestDiscard: (PendingGitDiscard) -> Void
 
     var body: some View {
@@ -38,6 +39,13 @@ struct GitDiffView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Refresh Diff")
+                if let url = selectedFileURL {
+                    Button { onOpenFile(url) } label: {
+                        Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open in editor")
+                }
             }
             .padding(8)
             Divider()
@@ -52,9 +60,9 @@ struct GitDiffView: View {
                 } description: {
                     Text(error)
                 } actions: {
-                    Button("Riprova") { Task { await panelModel.ensureDiffLoaded() } }
+                    Button("Retry") { Task { await panelModel.ensureDiffLoaded() } }
                     if let url = selectedFileURL {
-                        Button("Apri file") { NSWorkspace.shared.open(url) }
+                        Button("Open file") { onOpenFile(url) }
                     }
                 }
             } else if let diff = panelModel.diff {

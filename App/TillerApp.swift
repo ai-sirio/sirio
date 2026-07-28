@@ -47,7 +47,7 @@ struct TillerApp: App {
                     .keyboardShortcut("w", modifiers: .command)
                 Button("Save") { model.saveActiveDocument() }
                     .keyboardShortcut("s", modifiers: .command)
-                Button("Open File…") { model.openMarkdownFilePanel() }
+                Button("Open File…") { model.openFilePanel() }
                     .keyboardShortcut("o", modifiers: .command)
             }
             CommandMenu("History") {

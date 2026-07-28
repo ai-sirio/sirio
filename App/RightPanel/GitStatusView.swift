@@ -26,6 +26,7 @@ struct GitStatusView: View {
 
     @Bindable var panelModel: RightPanelModel
     let onOpenDiff: (GitStatusEntry) -> Void
+    let onOpenFile: (GitStatusEntry) -> Void
     let requestDiscard: (PendingGitDiscard) -> Void
 
     var body: some View {
@@ -51,7 +52,7 @@ struct GitStatusView: View {
                 } description: {
                     Text(error)
                 } actions: {
-                    Button("Riprova") { Task { await panelModel.refresh() } }
+                    Button("Retry") { Task { await panelModel.refresh() } }
                 }
             } else if panelModel.status.isClean {
                 ContentUnavailableView("Working tree clean", systemImage: "checkmark.circle")
@@ -160,6 +161,11 @@ struct GitStatusView: View {
                 }
                 .buttonStyle(.plain)
             }
+            Button { onOpenFile(entry) } label: {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+            }
+            .buttonStyle(.plain)
+            .help("Open in editor")
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
@@ -167,6 +173,9 @@ struct GitStatusView: View {
         .background(AppTheme.rowHover.opacity(0.001),
                     in: RoundedRectangle(cornerRadius: 6))
         .onTapGesture { onOpenDiff(entry) }
+        .contextMenu {
+            Button("Open in editor") { onOpenFile(entry) }
+        }
         .help(entry.isConflicted ? "Conflicted" : entry.path.value)
     }
 

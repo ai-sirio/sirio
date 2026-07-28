@@ -1561,6 +1561,14 @@ final class AppModel {
         openFileTab(fileURL: fileURL, in: worktree)
     }
 
+    func openFileReference(_ raw: String, in worktree: Worktree) {
+        if let fileURL = FileLink.resolve(raw, worktreePath: worktree.path) {
+            openFileTab(fileURL: fileURL, in: worktree)
+        } else if let url = URL(string: raw) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     /// Documento della tab; lo crea al volo per le tab ripristinate da sessione.
     func markdownDocument(for tab: WorkspaceTab) -> MarkdownDocument? {
         guard let url = tab.markdownFileURL else { return nil }
@@ -1601,15 +1609,11 @@ final class AppModel {
     /// Link attivato (cmd+click) in un pane del terminale: file markdown →
     /// tab editor nel worktree del pane; tutto il resto → apertura di sistema.
     func handleTerminalOpenURL(_ raw: String, in worktree: Worktree) {
-        if let fileURL = MarkdownFileLink.resolve(raw, worktreePath: worktree.path) {
-            openMarkdownTab(fileURL: fileURL, in: worktree)
-        } else if let url = URL(string: raw) {
-            NSWorkspace.shared.open(url)
-        }
+        openFileReference(raw, in: worktree)
     }
 
     /// File > Open File… (⌘O): NSOpenPanel in the selected worktree.
-    func openMarkdownFilePanel() {
+    func openFilePanel() {
         guard let worktree = selectedWorktree else { return }
         let panel = NSOpenPanel()
         panel.directoryURL = URL(fileURLWithPath: worktree.path)
@@ -1617,6 +1621,10 @@ final class AppModel {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         openFileTab(fileURL: url, in: worktree)
+    }
+
+    func openMarkdownFilePanel() {
+        openFilePanel()
     }
 
     /// Alert modale per chiusura con modifiche non salvate.
