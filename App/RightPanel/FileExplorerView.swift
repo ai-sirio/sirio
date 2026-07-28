@@ -79,11 +79,24 @@ struct FileExplorerView: View {
             }
             iconView(for: node)
                 .frame(width: 14)
-            Text(node.name)
-                .font(.system(size: 12))
-                .foregroundStyle(nameColor(for: node))
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if node.kind.isDirectory {
+                Text(node.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(nameColor(for: node))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            } else {
+                Text(node.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(nameColor(for: node))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    // Scope double-click to the file name so row taps stay immediate.
+                    .onTapGesture(count: 2) {
+                        selectedPath = node.relativePath
+                        open(node)
+                    }
+            }
             Spacer(minLength: 4)
             if let entry = panelModel.statusByPath[node.relativePath] {
                 Text(statusSymbol(entry))
@@ -104,11 +117,6 @@ struct FileExplorerView: View {
         .contentShape(Rectangle())
         .background(selected ? AppTheme.selectionFill : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
-        // Double-tap must be attached before single-tap or it never fires.
-        .onTapGesture(count: 2) {
-            selectedPath = node.relativePath
-            if !node.kind.isDirectory { open(node) }
-        }
         .onTapGesture {
             selectedPath = node.relativePath
             treeFocused = true
