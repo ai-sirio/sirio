@@ -12,6 +12,9 @@ import TillerTerminal
 final class ChatController {
     enum ChatState: Equatable {
         case idle, connecting, ready, prompting, needsAuth
+        /// Transcript on screen, no agent process. Restored and history-opened
+        /// chats sit here until the user actually sends something.
+        case detached
         case disconnected(message: String?)
     }
 
@@ -146,11 +149,17 @@ final class ChatController {
     private var forceNewSession = false
     private var lifecycleGeneration = 0
     @ObservationIgnored private var persistenceEnqueueTask: Task<Void, Never>?
+    /// Prompt typed into a detached chat, replayed once the agent is ready.
+    /// Kept whole rather than pushed onto `queued`, which carries only text
+    /// and would silently drop mentions and images.
+    @ObservationIgnored private var pendingDetachedPrompt:
+        (text: String, mentionPaths: [String], images: [ImageAttachment])?
 
     init(tabId: UUID, agentId: String, worktreeId: UUID,
          worktreePath: String, store: ChatSessionStore?,
          installStore: AgentInstallStore,
          sessionId: String? = nil,
+         startDetached: Bool = false,
          persistenceCoordinator: PersistenceCoordinator? = nil,
          startNewConversation: Bool = false,
          driverFactory: @escaping DriverFactory = {
@@ -186,12 +195,27 @@ final class ChatController {
         self.sessionRecordId = sessionId
         self.driverFactory = driverFactory
         self.forceNewSession = startNewConversation
+        if startDetached {
+            state = .detached
+            if let sessionId, let stored = try? store?.loadTranscript(sessionId: sessionId) {
+                restored = stored
+                reducer = TranscriptReducer(existingIDs: Set(stored.map(\.id)))
+                rebuildPresentationSnapshot()
+            }
+        }
     }
 
     // MARK: - Lifecycle
 
+    /// Called when a chat view appears. A detached chat stays asleep: its
+    /// transcript is already on screen and the agent costs a subprocess.
+    func activate() async {
+        guard state != .detached else { return }
+        await start()
+    }
+
     func start() async {
-        guard state == .idle || isDisconnected else { return }
+        guard state == .idle || state == .detached || isDisconnected else { return }
         let generation = lifecycleGeneration
 
         // The tab owns its session. A nil id means a legacy tab from before
@@ -394,6 +418,14 @@ final class ChatController {
     // MARK: - Prompting
 
     func send(text: String, mentionPaths: [String], images: [ImageAttachment]) {
+        if state == .detached {
+            pendingDetachedPrompt = (text, mentionPaths, images)
+            Task { [weak self] in
+                await self?.start()
+                self?.sendPendingDetachedPrompt()
+            }
+            return
+        }
         if state == .prompting {
             queued.append(text)
             return
@@ -436,6 +468,12 @@ final class ChatController {
             self.onStatusChange?(.done)
             self.dispatchQueued()
         }
+    }
+
+    private func sendPendingDetachedPrompt() {
+        guard state == .ready, let pending = pendingDetachedPrompt else { return }
+        pendingDetachedPrompt = nil
+        send(text: pending.text, mentionPaths: pending.mentionPaths, images: pending.images)
     }
 
     private func dispatchQueued() {

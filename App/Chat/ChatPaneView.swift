@@ -99,7 +99,7 @@ struct ChatPaneView: View {
             controller.onFollowLocation = { [weak appModel] path in
                 appModel?.requestChatFollow(path: path, worktreeId: worktree.id)
             }
-            await controller.start()
+            await controller.activate()
         }
     }
 

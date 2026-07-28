@@ -1567,7 +1567,8 @@ final class AppModel {
     /// Lazily builds the controller for a (restored) chat tab, mirroring
     /// markdownDocument(for:).
     func chatController(for tab: WorkspaceTab, in worktree: Worktree,
-                     startNewConversation: Bool = false) -> ChatController? {
+                     startNewConversation: Bool = false,
+                     startDetached: Bool = false) -> ChatController? {
         guard let agentId = tab.chatAgentId else { return nil }
         if let controller = chatControllers[tab.id] { return controller }
         let controller = ChatController(
@@ -1575,6 +1576,7 @@ final class AppModel {
             worktreePath: worktree.path, store: chatStore,
             installStore: agentInstallStore,
             sessionId: tab.chatSessionId,
+            startDetached: startDetached,
             persistenceCoordinator: persistenceCoordinator,
             startNewConversation: startNewConversation)
         controller.onStatusChange = { [weak self] status in

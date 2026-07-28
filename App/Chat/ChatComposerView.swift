@@ -21,7 +21,8 @@ struct ChatComposerView: View {
     private var isPrompting: Bool { controller.state == .prompting }
     private var isConnecting: Bool { controller.state == .connecting }
     private var canInteract: Bool {
-        (controller.state == .ready || isPrompting) && !controller.presentationSnapshot.hasPendingPermission
+        (controller.state == .ready || isPrompting || controller.state == .detached)
+            && !controller.presentationSnapshot.hasPendingPermission
     }
     private var canSend: Bool { canInteract && !document.isEmpty }
 
@@ -241,4 +242,3 @@ struct ChatComposerView: View {
                         replacing: NSRange(location: document.storage.length, length: 0))
     }
 }
-

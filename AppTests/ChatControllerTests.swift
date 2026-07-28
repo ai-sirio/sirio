@@ -318,6 +318,63 @@ struct ChatControllerTests {
         #expect(await freshDriver.resumeIds == [nil])
     }
 
+    @Test func detachedControllerShowsTranscriptWithoutStartingAnAgent() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try store.createSession(worktreeId: worktreeId.uuidString,
+                                              agentId: "claude-acp")
+        try store.saveTranscript(sessionId: session.id, items: [
+            .agentMessage(id: "old", text: "yesterday's answer", isComplete: true)
+        ])
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "live"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: session.id, startDetached: true,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        await controller.activate()
+
+        #expect(controller.state == ChatController.ChatState.detached)
+        #expect(await driver.promptCount == 0)
+        #expect(controller.items.contains { item in
+            if case .agentMessage(_, let text, _) = item { return text == "yesterday's answer" }
+            return false
+        })
+    }
+
+    @Test func sendingFromDetachedStartsTheAgentAndDeliversThePrompt() async throws {
+        let worktreeId = UUID()
+        let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let session = try store.createSession(worktreeId: worktreeId.uuidString,
+                                              agentId: "claude-acp")
+        try store.saveTranscript(sessionId: session.id, items: [
+            .agentMessage(id: "old", text: "yesterday's answer", isComplete: true)
+        ])
+        let driver = ChatTestDriver(handle: makeChatTestHandle(sessionId: "live"))
+        let controller = ChatController(
+            tabId: UUID(), agentId: "claude-acp", worktreeId: worktreeId,
+            worktreePath: root.path, store: store, installStore: installStore,
+            sessionId: session.id, startDetached: true,
+            driverFactory: { _, _, _, _, _, _, _ in driver })
+
+        controller.send(text: "carry on", mentionPaths: [], images: [])
+        while await driver.promptCount == 0 { await Task.yield() }
+
+        #expect(await driver.promptCount == 1)
+        #expect(controller.items.contains { item in
+            if case .userMessage(_, let blocks) = item {
+                return blocks.contains {
+                    if case .text(let text) = $0 { return text == "carry on" }
+                    return false
+                }
+            }
+            return false
+        })
+    }
+
     @Test func nativeResumeKeepsPersistedTranscript() async throws {
         let worktreeId = UUID()
         let (store, installStore, root) = try makeChatTestFixture(worktreeId: worktreeId)
