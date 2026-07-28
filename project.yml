@@ -120,9 +120,11 @@ targets:
     sources:
       - path: AppTests
     dependencies:
+      # Only the host app. Listing TillerCode / CodeEditSourceEditor here too would
+      # make them multi-consumer products, which pushes SwiftPM to build them as
+      # dynamic PackageFrameworks — and several packages in the CodeEdit graph rely
+      # on transitive symbol leakage that only survives static linking.
       - target: Tiller
-      - package: TillerCode
-      - package: CodeEditSourceEditor
 schemes:
   Tiller:
     build:
