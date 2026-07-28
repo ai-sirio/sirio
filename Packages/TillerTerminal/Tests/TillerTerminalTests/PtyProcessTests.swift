@@ -202,6 +202,12 @@ actor OutputCollector {
         let reported = exited.withLock { $0 }
         #expect(reported)
     }
+    // The invariant is that deinit-after-reap does not BLOCK — i.e. it never waits on
+    // the child. The elapsed time also covers the exit-polling loop above, which is
+    // allowed to spend 40 * 50ms = 2s, so a 1s bound was tighter than the test's own
+    // budget and went red whenever the machine was loaded (ci.sh tests every package
+    // in parallel). Bound it above that budget instead: a real block would hang, not
+    // land near 2s.
     let elapsed = ContinuousClock.now - deadline
-    #expect(elapsed < .seconds(1))
+    #expect(elapsed < .seconds(4))
 }
