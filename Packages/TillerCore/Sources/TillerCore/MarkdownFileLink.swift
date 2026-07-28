@@ -12,18 +12,8 @@ public enum MarkdownFileLink {
     }
 
     public static func resolve(_ raw: String, worktreePath: String) -> URL? {
-        let fileURL: URL
-        if let parsed = URL(string: raw), parsed.scheme == "file" {
-            fileURL = URL(fileURLWithPath: parsed.path)
-        } else if raw.hasPrefix("/") {
-            fileURL = URL(fileURLWithPath: raw)
-        } else if !raw.contains("://") {
-            // Path relativo (es. stampato da un agente): risolto sul worktree.
-            fileURL = URL(fileURLWithPath: worktreePath).appendingPathComponent(raw)
-        } else {
-            return nil
-        }
-        guard isMarkdown(fileURL) else { return nil }
-        return fileURL.standardizedFileURL
+        guard let fileURL = FileLink.resolve(raw, worktreePath: worktreePath),
+              isMarkdown(fileURL) else { return nil }
+        return fileURL
     }
 }

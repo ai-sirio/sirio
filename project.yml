@@ -26,15 +26,17 @@ packages:
     path: Packages/TillerAgents
   TillerACP:
     path: Packages/TillerACP
+  TillerCode:
+    path: Packages/TillerCode
+  CodeEditSourceEditor:
+    url: https://github.com/CodeEditApp/CodeEditSourceEditor.git
+    from: 0.15.2
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     from: 2.4.0
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.8.0
-  Highlightr:
-    url: https://github.com/raspu/Highlightr
-    from: 2.2.0
 targets:
   Tiller:
     type: application
@@ -57,10 +59,11 @@ targets:
       - package: TillerControl
       - package: TillerAgents
       - package: TillerACP
+      - package: TillerCode
+      - package: CodeEditSourceEditor
       - package: MarkdownUI
       - package: TillerGit
       - package: Sparkle
-      - package: Highlightr
     info:
       path: App/Info.plist
       properties:
@@ -113,6 +116,10 @@ targets:
     sources:
       - path: AppTests
     dependencies:
+      # Only the host app. Listing TillerCode / CodeEditSourceEditor here too would
+      # make them multi-consumer products, which pushes SwiftPM to build them as
+      # dynamic PackageFrameworks — and several packages in the CodeEdit graph rely
+      # on transitive symbol leakage that only survives static linking.
       - target: Tiller
 schemes:
   Tiller:

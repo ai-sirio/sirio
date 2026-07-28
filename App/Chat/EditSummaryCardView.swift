@@ -64,6 +64,13 @@ struct EditSummaryCardView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.tint)
+            Button {
+                appModel.openFileReference(path, in: worktree)
+            } label: {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+            }
+            .buttonStyle(.plain)
+            .help("Open in editor")
             Spacer()
             if revertedPaths.contains(path) {
                 Text("reverted")

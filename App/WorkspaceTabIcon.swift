@@ -13,6 +13,10 @@ struct WorkspaceTabIcon: View {
             Image(systemName: "doc.text")
                 .font(.system(size: 10))
                 .foregroundStyle(AppTheme.meta)
+        } else if tab.codeFileURL != nil {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.meta)
         } else if let agentId = tab.chatAgentId {
             AgentIcon(agentId: agentId, size: 12)
         } else if let agentId = tab.leafIds.compactMap({ model.agentActivity.paneAgents[$0] }).first {

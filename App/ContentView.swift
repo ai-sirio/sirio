@@ -199,8 +199,12 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
-                      let url = urls.first(where: { MarkdownFileLink.isMarkdown($0) }) else { return false }
-                model.openMarkdownTab(fileURL: url, in: worktree)
+                      let url = urls.first(where: {
+                          guard $0.isFileURL else { return false }
+                          return (try? $0.resourceValues(
+                              forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                      }) else { return false }
+                model.openFileTab(fileURL: url, in: worktree)
                 return true
             }
             if rightPanelVisible {
@@ -295,7 +299,7 @@ struct ContentView: View {
                                         command: { model.paneCommand(paneId: $0) },
                                         onTitleChange: { id, title in model.handleTitleChange(paneId: id, title: title) },
                                         onContentSignal: { id, tail in model.handleContentSignal(paneId: id, tailText: tail) },
-                                        onOpenURL: { _, url in model.handleTerminalOpenURL(url, in: worktree) }
+                                        onOpenURL: { _, url in model.openFileReference(url, in: worktree) }
                                     ),
                                     menuProvider: { paneId, proxy in
                                         menuProvider.items(for: paneId, proxy: proxy)
@@ -315,6 +319,15 @@ struct ContentView: View {
                                         systemImage: "doc.questionmark",
                                         description: Text(tab.markdownFileURL?.path ?? "")
                                     )
+                                }
+                            case .code:
+                                if let document = model.codeDocument(for: tab) {
+                                    CodeEditorTabView(document: document)
+                                } else {
+                                    ContentUnavailableView(
+                                        "File not readable",
+                                        systemImage: "doc.questionmark",
+                                        description: Text(tab.codeFileURL?.path ?? ""))
                                 }
                             case .chat:
                                 // A chat that was opened once (controller exists) stays

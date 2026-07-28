@@ -110,7 +110,7 @@ public enum AgentTreeBuilder {
                         status: status,
                         children: children))
                 }
-            case .markdown:
+            case .markdown, .code:
                 continue
             }
         }

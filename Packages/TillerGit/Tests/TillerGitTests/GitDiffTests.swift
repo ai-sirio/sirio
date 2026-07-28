@@ -46,12 +46,15 @@ import Testing
 
     #expect(diff.lines.contains { $0.kind == .deletion && $0.text == "one" })
     #expect(diff.lines.contains { $0.kind == .addition && $0.text == "three" })
+    #expect(diff.oldText == "one\n")
+    #expect(diff.newText == "three\n")
 }
 
 @Test func untrackedAndUnbornFilesDiffFromDevNull() async throws {
     let repo = try makeGitTestRepository(withCommit: false)
     defer { try? FileManager.default.removeItem(at: repo) }
-    try "new\n".write(to: repo.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+    let fileContents = "new\n"
+    try fileContents.write(to: repo.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
     let snapshot = try await GitStatus.load(in: repo.path)
     let entry = try #require(snapshot.untracked.first)
 
@@ -59,6 +62,21 @@ import Testing
 
     #expect(diff.deletions == 0)
     #expect(diff.lines.contains { $0.kind == .addition && $0.text == "new" })
+    #expect(diff.oldText == nil)
+    #expect(diff.newText == fileContents)
+}
+
+@Test func deletedFileCarriesHeadSnapshotOnly() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    try FileManager.default.removeItem(at: repo.appendingPathComponent("file.txt"))
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.entries.first { $0.path.value == "file.txt" })
+
+    let diff = try await GitDiff.load(entry: entry, in: repo.path)
+
+    #expect(diff.oldText == "one\n")
+    #expect(diff.newText == nil)
 }
 
 @Test func parserTracksZeroLengthHunkAndBlankContentBoundaries() throws {
