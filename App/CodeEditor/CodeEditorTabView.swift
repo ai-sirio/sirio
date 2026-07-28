@@ -29,8 +29,18 @@ struct CodeEditorTabView: View {
                         font: .monospacedSystemFont(ofSize: 12, weight: .regular),
                         wrapLines: false),
                     behavior: .init(isEditable: true, isSelectable: true,
-                                    indentOption: .spaces(count: 4))),
+                                    indentOption: .spaces(count: 4)),
+                    // Left nil, the scroll view auto-adjusts its top inset to the
+                    // window safe area — non-zero here because the window is
+                    // `.fullSizeContentView` — which offsets the gutter by that
+                    // much, since it sits at `textView.origin.y - contentInsets.top`.
+                    layout: .init(contentInsets: NSEdgeInsets())),
                 state: $editorState)
+            // The gutter is a floating subview of the scroll view, so it lives
+            // outside the clip view and is as tall as the whole document. Scrolled
+            // down, it reaches above the scroll view and — `NSView.clipsToBounds`
+            // being false by default since macOS 14 — paints over the tab bar.
+            .clipped()
         }
         .background(AppTheme.background)
     }
