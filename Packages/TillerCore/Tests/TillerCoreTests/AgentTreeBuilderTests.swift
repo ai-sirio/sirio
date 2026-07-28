@@ -10,7 +10,7 @@ import Testing
 
     func makeTabs() -> [WorkspaceTab] {
         let chatTab = WorkspaceTab(id: Self.chatTabId, title: "Claude Code",
-                                   content: .chat(agentId: "claude"))
+                                   content: .chat(agentId: "claude", sessionId: nil))
         let tree = SplitTree.leaf(id: Self.paneId)
         let termTab = WorkspaceTab(id: Self.termTabId, title: "Terminale 1", tree: tree)
         // Terminal tab listed first: builder must still put chat first.
@@ -37,7 +37,7 @@ import Testing
     /// assenti da displayNames.
     @Test func chatNodeTitleFollowsTabTitle() {
         let tab = WorkspaceTab(id: Self.chatTabId, title: "Fix login bug",
-                               content: .chat(agentId: "claude-acp"))
+                               content: .chat(agentId: "claude-acp", sessionId: nil))
         let nodes = AgentTreeBuilder.build(
             tabs: [tab],
             agentStatus: [Self.chatTabId: .running],

@@ -6,8 +6,12 @@ public enum TabContent: Equatable, Sendable {
     case terminal(SplitTree)
     case markdown(fileURL: URL)
     case code(fileURL: URL)
-    /// `sessionId` identifies the chat conversation rendered by the tab.
-    case chat(agentId: String, sessionId: String? = nil)
+    /// `sessionId` is the chat conversation this tab renders. Nil only for
+    /// legacy tabs restored from before v15; they adopt a fresh session on
+    /// first open. Deliberately not defaulted: a caller that omits it would
+    /// silently produce a tab with no conversation of its own, which is the
+    /// bug the column exists to prevent.
+    case chat(agentId: String, sessionId: String?)
 }
 
 /// Una tab dentro un worktree. L'identità della tab è stabile; title e
