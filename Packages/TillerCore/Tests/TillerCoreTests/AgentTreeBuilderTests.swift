@@ -8,11 +8,11 @@ import Testing
     static let termTabId = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     static let paneId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
 
-    func makeTabs() -> [WorkspaceTab] {
-        let chatTab = WorkspaceTab(id: Self.chatTabId, title: "Claude Code",
+    func makeTabs() -> [LegacyWorkspaceTab] {
+        let chatTab = LegacyWorkspaceTab(id: Self.chatTabId, title: "Claude Code",
                                    content: .chat(agentId: "claude", sessionId: nil))
         let tree = SplitTree.leaf(id: Self.paneId)
-        let termTab = WorkspaceTab(id: Self.termTabId, title: "Terminale 1", tree: tree)
+        let termTab = LegacyWorkspaceTab(id: Self.termTabId, title: "Terminale 1", tree: tree)
         // Terminal tab listed first: builder must still put chat first.
         return [termTab, chatTab]
     }
@@ -36,7 +36,7 @@ import Testing
     /// mai l'id agente raw — le chat registrano id canonici ("claude-acp")
     /// assenti da displayNames.
     @Test func chatNodeTitleFollowsTabTitle() {
-        let tab = WorkspaceTab(id: Self.chatTabId, title: "Fix login bug",
+        let tab = LegacyWorkspaceTab(id: Self.chatTabId, title: "Fix login bug",
                                content: .chat(agentId: "claude-acp", sessionId: nil))
         let nodes = AgentTreeBuilder.build(
             tabs: [tab],

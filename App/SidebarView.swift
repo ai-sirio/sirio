@@ -493,7 +493,7 @@ private struct NewWorktreeButton: View {
 private struct TabRow: View {
     @Bindable var model: AppModel
     let worktree: Worktree
-    let tab: WorkspaceTab
+    let tab: LegacyWorkspaceTab
     /// Ultima tab del proprio worktree: chiude la guida col raccordo curvo.
     let isLast: Bool
     @State private var hovering = false
@@ -618,7 +618,7 @@ private struct TabRow: View {
 private struct PaneRow: View {
     @Bindable var model: AppModel
     let worktree: Worktree
-    let tab: WorkspaceTab
+    let tab: LegacyWorkspaceTab
     let paneId: UUID
     let index: Int
     /// Ultimo pane del tab: chiude la guida col raccordo curvo.

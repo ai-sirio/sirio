@@ -100,7 +100,7 @@ struct TabBarView: View {
 struct TabBarItem: View {
     @Bindable var model: AppModel
     let worktree: Worktree
-    let tab: WorkspaceTab
+    let tab: LegacyWorkspaceTab
     @State private var hovering = false
     @State private var renaming = false
     @State private var draftTitle = ""

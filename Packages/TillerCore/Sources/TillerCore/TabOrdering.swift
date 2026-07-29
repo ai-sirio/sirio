@@ -6,8 +6,8 @@ public enum TabOrdering {
     /// Rimuove `id` e lo reinserisce immediatamente prima di `targetId`
     /// (`nil` = in coda). Id o target sconosciuti → lista invariata.
     public static func moving(
-        _ list: [WorkspaceTab], id: UUID, before targetId: UUID?
-    ) -> [WorkspaceTab] {
+        _ list: [LegacyWorkspaceTab], id: UUID, before targetId: UUID?
+    ) -> [LegacyWorkspaceTab] {
         ManualOrder.moving(list, id: id, before: targetId)
     }
 

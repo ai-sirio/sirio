@@ -27,7 +27,7 @@ public enum ControlListing {
     }
 
     public static func paneRows(
-        tabs: [WorkspaceTab],
+        tabs: [LegacyWorkspaceTab],
         activeTabId: UUID?,
         agentIdForPane: (UUID) -> String?,
         titleForPane: (UUID) -> String?

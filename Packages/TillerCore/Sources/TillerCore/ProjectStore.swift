@@ -237,7 +237,7 @@ public actor ProjectStore {
 
     /// Riscrive l'intera lista tab del worktree (delete + insert): poche
     /// righe, elimina la sincronizzazione incrementale DB↔memoria.
-    public func saveTabs(worktreeId: UUID, tabs: [WorkspaceTab], activeTabId: UUID?) throws {
+    public func saveTabs(worktreeId: UUID, tabs: [LegacyWorkspaceTab], activeTabId: UUID?) throws {
         let encoder = JSONEncoder()
         try database.write { db in
             try db.execute(
@@ -292,14 +292,14 @@ public actor ProjectStore {
         }
     }
 
-    public func loadTabs(of worktreeId: UUID) throws -> (tabs: [WorkspaceTab], activeTabId: UUID?) {
+    public func loadTabs(of worktreeId: UUID) throws -> (tabs: [LegacyWorkspaceTab], activeTabId: UUID?) {
         let decoder = JSONDecoder()
         return try database.read { db in
             let records = try TerminalTabRecord
                 .filter(Column("worktreeId") == worktreeId.uuidString)
                 .order(Column("orderIdx"))
                 .fetchAll(db)
-            var tabs: [WorkspaceTab] = []
+            var tabs: [LegacyWorkspaceTab] = []
             var active: UUID?
             for record in records {
                 // ids/treeJSON scritti da questo store; righe non parsabili = corruzione esterna
@@ -313,7 +313,7 @@ public actor ProjectStore {
                         logger.warning("loadTabs: markdown tab '\(record.id)' senza filePath — skip")
                         continue
                     }
-                    tabs.append(WorkspaceTab(id: id, title: record.title,
+                    tabs.append(LegacyWorkspaceTab(id: id, title: record.title,
                                              content: .markdown(fileURL: URL(fileURLWithPath: path)),
                                              titleIsAutoNamed: record.titleIsAutoNamed))
                 case "code":
@@ -321,12 +321,12 @@ public actor ProjectStore {
                         logger.warning("loadTabs: code tab '\(record.id)' missing filePath — skip")
                         continue
                     }
-                    tabs.append(WorkspaceTab(id: id, title: record.title,
+                    tabs.append(LegacyWorkspaceTab(id: id, title: record.title,
                                              content: .code(fileURL: URL(fileURLWithPath: path)),
                                              titleIsAutoNamed: record.titleIsAutoNamed))
                 case "chat":
                     guard let agentId = record.chatAgentId else { continue }
-                    tabs.append(WorkspaceTab(
+                    tabs.append(LegacyWorkspaceTab(
                         id: id, title: record.title,
                         content: .chat(agentId: agentId, sessionId: record.chatSessionId),
                         titleIsAutoNamed: record.titleIsAutoNamed))
@@ -335,7 +335,7 @@ public actor ProjectStore {
                         logger.warning("loadTabs: skipping corrupt TerminalTabRecord '\(record.id)'")
                         continue
                     }
-                    tabs.append(WorkspaceTab(id: id, title: record.title, tree: tree,
+                    tabs.append(LegacyWorkspaceTab(id: id, title: record.title, tree: tree,
                                              titleIsAutoNamed: record.titleIsAutoNamed))
                 }
                 if record.isActive { active = id }

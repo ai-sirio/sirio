@@ -9,12 +9,12 @@ import TillerPersistence
     let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
 
-    let terminal = WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
-    let markdown = WorkspaceTab(
+    let terminal = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
+    let markdown = LegacyWorkspaceTab(
         id: UUID(), title: "README.md",
         content: .markdown(fileURL: URL(fileURLWithPath: "/tmp/p/README.md"))
     )
-    let code = WorkspaceTab(
+    let code = LegacyWorkspaceTab(
         id: UUID(), title: "App.swift",
         content: .code(fileURL: URL(fileURLWithPath: "/tmp/p/App.swift")))
     try await store.saveTabs(
@@ -33,9 +33,9 @@ import TillerPersistence
     let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
 
-    let bound = WorkspaceTab(id: UUID(), title: "Chat",
+    let bound = LegacyWorkspaceTab(id: UUID(), title: "Chat",
                              content: .chat(agentId: "claude-acp", sessionId: "s-1"))
-    let legacy = WorkspaceTab(id: UUID(), title: "Chat",
+    let legacy = LegacyWorkspaceTab(id: UUID(), title: "Chat",
                               content: .chat(agentId: "claude-acp", sessionId: nil))
     try await store.saveTabs(worktreeId: worktree.id, tabs: [bound, legacy],
                              activeTabId: bound.id)

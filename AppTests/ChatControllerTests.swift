@@ -610,9 +610,9 @@ extension ChatControllerTests {
             activateApplication: {},
             persistenceCoordinator: coordinator)
         model.tabs[worktreeId] = [
-            WorkspaceTab(id: chatTabId, title: "Chat",
+            LegacyWorkspaceTab(id: chatTabId, title: "Chat",
                          content: .chat(agentId: "claude-acp", sessionId: nil)),
-            WorkspaceTab(id: UUID(), title: "Terminal 1", tree: .leaf(id: paneId))
+            LegacyWorkspaceTab(id: UUID(), title: "Terminal 1", tree: .leaf(id: paneId))
         ]
         model.chatControllers[chatTabId] = controller
 
