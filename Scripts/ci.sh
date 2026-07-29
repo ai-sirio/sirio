@@ -16,13 +16,24 @@ xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
   -skipPackagePluginValidation -skipMacroValidation build | tail -5
 
+# Temporary logs for the App test run and the package batch.
+tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
+tmpdir_app=$(mktemp -d /tmp/tiller-apptests-XXXXXX) || exit 1
+trap 'rm -rf "$tmpdir" "$tmpdir_app"' EXIT
+
+# App-target tests (TillerTests, sources in AppTests/). Deliberately NOT
+# passing CODE_SIGNING_ALLOWED=NO or -derivedDataPath: with either one the
+# test host hangs in dyld before test discovery on managed Macs.
+xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
+  -skipPackagePluginValidation -skipMacroValidation | tee "$tmpdir_app/apptests.log" | tail -20
+grep -qE "Test run with [0-9]+ tests" "$tmpdir_app/apptests.log" || {
+    echo "FAILED: App test run reported no tests"; exit 1; }
+
 # --- Parallel package tests ---
 # TillerTerminal is excluded from the parallel batch and run on its own afterwards.
 # Its PtyProcessTests spawn real PTYs and assert on wall-clock deadlines and on output
 # arriving within a timeout, so they fail whenever the machine is saturated — and this
 # batch saturates it. They pass consistently when run alone.
-tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
-trap 'rm -rf "$tmpdir"' EXIT
 
 serial_pkg=TillerTerminal
 
