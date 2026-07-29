@@ -37,11 +37,11 @@ import Foundation
 
     @Test func paneRowsListLeavesWithTabTitleAndActiveFlag() {
         let paneA = UUID(); let paneB = UUID(); let paneC = UUID()
-        let tab1 = WorkspaceTab(id: UUID(), title: "Shell 1",
+        let tab1 = LegacyWorkspaceTab(id: UUID(), title: "Shell 1",
                                 tree: .split(axis: .horizontal,
                                              first: .leaf(id: paneA),
                                              second: .leaf(id: paneB)))
-        let tab2 = WorkspaceTab(id: UUID(), title: "claude", tree: .leaf(id: paneC))
+        let tab2 = LegacyWorkspaceTab(id: UUID(), title: "claude", tree: .leaf(id: paneC))
         let rows = ControlListing.paneRows(
             tabs: [tab1, tab2], activeTabId: tab2.id,
             agentIdForPane: { $0 == paneC ? "claude" : nil },

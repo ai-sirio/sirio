@@ -2,8 +2,8 @@ import Testing
 import Foundation
 @testable import TillerCore
 
-private func tabs(_ n: Int) -> [WorkspaceTab] {
-    (0..<n).map { WorkspaceTab(id: UUID(), title: "T\($0)", tree: .leaf(id: UUID())) }
+private func tabs(_ n: Int) -> [LegacyWorkspaceTab] {
+    (0..<n).map { LegacyWorkspaceTab(id: UUID(), title: "T\($0)", tree: .leaf(id: UUID())) }
 }
 
 @Suite struct TabOrderingMovingTests {

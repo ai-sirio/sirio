@@ -2,7 +2,7 @@ import Foundation
 
 /// Contenuto di una tab di workspace: un albero di split terminale oppure
 /// un editor markdown puntato a un file su disco.
-public enum TabContent: Equatable, Sendable {
+public enum LegacyTabContent: Equatable, Sendable {
     case terminal(SplitTree)
     case markdown(fileURL: URL)
     case code(fileURL: URL)
@@ -16,16 +16,16 @@ public enum TabContent: Equatable, Sendable {
 
 /// Una tab dentro un worktree. L'identità della tab è stabile; title e
 /// content sono mutabili (rinomina, split).
-public struct WorkspaceTab: Identifiable, Equatable, Sendable {
+public struct LegacyWorkspaceTab: Identifiable, Equatable, Sendable {
     public let id: UUID
     public var title: String
-    public var content: TabContent
+    public var content: LegacyTabContent
     /// True quando `title` è ancora eleggibile per l'auto-naming: placeholder
     /// di creazione o ultimo titolo scritto dall'auto-naming stesso. Un
     /// rename manuale (`AppModel.renameTab`) lo flippa a false per sempre.
     public var titleIsAutoNamed: Bool
 
-    public init(id: UUID, title: String, content: TabContent, titleIsAutoNamed: Bool = true) {
+    public init(id: UUID, title: String, content: LegacyTabContent, titleIsAutoNamed: Bool = true) {
         self.id = id; self.title = title; self.content = content
         self.titleIsAutoNamed = titleIsAutoNamed
     }
@@ -88,7 +88,7 @@ public struct WorkspaceTab: Identifiable, Equatable, Sendable {
     /// Titolo default per una nuova shell manuale: "Terminale N", dove N
     /// conta le tab shell esistenti (prefisso "Terminale") + 1. Le tab
     /// agente (titolo = displayName) e markdown non incrementano il contatore.
-    public static func nextShellTitle(existing: [WorkspaceTab]) -> String {
+    public static func nextShellTitle(existing: [LegacyWorkspaceTab]) -> String {
         let count = existing.filter { $0.title.hasPrefix("Terminale") }.count
         return "Terminale \(count + 1)"
     }

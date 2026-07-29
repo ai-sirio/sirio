@@ -64,7 +64,7 @@ struct AutoRenameWiringTests {
     /// quindi .standard è il dominio reale dev.tiller.Tiller dell'utente.
     private func makeChatTab(
         autoNamingEnabled: Bool? = nil
-    ) -> (AppModel, Worktree, WorkspaceTab, ChatController) {
+    ) -> (AppModel, Worktree, LegacyWorkspaceTab, ChatController) {
         let suiteName = "dev.tiller.Tiller.AutoRenameWiringTests"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)

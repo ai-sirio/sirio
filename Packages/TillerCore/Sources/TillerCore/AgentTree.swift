@@ -58,7 +58,7 @@ public struct AgentNode: Identifiable, Equatable, Sendable {
 /// Chat tabs first, then terminal panes, both in `tabs` order.
 public enum AgentTreeBuilder {
     public static func build(
-        tabs: [WorkspaceTab],
+        tabs: [LegacyWorkspaceTab],
         agentStatus: [UUID: AgentStatus],
         paneAgents: [UUID: String],
         chatSubagents: [UUID: [ChatSubagentInput]],

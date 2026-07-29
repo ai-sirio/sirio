@@ -154,7 +154,7 @@ final class AppModel {
 
     /// Tab whose panes report the worst status within `worktree` — the tab
     /// the menu-bar roster switches to when jumping back into a worktree.
-    func worstStatusTab(in worktree: Worktree) -> WorkspaceTab? {
+    func worstStatusTab(in worktree: Worktree) -> LegacyWorkspaceTab? {
         AttentionSort.sorted(tabs[worktree.id] ?? []) { tab in
             agentActivity.statusForWorktree(paneIds: tab.leafIds)
         }.first
@@ -190,7 +190,7 @@ final class AppModel {
 
     private var controlServer: ControlServer?
     typealias ControlTabPersister = @MainActor (
-        UUID, [WorkspaceTab], UUID?
+        UUID, [LegacyWorkspaceTab], UUID?
     ) async throws -> Void
 
     private let paneRegistry: PaneRegistry
@@ -246,7 +246,7 @@ final class AppModel {
         self.agentInstallStore = installStore
         self.agentCenter = AcpAgentCenter(installStore: installStore)
     }
-    var tabs: [UUID: [WorkspaceTab]] = [:]
+    var tabs: [UUID: [LegacyWorkspaceTab]] = [:]
     /// Projects whose root currently contains a `.git` entry. Derived at
     /// runtime (bootstrap, add, in-app git init) — never persisted, so an
     /// external `git init` is picked up on the next launch.
@@ -281,7 +281,7 @@ final class AppModel {
     /// State as loaded at launch — the target of the manual
     /// "Restore Previous Launch" action. In-memory only.
     struct LaunchSnapshot {
-        let tabs: [UUID: [WorkspaceTab]]
+        let tabs: [UUID: [LegacyWorkspaceTab]]
         let paneCommands: [UUID: String]
         let openWorktreeIds: [UUID]
     }
@@ -412,7 +412,7 @@ final class AppModel {
             atPath: worktree.path + "/.claude/settings.local.json",
             tillerctlPath: ctl
         )
-        let loaded: (tabs: [WorkspaceTab], activeTabId: UUID?)
+        let loaded: (tabs: [LegacyWorkspaceTab], activeTabId: UUID?)
         do {
             loaded = try await store.loadTabs(of: worktree.id)
         } catch {
@@ -974,7 +974,7 @@ final class AppModel {
         // via newShellTab, spawnAgent, or the panel.create control command.
     }
 
-    func activeTab(for worktreeId: UUID) -> WorkspaceTab? {
+    func activeTab(for worktreeId: UUID) -> LegacyWorkspaceTab? {
         guard let list = tabs[worktreeId], !list.isEmpty else { return nil }
         return list.first { $0.id == activeTabId[worktreeId] } ?? list.first
     }
@@ -988,8 +988,8 @@ final class AppModel {
         in worktree: Worktree,
         activate: Bool = true,
         persist: Bool = true
-    ) -> WorkspaceTab {
-        let tab = WorkspaceTab(id: UUID(), title: title, tree: .leaf(id: paneId))
+    ) -> LegacyWorkspaceTab {
+        let tab = LegacyWorkspaceTab(id: UUID(), title: title, tree: .leaf(id: paneId))
         tabs[worktree.id, default: []].append(tab)
         if activate { activeTabId[worktree.id] = tab.id }
         if persist { persistTabs(for: worktree.id) }
@@ -997,7 +997,7 @@ final class AppModel {
     }
 
     func newShellTab(in worktree: Worktree) {
-        let title = WorkspaceTab.nextShellTitle(existing: tabs[worktree.id] ?? [])
+        let title = LegacyWorkspaceTab.nextShellTitle(existing: tabs[worktree.id] ?? [])
         openTab(paneId: UUID(), title: title, in: worktree)
     }
 
@@ -1203,7 +1203,7 @@ final class AppModel {
     }
 
     /// Tab (se esiste) che contiene paneId in uno qualsiasi dei worktree aperti.
-    func tabContaining(paneId: UUID) -> (worktree: Worktree, tab: WorkspaceTab, index: Int)? {
+    func tabContaining(paneId: UUID) -> (worktree: Worktree, tab: LegacyWorkspaceTab, index: Int)? {
         for worktree in worktrees.values.flatMap({ $0 }) {
             if let idx = tabs[worktree.id]?.firstIndex(where: { $0.leafIds.contains(paneId) }) {
                 return (worktree, tabs[worktree.id]![idx], idx)
@@ -1372,7 +1372,7 @@ final class AppModel {
     /// Fire-and-forget: la persistenza tab non deve bloccare la UI; un
     /// fallimento lascia solo il layout non salvato (rimedio: prossima mutazione).
     private func removePaneForControl(_ paneId: UUID) -> (
-        worktreeId: UUID, tabs: [WorkspaceTab], activeTabId: UUID?
+        worktreeId: UUID, tabs: [LegacyWorkspaceTab], activeTabId: UUID?
     )? {
         guard let target = tabContaining(paneId: paneId),
               let tree = target.tab.terminalTree,
@@ -1578,7 +1578,7 @@ final class AppModel {
         else { return }
         let agentId = AgentIdMigration.canonical(record.agentId)
         let trimmed = record.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let tab = WorkspaceTab(
+        let tab = LegacyWorkspaceTab(
             id: UUID(),
             title: trimmed.isEmpty ? "Chat" : trimmed,
             content: .chat(agentId: agentId, sessionId: sessionId))
@@ -1602,13 +1602,13 @@ final class AppModel {
     }
 
     @discardableResult
-    func openChatTab(agentId: String, in worktree: Worktree) -> WorkspaceTab? {
+    func openChatTab(agentId: String, in worktree: Worktree) -> LegacyWorkspaceTab? {
         rememberChatAgent(agentId)
         // The session row exists from the start so the tab knows which
         // conversation it owns even before the first turn is persisted.
         let sessionId = try? chatStore?.createSession(
             worktreeId: worktree.id.uuidString, agentId: agentId).id
-        let tab = WorkspaceTab(id: UUID(), title: "Chat",
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Chat",
                                content: .chat(agentId: agentId, sessionId: sessionId))
         selectedWorktree = worktree
         tabs[worktree.id, default: []].append(tab)
@@ -1626,7 +1626,7 @@ final class AppModel {
 
     /// Lazily builds the controller for a (restored) chat tab, mirroring
     /// markdownDocument(for:).
-    func chatController(for tab: WorkspaceTab, in worktree: Worktree,
+    func chatController(for tab: LegacyWorkspaceTab, in worktree: Worktree,
                      startNewConversation: Bool = false,
                      startDetached: Bool = false) -> ChatController? {
         guard let agentId = tab.chatAgentId else { return nil }
@@ -1681,7 +1681,7 @@ final class AppModel {
     /// Funnel unico per tutti i canali di apertura (cmd+click, drop, ⌘O).
     /// Dedup per fileURL: se il file è già aperto nel worktree attiva quella tab.
     @discardableResult
-    func openFileTab(fileURL: URL, in worktree: Worktree) -> WorkspaceTab? {
+    func openFileTab(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
         let url = fileURL.standardizedFileURL
         if let existing = tabs[worktree.id]?.first(where: {
             $0.fileURL?.standardizedFileURL == url
@@ -1692,15 +1692,15 @@ final class AppModel {
             return existing
         }
         do {
-            let tab: WorkspaceTab
+            let tab: LegacyWorkspaceTab
             if MarkdownFileLink.isMarkdown(url) {
                 let document = try MarkdownDocument(fileURL: url)
-                tab = WorkspaceTab(id: UUID(), title: url.lastPathComponent,
+                tab = LegacyWorkspaceTab(id: UUID(), title: url.lastPathComponent,
                                    content: .markdown(fileURL: url))
                 markdownDocuments[tab.id] = document
             } else {
                 let document = try CodeDocument(fileURL: url)
-                tab = WorkspaceTab(id: UUID(), title: url.lastPathComponent,
+                tab = LegacyWorkspaceTab(id: UUID(), title: url.lastPathComponent,
                                    content: .code(fileURL: url))
                 codeDocuments[tab.id] = document
             }
@@ -1717,7 +1717,7 @@ final class AppModel {
     }
 
     @discardableResult
-    func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> WorkspaceTab? {
+    func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
         openFileTab(fileURL: fileURL, in: worktree)
     }
 
@@ -1730,7 +1730,7 @@ final class AppModel {
     }
 
     /// Documento della tab; lo crea al volo per le tab ripristinate da sessione.
-    func markdownDocument(for tab: WorkspaceTab) -> MarkdownDocument? {
+    func markdownDocument(for tab: LegacyWorkspaceTab) -> MarkdownDocument? {
         guard let url = tab.markdownFileURL else { return nil }
         if let doc = markdownDocuments[tab.id] { return doc }
         guard let doc = try? MarkdownDocument(fileURL: url) else { return nil }
@@ -1738,7 +1738,7 @@ final class AppModel {
         return doc
     }
 
-    func codeDocument(for tab: WorkspaceTab) -> CodeDocument? {
+    func codeDocument(for tab: LegacyWorkspaceTab) -> CodeDocument? {
         guard let url = tab.codeFileURL else { return nil }
         if let document = codeDocuments[tab.id] { return document }
         guard let document = try? CodeDocument(fileURL: url) else { return nil }

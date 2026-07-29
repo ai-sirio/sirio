@@ -12,7 +12,7 @@ struct AppModelControlTests {
     @Test func renameTabDisablesAutoNaming() {
         let model = makeModel()
         let worktree = makeWorktree(path: "/tmp/rename-tab")
-        let tab = WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
         model.worktrees = [worktree.projectId: [worktree]]
         model.tabs[worktree.id] = [tab]
 
@@ -27,7 +27,7 @@ struct AppModelControlTests {
     @Test func applyAutoTitleLeavesProvenanceUntouched() {
         let model = makeModel()
         let worktree = makeWorktree(path: "/tmp/apply-auto-title")
-        let tab = WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
         model.worktrees = [worktree.projectId: [worktree]]
         model.tabs[worktree.id] = [tab]
 
@@ -52,10 +52,10 @@ struct AppModelControlTests {
         let selected = makeWorktree(path: "/tmp/selected")
         model.worktrees = [target.projectId: [target], selected.projectId: [selected]]
         let targetPaneId = UUID(), selectedPaneId = UUID()
-        let targetTab = WorkspaceTab(
+        let targetTab = LegacyWorkspaceTab(
             id: UUID(), title: "Target active", tree: .leaf(id: targetPaneId)
         )
-        let selectedTab = WorkspaceTab(
+        let selectedTab = LegacyWorkspaceTab(
             id: UUID(), title: "Selected", tree: .leaf(id: selectedPaneId)
         )
         model.tabs[target.id] = [targetTab]
@@ -139,7 +139,7 @@ struct AppModelControlTests {
         )
         let worktree = makeWorktree(path: "/tmp/split-timeout")
         let sourcePaneId = UUID()
-        let tab = WorkspaceTab(id: UUID(), title: "Source", tree: .leaf(id: sourcePaneId))
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Source", tree: .leaf(id: sourcePaneId))
         model.worktrees = [worktree.projectId: [worktree]]
         model.tabs[worktree.id] = [tab]
         model.activeTabId[worktree.id] = tab.id
@@ -166,10 +166,10 @@ struct AppModelControlTests {
         let requested = makeWorktree(path: "/tmp/list-requested")
         let selected = makeWorktree(path: "/tmp/list-selected")
         let requestedPaneId = UUID(), selectedPaneId = UUID()
-        let requestedTab = WorkspaceTab(
+        let requestedTab = LegacyWorkspaceTab(
             id: UUID(), title: "Requested", tree: .leaf(id: requestedPaneId)
         )
-        let selectedTab = WorkspaceTab(
+        let selectedTab = LegacyWorkspaceTab(
             id: UUID(), title: "Selected", tree: .leaf(id: selectedPaneId)
         )
         model.worktrees = [requested.projectId: [requested], selected.projectId: [selected]]
@@ -194,7 +194,7 @@ struct AppModelControlTests {
         let model = makeModel(registry: registry)
         let worktree = makeWorktree(path: "/tmp/close")
         let paneId = UUID()
-        let tab = WorkspaceTab(id: UUID(), title: "Close", tree: .leaf(id: paneId))
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Close", tree: .leaf(id: paneId))
         model.worktrees = [worktree.projectId: [worktree]]
         model.tabs[worktree.id] = [tab]
         model.activeTabId[worktree.id] = tab.id
@@ -243,7 +243,7 @@ struct AppModelControlTests {
         let owning = makeWorktree(path: "/tmp/focus-owning")
         let selected = makeWorktree(path: "/tmp/focus-selected")
         let paneId = UUID()
-        let owningTab = WorkspaceTab(id: UUID(), title: "Owning", tree: .leaf(id: paneId))
+        let owningTab = LegacyWorkspaceTab(id: UUID(), title: "Owning", tree: .leaf(id: paneId))
         model.worktrees = [owning.projectId: [owning], selected.projectId: [selected]]
         model.tabs[owning.id] = [owningTab]
         model.selectedWorktree = selected
@@ -283,7 +283,7 @@ struct AppModelControlTests {
         let model = makeModel(timeoutMs: 20, activation: activation)
         let worktree = makeWorktree(path: "/tmp/focus-unattached")
         let paneId = UUID()
-        let tab = WorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
         model.worktrees = [worktree.projectId: [worktree]]
         model.tabs[worktree.id] = [tab]
 
@@ -317,7 +317,7 @@ struct AppModelControlTests {
         let model = makeModel(timeoutMs: 1_000)
         let worktree = makeWorktree(path: "/tmp/focus-cancelled")
         let paneId = UUID()
-        let tab = WorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
+        let tab = LegacyWorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
         model.worktrees = [worktree.projectId: [worktree]]
         model.tabs[worktree.id] = [tab]
 

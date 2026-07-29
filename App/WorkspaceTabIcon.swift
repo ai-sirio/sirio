@@ -6,7 +6,7 @@ import TillerCore
 /// della sidebar e la tab bar.
 struct WorkspaceTabIcon: View {
     @Bindable var model: AppModel
-    let tab: WorkspaceTab
+    let tab: LegacyWorkspaceTab
 
     var body: some View {
         if tab.markdownFileURL != nil {

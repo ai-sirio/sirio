@@ -105,8 +105,8 @@ import TillerPersistence
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
     let paneA = UUID(), paneB = UUID(), paneC = UUID()
     let tabs = [
-        WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: paneA)),
-        WorkspaceTab(
+        LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: paneA)),
+        LegacyWorkspaceTab(
             id: UUID(), title: "Claude Code",
             tree: SplitTree.leaf(id: paneB)
                 .splitting(leaf: paneB, axis: .vertical, newLeaf: paneC)
@@ -123,9 +123,9 @@ import TillerPersistence
     let store = ProjectStore(database: db)
     let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
-    let first = [WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))]
+    let first = [LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))]
     try await store.saveTabs(worktreeId: worktree.id, tabs: first, activeTabId: first[0].id)
-    let second = [WorkspaceTab(id: UUID(), title: "Codex", tree: .leaf(id: UUID()))]
+    let second = [LegacyWorkspaceTab(id: UUID(), title: "Codex", tree: .leaf(id: UUID()))]
     try await store.saveTabs(worktreeId: worktree.id, tabs: second, activeTabId: second[0].id)
     let loaded = try await store.loadTabs(of: worktree.id)
     #expect(loaded.tabs == second)
@@ -136,7 +136,7 @@ import TillerPersistence
     let store = ProjectStore(database: db)
     let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
-    let tabs = [WorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))]
+    let tabs = [LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))]
     try await store.saveTabs(worktreeId: worktree.id, tabs: tabs, activeTabId: tabs[0].id)
     try await store.removeWorktree(worktree.id)
     let loaded = try await store.loadTabs(of: worktree.id)
@@ -205,7 +205,7 @@ import TillerPersistence
     let store = ProjectStore(database: db)
     let project = try await store.addProject(name: "p", rootPath: "/tmp/p")
     let worktree = try await store.addWorktree(projectId: project.id, branch: "main", path: "/tmp/p")
-    let tab = WorkspaceTab(id: UUID(), title: "Claude Code",
+    let tab = LegacyWorkspaceTab(id: UUID(), title: "Claude Code",
                            content: .chat(agentId: "claude", sessionId: nil))
     try await store.saveTabs(worktreeId: worktree.id, tabs: [tab], activeTabId: tab.id)
     let loaded = try await store.loadTabs(of: worktree.id)
