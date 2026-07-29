@@ -16,18 +16,33 @@ xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
   -skipPackagePluginValidation -skipMacroValidation build | tail -5
 
-# Temporary logs for the App test run and the package batch.
 tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
-tmpdir_app=$(mktemp -d /tmp/tiller-apptests-XXXXXX) || exit 1
-trap 'rm -rf "$tmpdir" "$tmpdir_app"' EXIT
+trap 'rm -rf "$tmpdir"' EXIT
 
 # App-target tests (TillerTests, sources in AppTests/). Deliberately NOT
 # passing CODE_SIGNING_ALLOWED=NO or -derivedDataPath: with either one the
 # test host hangs in dyld before test discovery on managed Macs.
+#
+# The log lands in gitignored DerivedData rather than a trap-deleted tmpdir:
+# when this step fails, the failure detail is the whole point, and a tail of
+# the last lines is usually xcodebuild epilogue, not the failing assertion.
+app_test_log=DerivedData/apptests.log
+mkdir -p DerivedData
+set +e
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation -skipMacroValidation | tee "$tmpdir_app/apptests.log" | tail -20
-grep -qE "Test run with [0-9]+ tests" "$tmpdir_app/apptests.log" || {
-    echo "FAILED: App test run reported no tests"; exit 1; }
+  -skipPackagePluginValidation -skipMacroValidation > "$app_test_log" 2>&1
+app_test_status=$?
+set -e
+if [ "$app_test_status" != 0 ]; then
+    echo "==> App tests FAILED (full log: $app_test_log)"
+    grep -E "✘|error:|Test Case .* failed" "$app_test_log" | head -40
+    exit 1
+fi
+# [1-9][0-9]* not [0-9]+: a misconfigured selector exits "TEST SUCCEEDED"
+# having run zero tests, which this assertion exists to catch.
+grep -qE "Test run with [1-9][0-9]* tests" "$app_test_log" || {
+    echo "FAILED: App test run reported no tests (full log: $app_test_log)"; exit 1; }
+tail -3 "$app_test_log"
 
 # --- Parallel package tests ---
 # TillerTerminal is excluded from the parallel batch and run on its own afterwards.
