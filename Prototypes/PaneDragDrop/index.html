@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en" data-variant="edge">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tiller — Pane Drag Prototype</title>
+  <link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+  <!--
+    THROWAWAY PROTOTYPE — not production UI.
+    Decision question: which pointer grammar and drop feedback should govern local tabs and pane-group splits?
+    Assumptions: one worktree, tab is the drag unit, state is in-memory, topology is a binary split tree,
+    empty non-root groups collapse, target group identity survives a split, reduced motion stays static.
+  -->
+  <header class="prototype-header">
+    <div>
+      <span class="eyebrow">THROWAWAY PROTOTYPE · TICKET #3</span>
+      <h1>Pane drag & split grammar</h1>
+    </div>
+    <div class="header-copy">
+      <p id="variant-summary">Edge Preview — proposed region appears at the target edge.</p>
+      <p class="instruction">Drag a tab · Drag a divider · Escape cancels · Reload resets</p>
+    </div>
+  </header>
+
+  <main class="prototype-stage">
+    <section class="app-window" aria-label="Tiller workspace prototype">
+      <div class="titlebar">
+        <div class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></div>
+        <span>Tiller — pane-layout-prototype</span>
+        <div class="titlebar-actions">
+          <button id="reset-button" type="button">Reset layout</button>
+        </div>
+      </div>
+
+      <div class="app-body">
+        <aside class="sidebar">
+          <div class="sidebar-title">WORKTREES</div>
+          <button class="worktree-row active"><span class="branch-dot"></span> main</button>
+          <button class="worktree-row"><span class="branch-dot"></span> pane-layout</button>
+          <div class="sidebar-title files-title">FILES</div>
+          <div class="file-row">▾ App</div>
+          <div class="file-row nested">ContentView.swift</div>
+          <div class="file-row nested">AppModel.swift</div>
+          <div class="file-row">▾ Packages</div>
+          <div class="scope-note"><span></span>Drag stays inside this worktree</div>
+        </aside>
+
+        <section class="workspace" aria-label="Pane groups">
+          <div id="pane-layout" class="pane-layout"></div>
+          <div class="usage-bar">
+            <span id="state-summary">Group A active · Terminal 1 selected</span>
+            <span class="usage-hint">State is deliberately not persisted</span>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <aside class="state-inspector" aria-live="polite">
+      <div class="inspector-heading">
+        <span class="eyebrow">LIVE STATE</span>
+        <span id="drag-status-pill" class="status-pill">IDLE</span>
+      </div>
+      <h2>Transactional workspace layout</h2>
+      <dl>
+        <div><dt>Variant</dt><dd id="state-variant">Edge Preview</dd></div>
+        <div><dt>Active group</dt><dd id="state-active-group">A</dd></div>
+        <div><dt>Dragging</dt><dd id="state-dragging">None</dd></div>
+        <div><dt>Target</dt><dd id="state-target">None</dd></div>
+        <div><dt>Topology</dt><dd id="state-topology" data-testid="topology">H58(A, V56(B, C))</dd></div>
+        <div><dt>Last mutation</dt><dd id="state-mutation">Initial three-group layout</dd></div>
+      </dl>
+      <div id="event-note" class="event-note">
+        The ghost keeps the original grab point. A mutation commits only on a legal drop.
+      </div>
+      <div class="interaction-key">
+        <div><i class="key-edge"></i><span>Edge creates a 50/50 split</span></div>
+        <div><i class="key-center"></i><span>Center moves or reorders</span></div>
+        <div><i class="key-divider"></i><span>Divider stores a normalized fraction</span></div>
+      </div>
+    </aside>
+  </main>
+
+  <nav class="variant-bar" aria-label="Prototype variants">
+    <span>Feedback model</span>
+    <a href="?variant=edge" data-variant-link="edge">1 · Edge Preview</a>
+    <a href="?variant=compass" data-variant-link="compass">2 · Drop Compass</a>
+    <a href="?variant=rails" data-variant-link="rails">3 · Insertion Rails</a>
+  </nav>
+
+  <script type="module" src="prototype.js"></script>
+</body>
+</html>
