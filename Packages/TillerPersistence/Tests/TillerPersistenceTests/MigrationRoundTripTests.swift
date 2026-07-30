@@ -96,7 +96,7 @@ import GRDB
     let identifiers = try queue.read { db in
         try AppDatabase.migrator.appliedMigrations(db)
     }
-    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16"])
+    #expect(identifiers == ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17"])
 }
 
 /// Applying migrations one at a time (stepwise) must produce the same final
@@ -121,6 +121,7 @@ import GRDB
     try AppDatabase.migrator.migrate(queueA, upTo: "v14")
     try AppDatabase.migrator.migrate(queueA, upTo: "v15")
     try AppDatabase.migrator.migrate(queueA, upTo: "v16")
+    try AppDatabase.migrator.migrate(queueA, upTo: "v17")
 
     // Queue B: direct to head
     let queueB = try DatabaseQueue()
@@ -203,9 +204,9 @@ private func normalizeSQL(_ sql: String) -> String {
     try AppDatabase.migrator.migrate(queue)
 
     try queue.read { db in
-        let active = try Row.fetchOne(db, sql: "SELECT * FROM terminalTab WHERE id = 't-active'")
+        let active = try Row.fetchOne(db, sql: "SELECT * FROM legacyTerminalTab_v15 WHERE id = 't-active'")
         #expect(active?["chatSessionId"] as? String == "s-used")
-        let other = try Row.fetchOne(db, sql: "SELECT * FROM terminalTab WHERE id = 't-other'")
+        let other = try Row.fetchOne(db, sql: "SELECT * FROM legacyTerminalTab_v15 WHERE id = 't-other'")
         #expect(other?["chatSessionId"] as? String == nil)
         let session = try Row.fetchOne(db, sql: "SELECT * FROM chatSession WHERE id = 's-used'")
         #expect(session?["title"] as? String == nil)

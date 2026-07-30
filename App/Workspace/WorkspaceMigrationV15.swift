@@ -178,7 +178,7 @@ enum WorkspaceMigrationV15 {
                 migratedEntryIDs[row.id] = tab.id
                 otherEntries.append((row: row, tabs: [tab], order: row.orderIdx))
             case "chat":
-                guard let agentID = row.chatAgentId else { continue }
+                guard row.chatAgentId != nil else { continue }
                 let chatID = row.chatSessionId.map(ChatContentID.init) ?? freshChatID()
                 let tab = WorkspaceTab(
                     id: WorkspaceTabID(row.id), title: row.title, titleIsAutoNamed: row.titleIsAutoNamed,
