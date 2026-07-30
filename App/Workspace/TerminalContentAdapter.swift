@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import TillerCore
 import TillerWorkspace
+import TillerTerminal
+import TillerControl
 
 @MainActor
 final class TerminalContentAdapter: WorkspaceContentAdapter {
@@ -38,10 +40,23 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
     }
 
     func makeHost(tab: WorkspaceTab, worktree: Worktree) -> WorkspaceContentHost {
-        let runtime = runtimes[tab.id]
+        guard case .terminal(let contentID) = tab.content else {
+            return WorkspaceContentHostAdapter(tabID: tab.id, viewController: NSViewController())
+        }
+        let surface = TerminalSurfaceHost(
+            contentID: contentID,
+            configuration: TerminalSurfaceConfiguration(
+                workingDirectory: worktree.path,
+                extraEnvironment: [
+                    "TILLER_ENV": "1",
+                    "TILLER_SOCKET": ControlSocket.defaultPath(),
+                    "TILLER_WORKTREE_ID": worktree.id.uuidString
+                ]))
         return WorkspaceContentHostAdapter(
-            tabID: tab.id, viewController: NSViewController(),
-            release: { [weak runtime] in runtime?.released = true })
+            tabID: tab.id,
+            viewController: surface.viewController,
+            focus: { _ in surface.focusTerminal() },
+            release: { await surface.teardown() })
     }
 
     func checkpoint(tab: WorkspaceTab) async { await boundary.checkpoint(tab) }

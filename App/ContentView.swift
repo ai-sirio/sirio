@@ -2,6 +2,7 @@ import SwiftUI
 import TillerCore
 import TillerTerminal
 import TillerControl
+import TillerWorkspace
 
 private struct RightPanelContext: Hashable {
     let worktreeId: UUID?
@@ -33,6 +34,12 @@ struct ContentView: View {
     private var rightPanelModeRaw = RightPanelMode.files.rawValue
     @State private var rightPanelModel = RightPanelModel()
     private let menuProvider: TerminalContextMenuProvider
+    private let workspaceCoordinator: WorkspaceCoordinator
+    private let workspaceEngineEnabled: Bool
+
+    static func renderPath(gateEnabled: Bool) -> WorkspaceRenderPath {
+        gateEnabled ? .workspace : .legacyTerminal
+    }
 
     private var showUsageBar: Bool {
         showClaudeInBar || showCodexInBar || showOpencodeGoInBar || showOllamaCloudInBar
@@ -46,10 +53,14 @@ struct ContentView: View {
             visible: rightPanelVisible)
     }
 
-    init(model: AppModel, updater: UpdaterModel) {
+    init(model: AppModel, updater: UpdaterModel,
+         workspaceCoordinator: WorkspaceCoordinator? = nil,
+         workspaceEngineEnabled: Bool = WorkspaceEngineGate.isEnabled) {
         self.model = model
         self.updater = updater
         self.menuProvider = TerminalContextMenuProvider(model: model)
+        self.workspaceCoordinator = workspaceCoordinator ?? model.workspaceCoordinator
+        self.workspaceEngineEnabled = workspaceEngineEnabled
     }
 
     var body: some View {
@@ -185,7 +196,11 @@ struct ContentView: View {
                     TabBarView(model: model, worktree: worktree)
                     Divider()
                 }
-                terminalStack
+                if workspaceEngineEnabled {
+                    workspaceStack
+                } else {
+                    terminalStack
+                }
                 if showUsageBar {
                     Divider()
                     UsageBarView(store: model.usage, worktree: model.selectedWorktree)
@@ -358,6 +373,38 @@ struct ContentView: View {
         }
         // Fill the detail column even when empty, so the usage bar stays
         // pinned to the window bottom instead of centering with the ZStack.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var workspaceStack: some View {
+        let plan = WorkspaceMountPlan(
+            openWorktreeIDs: model.openWorktreeIds,
+            selectedWorktreeID: model.selectedWorktree?.id)
+        ZStack {
+            if plan.mountedWorktreeIDs.isEmpty {
+                ContentUnavailableView(
+                    "No worktree selected",
+                    systemImage: "rectangle.split.3x1",
+                    description: Text("Add a project, then select a worktree.")
+                )
+            }
+            ForEach(plan.mountedWorktreeIDs, id: \.self) { worktreeID in
+                if let worktree = model.worktree(byId: worktreeID),
+                   let layout = workspaceCoordinator.layouts[worktreeID] {
+                    let isSelected = plan.selectedWorktreeID == worktreeID
+                    WorkspaceView(
+                        layout: layout,
+                        delta: isSelected ? workspaceCoordinator.lastSemanticDelta : nil,
+                        hostProvider: workspaceCoordinator.registry,
+                        intentSink: WorkspaceIntentRouter(
+                            coordinator: workspaceCoordinator, worktree: worktree))
+                        .opacity(isSelected ? 1 : 0)
+                        .allowsHitTesting(isSelected)
+                        .accessibilityHidden(!isSelected)
+                }
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
