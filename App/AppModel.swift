@@ -310,7 +310,10 @@ final class AppModel {
                 .appendingPathComponent("Tiller", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             refreshTillerctlShim()
-            let db = try AppDatabase(path: dir.appendingPathComponent("tiller.sqlite").path)
+            let db = try AppDatabase(
+                path: dir.appendingPathComponent("tiller.sqlite").path, upTo: "v16")
+            try SQLiteWorkspacePersistence.migrateV15IfNeeded(
+                database: db, backupDirectory: dir.appendingPathComponent("backups", isDirectory: true))
             let store = ProjectStore(database: db)
             self.store = store
             self.database = db

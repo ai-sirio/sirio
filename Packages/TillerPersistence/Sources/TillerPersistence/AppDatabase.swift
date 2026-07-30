@@ -5,10 +5,21 @@ import GRDB
 /// here; domain code never sees SQL.
 public final class AppDatabase: Sendable {
     private let dbQueue: DatabaseQueue
+    public let databasePath: String?
 
-    public init(path: String) throws {
+    public init(path: String, upTo: String? = nil) throws {
         dbQueue = try DatabaseQueue(path: path)
-        try Self.migrator.migrate(dbQueue)
+        databasePath = path
+        if let upTo {
+            let applied = try dbQueue.read { db in
+                try Self.migrator.appliedMigrations(db)
+            }
+            if !applied.contains(upTo) {
+                try Self.migrator.migrate(dbQueue, upTo: upTo)
+            }
+        } else {
+            try Self.migrator.migrate(dbQueue)
+        }
     }
 
     public static func inMemory() throws -> AppDatabase {
@@ -17,7 +28,18 @@ public final class AppDatabase: Sendable {
 
     private init(queue: DatabaseQueue) throws {
         dbQueue = queue
-        try Self.migrator.migrate(dbQueue)
+        databasePath = nil
+        // In-memory databases remain a v16 fixture surface for legacy-store
+        // tests. Persistent application databases opt into v17 explicitly so
+        // the App-layer callback can read terminalTab before it is renamed.
+        try Self.migrator.migrate(dbQueue, upTo: "v16")
+    }
+
+    /// Runs v17 with the App-layer data callback inside the same SQLite
+    /// transaction as the schema rename. The callback is never invoked again
+    /// after v17 has been recorded.
+    public func migrateV17(using migration: @escaping @Sendable (Database) throws -> Void) throws {
+        try Self.migrator(v17Migration: migration).migrate(dbQueue)
     }
 
     public func read<T>(_ block: (Database) throws -> T) throws -> T {
@@ -30,6 +52,12 @@ public final class AppDatabase: Sendable {
     }
 
     static var migrator: DatabaseMigrator {
+        migrator(v17Migration: nil)
+    }
+
+    private static func migrator(
+        v17Migration: (@Sendable (Database) throws -> Void)?
+    ) -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1") { db in
             try db.create(table: "project") { t in
@@ -251,6 +279,28 @@ public final class AppDatabase: Sendable {
             try db.alter(table: "agentSession") { t in
                 t.rename(column: "paneId", to: "terminalContentId")
             }
+        }
+        migrator.registerMigration("v17") { db in
+            if let v17Migration {
+                try v17Migration(db)
+            }
+            guard try db.tableExists("terminalTab") else { return }
+            try db.rename(table: "terminalTab", to: "legacyTerminalTab_v15")
+            try db.execute(sql: """
+                CREATE TRIGGER legacyTerminalTab_v15_read_only_insert
+                BEFORE INSERT ON legacyTerminalTab_v15
+                BEGIN SELECT RAISE(ABORT, 'legacyTerminalTab_v15 is read-only'); END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER legacyTerminalTab_v15_read_only_update
+                BEFORE UPDATE ON legacyTerminalTab_v15
+                BEGIN SELECT RAISE(ABORT, 'legacyTerminalTab_v15 is read-only'); END
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER legacyTerminalTab_v15_read_only_delete
+                BEFORE DELETE ON legacyTerminalTab_v15
+                BEGIN SELECT RAISE(ABORT, 'legacyTerminalTab_v15 is read-only'); END
+                """)
         }
         return migrator
     }

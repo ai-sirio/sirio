@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 xcodegen generate
+bash Scripts/check-migration-fixtures.sh
 bash Scripts/check-module-boundaries.sh
 
 # Build tillerctl so dev-build fallback exists for pane spawns.

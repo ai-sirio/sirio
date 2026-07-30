@@ -3,7 +3,127 @@ import GRDB
 import TillerCore
 import TillerPersistence
 
+private final class V15MigrationBoundary: @unchecked Sendable {
+    private var index = 0
+    private let failureIndex: Int?
+
+    init(failureIndex: Int?) {
+        self.failureIndex = failureIndex
+    }
+
+    func check() throws {
+        if failureIndex == index {
+            throw WorkspacePersistenceError.invalidRecord
+        }
+        index += 1
+    }
+}
+
 final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked Sendable {
+    static let v15WriteBoundaryCount = 4
+
+    static func migrateV15IfNeeded(
+        database: AppDatabase,
+        backupDirectory: URL,
+        now: @escaping @Sendable () -> Date = Date.init,
+        failAtWriteBoundary: Int? = nil
+    ) throws {
+        guard let databasePath = database.databasePath else {
+            throw WorkspacePersistenceError.invalidRecord
+        }
+        guard try database.read({ try $0.tableExists("terminalTab") }) else { return }
+
+        try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        let timestamp = formatter.string(from: now()).replacingOccurrences(of: ":", with: "-")
+        let backupURL = backupDirectory.appendingPathComponent(
+            "tiller-v15-\(timestamp)-\(UUID().uuidString).sqlite")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: databasePath), to: backupURL)
+
+        let boundary = V15MigrationBoundary(failureIndex: failAtWriteBoundary)
+
+        try database.migrateV17 { db in
+            let worktreeIDs = try String.fetchAll(db, sql: "SELECT id FROM worktree ORDER BY orderIdx, id")
+                .compactMap(UUID.init(uuidString:))
+            let allRows = try Row.fetchAll(db, sql: """
+                SELECT id, worktreeId, title, orderIdx, isActive, treeJSON, kind,
+                       filePath, chatAgentId, chatSessionId, titleIsAutoNamed
+                FROM terminalTab ORDER BY worktreeId, orderIdx, id
+                """)
+
+            for worktreeID in worktreeIDs {
+                let rows = allRows.compactMap { row -> WorkspaceMigrationV15.LegacyTabRow? in
+                    guard let rawWorktreeID: String = row["worktreeId"],
+                          UUID(uuidString: rawWorktreeID) == worktreeID,
+                          let rawID: String = row["id"], let id = UUID(uuidString: rawID),
+                          let title: String = row["title"], let orderIdx: Int = row["orderIdx"],
+                          let isActive: Bool = row["isActive"], let treeJSON: String = row["treeJSON"],
+                          let kind: String = row["kind"],
+                          let titleIsAutoNamed: Bool = row["titleIsAutoNamed"] else { return nil }
+                    return WorkspaceMigrationV15.LegacyTabRow(
+                        id: id, worktreeId: worktreeID, title: title, orderIdx: orderIdx,
+                        isActive: isActive, treeJSON: treeJSON, kind: kind,
+                        filePath: row["filePath"], chatAgentId: row["chatAgentId"],
+                        chatSessionId: row["chatSessionId"], titleIsAutoNamed: titleIsAutoNamed)
+                }
+
+                let result = WorkspaceMigrationV15.migrate(
+                    rows: rows, worktreeID: worktreeID,
+                    freshTabID: { WorkspaceTabID() }, freshGroupID: { PaneGroupID() },
+                    freshSplitID: { SplitID() }, freshChatID: { ChatContentID(UUID().uuidString) },
+                    agentDisplayName: Self.knownAgentDisplayName)
+                let snapshot = WorkspaceSnapshot(layout: result.layout)
+                let payload = try snapshot.canonicalPayload()
+                let timestamp = now()
+
+                try boundary.check()
+                try WorkspaceLayoutRecord(
+                    worktreeId: worktreeID.uuidString, schemaVersion: snapshot.schemaVersion,
+                    revision: 1, payload: String(decoding: payload, as: UTF8.self),
+                    checksum: SHA256Hex.digest(payload), updatedAt: timestamp).insert(db)
+
+                for tab in result.tabs {
+                    try boundary.check()
+                    try WorkspaceTabRecord(
+                        id: tab.id.rawValue.uuidString, worktreeId: worktreeID.uuidString,
+                        title: tab.title, titleIsAutoNamed: tab.titleIsAutoNamed,
+                        contentKind: tab.content.kind.rawValue,
+                        contentId: tab.content.contentIdentifierString,
+                        viewStateJSON: String(decoding: try JSONEncoder().encode(tab.viewState), as: UTF8.self),
+                        viewStateVersion: 1, createdAt: timestamp).insert(db)
+                }
+                for content in result.terminalContents {
+                    try boundary.check()
+                    let launchKind: String
+                    let agentID: String?
+                    switch content.launchKind {
+                    case .shell: launchKind = "shell"; agentID = nil
+                    case .agent(let id): launchKind = "agent"; agentID = id
+                    }
+                    try TerminalContentRecord(
+                        id: content.id.rawValue.uuidString, worktreeId: worktreeID.uuidString,
+                        launchKind: launchKind, agentId: agentID,
+                        commandJSON: content.commandJSON, createdAt: timestamp).insert(db)
+                }
+            }
+            // This is the final data-write boundary. If it fails, v17's table
+            // rename and migration marker are rolled back together with data.
+            try boundary.check()
+        }
+    }
+
+    private static func knownAgentDisplayName(_ id: String) -> String? {
+        switch id {
+        case "claude", "claude-acp": return "Claude"
+        case "codex", "codex-acp": return "Codex"
+        case "opencode": return "OpenCode"
+        case "pi", "pi-acp": return "Pi"
+        case "omp": return "Oh My Pi"
+        default: return nil
+        }
+    }
+
     private let database: AppDatabase
     private let now: @Sendable () -> Date
     private let recoveryDirectory: URL?

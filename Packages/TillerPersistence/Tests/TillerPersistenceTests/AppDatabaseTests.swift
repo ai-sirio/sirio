@@ -189,7 +189,9 @@ import GRDB
     }
     try migrator.migrate(queue)
     let value = try queue.read { database in
-        try Bool.fetchOne(database, sql: "SELECT titleIsAutoNamed FROM terminalTab WHERE id = 't1'")
+        try Bool.fetchOne(
+            database, sql: "SELECT titleIsAutoNamed FROM legacyTerminalTab_v15 WHERE id = 't1'"
+        )
     }
     #expect(value == true)
 }
