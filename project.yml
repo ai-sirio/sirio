@@ -14,6 +14,8 @@ settings:
 packages:
   TillerCore:
     path: Packages/TillerCore
+  TillerWorkspace:
+    path: Packages/TillerWorkspace
   TillerTerminal:
     path: Packages/TillerTerminal
   TillerPersistence:
@@ -54,6 +56,7 @@ targets:
           ENABLE_DEBUG_DYLIB: YES
     dependencies:
       - package: TillerCore
+      - package: TillerWorkspace
       - package: TillerTerminal
       - package: TillerPersistence
       - package: TillerControl
