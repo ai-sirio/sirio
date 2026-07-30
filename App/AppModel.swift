@@ -2175,6 +2175,13 @@ final class AppModel {
     @discardableResult
     private func focusPane(paneId: UUID) async -> Bool {
         guard let target = tabContaining(paneId: paneId) else { return false }
+        // Cancellation is checked before the prologue, not just inside the wait
+        // loop: selecting a worktree and calling activateApplication() steal the
+        // user's window focus, and doing that for a request whose caller has
+        // already gone away is both wrong and slow — AppKit activation can cost
+        // ~1s in a fresh session, which is time spent before the first
+        // in-loop cancellation check could ever run.
+        guard !Task.isCancelled else { return false }
         selectedWorktree = target.worktree
         activateTab(target.tab.id, in: target.worktree.id)
         activateApplication()
