@@ -2,6 +2,11 @@ import Foundation
 
 public enum WorkspaceInvalidAction: Equatable, Sendable {
     case destinationUnavailable
+    /// CO-2 requires the reason a split is unavailable to reach accessibility
+    /// clients and control callers, not merely the fact that it is. "The
+    /// window is too narrow" and "this is the pane's only tab" call for
+    /// different user actions, so they must not share one message.
+    case splitUnavailable(SplitEligibility.Reason)
 }
 
 public enum WorkspaceAnnouncement: Equatable, Sendable {
@@ -74,6 +79,20 @@ public enum WorkspaceAnnouncements {
     public static var minimumPaneSize: String { "Minimum pane size" }
     public static var focusFulfillmentFailure: String { "Focus could not be fulfilled." }
 
+    /// Concise, actionable text per CO-2. The numbers are deliberately left
+    /// out: a screen-reader user needs to know what to do about it, not the
+    /// point arithmetic behind the decision.
+    public static func reasonText(_ reason: SplitEligibility.Reason) -> String {
+        switch reason {
+        case .insufficientWidth:
+            "the window is too narrow to split this pane."
+        case .insufficientHeight:
+            "the window is too short to split this pane."
+        case .soleTabOfItsOwnGroup:
+            "this is the only tab in its pane."
+        }
+    }
+
     public static func text(for announcement: WorkspaceAnnouncement) -> String {
         switch announcement {
         case let .moved(tabTitle, destinationPane, position, sourcePane, sourceCollapsed):
@@ -81,6 +100,8 @@ public enum WorkspaceAnnouncements {
             return "Moved \(tabTitle) to Pane \(destinationPane), position \(position).\(collapse)"
         case .invalid(.destinationUnavailable):
             return "Action unavailable: destination pane is unavailable."
+        case let .invalid(.splitUnavailable(reason)):
+            return "Action unavailable: \(reasonText(reason))"
         case .layoutUpdated:
             return layoutUpdated
         case .minimumPaneSize:
