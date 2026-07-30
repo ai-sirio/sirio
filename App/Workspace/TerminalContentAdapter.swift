@@ -16,13 +16,19 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
     init(boundary: AdapterBoundary = AdapterBoundary()) { self.boundary = boundary }
 
     func prepare(request: ContentRequest, worktree: Worktree) async throws -> PreparedContent {
-        guard request == .newTerminal || isAgentTerminal(request) else {
+        let command: String?
+        switch request {
+        case .newTerminal(let requestedCommand): command = requestedCommand
+        case .agentTerminal: command = nil
+        default: command = nil
+        }
+        guard isTerminalRequest(request) else {
             throw ContentAdapterError.unsupportedRequest
         }
         let tab = makeTab(request: request)
         let token = AdapterRuntimeToken(
             tabID: tab.id, contentID: tab.content.contentIdentifierString,
-            generationID: ResourceGenerationID())
+            generationID: ResourceGenerationID(), command: command)
         token.phase = .preparing
         tabs[tab.id] = tab
         runtimes[tab.id] = token
@@ -47,11 +53,16 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
             contentID: contentID,
             configuration: TerminalSurfaceConfiguration(
                 workingDirectory: worktree.path,
+                command: runtimes[tab.id]?.command,
                 extraEnvironment: [
                     "TILLER_ENV": "1",
                     "TILLER_SOCKET": ControlSocket.defaultPath(),
                     "TILLER_WORKTREE_ID": worktree.id.uuidString
                 ]))
+        // The PTY registers under TerminalSurfaceHost's generation. Keep the
+        // adapter's live lookup aligned with that runtime key; the content id
+        // remains stable across relaunches.
+        runtimes[tab.id]?.generationID = surface.generationID
         return WorkspaceContentHostAdapter(
             tabID: tab.id,
             viewController: surface.viewController,
@@ -98,6 +109,7 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
 
     func phase(for tabID: WorkspaceTabID) -> ContentPhase? { runtimes[tabID]?.phase }
     func generation(for tabID: WorkspaceTabID) -> ResourceGenerationID? { runtimes[tabID]?.generationID }
+    func command(for tabID: WorkspaceTabID) -> String? { runtimes[tabID]?.command }
 
     func markFailed(tabID: WorkspaceTabID, reason: String) {
         runtimes[tabID]?.phase = .failed(reason: reason)
@@ -126,8 +138,10 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
                             content: .terminal(contentID))
     }
 
-    private func isAgentTerminal(_ request: ContentRequest) -> Bool {
-        if case .agentTerminal = request { return true }
-        return false
+    private func isTerminalRequest(_ request: ContentRequest) -> Bool {
+        switch request {
+        case .newTerminal, .agentTerminal: return true
+        default: return false
+        }
     }
 }

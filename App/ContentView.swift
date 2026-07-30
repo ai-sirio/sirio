@@ -326,7 +326,7 @@ struct ContentView: View {
                     choice: .openFile(url, editor: editor), in: worktree)
             }
         case .newTerminal:
-            requestUniversalSplit(.newTerminal, anchor: anchor, worktree: worktree)
+            requestUniversalSplit(.newTerminal(command: nil), anchor: anchor, worktree: worktree)
         case .agentTerminal(let agentID):
             requestUniversalSplit(.agentTerminal(agentID: agentID), anchor: anchor, worktree: worktree)
         case .newChat(let agentID):

@@ -5,7 +5,7 @@ import TillerTerminal
 import TillerWorkspace
 
 enum ContentChoice: Sendable {
-    case newTerminal
+    case newTerminal(command: String?)
     case agentTerminal(agentID: String)
     case newChat(agentID: String)
     case resumeChat(ChatContentID)
@@ -126,14 +126,39 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         return layout.orderedGroupIDs.first
     }
 
+    func terminalContentID(for tabID: WorkspaceTabID, in worktreeID: UUID)
+        -> TerminalContentID? {
+        guard let tab = layouts[worktreeID]?.tab(tabID),
+              case .terminal(let contentID) = tab.content else { return nil }
+        return contentID
+    }
+
+    /// Resolves a terminal tab's stable content id to the key its live PTY is
+    /// currently registered under in PaneRegistry (the adapter's current
+    /// ResourceGenerationID) — nil if the tab does not exist, is not a
+    /// terminal, or has not hydrated a live process yet. Never cached: call
+    /// this again after any move/split/relaunch.
+    func liveControlPaneId(contentID: TerminalContentID, in worktreeID: UUID) -> UUID? {
+        guard let layout = layouts[worktreeID],
+              let tab = layout.allTabs.first(where: {
+                  if case .terminal(let cid) = $0.content { return cid == contentID }
+                  return false
+              }),
+              let terminalAdapter = adapters[.terminal] as? TerminalContentAdapter,
+              let generation = terminalAdapter.generation(for: tab.id)
+        else { return nil }
+        return generation.rawValue
+    }
+
     func handle(_ intent: WorkspaceIntent, in worktree: Worktree) async {
         worktrees[worktree.id] = worktree
         switch intent {
         case .requestSplit(let anchor, let placement):
             await requestSplit(anchor: anchor, placement: placement,
-                               choice: .newTerminal, in: worktree)
+                               choice: .newTerminal(command: nil), in: worktree)
         case .requestNewTab(let groupID):
-            await requestNewTab(into: groupID, choice: .newTerminal, in: worktree)
+            await requestNewTab(
+                into: groupID, choice: .newTerminal(command: nil), in: worktree)
         case .requestClose(let tabID):
             await closeTab(tabID, in: worktree)
         case .requestMove(let tabID, to: let destination):
@@ -481,7 +506,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
 
     private func contentRequest(for choice: ContentChoice) -> ContentRequest? {
         switch choice {
-        case .newTerminal: .newTerminal
+        case .newTerminal(let command): .newTerminal(command: command)
         case .agentTerminal(let agentID): .agentTerminal(agentID: agentID)
         case .newChat(let agentID): .newChat(agentID: agentID)
         case .resumeChat(let id): .resumeChat(id)

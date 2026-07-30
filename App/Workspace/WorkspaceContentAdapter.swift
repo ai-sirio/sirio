@@ -24,7 +24,7 @@ enum ChatDetail: Equatable, Sendable { case idle, turning, disconnected, interru
 enum DocumentDetail: Equatable, Sendable { case available, dirty, conflicted, missing }
 
 enum ContentRequest: Sendable, Equatable {
-    case newTerminal
+    case newTerminal(command: String?)
     case agentTerminal(agentID: String)
     case newChat(agentID: String)
     case resumeChat(ChatContentID)
@@ -73,15 +73,18 @@ protocol WorkspaceContentAdapter: AnyObject {
 class AdapterRuntimeToken: NSObject {
     let tabID: WorkspaceTabID
     let contentID: String
+    var command: String?
     var generationID: ResourceGenerationID
     var phase: ContentPhase = .dormant
     var released = false
     var disposed = false
     var hydrated = false
 
-    init(tabID: WorkspaceTabID, contentID: String, generationID: ResourceGenerationID) {
+    init(tabID: WorkspaceTabID, contentID: String, generationID: ResourceGenerationID,
+         command: String? = nil) {
         self.tabID = tabID
         self.contentID = contentID
+        self.command = command
         self.generationID = generationID
     }
 }

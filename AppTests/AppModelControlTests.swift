@@ -4,6 +4,7 @@ import Testing
 import TillerControl
 import TillerCore
 import TillerTerminal
+import TillerWorkspace
 @testable import Tiller
 
 @Suite(.serialized)
@@ -38,13 +39,12 @@ struct AppModelControlTests {
         #expect(updated.titleIsAutoNamed == true)
     }
 
-    @Test func createReturnsOnlyAfterRegistrationWithoutChangingSelection() async {
+    @Test func panelCreateWithTheEngineEnabledResolvesThroughLiveControlPaneId() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
-        let createdPaneId = UUID()
         let activation = ActivationCounter()
         let model = makeModel(
             registry: registry,
-            paneId: createdPaneId,
             timeoutMs: 1_000,
             activation: activation
         )
@@ -53,16 +53,11 @@ struct AppModelControlTests {
         model.worktrees = [target.projectId: [target], selected.projectId: [selected]]
         await model.workspaceCoordinator.restore(worktree: target)
         await model.workspaceCoordinator.restore(worktree: selected)
-        let targetPaneId = UUID(), selectedPaneId = UUID()
-        let targetTab = LegacyWorkspaceTab(
-            id: UUID(), title: "Target active", tree: .leaf(id: targetPaneId)
-        )
+        let selectedPaneId = UUID()
         let selectedTab = LegacyWorkspaceTab(
             id: UUID(), title: "Selected", tree: .leaf(id: selectedPaneId)
         )
-        model.workspaceCoordinator.setLegacyTabs([targetTab], for: target.id)
         model.workspaceCoordinator.setLegacyTabs([selectedTab], for: selected.id)
-        model.workspaceCoordinator.setLegacyActiveTabID(targetTab.id, for: target.id)
         model.workspaceCoordinator.setLegacyActiveTabID(selectedTab.id, for: selected.id)
         model.selectedWorktree = selected
         let priorOpenIds = model.openWorktreeIds
@@ -76,31 +71,75 @@ struct AppModelControlTests {
             return value
         }
         await poll {
-            model.workspaceTabs(for: target.id).flatMap(\.leafIds).contains(createdPaneId)
+            model.workspaceCoordinator.layouts[target.id]?.allTabs.isEmpty == false
         }
 
         #expect(await response.value == nil)
         #expect(model.selectedWorktree?.id == selected.id)
         #expect(model.workspaceActiveTabID(for: selected.id) == selectedTab.id)
-        #expect(model.workspaceActiveTabID(for: target.id) == targetTab.id)
-        #expect(model.workspaceTabs(for: target.id).flatMap(\.leafIds).contains(createdPaneId))
+        #expect(model.workspaceCoordinator.legacyTabs(for: target.id).isEmpty)
+        guard let tab = model.workspaceCoordinator.layouts[target.id]?.allTabs.first,
+              case .terminal(let contentID) = tab.content,
+              let livePaneId = model.workspaceCoordinator.liveControlPaneId(
+                  contentID: contentID, in: target.id) else {
+            Issue.record("universal terminal did not expose a live control id")
+            return
+        }
         await registry.register(
-            paneId: createdPaneId,
+            paneId: livePaneId,
             pty: PtyProcess { _ in },
             scrollback: ScrollbackBuffer()
         )
 
         let result = await requestTask.value
         #expect(result.ok)
-        #expect(result.result == ["id": createdPaneId.uuidString])
+        #expect(result.result == ["id": livePaneId.uuidString])
         #expect(model.selectedWorktree?.id == selected.id)
         #expect(model.workspaceActiveTabID(for: selected.id) == selectedTab.id)
-        #expect(model.workspaceActiveTabID(for: target.id) == targetTab.id)
         #expect(Set(model.openWorktreeIds) == Set(priorOpenIds + [target.id]))
         #expect(activation.count == 0)
     }
 
+    @Test func panelCreateRunsTheRequestedCommandThroughTheUniversalEngine() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let registry = PaneRegistry()
+        let model = makeModel(registry: registry, timeoutMs: 1_000)
+        let worktree = makeWorktree(path: "/tmp/universal-command")
+        model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
+
+        let task = Task {
+            await model.handleControl(request(
+                "panel.create",
+                ["worktree": worktree.id.uuidString, "cmd": "printf universal-command"]
+            ))
+        }
+        await poll {
+            model.workspaceCoordinator.layouts[worktree.id]?.allTabs.isEmpty == false
+        }
+        guard let tab = model.workspaceCoordinator.layouts[worktree.id]?.allTabs.first,
+              case .terminal(let contentID) = tab.content,
+              let adapter = model.workspaceCoordinator.adapters[.terminal]
+                  as? TerminalContentAdapter,
+              let livePaneId = model.workspaceCoordinator.liveControlPaneId(
+                  contentID: contentID, in: worktree.id) else {
+            Issue.record("universal terminal was not prepared")
+            return
+        }
+        #expect(adapter.command(for: tab.id) == "printf universal-command")
+        await registry.register(
+            paneId: livePaneId,
+            pty: PtyProcess { _ in },
+            scrollback: ScrollbackBuffer()
+        )
+
+        let result = await task.value
+        #expect(result.ok)
+        #expect(result.result == ["id": livePaneId.uuidString])
+    }
+
     @Test func createTimeoutRollsBackTabCommandMountAndLateRegistration() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
         let createdPaneId = UUID()
         let activation = ActivationCounter()
@@ -132,6 +171,7 @@ struct AppModelControlTests {
     }
 
     @Test func splitTimeoutRollsBackOnlyNewLeafAndCommand() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
         let createdPaneId = UUID()
         let model = makeModel(
@@ -165,6 +205,7 @@ struct AppModelControlTests {
     }
 
     @Test func listUsesExplicitWorktreeSelector() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let model = makeModel()
         let requested = makeWorktree(path: "/tmp/list-requested")
         let selected = makeWorktree(path: "/tmp/list-selected")
@@ -192,7 +233,145 @@ struct AppModelControlTests {
         #expect(model.selectedWorktree?.id == selected.id)
     }
 
+    @Test func panelListReflectsUniversalTabsWhenTheEngineIsEnabled() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let registry = PaneRegistry()
+        let model = makeModel(registry: registry, timeoutMs: 1_000)
+        let worktree = makeWorktree(path: "/tmp/universal-list")
+        model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
+
+        let createTask = Task {
+            await model.handleControl(request(
+                "panel.create", ["worktree": worktree.id.uuidString]
+            ))
+        }
+        await poll {
+            model.workspaceCoordinator.layouts[worktree.id]?.allTabs.isEmpty == false
+        }
+        guard let tab = model.workspaceCoordinator.layouts[worktree.id]?.allTabs.first,
+              case .terminal(let contentID) = tab.content,
+              let livePaneId = model.workspaceCoordinator.liveControlPaneId(
+                  contentID: contentID, in: worktree.id) else {
+            Issue.record("universal terminal did not expose its live control id")
+            return
+        }
+        await registry.register(
+            paneId: livePaneId, pty: PtyProcess { _ in }, scrollback: ScrollbackBuffer())
+        let created = await createTask.value
+        #expect(created.result?["id"] == livePaneId.uuidString)
+        let listed = await model.handleControl(request(
+            "panel.list", ["worktree": worktree.id.uuidString]
+        ))
+        let rows = listed.result?["panels"].flatMap(ControlRows.decode) ?? []
+
+        #expect(listed.ok)
+        #expect(rows.count == 1)
+        #expect(rows.first?["id"] == livePaneId.uuidString)
+        #expect(model.workspaceCoordinator.legacyTabs(for: worktree.id).isEmpty)
+        await registry.cancelRegistration(paneId: livePaneId)
+    }
+
+    @Test func aMovedTerminalKeepsItsControlIdentityAndLivePty() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let registry = PaneRegistry()
+        let model = makeModel(registry: registry, timeoutMs: 1_000)
+        let worktree = makeWorktree(path: "/tmp/universal-move")
+        model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
+
+        let createTask = Task {
+            await model.handleControl(request(
+                "panel.create", ["worktree": worktree.id.uuidString]
+            ))
+        }
+        await poll {
+            model.workspaceCoordinator.layouts[worktree.id]?.allTabs.isEmpty == false
+        }
+        guard let tab = model.workspaceCoordinator.layouts[worktree.id]?.allTabs.first,
+              case .terminal(let contentID) = tab.content,
+              let controlID = model.workspaceCoordinator.liveControlPaneId(
+                  contentID: contentID, in: worktree.id) else {
+            Issue.record("universal terminal was not created")
+            return
+        }
+        let pty = PtyProcess { _ in }
+        try? pty.spawn(
+            executable: "/bin/sh", arguments: ["-c", "sleep 30"],
+            environment: ["PATH=/usr/bin:/bin"], initialCols: 80, initialRows: 24)
+        await registry.register(
+            paneId: controlID, pty: pty, scrollback: ScrollbackBuffer())
+        let created = await createTask.value
+        #expect(created.result?["id"] == controlID.uuidString)
+        let pidBefore = await registry.shellPid(paneId: controlID)
+        #expect(pidBefore != nil)
+
+        let groupID = model.workspaceCoordinator.layouts[worktree.id]!.activeGroupID
+        await model.workspaceCoordinator.handle(
+            .requestMove(tab.id, to: .edgeSplit(anchor: groupID, placement: .right)),
+            in: worktree)
+
+        guard let movedTab = model.workspaceCoordinator.layouts[worktree.id]?.tab(tab.id),
+              case .terminal(let movedContentID) = movedTab.content else {
+            Issue.record("moved terminal tab disappeared")
+            return
+        }
+        let movedControlID = model.workspaceCoordinator.liveControlPaneId(
+            contentID: movedContentID, in: worktree.id)
+        #expect(movedControlID == controlID)
+        #expect(await registry.shellPid(paneId: controlID) == pidBefore)
+        await registry.cancelRegistration(paneId: controlID)
+    }
+
+    @Test func staleOrNonTerminalIdsReturnTypedErrorsWithNoMutation() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let model = makeModel()
+        let worktree = makeWorktree(path: "/tmp/universal-stale")
+        model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
+        let staleID = UUID().uuidString
+
+        let read = await model.handleControl(request("panel.read", ["id": staleID]))
+        let write = await model.handleControl(request(
+            "panel.write", ["id": staleID, "input": "ignored"]
+        ))
+        let key = await model.handleControl(request(
+            "panel.key", ["id": staleID, "key": "enter"]
+        ))
+        let wait = await model.handleControl(request(
+            "panel.wait", ["id": staleID, "timeoutMs": "0"]
+        ))
+        let focus = await model.handleControl(request("panel.focus", ["id": staleID]))
+        let close = await model.handleControl(request("panel.close", ["id": staleID]))
+
+        #expect(read.error == "unknown panel")
+        #expect(write.error == "unknown panel")
+        #expect(key.error == "unknown panel")
+        #expect(wait.error == "unknown panel or timeout")
+        #expect(focus.error == "unknown panel")
+        #expect(close.error == "unknown panel")
+        #expect(model.workspaceCoordinator.layouts[worktree.id]?.allTabs.isEmpty == true)
+    }
+
+    @Test func disablingTheSocketDisablesNoLocalWorkspaceFeature() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let model = makeModel()
+        let worktree = makeWorktree(path: "/tmp/socket-independent-workspace")
+        model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
+        model.setControlSocketEnabled(false)
+
+        model.newShellTab(in: worktree)
+        await poll {
+            model.workspaceCoordinator.layouts[worktree.id]?.allTabs.isEmpty == false
+        }
+
+        #expect(model.workspaceCoordinator.layouts[worktree.id]?.allTabs.count == 1)
+        model.setControlSocketEnabled(false)
+    }
+
     @Test func closeRejectsUnknownPaneAndRemovesKnownPaneBeforeReturning() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
         let model = makeModel(registry: registry)
         let worktree = makeWorktree(path: "/tmp/close")
@@ -241,6 +420,7 @@ struct AppModelControlTests {
     }
 
     @Test func activationCallbackIsInvokedOnlyByFocus() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let activation = ActivationCounter()
         let model = makeModel(activation: activation)
         let owning = makeWorktree(path: "/tmp/focus-owning")
@@ -282,6 +462,7 @@ struct AppModelControlTests {
     }
 
     @Test func focusFailsWhenPaneNeverAttaches() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let activation = ActivationCounter()
         let model = makeModel(timeoutMs: 20, activation: activation)
         let worktree = makeWorktree(path: "/tmp/focus-unattached")
@@ -324,6 +505,7 @@ struct AppModelControlTests {
     /// bound stays only as a generous guard against an outright hang: it must
     /// be well under the 3s timeout to prove the wait was short-circuited.
     @Test func cancelledFocusReturnsPromptly() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let model = makeModel(timeoutMs: 3_000)
         let worktree = makeWorktree(path: "/tmp/focus-cancelled")
         let paneId = UUID()
@@ -346,6 +528,7 @@ struct AppModelControlTests {
     }
 
     @Test func createFailsAndRollsBackWhenPersistenceFails() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
         let paneId = UUID()
         let model = makeModel(
@@ -373,6 +556,7 @@ struct AppModelControlTests {
     }
 
     @Test func createResponseWaitsForOrderedPersistence() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
         let paneId = UUID()
         let gate = PersistenceGate()
@@ -407,6 +591,7 @@ struct AppModelControlTests {
     }
 
     @Test func concurrentCreateTimeoutNeverPersistsPendingPane() async {
+        guard !WorkspaceEngineGate.isEnabled else { return }
         let registry = PaneRegistry()
         let successfulPaneId = UUID()
         let failedPaneId = UUID()

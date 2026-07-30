@@ -509,30 +509,69 @@ final class AppModel {
                 return .failure(id: request.id, error: "unknown worktree")
             }
             return await serializeControlLifecycle(for: worktree.id) {
-                let universalGroup: PaneGroupID?
                 if WorkspaceEngineGate.isEnabled {
                     guard let group = self.workspaceCoordinator.activeOrFirstGroup(
                         for: worktree.id) else {
                         return .failure(id: request.id, error: "workspace layout unavailable")
                     }
-                    universalGroup = group
-                } else {
-                    universalGroup = nil
+                    let mountLease = self.acquireControlMount(for: worktree.id)
+                    let tabsBefore = Set(
+                        self.workspaceCoordinator.layouts[worktree.id]?.allTabs.map(\.id) ?? [])
+                    await self.workspaceCoordinator.requestNewTab(
+                        into: group,
+                        choice: .newTerminal(command: request.params["cmd"]),
+                        in: worktree)
+                    let insertedTab = self.workspaceCoordinator.layouts[worktree.id]?.allTabs
+                        .first(where: { !tabsBefore.contains($0.id) })
+                    guard let universalTabID = insertedTab,
+                          let contentID = self.workspaceCoordinator.terminalContentID(
+                              for: universalTabID.id, in: worktree.id) else {
+                        if let insertedTab {
+                            await self.workspaceCoordinator.closeTab(insertedTab.id, in: worktree)
+                        }
+                        self.releaseControlMount(mountLease, success: false)
+                        return .failure(id: request.id, error: "panel did not register before timeout")
+                    }
+                    let startedAt = Date()
+                    var livePaneId = self.workspaceCoordinator.liveControlPaneId(
+                        contentID: contentID, in: worktree.id)
+                    while livePaneId == nil
+                        && Date().timeIntervalSince(startedAt) * 1_000
+                            < Double(self.registrationTimeoutMs) {
+                        livePaneId = self.workspaceCoordinator.liveControlPaneId(
+                            contentID: contentID, in: worktree.id)
+                        if livePaneId == nil {
+                            try? await Task.sleep(for: .milliseconds(1))
+                        }
+                    }
+                    guard let livePaneId else {
+                        await self.workspaceCoordinator.closeTab(universalTabID.id, in: worktree)
+                        self.releaseControlMount(mountLease, success: false)
+                        return .failure(
+                            id: request.id, error: "panel did not register before timeout"
+                        )
+                    }
+                    let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1_000)
+                    let remainingMs = max(0, self.registrationTimeoutMs - elapsedMs)
+                    guard await self.paneRegistry.waitUntilRegistered(
+                        paneId: livePaneId, timeoutMs: remainingMs
+                    ) else {
+                        await self.paneRegistry.cancelRegistration(paneId: livePaneId)
+                        await self.workspaceCoordinator.closeTab(universalTabID.id, in: worktree)
+                        self.releaseControlMount(mountLease, success: false)
+                        return .failure(
+                            id: request.id, error: "panel did not register before timeout"
+                        )
+                    }
+                    self.releaseControlMount(mountLease, success: true)
+                    return .success(id: request.id, result: ["id": livePaneId.uuidString])
                 }
+
                 let paneId = self.paneIdGenerator()
                 if let command = request.params["cmd"] { self.paneCommands[paneId] = command }
                 let mountLease = self.acquireControlMount(for: worktree.id)
                 let title = request.params["cmd"]?
                     .split(separator: " ").first.map(String.init) ?? "Panel"
-                let universalTabIDsBefore = Set(
-                    self.workspaceCoordinator.layouts[worktree.id]?.allTabs.map(\.id) ?? [])
-                var universalTabID: WorkspaceTabID?
-                if let universalGroup {
-                    await self.workspaceCoordinator.handle(
-                        .requestNewTab(into: universalGroup), in: worktree)
-                    universalTabID = self.workspaceCoordinator.layouts[worktree.id]?.allTabs
-                        .first { !universalTabIDsBefore.contains($0.id) }?.id
-                }
                 let tab = self.openTab(
                     paneId: paneId, title: title, in: worktree,
                     activate: false, persist: false
@@ -543,9 +582,6 @@ final class AppModel {
                 ) else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
                     self.workspaceRollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
-                    if let universalTabID {
-                        await self.workspaceCoordinator.closeTab(universalTabID, in: worktree)
-                    }
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -554,9 +590,6 @@ final class AppModel {
                 }
                 guard self.workspaceTabContaining(paneId: paneId) != nil else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
-                    if let universalTabID {
-                        await self.workspaceCoordinator.closeTab(universalTabID, in: worktree)
-                    }
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -568,9 +601,6 @@ final class AppModel {
                 } catch {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
                     self.workspaceRollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
-                    if let universalTabID {
-                        await self.workspaceCoordinator.closeTab(universalTabID, in: worktree)
-                    }
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -651,12 +681,42 @@ final class AppModel {
                   let worktree = resolveWorktree(selector) else {
                 return .failure(id: request.id, error: "unknown worktree")
             }
-            let rows = ControlListing.paneRows(
-                tabs: workspaceCoordinator.legacyTabs(for: worktree.id),
-                activeTabId: workspaceCoordinator.legacyActiveTabID(for: worktree.id),
-                agentIdForPane: { self.agentActivity.paneAgents[$0] },
-                titleForPane: { self.paneTitles[$0] }
-            )
+            let rows: [[String: String]]
+            if WorkspaceEngineGate.isEnabled {
+                guard let layout = self.workspaceCoordinator.layouts[worktree.id] else {
+                    return .success(id: request.id, result: ["panels": ControlRows.encode([])])
+                }
+                rows = layout.orderedGroupIDs.flatMap { groupID in
+                    guard let group = layout.group(groupID) else { return [[String: String]]() }
+                    return group.tabs.compactMap { tab -> [String: String]? in
+                        guard case .terminal(let contentID) = tab.content,
+                              let paneId = self.workspaceCoordinator.liveControlPaneId(
+                                  contentID: contentID, in: worktree.id) else { return nil }
+                        return [
+                            "id": paneId.uuidString,
+                            "tab": tab.title,
+                            "title": self.paneTitles[paneId] ?? "",
+                            "agent": self.agentActivity.paneAgents[paneId] ?? "",
+                            "active": groupID == layout.activeGroupID
+                                && tab.id == group.activeTabID ? "true" : "false",
+                        ]
+                    }
+                }
+            } else {
+                let legacyTabs = self.workspaceCoordinator.legacyTabs(for: worktree.id)
+                let activeTabID = self.workspaceCoordinator.legacyActiveTabID(for: worktree.id)
+                rows = ControlListing.paneRows(legacyTabs.flatMap { tab in
+                    tab.leafIds.map { paneId in
+                        [
+                            "id": paneId.uuidString,
+                            "tab": tab.title,
+                            "title": self.paneTitles[paneId] ?? "",
+                            "agent": self.agentActivity.paneAgents[paneId] ?? "",
+                            "active": tab.id == activeTabID ? "true" : "false",
+                        ]
+                    }
+                })
+            }
             return .success(
                 id: request.id, result: ["panels": ControlRows.encode(rows)]
             )
@@ -718,6 +778,21 @@ final class AppModel {
             )
 
         case "panel.focus":
+            if WorkspaceEngineGate.isEnabled {
+                guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
+                      await paneRegistry.isRegistered(paneId: paneId),
+                      let target = universalControlTarget(paneId: paneId) else {
+                    return .failure(id: request.id, error: "unknown panel")
+                }
+                guard !Task.isCancelled else {
+                    return .failure(id: request.id, error: "panel focus cancelled")
+                }
+                selectedWorktree = target.worktree
+                activateApplication()
+                await workspaceCoordinator.handle(
+                    .activateTab(target.tab.id), in: target.worktree)
+                return .success(id: request.id)
+            }
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
                   workspaceTabContaining(paneId: paneId) != nil else {
                 return .failure(id: request.id, error: "unknown panel")
@@ -735,6 +810,23 @@ final class AppModel {
             }
 
         case "panel.close":
+            if WorkspaceEngineGate.isEnabled {
+                guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
+                      await paneRegistry.isRegistered(paneId: paneId),
+                      let target = universalControlTarget(paneId: paneId) else {
+                    return .failure(id: request.id, error: "unknown panel")
+                }
+                return await serializeControlLifecycle(for: target.worktree.id) {
+                    guard await self.paneRegistry.isRegistered(paneId: paneId) else {
+                        return .failure(id: request.id, error: "unknown panel")
+                    }
+                    await self.workspaceCoordinator.closeTab(target.tab.id, in: target.worktree)
+                    await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    self.deleteAgentSessionRefs(paneIds: [paneId])
+                    self.paneCommands[paneId] = nil
+                    return .success(id: request.id)
+                }
+            }
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
                   let target = workspaceTabContaining(paneId: paneId) else {
                 return .failure(id: request.id, error: "unknown panel")
@@ -1305,6 +1397,21 @@ final class AppModel {
             let tabs = workspaceCoordinator.legacyTabs(for: worktree.id)
             if let idx = tabs.firstIndex(where: { $0.leafIds.contains(paneId) }) {
                 return (worktree, tabs[idx], idx)
+            }
+        }
+        return nil
+    }
+
+    private func universalControlTarget(
+        paneId: UUID
+    ) -> (worktree: Worktree, tab: WorkspaceTab)? {
+        for worktree in worktrees.values.flatMap({ $0 }) {
+            guard let layout = workspaceCoordinator.layouts[worktree.id] else { continue }
+            for tab in layout.allTabs {
+                guard case .terminal(let contentID) = tab.content,
+                      workspaceCoordinator.liveControlPaneId(
+                          contentID: contentID, in: worktree.id) == paneId else { continue }
+                return (worktree, tab)
             }
         }
         return nil

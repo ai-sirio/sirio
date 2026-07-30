@@ -16,7 +16,7 @@ struct SplitContentMenuTests {
         #expect(session.isPresented)
         #expect(mutations == 0)
 
-        session.choose(.newTerminal)
+        session.choose(.newTerminal(command: nil))
         #expect(!session.isPresented)
         #expect(mutations == 1)
     }

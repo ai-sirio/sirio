@@ -366,7 +366,7 @@ extension WorkspaceCoordinator {
         case .split(let placement):
             await requestSplit(
                 anchor: layout.activeGroupID, placement: placement,
-                choice: .newTerminal, in: worktree)
+                choice: .newTerminal(command: nil), in: worktree)
         case .focusNextDivider, .focusPreviousDivider:
             let splits = layout.splitIDs()
             guard !splits.isEmpty else { return }
