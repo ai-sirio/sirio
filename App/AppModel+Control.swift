@@ -38,10 +38,10 @@ extension AppModel {
         }
         for (worktreeId, snapshotTabs) in snapshot.tabs {
             guard worktree(byId: worktreeId) != nil else { continue }
-            let currentIds = Set((tabs[worktreeId] ?? []).map(\.id))
+            let currentIds = Set(workspaceCoordinator.legacyTabs(for: worktreeId).map(\.id))
             var added = 0
             for tab in snapshotTabs where !currentIds.contains(tab.id) {
-                tabs[worktreeId, default: []].append(tab)
+                workspaceCoordinator.appendLegacyTab(tab, to: worktreeId, activate: false)
                 added += 1
                 for paneId in tab.leafIds {
                     if let command = snapshot.paneCommands[paneId] {
@@ -50,7 +50,7 @@ extension AppModel {
                     }
                 }
             }
-            if added > 0 { persistTabs(for: worktreeId) }
+            if added > 0 { workspacePersistTabs(for: worktreeId) }
             restored += added
         }
         return restored

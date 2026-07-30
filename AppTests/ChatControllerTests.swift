@@ -609,11 +609,11 @@ extension ChatControllerTests {
             paneRegistry: registry,
             activateApplication: {},
             persistenceCoordinator: coordinator)
-        model.tabs[worktreeId] = [
+        model.workspaceCoordinator.setLegacyTabs([
             LegacyWorkspaceTab(id: chatTabId, title: "Chat",
                          content: .chat(agentId: "claude-acp", sessionId: nil)),
             LegacyWorkspaceTab(id: UUID(), title: "Terminal 1", tree: .leaf(id: paneId))
-        ]
+        ], for: worktreeId)
         model.chatControllers[chatTabId] = controller
 
         await model.flushLiveScrollback()

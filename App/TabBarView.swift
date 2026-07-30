@@ -18,7 +18,7 @@ struct TabBarView: View {
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 2) {
-                        ForEach(model.tabs[worktree.id] ?? []) { tab in
+                        ForEach(model.workspaceTabs(for: worktree.id)) { tab in
                             TabBarItem(model: model, worktree: worktree, tab: tab)
                                 .id(tab.id)
                         }
@@ -43,7 +43,7 @@ struct TabBarView: View {
                         return true
                     }
                 }
-                .onChange(of: model.activeTabId[worktree.id]) { _, newValue in
+                .onChange(of: model.workspaceActiveTabID(for: worktree.id)) { _, newValue in
                     guard let id = newValue else { return }
                     withAnimation(.easeInOut(duration: 0.15)) { proxy.scrollTo(id) }
                 }
@@ -55,7 +55,7 @@ struct TabBarView: View {
             Spacer(minLength: 0)
             if isOverflowing {
                 Menu {
-                    ForEach(model.tabs[worktree.id] ?? []) { tab in
+                    ForEach(model.workspaceTabs(for: worktree.id)) { tab in
                         Button {
                             model.activateTab(tab.id, in: worktree.id)
                         } label: {
@@ -206,9 +206,11 @@ struct TabBarItem: View {
             Divider()
             Button("Close") { model.closeTab(tab.id, in: worktree) }
             Button("Close Others") { model.closeOtherTabs(tab.id, in: worktree) }
-                .disabled((model.tabs[worktree.id]?.count ?? 0) <= 1)
-            Button("Close Tabs to the Right") { model.closeTabsToRight(of: tab.id, in: worktree) }
-                .disabled(model.tabs[worktree.id]?.last?.id == tab.id)
+                .disabled(model.workspaceTabs(for: worktree.id).count <= 1)
+            Button("Close Tabs to the Right") {
+                model.workspaceCloseTabsToRight(of: tab.id, in: worktree)
+            }
+                .disabled(model.workspaceTabs(for: worktree.id).last?.id == tab.id)
     }
         .reorderable(model: model, id: tab.id, scope: .tabs(worktreeId: worktree.id))
 }

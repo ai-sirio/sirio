@@ -17,7 +17,7 @@ struct ChatHistoryMenu: View {
             } else {
                 ForEach(rows) { row in
                     Button {
-                        model.openChatSession(sessionId: row.id, in: worktree)
+                        model.openExistingChatSession(sessionId: row.id, in: worktree)
                     } label: {
                         if let icon = AgentMenuIconCache.image(for: row.agentId) {
                             Label { Text(row.title) } icon: { Image(nsImage: icon) }

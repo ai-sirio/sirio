@@ -14,12 +14,12 @@ struct AppModelControlTests {
         let worktree = makeWorktree(path: "/tmp/rename-tab")
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
         model.worktrees = [worktree.projectId: [worktree]]
-        model.tabs[worktree.id] = [tab]
+        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
 
         #expect(tab.titleIsAutoNamed == true)
         model.renameTab(tab.id, in: worktree.id, to: "My custom name")
 
-        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == "My custom name")
         #expect(updated.titleIsAutoNamed == false)
     }
@@ -29,11 +29,11 @@ struct AppModelControlTests {
         let worktree = makeWorktree(path: "/tmp/apply-auto-title")
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
         model.worktrees = [worktree.projectId: [worktree]]
-        model.tabs[worktree.id] = [tab]
+        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
 
         model.applyAutoTitle(tab.id, in: worktree.id, title: "Fix login bug")
 
-        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == "Fix login bug")
         #expect(updated.titleIsAutoNamed == true)
     }
@@ -58,10 +58,10 @@ struct AppModelControlTests {
         let selectedTab = LegacyWorkspaceTab(
             id: UUID(), title: "Selected", tree: .leaf(id: selectedPaneId)
         )
-        model.tabs[target.id] = [targetTab]
-        model.tabs[selected.id] = [selectedTab]
-        model.activeTabId[target.id] = targetTab.id
-        model.activeTabId[selected.id] = selectedTab.id
+        model.workspaceCoordinator.setLegacyTabs([targetTab], for: target.id)
+        model.workspaceCoordinator.setLegacyTabs([selectedTab], for: selected.id)
+        model.workspaceCoordinator.setLegacyActiveTabID(targetTab.id, for: target.id)
+        model.workspaceCoordinator.setLegacyActiveTabID(selectedTab.id, for: selected.id)
         model.selectedWorktree = selected
         let priorOpenIds = model.openWorktreeIds
         let response = ResponseBox()
@@ -74,14 +74,14 @@ struct AppModelControlTests {
             return value
         }
         await poll {
-            model.tabs[target.id]?.flatMap(\.leafIds).contains(createdPaneId) == true
+            model.workspaceTabs(for: target.id).flatMap(\.leafIds).contains(createdPaneId)
         }
 
         #expect(await response.value == nil)
         #expect(model.selectedWorktree?.id == selected.id)
-        #expect(model.activeTabId[selected.id] == selectedTab.id)
-        #expect(model.activeTabId[target.id] == targetTab.id)
-        #expect(model.tabs[target.id]?.flatMap(\.leafIds).contains(createdPaneId) == true)
+        #expect(model.workspaceActiveTabID(for: selected.id) == selectedTab.id)
+        #expect(model.workspaceActiveTabID(for: target.id) == targetTab.id)
+        #expect(model.workspaceTabs(for: target.id).flatMap(\.leafIds).contains(createdPaneId))
         await registry.register(
             paneId: createdPaneId,
             pty: PtyProcess { _ in },
@@ -92,8 +92,8 @@ struct AppModelControlTests {
         #expect(result.ok)
         #expect(result.result == ["id": createdPaneId.uuidString])
         #expect(model.selectedWorktree?.id == selected.id)
-        #expect(model.activeTabId[selected.id] == selectedTab.id)
-        #expect(model.activeTabId[target.id] == targetTab.id)
+        #expect(model.workspaceActiveTabID(for: selected.id) == selectedTab.id)
+        #expect(model.workspaceActiveTabID(for: target.id) == targetTab.id)
         #expect(Set(model.openWorktreeIds) == Set(priorOpenIds + [target.id]))
         #expect(activation.count == 0)
     }
@@ -116,7 +116,7 @@ struct AppModelControlTests {
         ))
 
         #expect(result.ok == false)
-        #expect(model.tabs[target.id]?.isEmpty != false)
+        #expect(model.workspaceTabs(for: target.id).isEmpty)
         #expect(model.paneCommands[createdPaneId] == nil)
         #expect(model.openWorktreeIds.contains(target.id) == false)
         await registry.register(
@@ -141,8 +141,8 @@ struct AppModelControlTests {
         let sourcePaneId = UUID()
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Source", tree: .leaf(id: sourcePaneId))
         model.worktrees = [worktree.projectId: [worktree]]
-        model.tabs[worktree.id] = [tab]
-        model.activeTabId[worktree.id] = tab.id
+        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
+        model.workspaceCoordinator.setLegacyActiveTabID(tab.id, for: worktree.id)
         model.openWorktreeIds = [worktree.id]
 
         let result = await model.handleControl(request(
@@ -151,7 +151,7 @@ struct AppModelControlTests {
         ))
 
         #expect(result.ok == false)
-        #expect(model.tabs[worktree.id]?.first?.terminalTree == .leaf(id: sourcePaneId))
+        #expect(model.workspaceTabs(for: worktree.id).first?.terminalTree == .leaf(id: sourcePaneId))
         #expect(model.paneCommands[createdPaneId] == nil)
         await registry.register(
             paneId: createdPaneId,
@@ -173,10 +173,10 @@ struct AppModelControlTests {
             id: UUID(), title: "Selected", tree: .leaf(id: selectedPaneId)
         )
         model.worktrees = [requested.projectId: [requested], selected.projectId: [selected]]
-        model.tabs[requested.id] = [requestedTab]
-        model.tabs[selected.id] = [selectedTab]
-        model.activeTabId[requested.id] = requestedTab.id
-        model.activeTabId[selected.id] = selectedTab.id
+        model.workspaceCoordinator.setLegacyTabs([requestedTab], for: requested.id)
+        model.workspaceCoordinator.setLegacyTabs([selectedTab], for: selected.id)
+        model.workspaceCoordinator.setLegacyActiveTabID(requestedTab.id, for: requested.id)
+        model.workspaceCoordinator.setLegacyActiveTabID(selectedTab.id, for: selected.id)
         model.selectedWorktree = selected
 
         let result = await model.handleControl(request(
@@ -196,8 +196,8 @@ struct AppModelControlTests {
         let paneId = UUID()
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Close", tree: .leaf(id: paneId))
         model.worktrees = [worktree.projectId: [worktree]]
-        model.tabs[worktree.id] = [tab]
-        model.activeTabId[worktree.id] = tab.id
+        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
+        model.workspaceCoordinator.setLegacyActiveTabID(tab.id, for: worktree.id)
 
         let unknown = await model.handleControl(request(
             "panel.close", ["id": UUID().uuidString]
@@ -214,7 +214,7 @@ struct AppModelControlTests {
         ))
 
         #expect(known.ok)
-        #expect(model.tabContaining(paneId: paneId) == nil)
+        #expect(model.workspaceTabContaining(paneId: paneId) == nil)
         #expect(await registry.isRegistered(paneId: paneId) == false)
         #expect(await registry.write(paneId: paneId, data: Data("stale".utf8)) == false)
     }
@@ -245,13 +245,13 @@ struct AppModelControlTests {
         let paneId = UUID()
         let owningTab = LegacyWorkspaceTab(id: UUID(), title: "Owning", tree: .leaf(id: paneId))
         model.worktrees = [owning.projectId: [owning], selected.projectId: [selected]]
-        model.tabs[owning.id] = [owningTab]
+        model.workspaceCoordinator.setLegacyTabs([owningTab], for: owning.id)
         model.selectedWorktree = selected
 
         let controller = NSViewController()
         let focusView = AppModelFocusableView()
         controller.view = focusView
-        model.paneCache(for: owning.id).controllers[paneId] = controller
+        model.workspacePaneCache(for: owning.id).controllers[paneId] = controller
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
         host.addSubview(focusView)
         let window = NSWindow(
@@ -274,7 +274,7 @@ struct AppModelControlTests {
         #expect(focused.ok)
         #expect(activation.count == 1)
         #expect(model.selectedWorktree?.id == owning.id)
-        #expect(model.activeTabId[owning.id] == owningTab.id)
+        #expect(model.workspaceActiveTabID(for: owning.id) == owningTab.id)
         #expect(window.firstResponder === focusView)
     }
 
@@ -285,7 +285,7 @@ struct AppModelControlTests {
         let paneId = UUID()
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
         model.worktrees = [worktree.projectId: [worktree]]
-        model.tabs[worktree.id] = [tab]
+        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
 
         let result = await model.handleControl(request(
             "panel.focus", ["id": paneId.uuidString]
@@ -294,7 +294,7 @@ struct AppModelControlTests {
         #expect(result.ok == false)
         #expect(result.error == "panel could not be focused")
         #expect(model.selectedWorktree?.id == worktree.id)
-        #expect(model.activeTabId[worktree.id] == tab.id)
+        #expect(model.workspaceActiveTabID(for: worktree.id) == tab.id)
         #expect(activation.count == 1)
     }
 
@@ -326,7 +326,7 @@ struct AppModelControlTests {
         let paneId = UUID()
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Hidden", tree: .leaf(id: paneId))
         model.worktrees = [worktree.projectId: [worktree]]
-        model.tabs[worktree.id] = [tab]
+        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
 
         let task = Task {
             await model.handleControl(request("panel.focus", ["id": paneId.uuidString]))
@@ -363,7 +363,7 @@ struct AppModelControlTests {
         let result = await task.value
 
         #expect(result.ok == false)
-        #expect(model.tabContaining(paneId: paneId) == nil)
+        #expect(model.workspaceTabContaining(paneId: paneId) == nil)
         #expect(model.openWorktreeIds.contains(worktree.id) == false)
         #expect(await registry.isRegistered(paneId: paneId) == false)
     }
