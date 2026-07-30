@@ -6,6 +6,7 @@ public final class WorkspaceSplitController: NSSplitViewController {
     public let id: SplitID
     public private(set) var axis: WorkspaceSplitAxis
     public private(set) var preferredFraction: Double
+    private var didApplyInitialPosition = false
 
     public init(id: SplitID, axis: WorkspaceSplitAxis, preferredFraction: Double) {
         self.id = id
@@ -20,7 +21,9 @@ public final class WorkspaceSplitController: NSSplitViewController {
     }
 
     override public func loadView() {
-        splitView = WorkspaceNativeSplitView()
+        let nativeSplitView = WorkspaceNativeSplitView()
+        nativeSplitView.firstContentOnTop = axis == .vertical
+        splitView = nativeSplitView
         view = splitView
     }
 
@@ -32,10 +35,27 @@ public final class WorkspaceSplitController: NSSplitViewController {
     ) {
         self.axis = axis
         self.preferredFraction = preferredFraction
-        splitView.isVertical = axis == .horizontal
+        didApplyInitialPosition = false
         removeAllChildren()
         add(first, minimumThickness: minimumThickness(for: axis))
         add(second, minimumThickness: minimumThickness(for: axis))
+        // `NSSplitViewController` may normalize orientation while items are
+        // being installed, so apply the domain axis after the item update.
+        splitView.isVertical = axis == .horizontal
+        (splitView as? WorkspaceNativeSplitView)?.firstContentOnTop = axis == .vertical
+    }
+
+    override public func viewDidLayout() {
+        super.viewDidLayout()
+        splitView.isVertical = axis == .horizontal
+        guard !didApplyInitialPosition,
+              splitView.bounds.width > 0,
+              splitView.bounds.height > 0,
+              let effectiveFraction else { return }
+        let total = splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
+        let position = CGFloat(effectiveFraction) * (total - splitView.dividerThickness)
+        splitView.setPosition(position, ofDividerAt: 0)
+        didApplyInitialPosition = true
     }
 
     /// The AppKit fraction that can currently be displayed without making a
@@ -73,10 +93,40 @@ public final class WorkspaceSplitController: NSSplitViewController {
     }
 
     private func minimumThickness(for axis: WorkspaceSplitAxis) -> CGFloat {
-        axis == .horizontal ? 240 : 160
+        axis == .horizontal
+            ? WorkspaceMetrics.preferredGroupSize.width
+            : WorkspaceMetrics.preferredGroupSize.height
     }
 }
 
 private final class WorkspaceNativeSplitView: NSSplitView {
-    override var dividerThickness: CGFloat { 6 }
+    var firstContentOnTop = false
+    private var isExchangingFrames = false
+
+    override var dividerThickness: CGFloat { WorkspaceMetrics.dividerThickness }
+
+    override func layout() {
+        super.layout()
+        exchangeContentFramesIfNeeded()
+    }
+
+    override func adjustSubviews() {
+        super.adjustSubviews()
+        exchangeContentFramesIfNeeded()
+    }
+
+    private func exchangeContentFramesIfNeeded() {
+        guard firstContentOnTop, !isExchangingFrames, subviews.count >= 2 else { return }
+
+        // AppKit lays out the first item below the divider for a horizontal
+        // divider. Core's vertical axis is defined in reading order, so
+        // exchange the two content frames after native layout.
+        isExchangingFrames = true
+        let first = subviews[0]
+        let second = subviews[1]
+        let firstFrame = first.frame
+        first.frame = second.frame
+        second.frame = firstFrame
+        isExchangingFrames = false
+    }
 }
