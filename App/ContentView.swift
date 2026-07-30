@@ -475,6 +475,17 @@ struct ContentView: View {
                         hostProvider: workspaceCoordinator,
                         intentSink: WorkspaceIntentRouter(
                             coordinator: workspaceCoordinator, worktree: worktree))
+                        .focusedSceneValue(
+                            \.workspaceMenuTarget,
+                            WorkspaceMenuTarget(
+                                worktreeID: worktreeID,
+                                menuModel: WorkspaceMenuModel(layout: layout),
+                                send: { action in
+                                    Task { @MainActor in
+                                        await workspaceCoordinator.handle(
+                                            menuAction: action, in: worktree)
+                                    }
+                                }))
                         .opacity(isSelected ? 1 : 0)
                         .allowsHitTesting(isSelected)
                         .accessibilityHidden(!isSelected)
