@@ -4,6 +4,13 @@ import Testing
 
 @Suite(.serialized)
 struct WorkspaceEngineGateTests {
+    @Test func missingUserDefaultsValueEnablesTheUniversalEngine() {
+        let suiteName = "WorkspaceEngineGateTests.default.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+
+        #expect(WorkspaceEngineGate.value(defaults: defaults, environment: [:]))
+    }
+
     @Test func environmentOverrideWinsOverTheUserDefaultsValue() {
         let suiteName = "WorkspaceEngineGateTests.override.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -23,7 +30,7 @@ struct WorkspaceEngineGateTests {
         let suiteName = "WorkspaceEngineGateTests.defaults.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
 
-        #expect(!WorkspaceEngineGate.value(defaults: defaults, environment: [:]))
+        #expect(WorkspaceEngineGate.value(defaults: defaults, environment: [:]))
 
         defaults.set(true, forKey: "workspace.universalEngine")
         #expect(WorkspaceEngineGate.value(defaults: defaults, environment: [:]))
