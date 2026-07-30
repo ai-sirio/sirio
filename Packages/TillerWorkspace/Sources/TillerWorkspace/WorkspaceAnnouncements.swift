@@ -72,6 +72,7 @@ public enum WorkspaceAnnouncements {
     public static var tabStripLabel: String { "Tabs" }
     public static var layoutUpdated: String { "Layout updated." }
     public static var minimumPaneSize: String { "Minimum pane size" }
+    public static var focusFulfillmentFailure: String { "Focus could not be fulfilled." }
 
     public static func text(for announcement: WorkspaceAnnouncement) -> String {
         switch announcement {

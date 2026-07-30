@@ -39,6 +39,10 @@ public final class WorkspaceViewController: NSViewController {
         reconciler.splitController(id)
     }
 
+    public var focusCoordinator: WorkspaceFocusCoordinator {
+        reconciler.focusCoordinator
+    }
+
     private func attachRootIfNeeded() {
         let root = reconciler.rootViewController
         guard !children.contains(where: { $0 === root }) else { return }
