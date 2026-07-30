@@ -100,6 +100,34 @@ struct WorkspaceCoordinatorTests {
         #expect(coordinator.registry.liveHostCount == 1)
     }
 
+    /// `restore()` hydrates a restored terminal's PTY (LC-3), but must never
+    /// create its host: a worktree with dozens of restored tabs would
+    /// otherwise instantiate a host for every one of them regardless of
+    /// visibility. The host for a tab that already existed before this
+    /// session is created lazily, the first time something actually asks to
+    /// render it — which is exactly what `coordinator.host(for:)` (the
+    /// `WorkspaceHostProvider` conformance the renderer calls) does.
+    @Test func restoredTabsGetNoHostUntilTheRenderPathAsksForOne() async {
+        let tab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "restored", titleIsAutoNamed: true,
+            content: .terminal(TerminalContentID()))
+        let persistence = CoordinatorPersistence(restored: layoutWith(tab: tab))
+        let adapter = CoordinatorAdapter(persistence: persistence)
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 1)
+
+        await coordinator.restore(worktree: worktree)
+        #expect(coordinator.registry.liveHostCount == 0)
+
+        let firstLookup = coordinator.host(for: tab.id)
+        #expect(firstLookup != nil)
+        #expect(coordinator.registry.liveHostCount == 1)
+
+        let secondLookup = coordinator.host(for: tab.id)
+        #expect(secondLookup === firstLookup)
+        #expect(coordinator.registry.liveHostCount == 1)
+    }
+
     @Test func twoWorktreesCommitConcurrentlyWithIndependentGates() async {
         let persistence = CoordinatorPersistence(blockFirstCommit: true)
         let adapter = CoordinatorAdapter()

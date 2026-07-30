@@ -14,7 +14,7 @@ enum ContentChoice: Sendable {
 
 @MainActor
 @Observable
-final class WorkspaceCoordinator {
+final class WorkspaceCoordinator: WorkspaceHostProvider {
     let persistence: WorkspaceLayoutPersistence
     let registry: WorkspaceContentRegistry
     let adapters: [WorkspaceContentKind: any WorkspaceContentAdapter]
@@ -54,14 +54,36 @@ final class WorkspaceCoordinator {
         revisions[worktree.id] = restored.revision
         dirtyWorktreeIDs.remove(worktree.id)
 
-        for tab in layout.allTabs {
+        // Terminal RESOURCES hydrate eagerly here (LC-3: a background shell
+        // keeps running once its worktree is mounted, even while its tab is
+        // inactive) — but that is the PTY, not the view. HOSTS are never
+        // created here for any content kind: `host(for:)` below creates one
+        // lazily, the first time the render path actually needs to display a
+        // tab. Restoring a worktree with dozens of tabs must not eagerly
+        // instantiate a host — terminal, chat, or document — for every one
+        // of them; that regresses exactly the restore/reconciliation
+        // performance budgets Phase 13 measures (PF-5, PF-6).
+        for tab in layout.allTabs where tab.content.kind == .terminal {
             guard let adapter = adapters[tab.content.kind] else { continue }
-            if tab.content.kind == .terminal {
-                await adapter.hydrate(tab: tab, worktree: worktree)
-            }
+            await adapter.hydrate(tab: tab, worktree: worktree)
+        }
+    }
+
+    /// Resolves a tab id to its content host, creating one on first use if
+    /// none is cached yet. This is the mechanism issue #6 calls "hydrate
+    /// lazily on first use" for chat/document, and it is equally how a
+    /// restored terminal tab gets its view the first time it is rendered —
+    /// `restore()` above only started its PTY, not its host.
+    func host(for tabID: WorkspaceTabID) -> WorkspaceContentHost? {
+        if let existing = registry.host(for: tabID) { return existing }
+        for (worktreeID, layout) in layouts {
+            guard let tab = layout.tab(tabID), let worktree = worktrees[worktreeID],
+                  let adapter = adapters[tab.content.kind] else { continue }
             let host = adapter.makeHost(tab: tab, worktree: worktree)
             registry.adopt(host, tab: tab, generation: ResourceGenerationID())
+            return host
         }
+        return nil
     }
 
     func handle(_ intent: WorkspaceIntent, in worktree: Worktree) async {
