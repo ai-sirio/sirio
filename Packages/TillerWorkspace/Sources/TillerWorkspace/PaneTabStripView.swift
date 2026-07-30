@@ -32,11 +32,22 @@ public final class PaneTabStripView: NSView {
         horizontalScrollView.autohidesScrollers = true
         horizontalScrollView.drawsBackground = false
         addSubview(horizontalScrollView)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel(WorkspaceAnnouncements.tabStripLabel)
     }
 
     public convenience init() {
         self.init(frame: .zero)
     }
+
+    public var accessibilityTabActions: [WorkspaceTabAccessibilityAction] {
+        WorkspaceAccessibility.tabActions
+    }
+
+    /// Tabs remain local to this strip. The workspace rotor contains panes,
+    /// never a second global copy of these tab elements.
+    public var accessibilityRotorName: String? { nil }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {

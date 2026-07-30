@@ -6,6 +6,7 @@ public final class WorkspaceSplitController: NSSplitViewController {
     public let id: SplitID
     public private(set) var axis: WorkspaceSplitAxis
     public private(set) var preferredFraction: Double
+    public private(set) var accessibilityDivider: WorkspaceDividerAccessibility?
     private var didApplyInitialPosition = false
 
     public init(id: SplitID, axis: WorkspaceSplitAxis, preferredFraction: Double) {
@@ -25,6 +26,8 @@ public final class WorkspaceSplitController: NSSplitViewController {
         nativeSplitView.firstContentOnTop = axis == .vertical
         splitView = nativeSplitView
         view = splitView
+        splitView.setAccessibilityElement(true)
+        splitView.setAccessibilityRole(.splitter)
     }
 
     func update(
@@ -35,6 +38,7 @@ public final class WorkspaceSplitController: NSSplitViewController {
     ) {
         self.axis = axis
         self.preferredFraction = preferredFraction
+        accessibilityDivider = nil
         didApplyInitialPosition = false
         removeAllChildren()
         add(first, minimumThickness: minimumThickness(for: axis))
@@ -72,6 +76,23 @@ public final class WorkspaceSplitController: NSSplitViewController {
         let upper = 1 - lower
         guard lower <= upper else { return 0.5 }
         return min(max(preferredFraction, lower), upper)
+    }
+
+    public func setAccessibilityDivider(
+        firstPaneLabel: String,
+        secondPaneLabel: String,
+        fraction: Double
+    ) {
+        let divider = WorkspaceAccessibility.divider(
+            axis: axis,
+            firstPaneLabel: firstPaneLabel,
+            secondPaneLabel: secondPaneLabel,
+            fraction: fraction
+        )
+        accessibilityDivider = divider
+        if isViewLoaded {
+            splitView.setAccessibilityLabel(divider.label)
+        }
     }
 
     private func removeAllChildren() {

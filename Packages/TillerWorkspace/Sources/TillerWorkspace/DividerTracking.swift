@@ -101,7 +101,7 @@ public final class DividerTracking {
         guard next != currentFraction else {
             let boundary: Boundary? = direction == .decrease ? .minimum : .maximum
             if announcedBoundary != boundary {
-                announce("Minimum pane size")
+                announce(WorkspaceAnnouncements.minimumPaneSize)
                 announcedBoundary = boundary
             }
             return

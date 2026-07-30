@@ -7,6 +7,7 @@ import TillerCore
 public final class PaneGroupController: NSViewController {
     public let id: PaneGroupID
     public private(set) var mountedTabID: WorkspaceTabID?
+    public private(set) var accessibilityPane: WorkspacePaneAccessibility?
 
     private weak var mountedHost: WorkspaceContentHost?
 
@@ -22,6 +23,30 @@ public final class PaneGroupController: NSViewController {
 
     override public func loadView() {
         view = NSView()
+        view.setAccessibilityElement(true)
+        view.setAccessibilityRole(.group)
+    }
+
+    public var accessibilityPaneActions: [WorkspacePaneAccessibilityAction] {
+        WorkspaceAccessibility.paneActions
+    }
+
+    public func setAccessibilityPosition(
+        position: Int,
+        total: Int,
+        activeTabTitle: String
+    ) {
+        let pane = WorkspacePaneAccessibility(
+            id: id, position: position, total: total, activeTabTitle: activeTabTitle
+        )
+        accessibilityPane = pane
+        if isViewLoaded {
+            view.setAccessibilityLabel(pane.label)
+        }
+    }
+
+    public func accessibilityLabel() -> String {
+        accessibilityPane?.label ?? ""
     }
 
     func update(group: PaneGroup, hostProvider: WorkspaceHostProvider) {
