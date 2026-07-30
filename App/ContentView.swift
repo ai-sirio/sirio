@@ -472,7 +472,7 @@ struct ContentView: View {
                     WorkspaceView(
                         layout: layout,
                         delta: isSelected ? workspaceCoordinator.lastSemanticDelta : nil,
-                        hostProvider: workspaceCoordinator.registry,
+                        hostProvider: workspaceCoordinator,
                         intentSink: WorkspaceIntentRouter(
                             coordinator: workspaceCoordinator, worktree: worktree))
                         .opacity(isSelected ? 1 : 0)
