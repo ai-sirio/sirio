@@ -60,6 +60,15 @@ public struct DocumentID: Hashable, Sendable, Codable {
         )
     }
 
+    /// Pure path normalization used by migrations that must not inspect the
+    /// filesystem while converting persisted values.
+    public static func makeCanonical(worktreeID: UUID, path: String) -> DocumentID {
+        DocumentID(
+            worktreeID: worktreeID,
+            canonicalPath: URL(fileURLWithPath: path).standardizedFileURL.path
+        )
+    }
+
     private init(worktreeID: UUID, canonicalPath: String) {
         self.worktreeID = worktreeID
         self.canonicalPath = canonicalPath
