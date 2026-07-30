@@ -313,12 +313,13 @@ struct AppModelControlTests {
         #expect(missing.error == "unknown panel")
     }
 
-    /// The timeout is deliberately far larger than the assertion threshold.
-    /// Both the cancelled path and the timeout path return the same error, so
-    /// elapsed time is the ONLY thing distinguishing them: with a 1s timeout
-    /// and a 250ms bound the two were close enough that AppKit jitter decided
-    /// the outcome. 6x separation keeps the property sharp while tolerating a
-    /// loaded machine.
+    /// Asserts the cancellation SEMANTICS, not a stopwatch. The cancelled and
+    /// timed-out paths used to return the same error, leaving elapsed time as
+    /// the only discriminator — so this test was really a race against AppKit
+    /// activation cost, and it lost at both a 250ms and a 500ms bound. Now the
+    /// cancelled path has its own error, which is deterministic. The timing
+    /// bound stays only as a generous guard against an outright hang: it must
+    /// be well under the 3s timeout to prove the wait was short-circuited.
     @Test func cancelledFocusReturnsPromptly() async {
         let model = makeModel(timeoutMs: 3_000)
         let worktree = makeWorktree(path: "/tmp/focus-cancelled")
@@ -337,8 +338,8 @@ struct AppModelControlTests {
         let result = await task.value
         let elapsed = start.duration(to: clock.now)
 
-        #expect(elapsed < .milliseconds(500))
-        #expect(result.error == "panel could not be focused")
+        #expect(result.error == "panel focus cancelled")
+        #expect(elapsed < .milliseconds(2_000))
     }
 
     @Test func createFailsAndRollsBackWhenPersistenceFails() async {
