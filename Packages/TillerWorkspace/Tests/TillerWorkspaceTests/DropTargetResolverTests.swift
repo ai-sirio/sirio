@@ -82,7 +82,7 @@ struct DropTargetResolverTests {
     func eligibilityReasonsAreExposedForAccessibilityAndControlCallers() {
         let soleTabResult = SplitEligibility.check(
             groupSize: CGSize(width: 600, height: 300),
-            placement: .down, isSoleTabOfSourceGroup: true
+            placement: .below, isSoleTabOfSourceGroup: true
         )
         guard case .failure(let soleTabReason) = soleTabResult else {
             Issue.record("a sole tab should make an edge split ineligible")
@@ -92,7 +92,7 @@ struct DropTargetResolverTests {
 
         let heightResult = SplitEligibility.check(
             groupSize: CGSize(width: 600, height: 300),
-            placement: .down, isSoleTabOfSourceGroup: false
+            placement: .below, isSoleTabOfSourceGroup: false
         )
         guard case .failure(let heightReason) = heightResult else {
             Issue.record("a 300-point vertical group should reject this split")

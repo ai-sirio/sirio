@@ -37,7 +37,7 @@ import Testing
         let newSplit = SplitID()
         let fresh = Fixtures.freshTerminalTab()
         let result = WorkspaceLayoutEngine.apply(
-            .splitGroup(anchor: layout.activeGroupID, placement: .down,
+            .splitGroup(anchor: layout.activeGroupID, placement: .below,
                         newGroup: newGroup, newSplit: newSplit,
                         content: .newTab(fresh)),
             to: layout)
@@ -53,6 +53,59 @@ import Testing
         #expect(fraction == 0.5)
         #expect(first == layout.activeGroupID)
         #expect(second == newGroup)
+    }
+
+    /// `.right`/`.below` place the new group second; `.left`/`.above` must
+    /// place it FIRST with the anchor pushed second. Both share an axis with
+    /// their opposite (.left with .right, .above with .below), so a bug that
+    /// only inverted child order — the anchor always ending up first,
+    /// regardless of placement — would still pass every other test here.
+    @Test func splitLeftPlacesTheNewGroupFirstOnTheHorizontalAxis() throws {
+        let (layout, _) = Fixtures.singleTerminalTab()
+        let newGroup = PaneGroupID()
+        let newSplit = SplitID()
+        let fresh = Fixtures.freshTerminalTab()
+        let result = WorkspaceLayoutEngine.apply(
+            .splitGroup(anchor: layout.activeGroupID, placement: .left,
+                        newGroup: newGroup, newSplit: newSplit,
+                        content: .newTab(fresh)),
+            to: layout)
+        let transition = try #require(try result.get())
+
+        guard case .split(let splitID, let axis, let fraction, .group(let first),
+                          .group(let second)) = transition.layout.root else {
+            Issue.record("root should be a horizontal two-leaf split")
+            return
+        }
+        #expect(splitID == newSplit)
+        #expect(axis == .horizontal)
+        #expect(fraction == 0.5)
+        #expect(first == newGroup)
+        #expect(second == layout.activeGroupID)
+    }
+
+    @Test func splitAbovePlacesTheNewGroupFirstOnTheVerticalAxis() throws {
+        let (layout, _) = Fixtures.singleTerminalTab()
+        let newGroup = PaneGroupID()
+        let newSplit = SplitID()
+        let fresh = Fixtures.freshTerminalTab()
+        let result = WorkspaceLayoutEngine.apply(
+            .splitGroup(anchor: layout.activeGroupID, placement: .above,
+                        newGroup: newGroup, newSplit: newSplit,
+                        content: .newTab(fresh)),
+            to: layout)
+        let transition = try #require(try result.get())
+
+        guard case .split(let splitID, let axis, let fraction, .group(let first),
+                          .group(let second)) = transition.layout.root else {
+            Issue.record("root should be a vertical two-leaf split")
+            return
+        }
+        #expect(splitID == newSplit)
+        #expect(axis == .vertical)
+        #expect(fraction == 0.5)
+        #expect(first == newGroup)
+        #expect(second == layout.activeGroupID)
     }
 
     @Test func movingTheLastTabOutOfANonRootGroupCollapsesItAndItsParent() throws {
@@ -168,7 +221,7 @@ import Testing
                         newGroup: splitGroup, newSplit: splitID,
                         content: .newTab(splitTab)),
             .setPreferredFraction(splitID, 0.6),
-            .moveTab(tabB, to: .newSplit(anchor: rootGroup, placement: .down,
+            .moveTab(tabB, to: .newSplit(anchor: rootGroup, placement: .below,
                                          newGroup: moveGroup, newSplit: moveSplit)),
             .closeTab(inserted.id)
         ]

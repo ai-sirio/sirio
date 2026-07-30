@@ -306,10 +306,11 @@ public enum WorkspaceLayoutEngine {
         }
 
         let newPaneGroup = PaneGroup(id: newGroupID, tabs: [tab], activeTabID: tab.id)
-        let axis: WorkspaceSplitAxis = placement == .right ? .horizontal : .vertical
+        let first: LayoutNode = placement.anchorIsFirstChild ? .group(anchor) : .group(newGroupID)
+        let second: LayoutNode = placement.anchorIsFirstChild ? .group(newGroupID) : .group(anchor)
         let replacement: LayoutNode = .split(
-            id: newSplitID, axis: axis, fraction: 0.5,
-            first: .group(anchor), second: .group(newGroupID))
+            id: newSplitID, axis: placement.axis, fraction: 0.5,
+            first: first, second: second)
         guard let root = replaceGroup(anchor, with: replacement, in: layout.root) else {
             return .failure(.unknownGroup(anchor))
         }
