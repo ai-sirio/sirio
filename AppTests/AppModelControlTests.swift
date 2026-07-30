@@ -51,6 +51,8 @@ struct AppModelControlTests {
         let target = makeWorktree(path: "/tmp/target")
         let selected = makeWorktree(path: "/tmp/selected")
         model.worktrees = [target.projectId: [target], selected.projectId: [selected]]
+        await model.workspaceCoordinator.restore(worktree: target)
+        await model.workspaceCoordinator.restore(worktree: selected)
         let targetPaneId = UUID(), selectedPaneId = UUID()
         let targetTab = LegacyWorkspaceTab(
             id: UUID(), title: "Target active", tree: .leaf(id: targetPaneId)
@@ -110,6 +112,7 @@ struct AppModelControlTests {
         )
         let target = makeWorktree(path: "/tmp/target-timeout")
         model.worktrees = [target.projectId: [target]]
+        await model.workspaceCoordinator.restore(worktree: target)
 
         let result = await model.handleControl(request(
             "panel.create", ["worktree": target.id.uuidString, "cmd": "sleep 10"]
@@ -352,6 +355,7 @@ struct AppModelControlTests {
         )
         let worktree = makeWorktree(path: "/tmp/persist-failure")
         model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
 
         let task = Task { await model.handleControl(self.request(
             "panel.create", ["worktree": worktree.id.uuidString]
@@ -381,6 +385,7 @@ struct AppModelControlTests {
         )
         let worktree = makeWorktree(path: "/tmp/persist-order")
         model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
 
         let task = Task {
             let value = await model.handleControl(self.request(
@@ -407,6 +412,11 @@ struct AppModelControlTests {
         let failedPaneId = UUID()
         var generatedPaneIds = [successfulPaneId, failedPaneId]
         let recorder = ControlPersistenceRecorder()
+        let workspaceCoordinator = WorkspaceCoordinator(
+            persistence: ControlWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [.terminal: TerminalContentAdapter()]
+        )
         let model = AppModel(
             paneRegistry: registry,
             registrationTimeoutMs: 1_000,
@@ -414,10 +424,12 @@ struct AppModelControlTests {
             activateApplication: {},
             controlTabPersister: { _, tabs, _ in
                 await recorder.record(tabs.flatMap(\.leafIds))
-            }
+            },
+            workspaceCoordinator: workspaceCoordinator
         )
         let worktree = makeWorktree(path: "/tmp/concurrent-persistence")
         model.worktrees = [worktree.projectId: [worktree]]
+        await workspaceCoordinator.restore(worktree: worktree)
 
         let successfulTask = Task {
             await model.handleControl(request(
@@ -453,12 +465,18 @@ struct AppModelControlTests {
         activation: ActivationCounter = ActivationCounter(),
         controlTabPersister: AppModel.ControlTabPersister? = nil
     ) -> AppModel {
-        AppModel(
+        let workspaceCoordinator = WorkspaceCoordinator(
+            persistence: ControlWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [.terminal: TerminalContentAdapter()]
+        )
+        return AppModel(
             paneRegistry: registry,
             registrationTimeoutMs: timeoutMs,
             paneIdGenerator: { paneId },
             activateApplication: { activation.count += 1 },
-            controlTabPersister: controlTabPersister
+            controlTabPersister: controlTabPersister,
+            workspaceCoordinator: workspaceCoordinator
         )
     }
 
@@ -477,6 +495,24 @@ struct AppModelControlTests {
     ) -> ControlRequest {
         ControlRequest(id: UUID().uuidString, method: method, params: params)
     }
+}
+
+private actor ControlWorkspacePersistence: WorkspaceLayoutPersistence {
+    func restore(worktreeID: UUID) async -> RestoredWorkspace {
+        RestoredWorkspace(
+            layout: .empty(groupID: PaneGroupID(worktreeID)),
+            tabs: [:], revision: 0, diagnostics: [])
+    }
+
+    func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
+                          tabs: [WorkspaceTab],
+                          terminalContents: [TerminalContentRecordValue]) async throws {}
+
+    func checkpoint(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) async {}
+    func flush(worktreeID: UUID) async throws {}
+    nonisolated func writeRecoverySidecar(
+        worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) throws {}
+    func purge(worktreeID: UUID) async throws {}
 }
 
 @MainActor

@@ -509,11 +509,30 @@ final class AppModel {
                 return .failure(id: request.id, error: "unknown worktree")
             }
             return await serializeControlLifecycle(for: worktree.id) {
+                let universalGroup: PaneGroupID?
+                if WorkspaceEngineGate.isEnabled {
+                    guard let group = self.workspaceCoordinator.activeOrFirstGroup(
+                        for: worktree.id) else {
+                        return .failure(id: request.id, error: "workspace layout unavailable")
+                    }
+                    universalGroup = group
+                } else {
+                    universalGroup = nil
+                }
                 let paneId = self.paneIdGenerator()
                 if let command = request.params["cmd"] { self.paneCommands[paneId] = command }
                 let mountLease = self.acquireControlMount(for: worktree.id)
                 let title = request.params["cmd"]?
                     .split(separator: " ").first.map(String.init) ?? "Panel"
+                let universalTabIDsBefore = Set(
+                    self.workspaceCoordinator.layouts[worktree.id]?.allTabs.map(\.id) ?? [])
+                var universalTabID: WorkspaceTabID?
+                if let universalGroup {
+                    await self.workspaceCoordinator.handle(
+                        .requestNewTab(into: universalGroup), in: worktree)
+                    universalTabID = self.workspaceCoordinator.layouts[worktree.id]?.allTabs
+                        .first { !universalTabIDsBefore.contains($0.id) }?.id
+                }
                 let tab = self.openTab(
                     paneId: paneId, title: title, in: worktree,
                     activate: false, persist: false
@@ -524,6 +543,9 @@ final class AppModel {
                 ) else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
                     self.workspaceRollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                    if let universalTabID {
+                        await self.workspaceCoordinator.closeTab(universalTabID, in: worktree)
+                    }
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -532,6 +554,9 @@ final class AppModel {
                 }
                 guard self.workspaceTabContaining(paneId: paneId) != nil else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
+                    if let universalTabID {
+                        await self.workspaceCoordinator.closeTab(universalTabID, in: worktree)
+                    }
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -543,6 +568,9 @@ final class AppModel {
                 } catch {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
                     self.workspaceRollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                    if let universalTabID {
+                        await self.workspaceCoordinator.closeTab(universalTabID, in: worktree)
+                    }
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -1042,6 +1070,16 @@ final class AppModel {
     }
 
     func newShellTab(in worktree: Worktree) {
+        if WorkspaceEngineGate.isEnabled {
+            guard let groupID = workspaceCoordinator.activeOrFirstGroup(for: worktree.id) else {
+                return
+            }
+            Task {
+                await workspaceCoordinator.handle(
+                    .requestNewTab(into: groupID), in: worktree)
+            }
+            return
+        }
         let title = LegacyWorkspaceTab.nextShellTitle(
             existing: workspaceCoordinator.legacyTabs(for: worktree.id))
         openTab(paneId: UUID(), title: title, in: worktree)
@@ -1978,6 +2016,13 @@ final class AppModel {
     }
 
     func spawnAgent(_ adapter: any AgentAdapter, in worktree: Worktree) async {
+        // Kept on the legacy tab path regardless of the engine gate:
+        // TerminalContentAdapter's .agentTerminal(agentID:) only tags a plain
+        // shell tab with the agent's name — it never calls
+        // AgentAdapter.prepare/command or wires paneCommands/agentActivity, so
+        // routing through the universal engine here would silently spawn an
+        // agent-less shell instead of the agent CLI. Wiring that through the
+        // content-adapter/host pipeline is its own task, not part of this fix.
         Task { await notifier.ensureAuthorization() }
         do {
             let hc = tillerctlPath()

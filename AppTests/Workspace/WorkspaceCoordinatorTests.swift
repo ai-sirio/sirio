@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import Testing
 import TillerCore
+import TillerTerminal
 import TillerWorkspace
 @testable import Tiller
 
@@ -98,6 +99,86 @@ struct WorkspaceCoordinatorTests {
         #expect(await adapter.prepareCount == 1)
         #expect(events.first == "commit")
         #expect(coordinator.registry.liveHostCount == 1)
+    }
+
+    @Test func requestNewTabOnAFreshEmptyWorktreeInsertsIntoTheSoleGroupWithoutSplitting() async {
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let adapter = CoordinatorAdapter()
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 3)
+
+        await coordinator.restore(worktree: worktree)
+        let before = coordinator.layouts[worktree.id]!
+        let groupID = before.activeGroupID
+
+        await coordinator.requestNewTab(
+            into: groupID, choice: .newTerminal, in: worktree)
+
+        let after = coordinator.layouts[worktree.id]!
+        #expect(after.orderedGroupIDs == [groupID])
+        #expect(after.splitIDs().isEmpty)
+        #expect(after.group(groupID)?.tabs.count == 1)
+        #expect(after.group(groupID)?.activeTabID != nil)
+        #expect(await persistence.commitCount == 1)
+    }
+
+    @Test func requestNewTabAppendsASiblingTabIntoAnExistingNonEmptyGroup() async {
+        let persistence = CoordinatorPersistence()
+        let adapter = CoordinatorAdapter()
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 1)
+
+        await coordinator.restore(worktree: worktree)
+        let before = coordinator.layouts[worktree.id]!
+        let groupID = before.activeGroupID
+        let existingTabID = before.group(groupID)!.tabs[0].id
+
+        await coordinator.requestNewTab(
+            into: groupID, choice: .newTerminal, in: worktree)
+
+        let after = coordinator.layouts[worktree.id]!
+        #expect(after.orderedGroupIDs == before.orderedGroupIDs)
+        #expect(after.splitIDs() == before.splitIDs())
+        #expect(after.group(groupID)?.tabs.count == 2)
+        #expect(after.group(groupID)?.tabs.contains { $0.id == existingTabID } == true)
+    }
+
+    @Test func requestNewTabForAnAgentGoesThroughTheSameAgentTerminalAdapterPathAsSplit() async {
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let adapter = CoordinatorAdapter()
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 4)
+
+        await coordinator.restore(worktree: worktree)
+        await coordinator.requestNewTab(
+            into: coordinator.layouts[worktree.id]!.activeGroupID,
+            choice: .agentTerminal(agentID: "codex"), in: worktree)
+
+        #expect(adapter.preparedRequests == [.agentTerminal(agentID: "codex")])
+        #expect(coordinator.layouts[worktree.id]?.allTabs.count == 1)
+        #expect(coordinator.layouts[worktree.id]?.allTabs.first?.content.kind == .terminal)
+    }
+
+    @Test func newShellTabWithTheEngineEnabledIsVisibleThroughWorkspaceCoordinatorLayouts() async {
+        guard WorkspaceEngineGate.isEnabled else { return }
+
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let adapter = CoordinatorAdapter()
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let model = AppModel(
+            paneRegistry: PaneRegistry(),
+            workspaceCoordinator: coordinator)
+        let worktree = fixtureWorktree(number: 5)
+        model.worktrees = [worktree.projectId: [worktree]]
+        await coordinator.restore(worktree: worktree)
+
+        model.newShellTab(in: worktree)
+        for _ in 0..<100 where coordinator.layouts[worktree.id]?.allTabs.isEmpty == true {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+
+        #expect(coordinator.layouts[worktree.id]?.allTabs.count == 1)
+        #expect(coordinator.legacyTabs(for: worktree.id).isEmpty)
     }
 
     /// `restore()` hydrates a restored terminal's PTY (LC-3), but must never
@@ -300,11 +381,15 @@ private actor CoordinatorPersistence: WorkspaceLayoutPersistence {
     private(set) var sourceFileDeletionCount = 0
     private(set) var events: [String] = []
 
+    private let emptyUntouchedWorktrees: Bool
+
     init(restored: WorkspaceLayout? = nil, structuralError: Error? = nil,
-         blockFirstCommit: Bool = false, purgeFailures: Int = 0) {
+         blockFirstCommit: Bool = false, purgeFailures: Int = 0,
+         emptyUntouchedWorktrees: Bool = false) {
         self.structuralError = structuralError
         self.blockFirstCommit = blockFirstCommit
         self.purgeFailures = purgeFailures
+        self.emptyUntouchedWorktrees = emptyUntouchedWorktrees
         if let restored {
             let id = UUID(uuidString: "00000000-0000-4000-8000-000000000101")!
             self.restored[id] = RestoredWorkspace(
@@ -315,6 +400,10 @@ private actor CoordinatorPersistence: WorkspaceLayoutPersistence {
 
     func restore(worktreeID: UUID) async -> RestoredWorkspace {
         if let stored = restored[worktreeID] { return stored }
+        if emptyUntouchedWorktrees {
+            let layout = WorkspaceLayout.empty(groupID: PaneGroupID(worktreeID))
+            return RestoredWorkspace(layout: layout, tabs: [:], revision: 0, diagnostics: [])
+        }
         let groupID = PaneGroupID(worktreeID)
         let tabID = WorkspaceTabID(worktreeID)
         let tab = WorkspaceTab(
@@ -381,6 +470,7 @@ private final class CoordinatorAdapter: WorkspaceContentAdapter {
     private let prepareError: Error?
     private weak var persistence: CoordinatorPersistence?
     private(set) var prepareCount = 0
+    private(set) var preparedRequests: [ContentRequest] = []
     private(set) var disposeCount = 0
     private(set) var closeCount = 0
     private(set) var checkpointCount = 0
@@ -395,6 +485,7 @@ private final class CoordinatorAdapter: WorkspaceContentAdapter {
 
     func prepare(request: ContentRequest, worktree: Worktree) async throws -> PreparedContent {
         prepareCount += 1
+        preparedRequests.append(request)
         await preparation.markStarted()
         await preparation.waitIfBlocked()
         if let prepareError { throw prepareError }
