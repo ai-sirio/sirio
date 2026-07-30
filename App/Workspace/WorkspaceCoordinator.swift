@@ -118,12 +118,22 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         return nil
     }
 
+    func activeOrFirstGroup(for worktreeID: UUID) -> PaneGroupID? {
+        guard let layout = layouts[worktreeID] else { return nil }
+        if layout.group(layout.activeGroupID) != nil {
+            return layout.activeGroupID
+        }
+        return layout.orderedGroupIDs.first
+    }
+
     func handle(_ intent: WorkspaceIntent, in worktree: Worktree) async {
         worktrees[worktree.id] = worktree
         switch intent {
         case .requestSplit(let anchor, let placement):
             await requestSplit(anchor: anchor, placement: placement,
                                choice: .newTerminal, in: worktree)
+        case .requestNewTab(let groupID):
+            await requestNewTab(into: groupID, choice: .newTerminal, in: worktree)
         case .requestClose(let tabID):
             await closeTab(tabID, in: worktree)
         case .requestMove(let tabID, to: let destination):
@@ -174,99 +184,81 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
             sourceTabID = nil
         }
 
-        // Step 2: prepare content outside the per-worktree commit gate.
-        var prepared: PreparedContent?
-        var adapter: (any WorkspaceContentAdapter)?
-        if let request = contentRequest(for: choice) {
-            guard let contentAdapter = adapters[request.kind] else {
-                lastRecoverableError = "missing content adapter"
-                return
-            }
-            adapter = contentAdapter
-            do {
-                prepared = try await contentAdapter.prepare(request: request, worktree: worktree)
-            } catch is CancellationError {
-                return
-            } catch {
-                lastRecoverableError = String(describing: error)
-                return
-            }
-        }
-
-        // Step 3: enter the worktree gate.
-        let gate = gate(for: worktree.id)
-        await gate.acquire()
-        defer { Task { await gate.release() } }
-
-        // Step 4: re-resolve identities and reject stale preconditions.
-        guard revisions[worktree.id] == capturedRevision,
-              let currentLayout = layouts[worktree.id], currentLayout.group(anchor) != nil else {
-            if let prepared, let adapter { await adapter.dispose(prepared: prepared) }
-            return
-        }
-        if let sourceTabID, currentLayout.tab(sourceTabID) == nil {
-            if let prepared, let adapter { await adapter.dispose(prepared: prepared) }
+        let preparedContent = await prepareContent(for: choice, in: worktree)
+        if case .moveExistingTab = choice {
+            // Moving an existing tab does not need an adapter preparation.
+        } else if preparedContent == nil {
             return
         }
 
-        let newGroup = PaneGroupID()
-        let newSplit = SplitID()
-        let existingDocumentTabID: WorkspaceTabID? = {
-            guard let prepared,
-                  case .document(let documentID, _) = prepared.tab.content else { return nil }
-            return currentLayout.allTabs.first {
-                guard case .document(let existingID, _) = $0.content else { return false }
-                return existingID == documentID
-            }?.id
-        }()
-        if existingDocumentTabID != nil, let prepared, let adapter {
-            await adapter.dispose(prepared: prepared)
-        }
-        let selectedExistingTabID = sourceTabID ?? existingDocumentTabID
-        let command: WorkspaceLayoutCommand
-        if let selectedExistingTabID {
-            if currentLayout.groupContaining(tab: selectedExistingTabID) == anchor {
-                command = .splitGroup(
+        await commitPreparedContent(
+            preparedContent: preparedContent,
+            in: worktree,
+            expectedRevision: capturedRevision
+        ) { currentLayout, prepared in
+            guard currentLayout.group(anchor) != nil else { return nil }
+            if let sourceTabID, currentLayout.tab(sourceTabID) == nil { return nil }
+
+            let newGroup = PaneGroupID()
+            let newSplit = SplitID()
+            let existingDocumentTabID: WorkspaceTabID? = {
+                guard let prepared,
+                      case .document(let documentID, _) = prepared.tab.content else { return nil }
+                return currentLayout.allTabs.first {
+                    guard case .document(let existingID, _) = $0.content else { return false }
+                    return existingID == documentID
+                }?.id
+            }()
+            let selectedExistingTabID = sourceTabID ?? existingDocumentTabID
+            if let selectedExistingTabID {
+                let command: WorkspaceLayoutCommand
+                if currentLayout.groupContaining(tab: selectedExistingTabID) == anchor {
+                    command = .splitGroup(
+                        anchor: anchor, placement: placement, newGroup: newGroup,
+                        newSplit: newSplit, content: .existingTab(selectedExistingTabID))
+                } else {
+                    command = .moveTab(
+                        selectedExistingTabID,
+                        to: .newSplit(anchor: anchor, placement: placement,
+                                       newGroup: newGroup, newSplit: newSplit))
+                }
+                return PreparedCommand(
+                    command: command,
+                    attachPreparedContent: existingDocumentTabID == nil,
+                    discardPreparedContent: existingDocumentTabID != nil)
+            }
+            guard let prepared else { return nil }
+            return PreparedCommand(
+                command: .splitGroup(
                     anchor: anchor, placement: placement, newGroup: newGroup,
-                    newSplit: newSplit, content: .existingTab(selectedExistingTabID))
-            } else {
-                command = .moveTab(
-                    selectedExistingTabID,
-                    to: .newSplit(anchor: anchor, placement: placement,
-                                   newGroup: newGroup, newSplit: newSplit))
-            }
-        } else if let prepared {
-            command = .splitGroup(
-                anchor: anchor, placement: placement, newGroup: newGroup,
-                newSplit: newSplit, content: .newTab(prepared.tab))
-        } else {
+                    newSplit: newSplit, content: .newTab(prepared.tab)),
+                attachPreparedContent: true,
+                discardPreparedContent: false)
+        }
+    }
+
+    func requestNewTab(into groupID: PaneGroupID, choice: ContentChoice,
+                       in worktree: Worktree) async {
+        worktrees[worktree.id] = worktree
+        let capturedRevision = revisions[worktree.id] ?? 0
+        guard let layout = layouts[worktree.id], layout.group(groupID) != nil else {
+            lastRecoverableError = "missing group"
+            return
+        }
+        guard let preparedContent = await prepareContent(for: choice, in: worktree) else {
             return
         }
 
-        // Step 5: apply the pure Core command.
-        guard case .success(let transition) = WorkspaceLayoutEngine.apply(command, to: currentLayout) else {
-            lastRecoverableError = "workspace command rejected"
-            if let prepared, let adapter { await adapter.dispose(prepared: prepared) }
-            return
-        }
-
-        // Steps 6-8 are shared by the commit helper, kept explicit here so the
-        // durability boundary remains before any resource publication.
-        let committed = await durabilityGate(
-            command: command, transition: transition, worktree: worktree)
-        guard committed else {
-            if let prepared, let adapter { await adapter.dispose(prepared: prepared) }
-            return
-        }
-        publish(transition, worktreeID: worktree.id)
-
-        if let prepared, let adapter, existingDocumentTabID == nil {
-            // Step 8: attach/publish the prepared resource only after commit.
-            let host = adapter.makeHost(tab: prepared.tab, worktree: worktree)
-            registry.adopt(host, tab: prepared.tab, generation: prepared.generationID)
-            fulfilFocus(transition.focusIntent)
-        } else {
-            fulfilFocus(transition.focusIntent)
+        await commitPreparedContent(
+            preparedContent: preparedContent,
+            in: worktree,
+            expectedRevision: capturedRevision
+        ) { currentLayout, prepared in
+            guard currentLayout.group(groupID) != nil, let prepared else { return nil }
+            return PreparedCommand(
+                command: .insertTab(prepared.tab, into: groupID, index: nil, activate: true),
+                attachPreparedContent: true,
+                discardPreparedContent: false)
         }
     }
 
@@ -312,6 +304,80 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
             pendingCleanupObligations.insert(worktree.id)
             lastRecoverableError = String(describing: error)
         }
+    }
+
+    private func prepareContent(for choice: ContentChoice, in worktree: Worktree)
+        async -> PreparedContentBundle? {
+        guard let request = contentRequest(for: choice) else { return nil }
+        guard let adapter = adapters[request.kind] else {
+            lastRecoverableError = "missing content adapter"
+            return nil
+        }
+        do {
+            let prepared = try await adapter.prepare(request: request, worktree: worktree)
+            return PreparedContentBundle(prepared: prepared, adapter: adapter)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            lastRecoverableError = String(describing: error)
+            return nil
+        }
+    }
+
+    private func commitPreparedContent(
+        preparedContent: PreparedContentBundle?,
+        in worktree: Worktree,
+        expectedRevision: Int,
+        makeCommand: (WorkspaceLayout, PreparedContent?) -> PreparedCommand?
+    ) async {
+        let gate = gate(for: worktree.id)
+        await gate.acquire()
+        defer { Task { await gate.release() } }
+
+        guard revisions[worktree.id] == expectedRevision,
+              let currentLayout = layouts[worktree.id] else {
+            if let preparedContent {
+                await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
+            }
+            return
+        }
+        guard let preparedCommand = makeCommand(currentLayout, preparedContent?.prepared) else {
+            if let preparedContent {
+                await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
+            }
+            return
+        }
+
+        var discardedPreparedContent = false
+        if preparedCommand.discardPreparedContent, let preparedContent {
+            await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
+            discardedPreparedContent = true
+        }
+        guard case .success(let transition) = WorkspaceLayoutEngine.apply(
+            preparedCommand.command, to: currentLayout) else {
+            lastRecoverableError = "workspace command rejected"
+            if let preparedContent, !discardedPreparedContent {
+                await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
+            }
+            return
+        }
+        guard await durabilityGate(
+            command: preparedCommand.command, transition: transition, worktree: worktree) else {
+            if let preparedContent, !discardedPreparedContent {
+                await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
+            }
+            return
+        }
+        publish(transition, worktreeID: worktree.id)
+
+        if preparedCommand.attachPreparedContent, let preparedContent {
+            let host = preparedContent.adapter.makeHost(
+                tab: preparedContent.prepared.tab, worktree: worktree)
+            registry.adopt(
+                host, tab: preparedContent.prepared.tab,
+                generation: preparedContent.prepared.generationID)
+        }
+        fulfilFocus(transition.focusIntent)
     }
 
     private func retryContent(_ id: WorkspaceTabID, in worktree: Worktree) async {
@@ -423,6 +489,17 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         case .moveExistingTab: nil
         }
     }
+}
+
+private struct PreparedContentBundle {
+    let prepared: PreparedContent
+    let adapter: any WorkspaceContentAdapter
+}
+
+private struct PreparedCommand {
+    let command: WorkspaceLayoutCommand
+    let attachPreparedContent: Bool
+    let discardPreparedContent: Bool
 }
 
 private actor WorktreeCommitGate {
