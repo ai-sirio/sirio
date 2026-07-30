@@ -665,10 +665,17 @@ final class AppModel {
                   tabContaining(paneId: paneId) != nil else {
                 return .failure(id: request.id, error: "unknown panel")
             }
-            guard await focusPane(paneId: paneId) else {
+            switch await focusPane(paneId: paneId) {
+            case .focused:
+                return .success(id: request.id)
+            case .cancelled:
+                // No client is left to read this: the request was abandoned
+                // mid-flight. It is a distinct outcome anyway, so that
+                // "abandoned" is never silently reported as "failed".
+                return .failure(id: request.id, error: "panel focus cancelled")
+            case .notFocused:
                 return .failure(id: request.id, error: "panel could not be focused")
             }
-            return .success(id: request.id)
 
         case "panel.close":
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
@@ -2172,16 +2179,28 @@ final class AppModel {
         )
     }
 
+    /// Why a focus attempt ended. `cancelled` is reported separately from
+    /// `notFocused` because the two are indistinguishable from the outside
+    /// otherwise: both mean "no focus happened", and a caller — or a test —
+    /// then has nothing but elapsed wall-clock time to tell them apart. That
+    /// made the cancellation test a race against AppKit activation cost rather
+    /// than a check of cancellation semantics.
+    enum FocusPaneOutcome: Equatable {
+        case focused
+        case notFocused
+        case cancelled
+    }
+
     @discardableResult
-    private func focusPane(paneId: UUID) async -> Bool {
-        guard let target = tabContaining(paneId: paneId) else { return false }
+    private func focusPane(paneId: UUID) async -> FocusPaneOutcome {
+        guard let target = tabContaining(paneId: paneId) else { return .notFocused }
         // Cancellation is checked before the prologue, not just inside the wait
         // loop: selecting a worktree and calling activateApplication() steal the
         // user's window focus, and doing that for a request whose caller has
         // already gone away is both wrong and slow — AppKit activation can cost
         // ~1s in a fresh session, which is time spent before the first
         // in-loop cancellation check could ever run.
-        guard !Task.isCancelled else { return false }
+        guard !Task.isCancelled else { return .cancelled }
         selectedWorktree = target.worktree
         activateTab(target.tab.id, in: target.worktree.id)
         activateApplication()
@@ -2189,16 +2208,16 @@ final class AppModel {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .milliseconds(registrationTimeoutMs))
         while clock.now < deadline {
-            guard !Task.isCancelled else { return false }
-            if paneCache(for: target.worktree.id).focus(paneId: paneId) { return true }
+            guard !Task.isCancelled else { return .cancelled }
+            if paneCache(for: target.worktree.id).focus(paneId: paneId) { return .focused }
             do {
                 try await Task.sleep(for: .milliseconds(25))
             } catch {
-                return false
+                return .cancelled // Task.sleep only throws on cancellation
             }
         }
-        guard !Task.isCancelled else { return false }
-        return paneCache(for: target.worktree.id).focus(paneId: paneId)
+        guard !Task.isCancelled else { return .cancelled }
+        return paneCache(for: target.worktree.id).focus(paneId: paneId) ? .focused : .notFocused
     }
 
     /// tillerctl ships next to the app binary in DEBUG dev loops; fall back to PATH.
