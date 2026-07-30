@@ -1,0 +1,10 @@
+{
+  "worktreeID": "00000000-0000-4000-8000-000000000099",
+  "rows": [{"id":"00000000-0000-4000-8000-000000000011","worktreeID":"00000000-0000-4000-8000-000000000099","title":"Terminale 1","orderIdx":0,"isActive":true,"treeJSON":"{\"leaf\":{\"id\":\"00000000-0000-4000-8000-0000000000a1\"}}","kind":"terminal","filePath":null,"chatAgentId":null,"chatSessionId":null,"titleIsAutoNamed":true}],
+  "expected": {
+    "root":"group:00000000-0000-4000-8000-000000000001","orderedGroupIDs":["00000000-0000-4000-8000-000000000001"],"activeGroupID":"00000000-0000-4000-8000-000000000001",
+    "groups":[{"id":"00000000-0000-4000-8000-000000000001","tabIDs":["00000000-0000-4000-8000-000000000011"],"activeTabID":"00000000-0000-4000-8000-000000000011"}],
+    "tabs":[{"id":"00000000-0000-4000-8000-000000000011","title":"Terminale 1","titleIsAutoNamed":true,"contentKind":"terminal","contentID":"00000000-0000-4000-8000-0000000000A1","editor":null}],
+    "terminalContents":[{"id":"00000000-0000-4000-8000-0000000000A1","worktreeID":"00000000-0000-4000-8000-000000000099","launchKind":"shell","commandJSON":null}],"diagnostics":[]
+  }
+}

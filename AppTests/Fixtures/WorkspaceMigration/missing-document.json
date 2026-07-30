@@ -1,0 +1,5 @@
+{
+  "worktreeID":"00000000-0000-4000-8000-000000000099",
+  "rows":[{"id":"00000000-0000-4000-8000-000000000041","worktreeID":"00000000-0000-4000-8000-000000000099","title":"Missing","orderIdx":0,"isActive":true,"treeJSON":"","kind":"code","filePath":"/does/not/exist.swift","chatAgentId":null,"chatSessionId":null,"titleIsAutoNamed":true}],
+  "expected":{"root":"group:00000000-0000-4000-8000-000000000001","orderedGroupIDs":["00000000-0000-4000-8000-000000000001"],"activeGroupID":"00000000-0000-4000-8000-000000000001","groups":[{"id":"00000000-0000-4000-8000-000000000001","tabIDs":["00000000-0000-4000-8000-000000000041"],"activeTabID":"00000000-0000-4000-8000-000000000041"}],"tabs":[{"id":"00000000-0000-4000-8000-000000000041","title":"Missing","titleIsAutoNamed":true,"contentKind":"document","contentID":"/does/not/exist.swift","editor":"code"}],"terminalContents":[],"diagnostics":[]}
+}
