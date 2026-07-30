@@ -11,6 +11,9 @@ public final class WorkspaceReconciler {
     private var splitControllers: [SplitID: WorkspaceSplitController] = [:]
     private var pendingFocusTask: Task<Void, Never>?
 
+    public private(set) var groupControllerCreationCount = 0
+    public private(set) var splitControllerCreationCount = 0
+
     public init(hostProvider: WorkspaceHostProvider) {
         self.hostProvider = hostProvider
         self.rootViewController = WorkspaceRootController()
@@ -65,6 +68,7 @@ public final class WorkspaceReconciler {
         case .group(let id):
             let controller = groupControllers[id] ?? {
                 let created = PaneGroupController(id: id)
+                groupControllerCreationCount += 1
                 groupControllers[id] = created
                 return created
             }()
@@ -78,6 +82,7 @@ public final class WorkspaceReconciler {
                 let created = WorkspaceSplitController(
                     id: id, axis: axis, preferredFraction: fraction
                 )
+                splitControllerCreationCount += 1
                 splitControllers[id] = created
                 return created
             }()
