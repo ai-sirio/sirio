@@ -53,12 +53,17 @@ public final class DragSession {
         case .center(let groupID):
             return .requestMove(tab, to: .group(groupID, index: 0))
         case .edge(let groupID, let placement):
+            // One-to-one, not collapsed: a left-edge drag must split to the
+            // anchor's left, not silently produce the same result as a
+            // right-edge drag. `EdgePlacement` and `SplitPlacementSide` are
+            // separate types (drag-preview geometry vs. Core command), but
+            // this mapping only ever loses information if it is wrong.
             let splitPlacement: SplitPlacementSide
             switch placement {
-            case .left, .right:
-                splitPlacement = .right
-            case .top, .bottom:
-                splitPlacement = .down
+            case .left: splitPlacement = .left
+            case .right: splitPlacement = .right
+            case .top: splitPlacement = .above
+            case .bottom: splitPlacement = .below
             }
             return .requestMove(tab, to: .edgeSplit(anchor: groupID, placement: splitPlacement))
         case .none:

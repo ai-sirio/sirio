@@ -77,7 +77,7 @@ struct SplitContentMenuModel: Equatable {
         }
         splitItem = SplitContentMenuItem(
             id: "split",
-            label: placement == .right ? "Split Right" : "Split Down",
+            label: placement == .right ? "Split Right" : "Split Down", // menu is only ever built for .right/.below
             action: .newTerminal,
             isEnabled: splitEnabled,
             disabledReason: splitReason)

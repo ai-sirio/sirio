@@ -133,7 +133,7 @@ enum CommandGenerator {
             content: .terminal(TerminalContentID()))
         return .splitGroup(
             anchor: anchor,
-            placement: rng.nextInt(2) == 0 ? .right : .down,
+            placement: SplitPlacementSide.allCases[rng.nextInt(SplitPlacementSide.allCases.count)],
             newGroup: PaneGroupID(),
             newSplit: SplitID(),
             content: .newTab(tab))
@@ -176,7 +176,7 @@ enum CommandGenerator {
             tab.id,
             to: .newSplit(
                 anchor: anchor,
-                placement: rng.nextInt(2) == 0 ? .right : .down,
+                placement: SplitPlacementSide.allCases[rng.nextInt(SplitPlacementSide.allCases.count)],
                 newGroup: PaneGroupID(),
                 newSplit: SplitID()))
     }

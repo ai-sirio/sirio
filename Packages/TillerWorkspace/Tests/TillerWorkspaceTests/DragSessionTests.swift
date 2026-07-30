@@ -82,4 +82,32 @@ struct DragSessionTests {
         #expect(session.release() == nil)
         #expect(session.currentTarget == .none)
     }
+
+    /// Regression: `release()` used to collapse left into right and top into
+    /// bottom, so a left-edge drag would split to the anchor's RIGHT instead
+    /// of its left. That is a real interaction bug, not a naming detail — the
+    /// #3 Edge Preview contract requires the exact edge the pointer hovers,
+    /// not "the same axis, arbitrary side".
+    @Test
+    func eachOfTheFourEdgesProducesItsOwnDistinctSplitPlacement() {
+        let group = PaneGroupID()
+        var placements: [EdgePlacement: SplitPlacementSide] = [:]
+        for edge in [EdgePlacement.left, .right, .top, .bottom] {
+            let session = DragSession()
+            session.pressBegan(
+                tab: WorkspaceTabID(), at: CGPoint(x: 10, y: 10),
+                inTabFrame: CGRect(x: 0, y: 0, width: 100, height: 30))
+            session.pointerMoved(to: CGPoint(x: 20, y: 10)) { _ in .edge(group, placement: edge) }
+            guard case .requestMove(_, to: .edgeSplit(_, let placement)) = session.release() else {
+                Issue.record("expected an edgeSplit intent for \(edge)")
+                continue
+            }
+            placements[edge] = placement
+        }
+        #expect(placements[.left] == .left)
+        #expect(placements[.right] == .right)
+        #expect(placements[.top] == .above)
+        #expect(placements[.bottom] == .below)
+        #expect(Set(placements.values).count == 4)
+    }
 }

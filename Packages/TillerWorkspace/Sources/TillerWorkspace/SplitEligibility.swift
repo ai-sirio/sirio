@@ -17,15 +17,15 @@ public enum SplitEligibility {
             return .failure(.soleTabOfItsOwnGroup)
         }
 
-        switch placement {
-        case .right:
+        switch placement.axis {
+        case .horizontal:
             let available = (groupSize.width - WorkspaceMetrics.dividerThickness) / 2
             guard available >= WorkspaceMetrics.preferredGroupSize.width else {
                 return .failure(.insufficientWidth(
                     available: available, required: WorkspaceMetrics.preferredGroupSize.width
                 ))
             }
-        case .down:
+        case .vertical:
             let available = (groupSize.height - WorkspaceMetrics.dividerThickness) / 2
             guard available >= WorkspaceMetrics.preferredGroupSize.height else {
                 return .failure(.insufficientHeight(
