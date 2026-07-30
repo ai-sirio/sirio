@@ -123,13 +123,17 @@ struct ContentView: View {
                           : "Show right panel (⌃⌘I)")
                     .accessibilityLabel("Right panel")
 
-                    Button {
-                        model.splitCurrent(.horizontal)
-                    } label: {
-                        Image(systemName: "square.split.1x2")
+                    if workspaceEngineEnabled {
+                        universalSplitMenu
+                    } else {
+                        Button {
+                            model.splitCurrent(.horizontal)
+                        } label: {
+                            Image(systemName: "square.split.1x2")
+                        }
+                        .help("Split terminal")
+                        .accessibilityLabel("Split terminal")
                     }
-                    .help("Split terminal")
-                    .accessibilityLabel("Split terminal")
 
                     Button {
                         model.settingsCategory = .permissions
@@ -268,6 +272,78 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
         .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
+    }
+
+    @ViewBuilder
+    private var universalSplitMenu: some View {
+        if let worktree = model.selectedWorktree,
+           let layout = workspaceCoordinator.layouts[worktree.id] {
+            let menu = SplitContentMenuModel(
+                worktreeID: worktree.id,
+                sourceTabID: layout.group(layout.activeGroupID)?.activeTabID ?? WorkspaceTabID(),
+                layout: layout,
+                layoutsByWorktree: workspaceCoordinator.layouts,
+                groupSize: CGSize(width: 800, height: 600),
+                placement: .right,
+                installedAgents: model.agentCenter.installedAgents.map {
+                    SplitMenuAgent(id: $0.id, name: $0.name)
+                },
+                resumedChats: model.chatHistory(for: worktree).map {
+                    SplitMenuChat(id: $0.id, title: $0.title)
+                })
+            SplitContentMenu(model: menu, onAction: { action in
+                handleUniversalSplitAction(action, worktree: worktree, layout: layout)
+            })
+            .help("Split Right With…")
+            .accessibilityLabel("Split Right With…")
+        } else {
+            Button("Split Right With…") {}
+                .disabled(true)
+        }
+    }
+
+    private func handleUniversalSplitAction(
+        _ action: SplitContentMenuAction,
+        worktree: Worktree,
+        layout: WorkspaceLayout
+    ) {
+        let anchor = layout.activeGroupID
+        switch action {
+        case .configureAgents:
+            model.openAgentsSettings()
+        case .openFile:
+            let panel = NSOpenPanel()
+            panel.directoryURL = URL(fileURLWithPath: worktree.path)
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            let editor: DocumentEditorKind = MarkdownFileLink.isMarkdown(url) ? .markdown : .code
+            Task {
+                await workspaceCoordinator.requestSplit(
+                    anchor: anchor, placement: .right,
+                    choice: .openFile(url, editor: editor), in: worktree)
+            }
+        case .newTerminal:
+            requestUniversalSplit(.newTerminal, anchor: anchor, worktree: worktree)
+        case .agentTerminal(let agentID):
+            requestUniversalSplit(.agentTerminal(agentID: agentID), anchor: anchor, worktree: worktree)
+        case .newChat(let agentID):
+            requestUniversalSplit(.newChat(agentID: agentID), anchor: anchor, worktree: worktree)
+        case .resumeChat(let sessionID):
+            requestUniversalSplit(
+                .resumeChat(ChatContentID(sessionID)), anchor: anchor, worktree: worktree)
+        case .moveExistingTab(let tabID):
+            requestUniversalSplit(.moveExistingTab(tabID), anchor: anchor, worktree: worktree)
+        }
+    }
+
+    private func requestUniversalSplit(
+        _ choice: ContentChoice, anchor: PaneGroupID, worktree: Worktree
+    ) {
+        Task {
+            await workspaceCoordinator.requestSplit(
+                anchor: anchor, placement: .right, choice: choice, in: worktree)
+        }
     }
 
     @ViewBuilder
