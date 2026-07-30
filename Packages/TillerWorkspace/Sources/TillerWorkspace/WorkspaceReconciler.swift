@@ -6,6 +6,7 @@ public final class WorkspaceReconciler {
     public let rootViewController: NSViewController
 
     private let hostProvider: WorkspaceHostProvider
+    public let focusCoordinator = WorkspaceFocusCoordinator()
     private var groupControllers: [PaneGroupID: PaneGroupController] = [:]
     private var splitControllers: [SplitID: WorkspaceSplitController] = [:]
     private var pendingFocusTask: Task<Void, Never>?
@@ -36,7 +37,13 @@ public final class WorkspaceReconciler {
         updateAccessibility(for: layout)
         prune(keepingGroups: Set(layout.groups.keys), keepingSplits: Set(layout.splitIDs()))
         restoreFocusIfNeeded(previousFirstResponder: previousFirstResponder, window: window)
-        fulfill(focusIntent)
+        if delta?.activeGroupChanged != nil || focusCoordinator.activeGroupID == nil {
+            let activeGroup = layout.activeGroupID
+            let contentKind = layout.group(activeGroup)?.activeTabID
+                .flatMap { layout.tab($0)?.content.kind } ?? .terminal
+            _ = focusCoordinator.focusPane(activeGroup, contentKind: contentKind)
+        }
+        fulfill(focusIntent, in: layout)
     }
 
     public func groupController(_ id: PaneGroupID) -> PaneGroupController? {
@@ -120,16 +127,21 @@ public final class WorkspaceReconciler {
         return .none
     }
 
-    private func fulfill(_ intent: FocusIntent) {
+    private func fulfill(_ intent: FocusIntent, in layout: WorkspaceLayout) {
         guard case .focusTab(let tabID) = intent,
-              let host = hostProvider.host(for: tabID) else { return }
-        guard !host.fulfill(intent) else { return }
+              let host = hostProvider.host(for: tabID),
+              let groupID = layout.groupContaining(tab: tabID) else { return }
+
+        let result = focusCoordinator.requestFocus(.tab(tabID), in: groupID) {
+            host.fulfill(intent)
+        }
+        guard result == .pendingRetry else { return }
 
         pendingFocusTask?.cancel()
         pendingFocusTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard !Task.isCancelled, let self else { return }
-            _ = host.fulfill(.focusTab(tabID))
+            _ = self.focusCoordinator.hostAttached()
             self.pendingFocusTask = nil
         }
     }
