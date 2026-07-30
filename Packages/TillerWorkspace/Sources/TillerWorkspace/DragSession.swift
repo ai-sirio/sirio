@@ -30,7 +30,9 @@ public final class DragSession {
             guard movement >= WorkspaceMetrics.dragThreshold else { return }
             isActive = true
         }
+        let dragSignpost = SignpostMetrics.beginInterval("workspaceDragFrame")
         currentTarget = hitTest(point)
+        SignpostMetrics.endInterval("workspaceDragFrame", dragSignpost)
     }
 
     public func cancel(reason: CancelReason) {

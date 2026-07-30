@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import os
-@testable import TillerTerminal
+@testable import TillerCore
 
 @Test func beginIntervalReturnsNilWhenGateIsOff() {
     // Default state: the gate key is not set in UserDefaults, so enabled is false.

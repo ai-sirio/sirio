@@ -27,7 +27,9 @@ public final class WorkspaceViewController: NSViewController {
         _ = view
         attachRootIfNeeded()
         currentLayout = layout
+        let reconcileSignpost = SignpostMetrics.beginInterval("workspaceReconcile")
         reconciler.reconcile(to: layout, delta: delta)
+        SignpostMetrics.endInterval("workspaceReconcile", reconcileSignpost)
         view.needsLayout = true
     }
 

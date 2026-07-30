@@ -71,6 +71,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
 
     func restore(worktree: Worktree) async {
         worktrees[worktree.id] = worktree
+        let restoreSignpost = SignpostMetrics.beginInterval("workspaceRestore")
         if pendingCleanupObligations.contains(worktree.id) {
             do {
                 try await persistence.purge(worktreeID: worktree.id)
@@ -85,6 +86,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         layouts[worktree.id] = layout
         revisions[worktree.id] = restored.revision
         dirtyWorktreeIDs.remove(worktree.id)
+        SignpostMetrics.endInterval("workspaceRestore", restoreSignpost)
 
         // Terminal RESOURCES hydrate eagerly here (LC-3: a background shell
         // keeps running once its worktree is mounted, even while its tab is
@@ -378,8 +380,11 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
             await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
             discardedPreparedContent = true
         }
-        guard case .success(let transition) = WorkspaceLayoutEngine.apply(
-            preparedCommand.command, to: currentLayout) else {
+        let applySignpost = SignpostMetrics.beginInterval("workspaceCommandApply")
+        let applyResult = WorkspaceLayoutEngine.apply(
+            preparedCommand.command, to: currentLayout)
+        SignpostMetrics.endInterval("workspaceCommandApply", applySignpost)
+        guard case .success(let transition) = applyResult else {
             lastRecoverableError = "workspace command rejected"
             if let preparedContent, !discardedPreparedContent {
                 await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
@@ -423,7 +428,10 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         guard revisions[worktree.id] == expectedRevision,
               let layout = layouts[worktree.id] else { return false }
         // Step 5: apply Core.
-        guard case .success(let transition) = WorkspaceLayoutEngine.apply(command, to: layout) else {
+        let applySignpost = SignpostMetrics.beginInterval("workspaceCommandApply")
+        let applyResult = WorkspaceLayoutEngine.apply(command, to: layout)
+        SignpostMetrics.endInterval("workspaceCommandApply", applySignpost)
+        guard case .success(let transition) = applyResult else {
             lastRecoverableError = "workspace command rejected"
             return false
         }
@@ -443,14 +451,17 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
                                 worktree: Worktree) async -> Bool {
         guard WorkspaceLayoutDelta.isStructuralCommand(command) else { return true }
         let revision = (revisions[worktree.id] ?? 0) + 1
+        let commitSignpost = SignpostMetrics.beginInterval("workspaceStructuralCommit")
         do {
             try await persistence.commitStructural(
                 worktreeID: worktree.id, revision: revision,
                 snapshot: WorkspaceSnapshot(layout: transition.layout),
                 tabs: transition.layout.allTabs,
                 terminalContents: terminalRecords(in: transition.layout, worktreeID: worktree.id))
+            SignpostMetrics.endInterval("workspaceStructuralCommit", commitSignpost)
             return true
         } catch {
+            SignpostMetrics.endInterval("workspaceStructuralCommit", commitSignpost)
             lastRecoverableError = String(describing: error)
             return false
         }

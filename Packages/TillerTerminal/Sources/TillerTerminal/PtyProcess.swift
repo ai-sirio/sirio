@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import os
+import TillerCore
 
 public enum PtyError: Error, Equatable {
     case forkFailed(Int32)
