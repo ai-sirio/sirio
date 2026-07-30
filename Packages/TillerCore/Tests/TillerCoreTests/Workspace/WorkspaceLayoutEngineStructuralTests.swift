@@ -183,6 +183,49 @@ import Testing
         }
     }
 
+    /// The sibling promoted by a collapse must land in place of its parent
+    /// split without disturbing the enclosing split's fraction. Every other
+    /// collapse test here collapses at the root, where there is no enclosing
+    /// split to disturb — so none of them can catch a regression that rebuilds
+    /// the grandparent with a default fraction instead of its own.
+    @Test func collapsingANestedSplitPreservesTheGrandparentFraction() throws {
+        let outerSplit = SplitID()
+        let innerSplit = SplitID()
+        let leftGroup = PaneGroupID()
+        let sourceGroup = PaneGroupID()
+        let siblingGroup = PaneGroupID()
+        let leftTab = Fixtures.freshTerminalTab()
+        let movedTab = Fixtures.freshTerminalTab()
+        let siblingTab = Fixtures.freshTerminalTab()
+        let layout = makeLayout(
+            root: .split(id: outerSplit, axis: .horizontal, fraction: 0.75,
+                         first: .group(leftGroup),
+                         second: .split(id: innerSplit, axis: .vertical, fraction: 0.4,
+                                        first: .group(sourceGroup),
+                                        second: .group(siblingGroup))),
+            groups: [
+                leftGroup: PaneGroup(id: leftGroup, tabs: [leftTab], activeTabID: leftTab.id),
+                sourceGroup: PaneGroup(id: sourceGroup, tabs: [movedTab],
+                                       activeTabID: movedTab.id),
+                siblingGroup: PaneGroup(id: siblingGroup, tabs: [siblingTab],
+                                        activeTabID: siblingTab.id)
+            ],
+            activeGroupID: sourceGroup)
+
+        let result = WorkspaceLayoutEngine.apply(
+            .moveTab(movedTab.id, to: .group(leftGroup, index: 1)), to: layout)
+        let transition = try #require(try result.get())
+
+        #expect(transition.delta.removedGroups == [sourceGroup])
+        #expect(transition.delta.collapsedSplits == [innerSplit])
+        #expect(transition.layout.root == .split(
+            id: outerSplit, axis: .horizontal, fraction: 0.75,
+            first: .group(leftGroup), second: .group(siblingGroup)))
+        #expect(transition.layout.preferredFraction(for: outerSplit) == 0.75)
+        #expect(transition.layout.groups.count == 2)
+        #expect(WorkspaceLayoutInvariants.validate(transition.layout) == nil)
+    }
+
     private func makeLayout(root: LayoutNode,
                             groups: [PaneGroupID: PaneGroup],
                             activeGroupID: PaneGroupID) -> WorkspaceLayout {
