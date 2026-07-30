@@ -100,4 +100,24 @@ struct WorkspaceAccessibilityTests {
         #expect(accessible.tabActions == normal.tabActions)
         #expect(accessible.paneActions == normal.paneActions)
     }
+
+    /// CO-2 asks for the reason a split is unavailable, not just the fact.
+    /// A single generic string would leave a screen-reader user unable to tell
+    /// "widen the window" from "this pane has only one tab", which are
+    /// different problems with different remedies.
+    @Test func eachSplitIneligibilityReasonAnnouncesItsOwnRemedy() {
+        let width = WorkspaceAnnouncements.text(
+            for: .invalid(.splitUnavailable(
+                .insufficientWidth(available: 197, required: 240))))
+        let height = WorkspaceAnnouncements.text(
+            for: .invalid(.splitUnavailable(
+                .insufficientHeight(available: 120, required: 160))))
+        let soleTab = WorkspaceAnnouncements.text(
+            for: .invalid(.splitUnavailable(.soleTabOfItsOwnGroup)))
+
+        #expect(width == "Action unavailable: the window is too narrow to split this pane.")
+        #expect(height == "Action unavailable: the window is too short to split this pane.")
+        #expect(soleTab == "Action unavailable: this is the only tab in its pane.")
+        #expect(Set([width, height, soleTab]).count == 3)
+    }
 }
