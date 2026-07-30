@@ -33,6 +33,7 @@ public final class WorkspaceReconciler {
 
         let root = rootViewController as! WorkspaceRootController
         root.setContent(newRoot)
+        updateAccessibility(for: layout)
         prune(keepingGroups: Set(layout.groups.keys), keepingSplits: Set(layout.splitIDs()))
         restoreFocusIfNeeded(previousFirstResponder: previousFirstResponder, window: window)
         fulfill(focusIntent)
@@ -88,6 +89,21 @@ public final class WorkspaceReconciler {
     private func prune(keepingGroups: Set<PaneGroupID>, keepingSplits: Set<SplitID>) {
         groupControllers = groupControllers.filter { keepingGroups.contains($0.key) }
         splitControllers = splitControllers.filter { keepingSplits.contains($0.key) }
+    }
+
+    private func updateAccessibility(for layout: WorkspaceLayout) {
+        let total = layout.orderedGroupIDs.count
+        for (index, groupID) in layout.orderedGroupIDs.enumerated() {
+            guard let controller = groupControllers[groupID], let group = layout.group(groupID) else {
+                continue
+            }
+            controller.setAccessibilityPosition(
+                position: index + 1,
+                total: total,
+                activeTabTitle: group.tabs.first { $0.id == group.activeTabID }?.title
+                    ?? WorkspaceAnnouncements.emptyPaneTitle
+            )
+        }
     }
 
     private func focusIntent(for layout: WorkspaceLayout, delta: WorkspaceLayoutDelta?) -> FocusIntent {
