@@ -57,7 +57,8 @@ struct SidebarView: View {
                                     // File tabs (markdown/code) stay out of the tree: the
                                     // sidebar lists agents and terminals, and the tab bar
                                     // already exposes every open file.
-                                    let tabs = (model.tabs[worktree.id] ?? []).filter { $0.fileURL == nil }
+                                    let tabs = model.workspaceTabs(for: worktree.id)
+                                        .filter { $0.fileURL == nil }
                                     ForEach(tabs) { tab in
                                         let tabIsLast = tab.id == tabs.last?.id
                                         TabRow(model: model, worktree: worktree, tab: tab,
@@ -691,9 +692,13 @@ private struct TerminalPaneMenu: View {
 
     var body: some View {
         Group {
-            Button("Split orizzontale") { model.split(paneId: paneId, axis: .vertical) }
-            Button("Split verticale") { model.split(paneId: paneId, axis: .horizontal) }
-            if model.canAdoptPane(paneId) {
+            Button("Split Horizontally") {
+                model.workspaceSplit(paneId: paneId, axis: .vertical)
+            }
+            Button("Split Vertically") {
+                model.workspaceSplit(paneId: paneId, axis: .horizontal)
+            }
+            if model.workspaceCanAdoptPane(paneId) {
                 Button("Attach to Current Terminal") { model.adoptPane(paneId) }
             }
             Divider()

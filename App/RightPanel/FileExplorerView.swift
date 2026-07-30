@@ -166,7 +166,7 @@ struct FileExplorerView: View {
     private func open(_ node: FileTreeNode) {
         guard let root = panelModel.rootURL else { return }
         let url = node.url(relativeTo: root)
-        appModel.openFileTab(fileURL: url, in: worktree)
+        appModel.openDocument(fileURL: url, in: worktree)
     }
 
     private func reveal(_ node: FileTreeNode) {

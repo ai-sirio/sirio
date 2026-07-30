@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import TillerCore
+import TillerTerminal
 import TillerWorkspace
 
 enum ContentChoice: Sendable {
@@ -18,6 +19,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
     let persistence: WorkspaceLayoutPersistence
     let registry: WorkspaceContentRegistry
     let adapters: [WorkspaceContentKind: any WorkspaceContentAdapter]
+    let legacyStore: LegacyWorkspaceStore
 
     private(set) var layouts: [UUID: WorkspaceLayout] = [:]
     private(set) var revisions: [UUID: Int] = [:]
@@ -31,10 +33,40 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
     private var gates: [UUID: WorktreeCommitGate] = [:]
 
     init(persistence: WorkspaceLayoutPersistence, registry: WorkspaceContentRegistry,
-         adapters: [WorkspaceContentKind: WorkspaceContentAdapter]) {
+         adapters: [WorkspaceContentKind: WorkspaceContentAdapter],
+         legacyStore: LegacyWorkspaceStore = LegacyWorkspaceStore()) {
         self.persistence = persistence
         self.registry = registry
         self.adapters = adapters
+        self.legacyStore = legacyStore
+    }
+
+    func legacyTabs(for worktreeID: UUID) -> [LegacyWorkspaceTab] {
+        legacyStore.tabs(for: worktreeID)
+    }
+
+    func legacyActiveTabID(for worktreeID: UUID) -> UUID? {
+        legacyStore.activeTabID(for: worktreeID)
+    }
+
+    func setLegacyTabs(_ tabs: [LegacyWorkspaceTab], for worktreeID: UUID) {
+        legacyStore.replaceTabs(tabs, for: worktreeID)
+    }
+
+    func appendLegacyTab(_ tab: LegacyWorkspaceTab, to worktreeID: UUID, activate: Bool) {
+        legacyStore.appendTab(tab, to: worktreeID, activate: activate)
+    }
+
+    func setLegacyActiveTabID(_ tabID: UUID?, for worktreeID: UUID) {
+        legacyStore.setActiveTabID(tabID, for: worktreeID)
+    }
+
+    func legacyPaneCache(for worktreeID: UUID) -> TerminalPaneCache {
+        legacyStore.paneCache(for: worktreeID)
+    }
+
+    func legacyMutationRevision(for worktreeID: UUID) -> Int {
+        legacyStore.mutationRevision(for: worktreeID)
     }
 
     func restore(worktree: Worktree) async {

@@ -7,7 +7,7 @@ import TillerCore
 @MainActor
 enum AgentsPanelModel {
     static func nodes(appModel: AppModel, worktree: Worktree) -> [AgentNode] {
-        let tabs = appModel.tabs[worktree.id] ?? []
+        let tabs = appModel.workspaceTabs(for: worktree.id)
         var chatSubagents: [UUID: [ChatSubagentInput]] = [:]
         for tab in tabs where tab.chatAgentId != nil {
             guard let controller = appModel.chatControllers[tab.id] else { continue }

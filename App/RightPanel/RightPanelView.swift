@@ -101,7 +101,7 @@ struct RightPanelView: View {
                     case .diff:
                         GitDiffView(
                             panelModel: panelModel,
-                            onOpenFile: { url in appModel.openFileTab(fileURL: url, in: worktree) },
+                            onOpenFile: { url in appModel.openDocument(fileURL: url, in: worktree) },
                             requestDiscard: { pendingDiscard = $0 })
                     case .status:
                         GitStatusView(
@@ -112,7 +112,7 @@ struct RightPanelView: View {
                             },
                             onOpenFile: { entry in
                                 guard let root = panelModel.rootURL else { return }
-                                appModel.openFileTab(
+                                appModel.openDocument(
                                     fileURL: root.appendingPathComponent(entry.path.value),
                                     in: worktree)
                             },

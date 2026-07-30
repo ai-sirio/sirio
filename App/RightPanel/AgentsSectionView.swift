@@ -111,7 +111,7 @@ struct AgentsSectionView: View {
         case .chat(let tabId):
             appModel.focusTab(tabId: tabId, in: worktree)
         case .terminal(let paneId):
-            guard let tab = (appModel.tabs[worktree.id] ?? [])
+            guard let tab = appModel.workspaceTabs(for: worktree.id)
                 .first(where: { $0.leafIds.contains(paneId) }) else { return }
             appModel.focusTab(tabId: tab.id, in: worktree)
         case .subagent:

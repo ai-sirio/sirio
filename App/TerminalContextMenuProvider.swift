@@ -23,7 +23,7 @@ final class TerminalContextMenuProvider {
             TerminalContextMenuItem(title: "Split Terminal Right", systemImage: "square.split.1x2", action: .splitRight),
             TerminalContextMenuItem(title: "Split Terminal Down", systemImage: "square.split.2x1", action: .splitDown),
         ]
-        if let tuple = model?.tabContaining(paneId: paneId), tuple.tab.leafIds.count > 1 {
+        if let tuple = model?.workspaceTabContaining(paneId: paneId), tuple.tab.leafIds.count > 1 {
             items.append(TerminalContextMenuItem(title: "Close Terminal", systemImage: "xmark.square", action: .close))
         }
         return items
@@ -44,12 +44,12 @@ final class TerminalContextMenuProvider {
         case .copyPaneId:
             copyToPasteboard(paneId.uuidString)
         case .copyTerminalId:
-            guard let tuple = model?.tabContaining(paneId: paneId) else { return }
+            guard let tuple = model?.workspaceTabContaining(paneId: paneId) else { return }
             copyToPasteboard(tuple.tab.id.uuidString)
         case .splitRight:
-            model?.split(paneId: paneId, axis: .horizontal)
+            model?.workspaceSplit(paneId: paneId, axis: .horizontal)
         case .splitDown:
-            model?.split(paneId: paneId, axis: .vertical)
+            model?.workspaceSplit(paneId: paneId, axis: .vertical)
         case .close:
             showCloseConfirmAlert(paneId: paneId)
         }
@@ -64,7 +64,7 @@ final class TerminalContextMenuProvider {
         alert.addButton(withTitle: "Close")
         alert.buttons[1].hasDestructiveAction = true
         if alert.runModal() == .alertSecondButtonReturn {
-            model?.closePane(paneId: paneId)
+            model?.workspaceClosePane(paneId: paneId)
         }
     }
 
@@ -74,7 +74,7 @@ final class TerminalContextMenuProvider {
     }
 
     private func showSetTitleAlert(paneId: UUID) {
-        guard let tuple = model?.tabContaining(paneId: paneId) else { return }
+        guard let tuple = model?.workspaceTabContaining(paneId: paneId) else { return }
         let alert = NSAlert()
         alert.messageText = "Set Title"
         alert.informativeText = "Enter the new title for \"\(tuple.tab.title):\""

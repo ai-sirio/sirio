@@ -57,7 +57,7 @@ struct AgentRosterView: View {
         model.route = .workspace
         model.selectedWorktree = worktree
         if let tab = model.worstStatusTab(in: worktree) {
-            model.activeTabId[worktree.id] = tab.id
+            model.activateTab(tab.id, in: worktree.id)
         }
     }
 }

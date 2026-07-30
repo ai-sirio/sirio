@@ -127,7 +127,7 @@ struct ContentView: View {
                         universalSplitMenu
                     } else {
                         Button {
-                            model.splitCurrent(.horizontal)
+                            model.workspaceSplitCurrent(.horizontal)
                         } label: {
                             Image(systemName: "square.split.1x2")
                         }
@@ -197,8 +197,10 @@ struct ContentView: View {
             }
             VStack(spacing: 0) {
                 if let worktree = model.selectedWorktree {
-                    TabBarView(model: model, worktree: worktree)
-                    Divider()
+                    if !workspaceEngineEnabled {
+                        TabBarView(model: model, worktree: worktree)
+                        Divider()
+                    }
                 }
                 if workspaceEngineEnabled {
                     workspaceStack
@@ -223,7 +225,7 @@ struct ContentView: View {
                           return (try? $0.resourceValues(
                               forKeys: [.isRegularFileKey]).isRegularFile) ?? false
                       }) else { return false }
-                model.openFileTab(fileURL: url, in: worktree)
+                model.openDocument(fileURL: url, in: worktree)
                 return true
             }
             if rightPanelVisible {
@@ -356,13 +358,13 @@ struct ContentView: View {
                     description: Text("Add a project, then select a worktree.")
                 )
             } else if let worktree = model.selectedWorktree,
-                      (model.tabs[worktree.id] ?? []).isEmpty {
+                      model.workspaceTabs(for: worktree.id).isEmpty {
                 EmptyWorktreeView(onNewTerminal: { model.newShellTabInSelected() })
             }
             ForEach(model.openWorktreeIds, id: \.self) { worktreeId in
                 if let worktree = model.worktree(byId: worktreeId) {
                     let isSelected = model.selectedWorktree?.id == worktreeId
-                    ForEach(model.tabs[worktreeId] ?? []) { tab in
+                    ForEach(model.workspaceTabs(for: worktreeId)) { tab in
                         let isVisible = isSelected
                             && model.activeTab(for: worktreeId)?.id == tab.id
                         Group {
@@ -398,8 +400,8 @@ struct ContentView: View {
                                     onMenuAction: { action, paneId, proxy in
                                         menuProvider.handle(action, paneId: paneId, proxy: proxy)
                                     },
-                                    paneCache: model.paneCache(for: worktreeId),
-                                    liveLeafIds: { model.liveLeafIds(for: worktreeId) }
+                                    paneCache: model.workspacePaneCache(for: worktreeId),
+                                    liveLeafIds: { model.workspaceLiveLeafIds(for: worktreeId) }
                                 )
                             case .markdown:
                                 if let doc = model.markdownDocument(for: tab) {

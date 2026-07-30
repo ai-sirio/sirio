@@ -39,14 +39,14 @@ struct CodeFileTabTests {
         let worktree = Worktree(id: UUID(), projectId: UUID(), branch: "main", path: dir.path)
         model.worktrees = [worktree.projectId: [worktree]]
 
-        let code = try #require(model.openFileTab(fileURL: swiftURL, in: worktree))
-        let duplicate = model.openFileTab(fileURL: swiftURL, in: worktree)
-        let markdown = try #require(model.openFileTab(fileURL: markdownURL, in: worktree))
+        let code = try #require(model.openDocument(fileURL: swiftURL, in: worktree))
+        let duplicate = model.openDocument(fileURL: swiftURL, in: worktree)
+        let markdown = try #require(model.openDocument(fileURL: markdownURL, in: worktree))
 
         #expect(code.codeFileURL == swiftURL.standardizedFileURL)
         #expect(duplicate?.id == code.id)
         #expect(markdown.markdownFileURL == markdownURL.standardizedFileURL)
-        #expect(model.tabs[worktree.id]?.count == 2)
+        #expect(model.workspaceTabs(for: worktree.id).count == 2)
     }
 
     @Test func saveActiveDocumentWritesCodeBuffer() throws {
@@ -59,7 +59,7 @@ struct CodeFileTabTests {
         try "old\n".write(to: url, atomically: true, encoding: .utf8)
         let worktree = Worktree(id: UUID(), projectId: UUID(), branch: "main", path: url.deletingLastPathComponent().path)
         model.worktrees = [worktree.projectId: [worktree]]
-        let tab = try #require(model.openFileTab(fileURL: url, in: worktree))
+        let tab = try #require(model.openDocument(fileURL: url, in: worktree))
         model.codeDocuments[tab.id]?.text = "new\n"
         #expect(model.isDocumentDirty(tabId: tab.id))
         model.saveActiveDocument()

@@ -60,9 +60,9 @@ final class AppModel {
                 self?.worktree(byId: id).flatMap { self?.statusForWorktree($0) } ?? nil
             },
             hasUnsavedWork: { [weak self] id in
-                (self?.tabs[id] ?? []).contains {
+                self?.workspaceCoordinator.legacyTabs(for: id).contains {
                     self?.isDocumentDirty(tabId: $0.id) == true
-                }
+                } == true
             }
         )
         guard !evicted.isEmpty else { return }
@@ -138,7 +138,8 @@ final class AppModel {
     /// Highest-priority agent status among all panes in a worktree's tree.
     /// Priority: error > needs-input > running > done. Returns nil if no agent panes.
     func statusForWorktree(_ worktree: Worktree) -> AgentStatus? {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.activityPaneIds }
+        let paneIds = workspaceCoordinator.legacyTabs(for: worktree.id)
+            .flatMap { $0.activityPaneIds }
         return agentActivity.statusForWorktree(paneIds: paneIds)
     }
 
@@ -158,7 +159,7 @@ final class AppModel {
     /// Tab whose panes report the worst status within `worktree` — the tab
     /// the menu-bar roster switches to when jumping back into a worktree.
     func worstStatusTab(in worktree: Worktree) -> LegacyWorkspaceTab? {
-        AttentionSort.sorted(tabs[worktree.id] ?? []) { tab in
+        AttentionSort.sorted(workspaceCoordinator.legacyTabs(for: worktree.id)) { tab in
             agentActivity.statusForWorktree(paneIds: tab.leafIds)
         }.first
     }
@@ -178,7 +179,7 @@ final class AppModel {
     /// Adapter id of the most relevant agent pane in a worktree (same
     /// priority order as statusForWorktree), nil if no agent panes.
     func agentIdForWorktree(_ worktree: Worktree) -> String? {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.leafIds }
+        let paneIds = workspaceCoordinator.legacyTabs(for: worktree.id).flatMap { $0.leafIds }
         return agentActivity.agentIdForWorktree(paneIds: paneIds)
     }
 
@@ -186,7 +187,8 @@ final class AppModel {
     /// AgentCatalog.all for stable left-to-right icon order in the
     /// worktree row's trailing running-agents badge.
     func runningAgentIds(for worktree: Worktree) -> [String] {
-        let paneIds = (tabs[worktree.id] ?? []).flatMap { $0.activityPaneIds }
+        let paneIds = workspaceCoordinator.legacyTabs(for: worktree.id)
+            .flatMap { $0.activityPaneIds }
         return agentActivity.runningAgentIds(paneIds: paneIds, catalogIds: AgentCatalog.all.map(\.id))
     }
     private let notifier = AgentNotifier()
@@ -265,7 +267,6 @@ final class AppModel {
         self.agentInstallStore = installStore
         self.agentCenter = AcpAgentCenter(installStore: installStore)
     }
-    var tabs: [UUID: [LegacyWorkspaceTab]] = [:]
     /// Projects whose root currently contains a `.git` entry. Derived at
     /// runtime (bootstrap, add, in-app git init) — never persisted, so an
     /// external `git init` is picked up on the next launch.
@@ -295,7 +296,6 @@ final class AppModel {
             projects.filter { GitRepoDetection.isGitRepository(path: $0.rootPath) }.map(\.id)
         )
     }
-    var activeTabId: [UUID: UUID] = [:]
     var lastError: String?
     /// State as loaded at launch — the target of the manual
     /// "Restore Previous Launch" action. In-memory only.
@@ -404,7 +404,8 @@ final class AppModel {
                     await self.restoreWorktree(worktree, tillerctlPath: ctl)
                 }
                 self.launchSnapshot = LaunchSnapshot(
-                    tabs: self.tabs, paneCommands: self.paneCommands,
+                    tabs: self.workspaceCoordinator.legacyStore.tabs,
+                    paneCommands: self.paneCommands,
                     openWorktreeIds: self.openWorktreeIds
                 )
             }
@@ -430,7 +431,7 @@ final class AppModel {
     /// restore never clobbers panes created while it was still in flight.
     private func restoreWorktree(_ worktree: Worktree, tillerctlPath ctl: String) async {
         guard let store else { return }
-        if let existing = tabs[worktree.id], !existing.isEmpty { return }
+        if !workspaceCoordinator.legacyTabs(for: worktree.id).isEmpty { return }
         // Repair hook configs frozen on a tillerctl path that no
         // longer exists (pre-shim builds, cleaned DerivedData).
         ClaudeHookMigrator.migrateFile(
@@ -450,10 +451,10 @@ final class AppModel {
             guard let url = tab.markdownFileURL else { return true }
             return FileManager.default.fileExists(atPath: url.path)
         }
-        tabs[worktree.id] = restoredTabs
-        activeTabId[worktree.id] = loaded.activeTabId.flatMap { active in
+        workspaceCoordinator.setLegacyTabs(restoredTabs, for: worktree.id)
+        workspaceCoordinator.setLegacyActiveTabID(loaded.activeTabId.flatMap { active in
             restoredTabs.contains { $0.id == active } ? active : nil
-        } ?? restoredTabs.first?.id
+        } ?? restoredTabs.first?.id, for: worktree.id)
         for tab in restoredTabs {
             guard let chatAgentId = tab.chatAgentId else { continue }
             agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
@@ -522,14 +523,14 @@ final class AppModel {
                     paneId: paneId, timeoutMs: self.registrationTimeoutMs
                 ) else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
-                    self.rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                    self.workspaceRollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
                         id: request.id, error: "panel did not register before timeout"
                     )
                 }
-                guard self.tabContaining(paneId: paneId) != nil else {
+                guard self.workspaceTabContaining(paneId: paneId) != nil else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
@@ -541,7 +542,7 @@ final class AppModel {
                     try await self.persistControlTabs(for: worktree.id)
                 } catch {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
-                    self.rollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
+                    self.workspaceRollbackCreatedPane(paneId, tabId: tab.id, in: worktree.id)
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -554,7 +555,7 @@ final class AppModel {
 
         case "panel.split":
             guard let sourceId = request.params["from"].flatMap(UUID.init(uuidString:)),
-                  let source = tabContaining(paneId: sourceId) else {
+                  let source = workspaceTabContaining(paneId: sourceId) else {
                 return .failure(id: request.id, error: "unknown source panel")
             }
             let axis: SplitAxis
@@ -573,7 +574,7 @@ final class AppModel {
                 let paneId = self.paneIdGenerator()
                 if let command = request.params["cmd"] { self.paneCommands[paneId] = command }
                 let mountLease = self.acquireControlMount(for: source.worktree.id)
-                guard self.split(
+                guard self.workspaceSplit(
                     paneId: sourceId, axis: axis, newPaneId: paneId, placement: placement,
                     persist: false
                 ) else {
@@ -587,14 +588,14 @@ final class AppModel {
                     paneId: paneId, timeoutMs: self.registrationTimeoutMs
                 ) else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
-                    self.rollbackCreatedLeaf(paneId)
+                    self.workspaceRollbackCreatedLeaf(paneId)
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
                         id: request.id, error: "panel did not register before timeout"
                     )
                 }
-                guard self.tabContaining(paneId: paneId) != nil else {
+                guard self.workspaceTabContaining(paneId: paneId) != nil else {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
@@ -606,7 +607,7 @@ final class AppModel {
                     try await self.persistControlTabs(for: source.worktree.id)
                 } catch {
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
-                    self.rollbackCreatedLeaf(paneId)
+                    self.workspaceRollbackCreatedLeaf(paneId)
                     self.paneCommands[paneId] = nil
                     self.releaseControlMount(mountLease, success: false)
                     return .failure(
@@ -623,8 +624,8 @@ final class AppModel {
                 return .failure(id: request.id, error: "unknown worktree")
             }
             let rows = ControlListing.paneRows(
-                tabs: tabs[worktree.id] ?? [],
-                activeTabId: activeTabId[worktree.id],
+                tabs: workspaceCoordinator.legacyTabs(for: worktree.id),
+                activeTabId: workspaceCoordinator.legacyActiveTabID(for: worktree.id),
                 agentIdForPane: { self.agentActivity.paneAgents[$0] },
                 titleForPane: { self.paneTitles[$0] }
             )
@@ -690,7 +691,7 @@ final class AppModel {
 
         case "panel.focus":
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
-                  tabContaining(paneId: paneId) != nil else {
+                  workspaceTabContaining(paneId: paneId) != nil else {
                 return .failure(id: request.id, error: "unknown panel")
             }
             switch await focusPane(paneId: paneId) {
@@ -707,7 +708,7 @@ final class AppModel {
 
         case "panel.close":
             guard let paneId = request.params["id"].flatMap(UUID.init(uuidString:)),
-                  let target = tabContaining(paneId: paneId) else {
+                  let target = workspaceTabContaining(paneId: paneId) else {
                 return .failure(id: request.id, error: "unknown panel")
             }
             return await serializeControlLifecycle(for: target.worktree.id) {
@@ -717,8 +718,10 @@ final class AppModel {
                 do {
                     try await self.persistControlTabs(for: removal.worktreeId)
                 } catch {
-                    self.tabs[removal.worktreeId] = removal.tabs
-                    self.activeTabId[removal.worktreeId] = removal.activeTabId
+                    self.workspaceCoordinator.setLegacyTabs(
+                        removal.tabs, for: removal.worktreeId)
+                    self.workspaceCoordinator.setLegacyActiveTabID(
+                        removal.activeTabId, for: removal.worktreeId)
                     return .failure(
                         id: request.id, error: "panel persistence failed: \(error)"
                     )
@@ -726,8 +729,8 @@ final class AppModel {
                 await self.paneRegistry.cancelRegistration(paneId: paneId)
                 self.deleteAgentSessionRefs(paneIds: [paneId])
                 self.paneCommands[paneId] = nil
-                self.paneCaches[removal.worktreeId]?.prune(
-                    keeping: self.liveLeafIds(for: removal.worktreeId)
+                self.workspaceCoordinator.legacyPaneCache(for: removal.worktreeId).prune(
+                    keeping: self.workspaceLiveLeafIds(for: removal.worktreeId)
                 )
                 return .success(id: request.id)
             }
@@ -867,13 +870,12 @@ final class AppModel {
             projects.removeAll { $0.id == project.id }
             worktrees[project.id] = nil
             for worktree in projectWorktrees {
-                let tabsBeingRemoved = tabs[worktree.id] ?? []
-                tabs[worktree.id] = nil
+                let tabsBeingRemoved = workspaceCoordinator.legacyTabs(for: worktree.id)
+                workspaceCoordinator.legacyStore.removeWorktree(worktree.id)
                 for tab in tabsBeingRemoved {
                     teardownDocument(tabId: tab.id)
                     teardownChatController(tabId: tab.id)
                 }
-                activeTabId[worktree.id] = nil
             }
             openWorktreeIds.removeAll { id in projectWorktrees.contains { $0.id == id } }
             if let sel = selectedWorktree, sel.projectId == project.id {
@@ -965,14 +967,12 @@ final class AppModel {
             // Remove DB row first so a git failure can't strand a DB row.
             try await store.removeWorktree(worktree.id)
             worktrees[worktree.projectId]?.removeAll { $0.id == worktree.id }
-            let tabsBeingRemoved = tabs[worktree.id] ?? []
-            tabs[worktree.id] = nil
-            paneCaches[worktree.id] = nil
+            let tabsBeingRemoved = workspaceCoordinator.legacyTabs(for: worktree.id)
+            workspaceCoordinator.legacyStore.removeWorktree(worktree.id)
             for tab in tabsBeingRemoved {
                 teardownDocument(tabId: tab.id)
                 teardownChatController(tabId: tab.id)
             }
-            activeTabId[worktree.id] = nil
             openWorktreeIds.removeAll { $0 == worktree.id }
             if selectedWorktree?.id == worktree.id {
                 selectedWorktree = nil
@@ -1010,8 +1010,19 @@ final class AppModel {
     }
 
     func activeTab(for worktreeId: UUID) -> LegacyWorkspaceTab? {
-        guard let list = tabs[worktreeId], !list.isEmpty else { return nil }
-        return list.first { $0.id == activeTabId[worktreeId] } ?? list.first
+        let list = workspaceCoordinator.legacyTabs(for: worktreeId)
+        guard !list.isEmpty else { return nil }
+        return list.first {
+            $0.id == workspaceCoordinator.legacyActiveTabID(for: worktreeId)
+        } ?? list.first
+    }
+
+    func workspaceTabs(for worktreeID: UUID) -> [LegacyWorkspaceTab] {
+        workspaceCoordinator.legacyTabs(for: worktreeID)
+    }
+
+    func workspaceActiveTabID(for worktreeID: UUID) -> UUID? {
+        workspaceCoordinator.legacyActiveTabID(for: worktreeID)
     }
 
     /// Apre una nuova tab con un singolo pane e la attiva. Punto unico usato
@@ -1025,14 +1036,14 @@ final class AppModel {
         persist: Bool = true
     ) -> LegacyWorkspaceTab {
         let tab = LegacyWorkspaceTab(id: UUID(), title: title, tree: .leaf(id: paneId))
-        tabs[worktree.id, default: []].append(tab)
-        if activate { activeTabId[worktree.id] = tab.id }
-        if persist { persistTabs(for: worktree.id) }
+        workspaceCoordinator.appendLegacyTab(tab, to: worktree.id, activate: activate)
+        if persist { workspacePersistTabs(for: worktree.id) }
         return tab
     }
 
     func newShellTab(in worktree: Worktree) {
-        let title = LegacyWorkspaceTab.nextShellTitle(existing: tabs[worktree.id] ?? [])
+        let title = LegacyWorkspaceTab.nextShellTitle(
+            existing: workspaceCoordinator.legacyTabs(for: worktree.id))
         openTab(paneId: UUID(), title: title, in: worktree)
     }
 
@@ -1052,7 +1063,8 @@ final class AppModel {
         if let document = codeDocuments[tabId], document.isDirty {
             guard resolveDirtyClose(fileURL: document.fileURL, save: document.save) else { return }
         }
-        guard var list = tabs[worktree.id] else { return }
+        var list = workspaceCoordinator.legacyTabs(for: worktree.id)
+        guard !list.isEmpty else { return }
         if let closing = list.first(where: { $0.id == tabId }) {
             deleteAgentSessionRefs(paneIds: closing.leafIds)
         }
@@ -1061,11 +1073,13 @@ final class AppModel {
         teardownChatController(tabId: tabId)
         // Allow empty tab list — the worktree can have zero tabs.
         // The user creates a new tab via ⌘T or the sidebar "+" menu.
-        tabs[worktree.id] = list
-        if !list.contains(where: { $0.id == activeTabId[worktree.id] }) {
-            activeTabId[worktree.id] = list.last?.id
+        workspaceCoordinator.setLegacyTabs(list, for: worktree.id)
+        if !list.contains(where: {
+            $0.id == workspaceCoordinator.legacyActiveTabID(for: worktree.id)
+        }) {
+            workspaceCoordinator.setLegacyActiveTabID(list.last?.id, for: worktree.id)
         }
-        persistTabs(for: worktree.id)
+        workspacePersistTabs(for: worktree.id)
     }
 
     func closeActiveTab() {
@@ -1074,40 +1088,44 @@ final class AppModel {
     }
 
     func activateTab(_ tabId: UUID, in worktreeId: UUID) {
-        activeTabId[worktreeId] = tabId
-        persistTabs(for: worktreeId)
+        workspaceCoordinator.setLegacyActiveTabID(tabId, for: worktreeId)
+        workspacePersistTabs(for: worktreeId)
     }
 
     func renameTab(_ tabId: UUID, in worktreeId: UUID, to title: String) {
-        guard let idx = tabs[worktreeId]?.firstIndex(where: { $0.id == tabId }) else { return }
+        var tabs = workspaceCoordinator.legacyTabs(for: worktreeId)
+        guard let idx = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        tabs[worktreeId]?[idx].title = trimmed
-        tabs[worktreeId]?[idx].titleIsAutoNamed = false
-        persistTabs(for: worktreeId)
+        tabs[idx].title = trimmed
+        tabs[idx].titleIsAutoNamed = false
+        workspaceCoordinator.setLegacyTabs(tabs, for: worktreeId)
+        workspacePersistTabs(for: worktreeId)
     }
 
     /// Applica un titolo generato dall'auto-naming (Task 9). A differenza di
     /// `renameTab`, non tocca `titleIsAutoNamed`: resta eleggibile per il
     /// prossimo pass finché l'utente non rinomina manualmente.
     func applyAutoTitle(_ tabId: UUID, in worktreeId: UUID, title: String) {
-        guard let idx = tabs[worktreeId]?.firstIndex(where: { $0.id == tabId }) else { return }
+        var tabs = workspaceCoordinator.legacyTabs(for: worktreeId)
+        guard let idx = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         let trimmed = title.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, tabs[worktreeId]?[idx].titleIsAutoNamed == true else { return }
-        tabs[worktreeId]?[idx].title = trimmed
+        guard !trimmed.isEmpty, tabs[idx].titleIsAutoNamed == true else { return }
+        tabs[idx].title = trimmed
         // The history row outlives the tab, so the title has to live on the
         // session too — no extra summarizer call, same string.
-        if let sessionId = tabs[worktreeId]?[idx].chatSessionId {
+        if let sessionId = tabs[idx].chatSessionId {
             try? chatStore?.setTitle(trimmed, sessionId: sessionId)
         }
-        persistTabs(for: worktreeId)
+        workspaceCoordinator.setLegacyTabs(tabs, for: worktreeId)
+        workspacePersistTabs(for: worktreeId)
     }
     /// Riordina la tab prima di `targetId` (nil = in coda). Usato dal drag
     /// & drop di tab bar e sidebar; l'ordine persiste nello snapshot già
     /// serializzato da persistTabs.
-    func moveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) {
+    func workspaceMoveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) {
         guard previewMoveTab(tabId, before: targetId, in: worktreeId) else { return }
-        persistTabs(for: worktreeId)
+        workspacePersistTabs(for: worktreeId)
     }
 
     /// Applies the reorder to the live list without persisting, so the rows
@@ -1115,10 +1133,10 @@ final class AppModel {
     /// Returns whether the order actually changed.
     @discardableResult
     func previewMoveTab(_ tabId: UUID, before targetId: UUID?, in worktreeId: UUID) -> Bool {
-        guard let list = tabs[worktreeId] else { return false }
+        let list = workspaceCoordinator.legacyTabs(for: worktreeId)
         let moved = TabOrdering.moving(list, id: tabId, before: targetId)
         guard moved.map(\.id) != list.map(\.id) else { return false }
-        tabs[worktreeId] = moved
+        workspaceCoordinator.setLegacyTabs(moved, for: worktreeId)
         return true
     }
 
@@ -1184,7 +1202,7 @@ final class AppModel {
         switch dragged.scope {
         case .projects: persistProjectOrder()
         case .worktrees(let projectId): persistWorktreeOrder(for: projectId)
-        case .tabs(let worktreeId): persistTabs(for: worktreeId)
+        case .tabs(let worktreeId): workspacePersistTabs(for: worktreeId)
         }
     }
 
@@ -1197,13 +1215,15 @@ final class AppModel {
     /// percorso closeTab singolo: le conferme markdown-dirty appaiono una
     /// alla volta e un annulla lascia la tab aperta.
     func closeOtherTabs(_ tabId: UUID, in worktree: Worktree) {
-        let ids = (tabs[worktree.id] ?? []).map(\.id).filter { $0 != tabId }
+        let ids = workspaceCoordinator.legacyTabs(for: worktree.id)
+            .map(\.id).filter { $0 != tabId }
         for id in ids { closeTab(id, in: worktree) }
     }
 
     /// Chiude le tab a destra di quella indicata (stesso percorso singolo).
-    func closeTabsToRight(of tabId: UUID, in worktree: Worktree) {
-        guard let list = tabs[worktree.id],
+    func workspaceCloseTabsToRight(of tabId: UUID, in worktree: Worktree) {
+        let list = workspaceCoordinator.legacyTabs(for: worktree.id)
+        guard
               let index = list.firstIndex(where: { $0.id == tabId }) else { return }
         for id in list.suffix(from: index + 1).map(\.id) {
             closeTab(id, in: worktree)
@@ -1212,17 +1232,21 @@ final class AppModel {
 
     /// ⌘n: attiva la tab n del worktree selezionato (9 = ultima). Out of
     /// range = no-op.
-    func selectTab(number: Int) {
+    func workspaceSelectTab(number: Int) {
         guard let worktree = selectedWorktree,
-              let list = tabs[worktree.id],
-              let index = TabOrdering.selectionIndex(number: number, count: list.count)
+              let index = TabOrdering.selectionIndex(
+                  number: number,
+                  count: workspaceCoordinator.legacyTabs(for: worktree.id).count
+              )
         else { return }
+        let list = workspaceCoordinator.legacyTabs(for: worktree.id)
         activateTab(list[index].id, in: worktree.id)
     }
 
     /// ⌃Tab / ⌃⇧Tab: cicla le tab del worktree selezionato con wrap-around.
-    func cycleTab(forward: Bool) {
-        guard let worktree = selectedWorktree, let list = tabs[worktree.id] else { return }
+    func workspaceCycleTab(forward: Bool) {
+        guard let worktree = selectedWorktree else { return }
+        let list = workspaceCoordinator.legacyTabs(for: worktree.id)
         let current = list.firstIndex { $0.id == activeTab(for: worktree.id)?.id }
         guard let index = TabOrdering.cycledIndex(
             current: current, forward: forward, count: list.count
@@ -1230,18 +1254,19 @@ final class AppModel {
         activateTab(list[index].id, in: worktree.id)
     }
 
-    func splitCurrent(_ axis: SplitAxis) {
+    func workspaceSplitCurrent(_ axis: SplitAxis) {
         guard let worktree = selectedWorktree,
               let tab = activeTab(for: worktree.id),
               let target = tab.leafIds.first else { return }
-        split(paneId: target, axis: axis)
+        workspaceSplit(paneId: target, axis: axis)
     }
 
     /// Tab (se esiste) che contiene paneId in uno qualsiasi dei worktree aperti.
-    func tabContaining(paneId: UUID) -> (worktree: Worktree, tab: LegacyWorkspaceTab, index: Int)? {
+    func workspaceTabContaining(paneId: UUID) -> (worktree: Worktree, tab: LegacyWorkspaceTab, index: Int)? {
         for worktree in worktrees.values.flatMap({ $0 }) {
-            if let idx = tabs[worktree.id]?.firstIndex(where: { $0.leafIds.contains(paneId) }) {
-                return (worktree, tabs[worktree.id]![idx], idx)
+            let tabs = workspaceCoordinator.legacyTabs(for: worktree.id)
+            if let idx = tabs.firstIndex(where: { $0.leafIds.contains(paneId) }) {
+                return (worktree, tabs[idx], idx)
             }
         }
         return nil
@@ -1249,22 +1274,21 @@ final class AppModel {
 
     /// Splits the tab containing the given pane along the requested axis.
     @discardableResult
-    func split(
+    func workspaceSplit(
         paneId: UUID,
         axis: SplitAxis,
         newPaneId: UUID = UUID(),
         placement: SplitPlacement = .after,
         persist: Bool = true
     ) -> Bool {
-        guard let tuple = tabContaining(paneId: paneId),
+        guard let tuple = workspaceTabContaining(paneId: paneId),
               let tree = tuple.tab.terminalTree,
               tree.leafIds.contains(paneId) else { return false }
-        tabs[tuple.worktree.id]?[tuple.index].content = .terminal(
-            tree.splitting(
-                leaf: paneId, axis: axis, newLeaf: newPaneId, placement: placement
-            )
-        )
-        if persist { persistTabs(for: tuple.worktree.id) }
+        var tabs = workspaceCoordinator.legacyTabs(for: tuple.worktree.id)
+        tabs[tuple.index].content = .terminal(
+            tree.splitting(leaf: paneId, axis: axis, newLeaf: newPaneId, placement: placement))
+        workspaceCoordinator.setLegacyTabs(tabs, for: tuple.worktree.id)
+        if persist { workspacePersistTabs(for: tuple.worktree.id) }
         return true
     }
 
@@ -1299,34 +1323,41 @@ final class AppModel {
         }
     }
 
-    private func rollbackCreatedPane(_ paneId: UUID, tabId: UUID, in worktreeId: UUID) {
-        guard let index = tabs[worktreeId]?.firstIndex(where: { $0.id == tabId }),
-              let tree = tabs[worktreeId]?[index].terminalTree,
+    private func workspaceRollbackCreatedPane(_ paneId: UUID, tabId: UUID, in worktreeId: UUID) {
+        var tabs = workspaceCoordinator.legacyTabs(for: worktreeId)
+        guard let index = tabs.firstIndex(where: { $0.id == tabId }),
+              let tree = tabs[index].terminalTree,
               tree.leafIds.contains(paneId) else { return }
         if let remaining = tree.removing(leaf: paneId) {
-            tabs[worktreeId]?[index].content = .terminal(remaining)
+            tabs[index].content = .terminal(remaining)
         } else {
-            tabs[worktreeId]?.remove(at: index)
-            if activeTabId[worktreeId] == tabId {
-                activeTabId[worktreeId] = tabs[worktreeId]?.last?.id
+            tabs.remove(at: index)
+            if workspaceCoordinator.legacyActiveTabID(for: worktreeId) == tabId {
+                workspaceCoordinator.setLegacyActiveTabID(tabs.last?.id, for: worktreeId)
             }
         }
-        paneCaches[worktreeId]?.prune(keeping: liveLeafIds(for: worktreeId))
+        workspaceCoordinator.setLegacyTabs(tabs, for: worktreeId)
+        workspaceCoordinator.legacyPaneCache(for: worktreeId).prune(
+            keeping: workspaceLiveLeafIds(for: worktreeId))
     }
 
-    private func rollbackCreatedLeaf(_ paneId: UUID) {
-        guard let target = tabContaining(paneId: paneId),
+    private func workspaceRollbackCreatedLeaf(_ paneId: UUID) {
+        guard let target = workspaceTabContaining(paneId: paneId),
               let tree = target.tab.terminalTree else { return }
         if let remaining = tree.removing(leaf: paneId) {
-            tabs[target.worktree.id]?[target.index].content = .terminal(remaining)
+            var tabs = workspaceCoordinator.legacyTabs(for: target.worktree.id)
+            tabs[target.index].content = .terminal(remaining)
+            workspaceCoordinator.setLegacyTabs(tabs, for: target.worktree.id)
         } else {
-            tabs[target.worktree.id]?.remove(at: target.index)
-            if activeTabId[target.worktree.id] == target.tab.id {
-                activeTabId[target.worktree.id] = tabs[target.worktree.id]?.last?.id
+            var tabs = workspaceCoordinator.legacyTabs(for: target.worktree.id)
+            tabs.remove(at: target.index)
+            if workspaceCoordinator.legacyActiveTabID(for: target.worktree.id) == target.tab.id {
+                workspaceCoordinator.setLegacyActiveTabID(tabs.last?.id, for: target.worktree.id)
             }
+            workspaceCoordinator.setLegacyTabs(tabs, for: target.worktree.id)
         }
-        paneCaches[target.worktree.id]?.prune(
-            keeping: liveLeafIds(for: target.worktree.id)
+        workspaceCoordinator.legacyPaneCache(for: target.worktree.id).prune(
+            keeping: workspaceLiveLeafIds(for: target.worktree.id)
         )
     }
 
@@ -1334,36 +1365,33 @@ final class AppModel {
     /// spazio. Il teardown (stop PTY, unregister proxy) avviene tramite
     /// SplitViewRenderer.pruneCache + PtyTerminalPane.onDisappear, la stessa
     /// via già usata quando si cambia tab — nessuna nuova logica qui.
-    func closePane(paneId: UUID) {
-        guard let tuple = tabContaining(paneId: paneId),
+    func workspaceClosePane(paneId: UUID) {
+        guard let tuple = workspaceTabContaining(paneId: paneId),
               let tree = tuple.tab.terminalTree,
               let newTree = tree.removing(leaf: paneId) else { return }
         deleteAgentSessionRefs(paneIds: [paneId])
-        tabs[tuple.worktree.id]?[tuple.index].content = .terminal(newTree)
-        persistTabs(for: tuple.worktree.id)
+        var tabs = workspaceCoordinator.legacyTabs(for: tuple.worktree.id)
+        tabs[tuple.index].content = .terminal(newTree)
+        workspaceCoordinator.setLegacyTabs(tabs, for: tuple.worktree.id)
+        workspacePersistTabs(for: tuple.worktree.id)
     }
 
     // MARK: - Pane controller caches (una per worktree)
 
-    private var paneCaches: [UUID: TerminalPaneCache] = [:]
-
-    func paneCache(for worktreeId: UUID) -> TerminalPaneCache {
-        if let cache = paneCaches[worktreeId] { return cache }
-        let cache = TerminalPaneCache()
-        paneCaches[worktreeId] = cache
-        return cache
+    func workspacePaneCache(for worktreeId: UUID) -> TerminalPaneCache {
+        workspaceCoordinator.legacyPaneCache(for: worktreeId)
     }
 
     /// Tutti i pane vivi nei tab del worktree — set di pruning per gli host.
-    func liveLeafIds(for worktreeId: UUID) -> Set<UUID> {
-        Set((tabs[worktreeId] ?? []).flatMap(\.leafIds))
+    func workspaceLiveLeafIds(for worktreeId: UUID) -> Set<UUID> {
+        Set(workspaceCoordinator.legacyTabs(for: worktreeId).flatMap(\.leafIds))
     }
 
     /// True se il pane può essere affiancato al terminale corrente: stesso
     /// worktree del tab attivo, non già nel tab attivo, tab attivo terminale.
-    func canAdoptPane(_ paneId: UUID) -> Bool {
+    func workspaceCanAdoptPane(_ paneId: UUID) -> Bool {
         guard let worktree = selectedWorktree,
-              let source = tabContaining(paneId: paneId),
+              let source = workspaceTabContaining(paneId: paneId),
               source.worktree.id == worktree.id,
               let active = activeTab(for: worktree.id),
               active.terminalTree != nil,
@@ -1375,32 +1403,38 @@ final class AppModel {
     /// attivo. Il tab sorgente svuotato viene rimosso direttamente (niente
     /// closeTab: il pane è vivo altrove, i suoi session ref non vanno toccati).
     func adoptPane(_ paneId: UUID) {
-        guard canAdoptPane(paneId),
+        guard workspaceCanAdoptPane(paneId),
               let worktree = selectedWorktree,
-              let source = tabContaining(paneId: paneId),
+              let source = workspaceTabContaining(paneId: paneId),
               let active = activeTab(for: worktree.id),
               let destTree = active.terminalTree,
               let anchor = destTree.leafIds.first,
               let sourceTree = source.tab.terminalTree else { return }
 
         if let remaining = sourceTree.removing(leaf: paneId) {
-            tabs[worktree.id]?[source.index].content = .terminal(remaining)
+            var tabs = workspaceCoordinator.legacyTabs(for: worktree.id)
+            tabs[source.index].content = .terminal(remaining)
+            workspaceCoordinator.setLegacyTabs(tabs, for: worktree.id)
         } else {
-            tabs[worktree.id]?.remove(at: source.index)
+            var tabs = workspaceCoordinator.legacyTabs(for: worktree.id)
+            tabs.remove(at: source.index)
+            workspaceCoordinator.setLegacyTabs(tabs, for: worktree.id)
         }
-        guard let destIndex = tabs[worktree.id]?.firstIndex(where: { $0.id == active.id }) else { return }
-        tabs[worktree.id]?[destIndex].content =
+        var tabs = workspaceCoordinator.legacyTabs(for: worktree.id)
+        guard let destIndex = tabs.firstIndex(where: { $0.id == active.id }) else { return }
+        tabs[destIndex].content =
             .terminal(destTree.splitting(leaf: anchor, axis: .horizontal, newLeaf: paneId))
-        persistTabs(for: worktree.id)
+        workspaceCoordinator.setLegacyTabs(tabs, for: worktree.id)
+        workspacePersistTabs(for: worktree.id)
     }
 
     /// Chiude un terminale: se è l'unico pane del tab chiude l'intera tab.
     func closeTerminal(paneId: UUID) {
-        guard let target = tabContaining(paneId: paneId) else { return }
+        guard let target = workspaceTabContaining(paneId: paneId) else { return }
         if target.tab.leafIds.count <= 1 {
             closeTab(target.tab.id, in: target.worktree)
         } else {
-            closePane(paneId: paneId)
+            workspaceClosePane(paneId: paneId)
         }
     }
 
@@ -1409,26 +1443,29 @@ final class AppModel {
     private func removePaneForControl(_ paneId: UUID) -> (
         worktreeId: UUID, tabs: [LegacyWorkspaceTab], activeTabId: UUID?
     )? {
-        guard let target = tabContaining(paneId: paneId),
-              let tree = target.tab.terminalTree,
-              let currentTabs = tabs[target.worktree.id] else { return nil }
-        let previousActiveTabId = activeTabId[target.worktree.id]
+        guard let target = workspaceTabContaining(paneId: paneId),
+              let tree = target.tab.terminalTree else { return nil }
+        var currentTabs = workspaceCoordinator.legacyTabs(for: target.worktree.id)
+        let previousActiveTabId = workspaceCoordinator.legacyActiveTabID(
+            for: target.worktree.id)
         if target.tab.leafIds.count == 1 {
-            tabs[target.worktree.id]?.remove(at: target.index)
+            currentTabs.remove(at: target.index)
             if previousActiveTabId == target.tab.id {
-                activeTabId[target.worktree.id] = tabs[target.worktree.id]?.last?.id
+                workspaceCoordinator.setLegacyActiveTabID(
+                    currentTabs.last?.id, for: target.worktree.id)
             }
         } else if let remaining = tree.removing(leaf: paneId) {
-            tabs[target.worktree.id]?[target.index].content = .terminal(remaining)
+            currentTabs[target.index].content = .terminal(remaining)
         } else {
             return nil
         }
+        workspaceCoordinator.setLegacyTabs(currentTabs, for: target.worktree.id)
         return (target.worktree.id, currentTabs, previousActiveTabId)
     }
 
     private func persistControlTabs(for worktreeId: UUID) async throws {
-        let list = tabs[worktreeId] ?? []
-        let active = activeTabId[worktreeId]
+        let list = workspaceCoordinator.legacyTabs(for: worktreeId)
+        let active = workspaceCoordinator.legacyActiveTabID(for: worktreeId)
         let previous = tabPersistenceTasks[worktreeId]
         let persister = controlTabPersister
         let store = store
@@ -1464,11 +1501,12 @@ final class AppModel {
         return await task.value
     }
 
-    func persistTabs(for worktreeId: UUID) {
-        paneCaches[worktreeId]?.prune(keeping: liveLeafIds(for: worktreeId))
+    func workspacePersistTabs(for worktreeId: UUID) {
+        workspaceCoordinator.legacyPaneCache(for: worktreeId).prune(
+            keeping: workspaceLiveLeafIds(for: worktreeId))
         guard let store else { return }
-        let list = tabs[worktreeId] ?? []
-        let active = activeTabId[worktreeId]
+        let list = workspaceCoordinator.legacyTabs(for: worktreeId)
+        let active = workspaceCoordinator.legacyActiveTabID(for: worktreeId)
         let previous = tabPersistenceTasks[worktreeId]
         tabPersistenceTasks[worktreeId] = Task {
             _ = await previous?.value
@@ -1497,7 +1535,7 @@ final class AppModel {
     /// (AppDelegate). I pane non registrati (già chiusi) tornano nil da
     /// snapshot e sono saltati; saveScrollback salta i blob vuoti.
     func flushLiveScrollback() async {
-        for target in scrollbackFlushTargets(tabs: tabs) {
+        for target in scrollbackFlushTargets(tabs: workspaceCoordinator.legacyStore.tabs) {
             if let data = await paneRegistry.snapshot(paneId: target.paneId) {
                 await saveScrollback(
                     worktreeId: target.worktreeId, paneId: target.paneId, data: data)
@@ -1521,7 +1559,7 @@ final class AppModel {
     private func saveAgentSessionRef(paneId: UUID, sessionRef: String) {
         guard let store,
               let agentId = agentActivity.agentId(paneId: paneId),
-              let tuple = tabContaining(paneId: paneId) else {
+              let tuple = workspaceTabContaining(paneId: paneId) else {
             sessionRestoreLogger.warning("session ref for unknown pane \(paneId.uuidString, privacy: .public) dropped")
             return
         }
@@ -1571,10 +1609,11 @@ final class AppModel {
 
     /// Select a worktree tab from the Agents panel. No-op when the tab is gone.
     func focusTab(tabId: UUID, in worktree: Worktree) {
-        guard (tabs[worktree.id] ?? []).contains(where: { $0.id == tabId }) else { return }
+        guard workspaceCoordinator.legacyTabs(for: worktree.id)
+            .contains(where: { $0.id == tabId }) else { return }
         selectedWorktree = worktree
-        activeTabId[worktree.id] = tabId
-        persistTabs(for: worktree.id)
+        workspaceCoordinator.setLegacyActiveTabID(tabId, for: worktree.id)
+        workspacePersistTabs(for: worktree.id)
     }
 
     /// History rows for the worktree's chat menu, newest first.
@@ -1602,8 +1641,8 @@ final class AppModel {
 
     /// Focus the tab already showing this conversation, or open it in a new
     /// detached tab.
-    func openChatSession(sessionId: String, in worktree: Worktree) {
-        if let existing = (tabs[worktree.id] ?? []).first(where: {
+    func openExistingChatSession(sessionId: String, in worktree: Worktree) {
+        if let existing = workspaceCoordinator.legacyTabs(for: worktree.id).first(where: {
             $0.chatSessionId == sessionId
         }) {
             focusTab(tabId: existing.id, in: worktree)
@@ -1618,17 +1657,16 @@ final class AppModel {
             title: trimmed.isEmpty ? "Chat" : trimmed,
             content: .chat(agentId: agentId, sessionId: sessionId))
         selectedWorktree = worktree
-        tabs[worktree.id, default: []].append(tab)
-        activeTabId[worktree.id] = tab.id
+        workspaceCoordinator.appendLegacyTab(tab, to: worktree.id, activate: true)
         // Identity without status: a detached chat has no process to report on.
         agentActivity.registerAgentId(paneId: tab.id, agentId: agentId)
-        persistTabs(for: worktree.id)
+        workspacePersistTabs(for: worktree.id)
         _ = chatController(for: tab, in: worktree, startDetached: true)
     }
 
     /// Deletes a conversation and closes the tab rendering it, if any.
     func deleteChatSession(sessionId: String, in worktree: Worktree) {
-        if let open = (tabs[worktree.id] ?? []).first(where: {
+        if let open = workspaceCoordinator.legacyTabs(for: worktree.id).first(where: {
             $0.chatSessionId == sessionId
         }) {
             closeTab(open.id, in: worktree)
@@ -1646,10 +1684,9 @@ final class AppModel {
         let tab = LegacyWorkspaceTab(id: UUID(), title: "Chat",
                                content: .chat(agentId: agentId, sessionId: sessionId))
         selectedWorktree = worktree
-        tabs[worktree.id, default: []].append(tab)
-        activeTabId[worktree.id] = tab.id
+        workspaceCoordinator.appendLegacyTab(tab, to: worktree.id, activate: true)
         agentActivity.agentSpawned(paneId: tab.id, agentId: agentId, now: Date())
-        persistTabs(for: worktree.id)
+        workspacePersistTabs(for: worktree.id)
         _ = chatController(for: tab, in: worktree, startNewConversation: true)
         return tab
     }
@@ -1716,14 +1753,14 @@ final class AppModel {
     /// Funnel unico per tutti i canali di apertura (cmd+click, drop, ⌘O).
     /// Dedup per fileURL: se il file è già aperto nel worktree attiva quella tab.
     @discardableResult
-    func openFileTab(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
+    func openDocument(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
         let url = fileURL.standardizedFileURL
-        if let existing = tabs[worktree.id]?.first(where: {
+        if let existing = workspaceCoordinator.legacyTabs(for: worktree.id).first(where: {
             $0.fileURL?.standardizedFileURL == url
         }) {
             selectedWorktree = worktree
-            activeTabId[worktree.id] = existing.id
-            persistTabs(for: worktree.id)
+            workspaceCoordinator.setLegacyActiveTabID(existing.id, for: worktree.id)
+            workspacePersistTabs(for: worktree.id)
             return existing
         }
         do {
@@ -1740,9 +1777,8 @@ final class AppModel {
                 codeDocuments[tab.id] = document
             }
             selectedWorktree = worktree
-            tabs[worktree.id, default: []].append(tab)
-            activeTabId[worktree.id] = tab.id
-            persistTabs(for: worktree.id)
+            workspaceCoordinator.appendLegacyTab(tab, to: worktree.id, activate: true)
+            workspacePersistTabs(for: worktree.id)
             return tab
         } catch {
             lastError = "Could not open \(url.lastPathComponent): \(error.localizedDescription)"
@@ -1753,12 +1789,12 @@ final class AppModel {
 
     @discardableResult
     func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
-        openFileTab(fileURL: fileURL, in: worktree)
+        openDocument(fileURL: fileURL, in: worktree)
     }
 
     func openFileReference(_ raw: String, in worktree: Worktree) {
         if let fileURL = FileLink.resolve(raw, worktreePath: worktree.path) {
-            openFileTab(fileURL: fileURL, in: worktree)
+            openDocument(fileURL: fileURL, in: worktree)
         } else if let url = URL(string: raw) {
             NSWorkspace.shared.open(url)
         }
@@ -1815,7 +1851,7 @@ final class AppModel {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        openFileTab(fileURL: url, in: worktree)
+        openDocument(fileURL: url, in: worktree)
     }
 
     func openMarkdownFilePanel() {
@@ -2097,11 +2133,11 @@ final class AppModel {
             ) as? Bool
         ) else { return }
         guard let worktree = worktreeContaining(paneId: paneId),
-              let idx = tabs[worktree.id]?.firstIndex(where: {
+              let idx = workspaceCoordinator.legacyTabs(for: worktree.id).firstIndex(where: {
                   $0.activityPaneIds.contains(paneId)
               })
         else { return }
-        let tab = tabs[worktree.id]![idx]
+        let tab = workspaceCoordinator.legacyTabs(for: worktree.id)[idx]
         guard tab.titleIsAutoNamed,
               let tabAgentId = agentActivity.paneAgents[paneId]
         else { return }
@@ -2185,12 +2221,14 @@ final class AppModel {
 
     private func isSelectedWorktreeContaining(paneId: UUID) -> Bool {
         guard let sel = selectedWorktree else { return false }
-        return (tabs[sel.id] ?? []).contains { $0.leafIds.contains(paneId) }
+        return workspaceCoordinator.legacyTabs(for: sel.id)
+            .contains { $0.leafIds.contains(paneId) }
     }
 
     private func worktreeContaining(paneId: UUID) -> Worktree? {
         worktrees.values.flatMap { $0 }.first { wt in
-            (tabs[wt.id] ?? []).contains { $0.activityPaneIds.contains(paneId) }
+            workspaceCoordinator.legacyTabs(for: wt.id)
+                .contains { $0.activityPaneIds.contains(paneId) }
         }
     }
 
@@ -2221,7 +2259,7 @@ final class AppModel {
 
     @discardableResult
     private func focusPane(paneId: UUID) async -> FocusPaneOutcome {
-        guard let target = tabContaining(paneId: paneId) else { return .notFocused }
+        guard let target = workspaceTabContaining(paneId: paneId) else { return .notFocused }
         // Cancellation is checked before the prologue, not just inside the wait
         // loop: selecting a worktree and calling activateApplication() steal the
         // user's window focus, and doing that for a request whose caller has
@@ -2237,7 +2275,7 @@ final class AppModel {
         let deadline = clock.now.advanced(by: .milliseconds(registrationTimeoutMs))
         while clock.now < deadline {
             guard !Task.isCancelled else { return .cancelled }
-            if paneCache(for: target.worktree.id).focus(paneId: paneId) { return .focused }
+            if workspacePaneCache(for: target.worktree.id).focus(paneId: paneId) { return .focused }
             do {
                 try await Task.sleep(for: .milliseconds(25))
             } catch {
@@ -2245,7 +2283,8 @@ final class AppModel {
             }
         }
         guard !Task.isCancelled else { return .cancelled }
-        return paneCache(for: target.worktree.id).focus(paneId: paneId) ? .focused : .notFocused
+        return workspacePaneCache(for: target.worktree.id).focus(paneId: paneId)
+            ? .focused : .notFocused
     }
 
     /// tillerctl ships next to the app binary in DEBUG dev loops; fall back to PATH.

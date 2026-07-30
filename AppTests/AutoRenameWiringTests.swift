@@ -22,7 +22,7 @@ struct AutoRenameWiringTests {
         controller.onStatusChange?(.needsInput)
         await Task.yield()
 
-        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == originalTitle)
     }
 
@@ -33,7 +33,7 @@ struct AutoRenameWiringTests {
         controller.onStatusChange?(.error)
         await Task.yield()
 
-        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == originalTitle)
     }
 
@@ -45,7 +45,7 @@ struct AutoRenameWiringTests {
         controller.onStatusChange?(.needsInput)
         await Task.yield()
 
-        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == "Kept by user")
     }
 
@@ -54,7 +54,7 @@ struct AutoRenameWiringTests {
 
         model.applyAutoTitle(tab.id, in: worktree.id, title: "Fix login bug")
 
-        let updated = model.tabs[worktree.id]!.first { $0.id == tab.id }!
+        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == "Fix login bug")
         #expect(updated.titleIsAutoNamed == true)
     }
