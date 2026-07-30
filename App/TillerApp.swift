@@ -54,14 +54,17 @@ struct TillerApp: App {
                 .onChange(of: appearanceRaw) { _, _ in applyAppearance() }
         }
         .commands {
+            WorkspaceMenuCommands()
             // Nel menu File PRIMA di Close: performKeyEquivalent trova
             // "Chiudi tab" (⌘W) prima del Close di sistema, quindi ⌘W
             // chiude la tab, non la finestra.
             CommandGroup(after: .newItem) {
                 Button("New Tab") { model.newShellTabInSelected() }
                     .keyboardShortcut("t", modifiers: .command)
-                Button("Close Tab") { model.closeActiveTab() }
-                    .keyboardShortcut("w", modifiers: .command)
+                if !WorkspaceEngineGate.isEnabled {
+                    Button("Close Tab") { model.closeActiveTab() }
+                        .keyboardShortcut("w", modifiers: .command)
+                }
                 Button("Save") { model.saveActiveDocument() }
                     .keyboardShortcut("s", modifiers: .command)
                 Button("Open File…") { model.openFilePanel() }
@@ -72,21 +75,6 @@ struct TillerApp: App {
                     _ = model.restoreLaunchSnapshot()
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
-            }
-            CommandMenu("Tab") {
-                    Button("Next Tab") { model.cycleTab(forward: true) }
-                    .keyboardShortcut(.tab, modifiers: .control)
-                    Button("Previous Tab") { model.cycleTab(forward: false) }
-                    .keyboardShortcut(.tab, modifiers: [.control, .shift])
-                Divider()
-                ForEach(1...9, id: \.self) { number in
-                    Button(number == 9 ? "Last Tab" : "Tab \(number)") {
-                        model.selectTab(number: number)
-                    }
-                    .keyboardShortcut(
-                        KeyEquivalent(Character("\(number)")), modifiers: .command
-                    )
-                }
             }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { model.openSettings() }
