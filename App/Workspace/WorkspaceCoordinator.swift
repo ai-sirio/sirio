@@ -157,17 +157,37 @@ final class WorkspaceCoordinator {
 
         let newGroup = PaneGroupID()
         let newSplit = SplitID()
-        let content: SplitContentPayload
-        if let sourceTabID {
-            content = .existingTab(sourceTabID)
+        let existingDocumentTabID: WorkspaceTabID? = {
+            guard let prepared,
+                  case .document(let documentID, _) = prepared.tab.content else { return nil }
+            return currentLayout.allTabs.first {
+                guard case .document(let existingID, _) = $0.content else { return false }
+                return existingID == documentID
+            }?.id
+        }()
+        if existingDocumentTabID != nil, let prepared, let adapter {
+            await adapter.dispose(prepared: prepared)
+        }
+        let selectedExistingTabID = sourceTabID ?? existingDocumentTabID
+        let command: WorkspaceLayoutCommand
+        if let selectedExistingTabID {
+            if currentLayout.groupContaining(tab: selectedExistingTabID) == anchor {
+                command = .splitGroup(
+                    anchor: anchor, placement: placement, newGroup: newGroup,
+                    newSplit: newSplit, content: .existingTab(selectedExistingTabID))
+            } else {
+                command = .moveTab(
+                    selectedExistingTabID,
+                    to: .newSplit(anchor: anchor, placement: placement,
+                                   newGroup: newGroup, newSplit: newSplit))
+            }
         } else if let prepared {
-            content = .newTab(prepared.tab)
+            command = .splitGroup(
+                anchor: anchor, placement: placement, newGroup: newGroup,
+                newSplit: newSplit, content: .newTab(prepared.tab))
         } else {
             return
         }
-        let command = WorkspaceLayoutCommand.splitGroup(
-            anchor: anchor, placement: placement, newGroup: newGroup,
-            newSplit: newSplit, content: content)
 
         // Step 5: apply the pure Core command.
         guard case .success(let transition) = WorkspaceLayoutEngine.apply(command, to: currentLayout) else {
@@ -186,7 +206,7 @@ final class WorkspaceCoordinator {
         }
         publish(transition, worktreeID: worktree.id)
 
-        if let prepared, let adapter {
+        if let prepared, let adapter, existingDocumentTabID == nil {
             // Step 8: attach/publish the prepared resource only after commit.
             let host = adapter.makeHost(tab: prepared.tab, worktree: worktree)
             registry.adopt(host, tab: prepared.tab, generation: prepared.generationID)
