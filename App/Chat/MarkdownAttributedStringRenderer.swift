@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TillerCore
 import TillerTerminal
 
 /// Converts a markdown string to an `NSAttributedString` styled to match

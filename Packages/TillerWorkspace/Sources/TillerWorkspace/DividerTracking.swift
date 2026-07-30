@@ -66,9 +66,11 @@ public final class DividerTracking {
         // `total` is the available track length supplied by the split view;
         // the static helper takes the full length including the divider.
         let fullLength = total + thickness
+        let dragSignpost = SignpostMetrics.beginInterval("workspaceDragFrame")
         let fraction = Self.fraction(
             forPosition: position, total: fullLength, thickness: thickness
         )
+        SignpostMetrics.endInterval("workspaceDragFrame", dragSignpost)
         currentFraction = Self.clamp(fraction, total: total, minimum: minimum)
         announcedBoundary = nil
     }

@@ -1,6 +1,5 @@
 import os
 import Foundation
-import TillerCore
 
 /// os_signpost instrumentation for the terminal pipeline, gated by
 /// `UserDefaults.standard.bool(forKey: "debug.signpostMetrics")`.

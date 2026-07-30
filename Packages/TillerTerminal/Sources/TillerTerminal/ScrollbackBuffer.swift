@@ -1,4 +1,5 @@
 import Foundation
+import TillerCore
 
 /// Fixed-capacity byte ring buffer: appends raw PTY output and keeps only
 /// the last `capacity` bytes. Uses explicit `head` + `count` semantics into

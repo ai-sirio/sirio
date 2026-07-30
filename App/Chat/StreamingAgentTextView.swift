@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TillerCore
 import TillerTerminal
 
 struct StreamingAgentTextView: NSViewRepresentable {

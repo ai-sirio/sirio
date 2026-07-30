@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TillerCore
 import TillerTerminal
 
 /// NSTextView subclass owning the code-block header overlays. Headers are
