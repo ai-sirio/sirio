@@ -26,22 +26,10 @@ public enum ControlListing {
             }
     }
 
-    public static func paneRows(
-        tabs: [LegacyWorkspaceTab],
-        activeTabId: UUID?,
-        agentIdForPane: (UUID) -> String?,
-        titleForPane: (UUID) -> String?
-    ) -> [[String: String]] {
-        tabs.flatMap { tab in
-            tab.leafIds.map { paneId in
-                [
-                    "id": paneId.uuidString,
-                    "tab": tab.title,
-                    "title": titleForPane(paneId) ?? "",
-                    "agent": agentIdForPane(paneId) ?? "",
-                    "active": tab.id == activeTabId ? "true" : "false",
-                ]
-            }
-        }
+    /// Returns already-resolved panel rows unchanged. Resolution belongs to
+    /// the caller because legacy panes and universal-engine terminals have
+    /// different identity sources.
+    public static func paneRows(_ rows: [[String: String]]) -> [[String: String]] {
+        rows
     }
 }

@@ -21,7 +21,8 @@ struct WorkspaceCoordinatorTests {
         await coordinator.restore(worktree: second)
 
         let pending = Task { await coordinator.requestSplit(
-            anchor: anchor(in: first), placement: .right, choice: .newTerminal, in: first) }
+            anchor: anchor(in: first), placement: .right,
+            choice: .newTerminal(command: nil), in: first) }
         await preparation.waitUntilStarted()
         await coordinator.handle(.activateGroup(anchor(in: second)), in: second)
 
@@ -40,7 +41,8 @@ struct WorkspaceCoordinatorTests {
         let before = coordinator.layouts[worktree.id]
 
         let pending = Task { await coordinator.requestSplit(
-            anchor: anchor(in: worktree), placement: .right, choice: .newTerminal, in: worktree) }
+            anchor: anchor(in: worktree), placement: .right,
+            choice: .newTerminal(command: nil), in: worktree) }
         await preparation.waitUntilStarted()
         await coordinator.handle(.activateGroup(anchor(in: worktree)), in: worktree)
         await preparation.release()
@@ -60,7 +62,8 @@ struct WorkspaceCoordinatorTests {
         let before = coordinator.layouts[worktree.id]
 
         await coordinator.requestSplit(
-            anchor: anchor(in: worktree), placement: .right, choice: .newTerminal, in: worktree)
+            anchor: anchor(in: worktree), placement: .right,
+            choice: .newTerminal(command: nil), in: worktree)
 
         #expect(coordinator.layouts[worktree.id] == before)
         #expect(coordinator.lastFocusIntent == .none)
@@ -76,7 +79,8 @@ struct WorkspaceCoordinatorTests {
         let before = coordinator.layouts[worktree.id]
 
         await coordinator.requestSplit(
-            anchor: anchor(in: worktree), placement: .right, choice: .newTerminal, in: worktree)
+            anchor: anchor(in: worktree), placement: .right,
+            choice: .newTerminal(command: nil), in: worktree)
 
         #expect(coordinator.layouts[worktree.id] == before)
         #expect(coordinator.revisions[worktree.id] == 0)
@@ -93,7 +97,8 @@ struct WorkspaceCoordinatorTests {
         #expect(coordinator.layouts[worktree.id]?.group(anchor(in: worktree)) != nil)
 
         await coordinator.requestSplit(
-            anchor: anchor(in: worktree), placement: .right, choice: .newTerminal, in: worktree)
+            anchor: anchor(in: worktree), placement: .right,
+            choice: .newTerminal(command: nil), in: worktree)
 
         let events = await persistence.events
         #expect(await adapter.prepareCount == 1)
@@ -112,7 +117,7 @@ struct WorkspaceCoordinatorTests {
         let groupID = before.activeGroupID
 
         await coordinator.requestNewTab(
-            into: groupID, choice: .newTerminal, in: worktree)
+            into: groupID, choice: .newTerminal(command: nil), in: worktree)
 
         let after = coordinator.layouts[worktree.id]!
         #expect(after.orderedGroupIDs == [groupID])
@@ -134,7 +139,7 @@ struct WorkspaceCoordinatorTests {
         let existingTabID = before.group(groupID)!.tabs[0].id
 
         await coordinator.requestNewTab(
-            into: groupID, choice: .newTerminal, in: worktree)
+            into: groupID, choice: .newTerminal(command: nil), in: worktree)
 
         let after = coordinator.layouts[worktree.id]!
         #expect(after.orderedGroupIDs == before.orderedGroupIDs)
@@ -181,6 +186,83 @@ struct WorkspaceCoordinatorTests {
         #expect(coordinator.legacyTabs(for: worktree.id).isEmpty)
     }
 
+    @Test func liveControlPaneIdIsNilBeforeTheHostHydrates() async {
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let adapter = TerminalContentAdapter()
+        let coordinator = makeCoordinator(
+            persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 6)
+        await coordinator.restore(worktree: worktree)
+
+        let prepared = try? await adapter.prepare(
+            request: .newTerminal(command: nil), worktree: worktree)
+        guard let prepared,
+              case .terminal(let contentID) = prepared.tab.content else {
+            Issue.record("expected a prepared terminal candidate")
+            return
+        }
+        #expect(coordinator.liveControlPaneId(contentID: contentID, in: worktree.id) == nil)
+        await adapter.dispose(prepared: prepared)
+    }
+
+    @Test func liveControlPaneIdMatchesTheCurrentGenerationAfterHydration() async {
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let adapter = TerminalContentAdapter()
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 7)
+        await coordinator.restore(worktree: worktree)
+        let groupID = coordinator.layouts[worktree.id]!.activeGroupID
+
+        await coordinator.requestNewTab(
+            into: groupID, choice: .newTerminal(command: nil), in: worktree)
+
+        let tab = coordinator.layouts[worktree.id]!.allTabs[0]
+        guard case .terminal(let contentID) = tab.content else {
+            Issue.record("expected a terminal tab")
+            return
+        }
+        #expect(coordinator.terminalContentID(for: tab.id, in: worktree.id) == contentID)
+        #expect(coordinator.liveControlPaneId(contentID: contentID, in: worktree.id)
+                == adapter.generation(for: tab.id)?.rawValue)
+    }
+
+    @Test func liveControlPaneIdIsNilForANonTerminalTab() async {
+        let chatID = ChatContentID(UUID().uuidString)
+        let tab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "chat", titleIsAutoNamed: true,
+            content: .chat(chatID))
+        let persistence = CoordinatorPersistence(restored: layoutWith(tab: tab))
+        let coordinator = WorkspaceCoordinator(
+            persistence: persistence,
+            registry: WorkspaceContentRegistry(),
+            adapters: [.terminal: TerminalContentAdapter()])
+        let worktree = fixtureWorktree(number: 1)
+        await coordinator.restore(worktree: worktree)
+
+        #expect(coordinator.liveControlPaneId(contentID: TerminalContentID(), in: worktree.id) == nil)
+    }
+
+    @Test func liveControlPaneIdIsNilForAContentIdInTheWrongWorktree() async {
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let coordinator = makeCoordinator(
+            persistence: persistence, adapter: TerminalContentAdapter())
+        let owner = fixtureWorktree(number: 9)
+        let other = fixtureWorktree(number: 0)
+        await coordinator.restore(worktree: owner)
+        await coordinator.restore(worktree: other)
+        let groupID = coordinator.layouts[owner.id]!.activeGroupID
+
+        await coordinator.requestNewTab(
+            into: groupID, choice: .newTerminal(command: nil), in: owner)
+        guard let tab = coordinator.layouts[owner.id]!.allTabs.first,
+              case .terminal(let contentID) = tab.content else {
+            Issue.record("expected a terminal tab")
+            return
+        }
+
+        #expect(coordinator.liveControlPaneId(contentID: contentID, in: other.id) == nil)
+    }
+
     /// `restore()` hydrates a restored terminal's PTY (LC-3), but must never
     /// create its host: a worktree with dozens of restored tabs would
     /// otherwise instantiate a host for every one of them regardless of
@@ -219,10 +301,12 @@ struct WorkspaceCoordinatorTests {
         await coordinator.restore(worktree: second)
 
         let firstCommit = Task { await coordinator.requestSplit(
-            anchor: anchor(in: first), placement: .right, choice: .newTerminal, in: first) }
+            anchor: anchor(in: first), placement: .right,
+            choice: .newTerminal(command: nil), in: first) }
         await persistence.waitUntilFirstCommitStarted()
         let secondCommit = Task { await coordinator.requestSplit(
-            anchor: anchor(in: second), placement: .right, choice: .newTerminal, in: second) }
+            anchor: anchor(in: second), placement: .right,
+            choice: .newTerminal(command: nil), in: second) }
         await secondCommit.value
 
         #expect(coordinator.layouts[second.id]?.orderedGroupIDs.count == 2)
@@ -250,7 +334,8 @@ struct WorkspaceCoordinatorTests {
         let worktree = fixtureWorktree(number: 1)
         await coordinator.restore(worktree: worktree)
         await coordinator.requestSplit(
-            anchor: anchor(in: worktree), placement: .right, choice: .newTerminal, in: worktree)
+            anchor: anchor(in: worktree), placement: .right,
+            choice: .newTerminal(command: nil), in: worktree)
         let closeCountBeforeQuit = await adapter.closeCount
 
         await coordinator.checkpointOnQuit()
@@ -303,7 +388,7 @@ struct WorkspaceCoordinatorTests {
     }
 
     private func makeCoordinator(persistence: CoordinatorPersistence,
-                                 adapter: CoordinatorAdapter) -> WorkspaceCoordinator {
+                                 adapter: WorkspaceContentAdapter) -> WorkspaceCoordinator {
         WorkspaceCoordinator(
             persistence: persistence,
             registry: WorkspaceContentRegistry(),

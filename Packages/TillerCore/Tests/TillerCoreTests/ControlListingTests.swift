@@ -42,11 +42,14 @@ import Foundation
                                              first: .leaf(id: paneA),
                                              second: .leaf(id: paneB)))
         let tab2 = LegacyWorkspaceTab(id: UUID(), title: "claude", tree: .leaf(id: paneC))
-        let rows = ControlListing.paneRows(
-            tabs: [tab1, tab2], activeTabId: tab2.id,
-            agentIdForPane: { $0 == paneC ? "claude" : nil },
-            titleForPane: { $0 == paneA ? "zsh" : nil }
-        )
+        let rows = ControlListing.paneRows([
+            ["id": paneA.uuidString, "tab": tab1.title, "title": "zsh",
+             "agent": "", "active": "false"],
+            ["id": paneB.uuidString, "tab": tab1.title, "title": "",
+             "agent": "", "active": "false"],
+            ["id": paneC.uuidString, "tab": tab2.title, "title": "",
+             "agent": "claude", "active": "true"],
+        ])
         #expect(rows.count == 3)
         #expect(rows[0]["id"] == paneA.uuidString)
         #expect(rows[0]["tab"] == "Shell 1")

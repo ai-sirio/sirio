@@ -73,7 +73,8 @@ struct WorkspaceContentAdapterTests {
         let adapter = TerminalContentAdapter(boundary: recorder.boundary)
         let tab = terminalTab()
         let worktree = fixtureWorktree()
-        let prepared = try? await adapter.prepare(request: .newTerminal, worktree: worktree)
+        let prepared = try? await adapter.prepare(
+            request: .newTerminal(command: nil), worktree: worktree)
 
         await adapter.close(tab: tab)
         await adapter.close(tab: tab)
@@ -133,7 +134,8 @@ struct WorkspaceContentAdapterTests {
     @Test func disposalOfAPreparedCandidateIsIdempotent() async {
         let recorder = AdapterBoundaryRecorder()
         let adapter = TerminalContentAdapter(boundary: recorder.boundary)
-        let prepared = try? await adapter.prepare(request: .newTerminal, worktree: fixtureWorktree())
+        let prepared = try? await adapter.prepare(
+            request: .newTerminal(command: nil), worktree: fixtureWorktree())
         guard let prepared else {
             Issue.record("the fake terminal boundary must prepare a candidate")
             return
