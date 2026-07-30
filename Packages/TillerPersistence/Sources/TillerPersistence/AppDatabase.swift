@@ -204,6 +204,54 @@ public final class AppDatabase: Sendable {
                 WHERE kind = 'chat' AND isActive = 1
                 """)
         }
+        migrator.registerMigration("v16") { db in
+            try db.create(table: "workspaceLayout") { t in
+                t.primaryKey("worktreeId", .text)
+                    .references("worktree", onDelete: .cascade)
+                t.column("schemaVersion", .integer).notNull()
+                t.column("revision", .integer).notNull()
+                t.column("payload", .text).notNull()
+                t.column("checksum", .text).notNull()
+                t.column("updatedAt", .datetime).notNull()
+            }
+            try db.create(table: "workspaceTab") { t in
+                t.primaryKey("id", .text)
+                t.column("worktreeId", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("title", .text).notNull()
+                t.column("titleIsAutoNamed", .boolean).notNull()
+                t.column("contentKind", .text).notNull()
+                t.column("contentId", .text).notNull()
+                t.column("viewStateJSON", .text)
+                t.column("viewStateVersion", .integer).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.uniqueKey(["worktreeId", "contentKind", "contentId"])
+            }
+            try db.create(table: "terminalContent") { t in
+                t.primaryKey("id", .text)
+                t.column("worktreeId", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("launchKind", .text).notNull()
+                t.column("agentId", .text)
+                t.column("commandJSON", .text)
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.create(table: "workspaceLayoutQuarantine") { t in
+                t.primaryKey("id", .text)
+                t.column("worktreeId", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("payload", .text).notNull()
+                t.column("reason", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+            }
+
+            try db.alter(table: "paneScrollback") { t in
+                t.rename(column: "paneId", to: "terminalContentId")
+            }
+            try db.alter(table: "agentSession") { t in
+                t.rename(column: "paneId", to: "terminalContentId")
+            }
+        }
         return migrator
     }
 }

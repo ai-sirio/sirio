@@ -55,15 +55,23 @@ public struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Senda
 
 public struct PaneScrollbackRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     public static let databaseTableName = "paneScrollback"
-    public var paneId: String
+    public var terminalContentId: String
     public var worktreeId: String
     public var data: Data
     public var updatedAt: Date
 
     public init(paneId: String, worktreeId: String, data: Data, updatedAt: Date) {
-        self.paneId = paneId; self.worktreeId = worktreeId
+        self.terminalContentId = paneId; self.worktreeId = worktreeId
         self.data = data; self.updatedAt = updatedAt
     }
+
+    public init(terminalContentId: String, worktreeId: String, data: Data, updatedAt: Date) {
+        self.terminalContentId = terminalContentId; self.worktreeId = worktreeId
+        self.data = data; self.updatedAt = updatedAt
+    }
+
+    @available(*, deprecated, renamed: "terminalContentId")
+    public var paneId: String { terminalContentId }
 }
 
 public struct TerminalTabRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
@@ -117,7 +125,7 @@ public struct AgentAccountRecord: Codable, FetchableRecord, PersistableRecord, S
 
 public struct AgentSessionRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
     public static let databaseTableName = "agentSession"
-    public var paneId: String
+    public var terminalContentId: String
     public var worktreeId: String
     public var agentId: String
     public var sessionRef: String
@@ -125,8 +133,86 @@ public struct AgentSessionRecord: Codable, FetchableRecord, PersistableRecord, S
 
     public init(paneId: String, worktreeId: String, agentId: String,
                 sessionRef: String, capturedAt: Date) {
-        self.paneId = paneId; self.worktreeId = worktreeId; self.agentId = agentId
+        self.terminalContentId = paneId; self.worktreeId = worktreeId; self.agentId = agentId
         self.sessionRef = sessionRef; self.capturedAt = capturedAt
+    }
+
+    public init(terminalContentId: String, worktreeId: String, agentId: String,
+                sessionRef: String, capturedAt: Date) {
+        self.terminalContentId = terminalContentId; self.worktreeId = worktreeId; self.agentId = agentId
+        self.sessionRef = sessionRef; self.capturedAt = capturedAt
+    }
+
+    @available(*, deprecated, renamed: "terminalContentId")
+    public var paneId: String { terminalContentId }
+}
+
+public struct WorkspaceLayoutRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "workspaceLayout"
+    public var worktreeId: String
+    public var schemaVersion: Int
+    public var revision: Int
+    public var payload: String
+    public var checksum: String
+    public var updatedAt: Date
+
+    public init(worktreeId: String, schemaVersion: Int, revision: Int, payload: String,
+                checksum: String, updatedAt: Date) {
+        self.worktreeId = worktreeId; self.schemaVersion = schemaVersion
+        self.revision = revision; self.payload = payload; self.checksum = checksum
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct WorkspaceTabRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "workspaceTab"
+    public var id: String
+    public var worktreeId: String
+    public var title: String
+    public var titleIsAutoNamed: Bool
+    public var contentKind: String
+    public var contentId: String
+    public var viewStateJSON: String?
+    public var viewStateVersion: Int
+    public var createdAt: Date
+
+    public init(id: String, worktreeId: String, title: String, titleIsAutoNamed: Bool,
+                contentKind: String, contentId: String, viewStateJSON: String?,
+                viewStateVersion: Int, createdAt: Date) {
+        self.id = id; self.worktreeId = worktreeId; self.title = title
+        self.titleIsAutoNamed = titleIsAutoNamed; self.contentKind = contentKind
+        self.contentId = contentId; self.viewStateJSON = viewStateJSON
+        self.viewStateVersion = viewStateVersion; self.createdAt = createdAt
+    }
+}
+
+public struct TerminalContentRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "terminalContent"
+    public var id: String
+    public var worktreeId: String
+    public var launchKind: String
+    public var agentId: String?
+    public var commandJSON: String?
+    public var createdAt: Date
+
+    public init(id: String, worktreeId: String, launchKind: String, agentId: String?,
+                commandJSON: String?, createdAt: Date) {
+        self.id = id; self.worktreeId = worktreeId; self.launchKind = launchKind
+        self.agentId = agentId; self.commandJSON = commandJSON; self.createdAt = createdAt
+    }
+}
+
+public struct WorkspaceLayoutQuarantineRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "workspaceLayoutQuarantine"
+    public var id: String
+    public var worktreeId: String
+    public var payload: String
+    public var reason: String
+    public var createdAt: Date
+
+    public init(id: String, worktreeId: String, payload: String, reason: String, createdAt: Date) {
+        self.id = id; self.worktreeId = worktreeId; self.payload = payload
+        self.reason = reason; self.createdAt = createdAt
     }
 }
 
