@@ -19,6 +19,6 @@ enum WorkspaceEngineGate {
             default: break
             }
         }
-        return defaults.object(forKey: userDefaultsKey) as? Bool ?? false
+        return defaults.object(forKey: userDefaultsKey) as? Bool ?? true
     }
 }
