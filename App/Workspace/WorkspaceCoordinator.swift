@@ -54,9 +54,13 @@ final class WorkspaceCoordinator {
         revisions[worktree.id] = restored.revision
         dirtyWorktreeIDs.remove(worktree.id)
 
-        guard let terminalAdapter = adapters[.terminal] else { return }
-        for tab in layout.allTabs where tab.content.kind == .terminal {
-            await terminalAdapter.hydrate(tab: tab, worktree: worktree)
+        for tab in layout.allTabs {
+            guard let adapter = adapters[tab.content.kind] else { continue }
+            if tab.content.kind == .terminal {
+                await adapter.hydrate(tab: tab, worktree: worktree)
+            }
+            let host = adapter.makeHost(tab: tab, worktree: worktree)
+            registry.adopt(host, tab: tab, generation: ResourceGenerationID())
         }
     }
 

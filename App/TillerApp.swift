@@ -3,7 +3,8 @@ import TillerCore
 
 @main
 struct TillerApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
+    @State private var workspaceCoordinator: WorkspaceCoordinator
     @State private var updater = UpdaterModel()
     @AppStorage("sidebar.visible") private var sidebarVisible = true
     @AppStorage(AppSettings.rightPanelVisibleKey)
@@ -17,6 +18,19 @@ struct TillerApp: App {
         // ignoring SIGPIPE once here, rather than per-fetch, keeps that
         // write from ever being able to terminate the whole app.
         signal(SIGPIPE, SIG_IGN)
+        let bridge = WorkspacePersistenceBridge()
+        let registry = WorkspaceContentRegistry()
+        let adapters: [WorkspaceContentKind: any WorkspaceContentAdapter] = [
+            .terminal: TerminalContentAdapter(),
+            .chat: ChatContentAdapter(),
+            .document: DocumentContentAdapter()
+        ]
+        let coordinator = WorkspaceCoordinator(
+            persistence: bridge, registry: registry, adapters: adapters)
+        _workspaceCoordinator = State(initialValue: coordinator)
+        _model = State(initialValue: AppModel(
+            workspaceCoordinator: coordinator,
+            workspacePersistenceBridge: bridge))
         UserDefaults.standard.register(defaults: [
             "usage.claude.showInBar": true,
             "usage.codex.showInBar": true,
@@ -28,7 +42,10 @@ struct TillerApp: App {
 
     var body: some Scene {
         WindowGroup(id: "main") {
-            ContentView(model: model, updater: updater)
+            ContentView(
+                model: model,
+                updater: updater,
+                workspaceCoordinator: workspaceCoordinator)
                 .onAppear {
                     appDelegate.model = model
                     updater.start()

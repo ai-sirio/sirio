@@ -15,6 +15,9 @@ import OSLog
 @MainActor
 @Observable
 final class AppModel {
+    let workspaceCoordinator: WorkspaceCoordinator
+    private let workspacePersistenceBridge: WorkspacePersistenceBridge
+
     var projects: [Project] = []
     var worktrees: [UUID: [Worktree]] = [:]
 
@@ -228,7 +231,9 @@ final class AppModel {
         controlTabPersister: ControlTabPersister? = nil,
         defaults: UserDefaults = .standard,
         foregroundProcessScanner: ForegroundProcessScanner? = nil,
-        persistenceCoordinator: PersistenceCoordinator? = nil
+        persistenceCoordinator: PersistenceCoordinator? = nil,
+        workspaceCoordinator: WorkspaceCoordinator? = nil,
+        workspacePersistenceBridge: WorkspacePersistenceBridge? = nil
     ) {
         self.paneRegistry = paneRegistry
         self.registrationTimeoutMs = registrationTimeoutMs
@@ -237,6 +242,20 @@ final class AppModel {
         self.controlTabPersister = controlTabPersister
         self.defaults = defaults
         self.persistenceCoordinator = persistenceCoordinator
+        let bridge = workspacePersistenceBridge ?? WorkspacePersistenceBridge()
+        self.workspacePersistenceBridge = bridge
+        if let workspaceCoordinator {
+            self.workspaceCoordinator = workspaceCoordinator
+        } else {
+            let registry = WorkspaceContentRegistry()
+            let adapters: [WorkspaceContentKind: any WorkspaceContentAdapter] = [
+                .terminal: TerminalContentAdapter(),
+                .chat: ChatContentAdapter(),
+                .document: DocumentContentAdapter()
+            ]
+            self.workspaceCoordinator = WorkspaceCoordinator(
+                persistence: bridge, registry: registry, adapters: adapters)
+        }
         self.foregroundProcessScanner = foregroundProcessScanner
             ?? Self.makeForegroundProcessScanner(paneRegistry: paneRegistry)
         let installStore = AgentInstallStore(
@@ -315,6 +334,9 @@ final class AppModel {
             try SQLiteWorkspacePersistence.migrateV15IfNeeded(
                 database: db, backupDirectory: dir.appendingPathComponent("backups", isDirectory: true))
             let store = ProjectStore(database: db)
+            workspacePersistenceBridge.install(SQLiteWorkspacePersistence(
+                database: db,
+                recoveryDirectory: dir.appendingPathComponent("recovery", isDirectory: true)))
             self.store = store
             self.database = db
             self.agentAccounts = AgentAccountStore(database: db)
@@ -440,6 +462,9 @@ final class AppModel {
             for: worktree,
             paneIds: Set(restoredTabs.flatMap { $0.leafIds })
         )
+        if WorkspaceEngineGate.isEnabled {
+            await workspaceCoordinator.restore(worktree: worktree)
+        }
     }
 
     // MARK: - Control socket
