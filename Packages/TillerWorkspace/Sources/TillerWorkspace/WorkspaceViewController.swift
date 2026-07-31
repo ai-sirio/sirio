@@ -9,7 +9,8 @@ public final class WorkspaceViewController: NSViewController {
     private let intentSink: WorkspaceIntentSink
 
     public init(hostProvider: WorkspaceHostProvider, intentSink: WorkspaceIntentSink) {
-        self.reconciler = WorkspaceReconciler(hostProvider: hostProvider)
+        self.reconciler = WorkspaceReconciler(
+            hostProvider: hostProvider, intentSink: intentSink)
         self.intentSink = intentSink
         super.init(nibName: nil, bundle: nil)
     }
