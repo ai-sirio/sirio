@@ -8,18 +8,22 @@ import Testing
     static let termTabId = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
     static let paneId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
 
-    func makeTabs() -> [LegacyWorkspaceTab] {
-        let chatTab = LegacyWorkspaceTab(id: Self.chatTabId, title: "Claude Code",
-                                   content: .chat(agentId: "claude", sessionId: nil))
-        let tree = SplitTree.leaf(id: Self.paneId)
-        let termTab = LegacyWorkspaceTab(id: Self.termTabId, title: "Terminale 1", tree: tree)
+    static let livePaneIds: [WorkspaceTabID: UUID] = [WorkspaceTabID(termTabId): paneId]
+
+    func makeTabs() -> [WorkspaceTab] {
+        let chatTab = WorkspaceTab(
+            id: WorkspaceTabID(Self.chatTabId), title: "Claude Code", titleIsAutoNamed: false,
+            content: .chat(ChatContentID("claude-chat")))
+        let termTab = WorkspaceTab(
+            id: WorkspaceTabID(Self.termTabId), title: "Terminale 1", titleIsAutoNamed: false,
+            content: .terminal(TerminalContentID()))
         // Terminal tab listed first: builder must still put chat first.
         return [termTab, chatTab]
     }
 
     @Test func chatTabsComeFirstThenTerminals() {
         let nodes = AgentTreeBuilder.build(
-            tabs: makeTabs(),
+            tabs: makeTabs(), livePaneIds: Self.livePaneIds,
             agentStatus: [Self.chatTabId: .running, Self.paneId: .running],
             paneAgents: [Self.chatTabId: "claude", Self.paneId: "codex"],
             chatSubagents: [:], processTrees: [:],
@@ -36,10 +40,11 @@ import Testing
     /// mai l'id agente raw — le chat registrano id canonici ("claude-acp")
     /// assenti da displayNames.
     @Test func chatNodeTitleFollowsTabTitle() {
-        let tab = LegacyWorkspaceTab(id: Self.chatTabId, title: "Fix login bug",
-                               content: .chat(agentId: "claude-acp", sessionId: nil))
+        let tab = WorkspaceTab(
+            id: WorkspaceTabID(Self.chatTabId), title: "Fix login bug", titleIsAutoNamed: true,
+            content: .chat(ChatContentID("claude-acp-chat")))
         let nodes = AgentTreeBuilder.build(
-            tabs: [tab],
+            tabs: [tab], livePaneIds: [:],
             agentStatus: [Self.chatTabId: .running],
             paneAgents: [Self.chatTabId: "claude-acp"],
             chatSubagents: [:], processTrees: [:],
@@ -49,8 +54,18 @@ import Testing
 
     @Test func panesWithoutAgentAreOmitted() {
         let nodes = AgentTreeBuilder.build(
-            tabs: makeTabs(),
+            tabs: makeTabs(), livePaneIds: Self.livePaneIds,
             agentStatus: [:], paneAgents: [:],
+            chatSubagents: [:], processTrees: [:],
+            catalogIds: ["claude"], displayNames: [:])
+        #expect(nodes.isEmpty)
+    }
+
+    @Test func terminalTabWithoutLivePaneIsOmitted() {
+        let nodes = AgentTreeBuilder.build(
+            tabs: makeTabs(), livePaneIds: [:],
+            agentStatus: [Self.paneId: .running],
+            paneAgents: [Self.paneId: "claude"],
             chatSubagents: [:], processTrees: [:],
             catalogIds: ["claude"], displayNames: [:])
         #expect(nodes.isEmpty)
@@ -59,7 +74,7 @@ import Testing
     @Test func chatSubagentsBecomeChildren() {
         let sub = ChatSubagentInput(id: "tool-1", title: "Explore repo", status: .running)
         let nodes = AgentTreeBuilder.build(
-            tabs: makeTabs(),
+            tabs: makeTabs(), livePaneIds: Self.livePaneIds,
             agentStatus: [Self.chatTabId: .running],
             paneAgents: [Self.chatTabId: "claude"],
             chatSubagents: [Self.chatTabId: [sub]],
@@ -82,7 +97,7 @@ import Testing
             ProcessNode(pid: 250, name: "rg", children: [inner])
         ])
         let nodes = AgentTreeBuilder.build(
-            tabs: makeTabs(),
+            tabs: makeTabs(), livePaneIds: Self.livePaneIds,
             agentStatus: [Self.paneId: .running],
             paneAgents: [Self.paneId: "claude"],
             chatSubagents: [:],
@@ -101,7 +116,7 @@ import Testing
             ProcessNode(pid: 260, name: "node", children: []),
         ])
         let nodes = AgentTreeBuilder.build(
-            tabs: makeTabs(),
+            tabs: makeTabs(), livePaneIds: Self.livePaneIds,
             agentStatus: [Self.paneId: .running],
             paneAgents: [Self.paneId: "claude"],
             chatSubagents: [:],
@@ -112,7 +127,7 @@ import Testing
 
     @Test func doneAndErrorStatusesPassThrough() {
         let nodes = AgentTreeBuilder.build(
-            tabs: makeTabs(),
+            tabs: makeTabs(), livePaneIds: Self.livePaneIds,
             agentStatus: [Self.chatTabId: .done, Self.paneId: .error],
             paneAgents: [Self.chatTabId: "claude", Self.paneId: "codex"],
             chatSubagents: [:], processTrees: [:],

@@ -2,23 +2,18 @@ import Testing
 import Foundation
 @testable import TillerCore
 
-@Test func flushTargetsSingleLeafYieldsOnePair() {
+@Test func flushTargetsSinglePaneYieldsOnePair() {
     let wt = UUID(); let pane = UUID()
-    let tabs = [wt: [LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: pane))]]
-
-    let targets = scrollbackFlushTargets(tabs: tabs)
+    let targets = scrollbackFlushTargets(paneIds: [wt: [pane]])
 
     #expect(targets.count == 1)
     #expect(targets[0].worktreeId == wt)
     #expect(targets[0].paneId == pane)
 }
 
-@Test func flushTargetsSplitYieldsPairPerLeaf() {
+@Test func flushTargetsMultiplePanesYieldPairPerPane() {
     let wt = UUID(); let a = UUID(); let b = UUID()
-    let tree = SplitTree.leaf(id: a).splitting(leaf: a, axis: .horizontal, newLeaf: b)
-    let tabs = [wt: [LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: tree)]]
-
-    let targets = scrollbackFlushTargets(tabs: tabs)
+    let targets = scrollbackFlushTargets(paneIds: [wt: [a, b]])
 
     #expect(targets.count == 2)
     #expect(Set(targets.map(\.paneId)) == Set([a, b]))
@@ -27,37 +22,18 @@ import Foundation
 
 @Test func flushTargetsMultipleWorktreesKeepCorrectWorktreeId() {
     let wt1 = UUID(); let wt2 = UUID(); let p1 = UUID(); let p2 = UUID()
-    let tabs = [
-        wt1: [LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p1))],
-        wt2: [LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p2))],
-    ]
-
-    let targets = scrollbackFlushTargets(tabs: tabs)
+    let targets = scrollbackFlushTargets(paneIds: [wt1: [p1], wt2: [p2]])
 
     #expect(targets.count == 2)
     #expect(targets.contains { $0.worktreeId == wt1 && $0.paneId == p1 })
     #expect(targets.contains { $0.worktreeId == wt2 && $0.paneId == p2 })
 }
 
-@Test func flushTargetsEmptyTabsYieldsNothing() {
-    #expect(scrollbackFlushTargets(tabs: [:]).isEmpty)
+@Test func flushTargetsEmptyYieldsNothing() {
+    #expect(scrollbackFlushTargets(paneIds: [:]).isEmpty)
 }
 
-@Test func flushTargetsMultipleTabsPerWorktreeCoverAll() {
-    let wt = UUID(); let p1 = UUID(); let p2 = UUID()
-    let tabs = [wt: [
-        LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: p1)),
-        LegacyWorkspaceTab(id: UUID(), title: "Terminale 2", tree: .leaf(id: p2)),
-    ]]
-
-    let targets = scrollbackFlushTargets(tabs: tabs)
-
-    #expect(Set(targets.map(\.paneId)) == Set([p1, p2]))
-}
-
-@Test func flushTargetsEmptyTabListYieldsNothing() {
+@Test func flushTargetsEmptyPaneListYieldsNothing() {
     let wt = UUID()
-    let tabs = [wt: [LegacyWorkspaceTab]()]
-    let targets = scrollbackFlushTargets(tabs: tabs)
-    #expect(targets.isEmpty)
+    #expect(scrollbackFlushTargets(paneIds: [wt: []]).isEmpty)
 }

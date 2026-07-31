@@ -58,7 +58,8 @@ public struct AgentNode: Identifiable, Equatable, Sendable {
 /// Chat tabs first, then terminal panes, both in `tabs` order.
 public enum AgentTreeBuilder {
     public static func build(
-        tabs: [LegacyWorkspaceTab],
+        tabs: [WorkspaceTab],
+        livePaneIds: [WorkspaceTabID: UUID],
         agentStatus: [UUID: AgentStatus],
         paneAgents: [UUID: String],
         chatSubagents: [UUID: [ChatSubagentInput]],
@@ -72,11 +73,12 @@ public enum AgentTreeBuilder {
         for tab in tabs {
             switch tab.content {
             case .chat:
-                guard let status = agentStatus[tab.id],
-                      let agentId = paneAgents[tab.id] else { continue }
-                let children = (chatSubagents[tab.id] ?? []).map { sub in
+                let tabId = tab.id.rawValue
+                guard let status = agentStatus[tabId],
+                      let agentId = paneAgents[tabId] else { continue }
+                let children = (chatSubagents[tabId] ?? []).map { sub in
                     AgentNode(
-                        id: "chat:\(tab.id.uuidString):tool:\(sub.id)",
+                        id: "chat:\(tabId.uuidString):tool:\(sub.id)",
                         agentId: agentId,
                         title: sub.title,
                         kind: .subagent,
@@ -86,31 +88,32 @@ public enum AgentTreeBuilder {
                 // agente delle chat è canonico ("claude-acp") e non risolve
                 // in displayNames, che restano per i nodi processo.
                 chatNodes.append(AgentNode(
-                    id: "chat:\(tab.id.uuidString)",
+                    id: "chat:\(tabId.uuidString)",
                     agentId: agentId,
                     title: tab.title,
-                    kind: .chat(tabId: tab.id),
+                    kind: .chat(tabId: tabId),
                     status: status,
                     children: children))
             case .terminal:
-                for paneId in tab.leafIds {
-                    guard let status = agentStatus[paneId],
-                          let agentId = paneAgents[paneId] else { continue }
-                    let children = subagentNodes(
-                        paneId: paneId,
-                        forest: processTrees[paneId] ?? [],
-                        catalogIds: catalogIds,
-                        displayNames: displayNames,
-                        paneStatus: status)
-                    terminalNodes.append(AgentNode(
-                        id: "term:\(paneId.uuidString)",
-                        agentId: agentId,
-                        title: displayNames[agentId] ?? agentId,
-                        kind: .terminal(paneId: paneId),
-                        status: status,
-                        children: children))
-                }
-            case .markdown, .code:
+                // Un WorkspaceTab è già una singola foglia (niente split tree
+                // annidato come nel modello legacy): al più un pane live.
+                guard let paneId = livePaneIds[tab.id],
+                      let status = agentStatus[paneId],
+                      let agentId = paneAgents[paneId] else { continue }
+                let children = subagentNodes(
+                    paneId: paneId,
+                    forest: processTrees[paneId] ?? [],
+                    catalogIds: catalogIds,
+                    displayNames: displayNames,
+                    paneStatus: status)
+                terminalNodes.append(AgentNode(
+                    id: "term:\(paneId.uuidString)",
+                    agentId: agentId,
+                    title: displayNames[agentId] ?? agentId,
+                    kind: .terminal(paneId: paneId),
+                    status: status,
+                    children: children))
+            case .document:
                 continue
             }
         }

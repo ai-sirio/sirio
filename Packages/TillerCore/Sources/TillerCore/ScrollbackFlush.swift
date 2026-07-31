@@ -1,19 +1,18 @@
 import Foundation
 
-/// Coppie (worktreeId, paneId) da snapshottare al quit: tutte le leaf di
-/// tutte le tab di tutte le worktree. Pura e testabile; l'orchestrazione
-/// I/O (snapshot + save) vive in AppModel.
+/// Coppie (worktreeId, paneId) da snapshottare al quit: tutti i pane live
+/// di tutte le worktree. Pura e testabile; l'orchestrazione I/O (snapshot +
+/// save) vive in AppModel, che risolve i pane live per worktree prima di
+/// chiamare questa funzione.
 ///
-/// `tabs` è un Dictionary: l'ordine tra worktree diverse non è definito.
+/// `paneIds` è un Dictionary: l'ordine tra worktree diverse non è definito.
 public func scrollbackFlushTargets(
-    tabs: [UUID: [LegacyWorkspaceTab]]
+    paneIds: [UUID: [UUID]]
 ) -> [(worktreeId: UUID, paneId: UUID)] {
     var out: [(worktreeId: UUID, paneId: UUID)] = []
-    for (worktreeId, tabList) in tabs {
-        for tab in tabList {
-            for paneId in tab.leafIds {
-                out.append((worktreeId, paneId))
-            }
+    for (worktreeId, ids) in paneIds {
+        for paneId in ids {
+            out.append((worktreeId, paneId))
         }
     }
     return out
