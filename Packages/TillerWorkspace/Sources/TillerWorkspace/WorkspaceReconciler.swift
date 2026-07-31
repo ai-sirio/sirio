@@ -6,6 +6,7 @@ public final class WorkspaceReconciler {
     public let rootViewController: NSViewController
 
     private let hostProvider: WorkspaceHostProvider
+    private weak var intentSink: WorkspaceIntentSink?
     public let focusCoordinator = WorkspaceFocusCoordinator()
     private var groupControllers: [PaneGroupID: PaneGroupController] = [:]
     private var splitControllers: [SplitID: WorkspaceSplitController] = [:]
@@ -14,8 +15,9 @@ public final class WorkspaceReconciler {
     public private(set) var groupControllerCreationCount = 0
     public private(set) var splitControllerCreationCount = 0
 
-    public init(hostProvider: WorkspaceHostProvider) {
+    public init(hostProvider: WorkspaceHostProvider, intentSink: WorkspaceIntentSink? = nil) {
         self.hostProvider = hostProvider
+        self.intentSink = intentSink
         self.rootViewController = WorkspaceRootController()
     }
 
@@ -67,7 +69,7 @@ public final class WorkspaceReconciler {
         switch node {
         case .group(let id):
             let controller = groupControllers[id] ?? {
-                let created = PaneGroupController(id: id)
+                let created = PaneGroupController(id: id, intentSink: intentSink)
                 groupControllerCreationCount += 1
                 groupControllers[id] = created
                 return created
