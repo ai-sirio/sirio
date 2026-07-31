@@ -16,19 +16,27 @@ enum UniversalChatFixture {
         let model: AppModel
         let worktree: Worktree
         let suiteName: String
+        /// Exposed so a test can stage a previous run's layout and then call
+        /// restore, with the store already populated.
+        let persistence: FakeWorkspacePersistence
 
         func cleanUp() { UserDefaults().removePersistentDomain(forName: suiteName) }
     }
 
+    /// `restored` stands in for a previous run's persisted layout, so a test
+    /// can observe what a relaunch does before anything is mounted.
     static func make(suiteName: String,
+                     restored: RestoredWorkspace? = nil,
                      configureDefaults: (UserDefaults) -> Void = { _ in }) async throws -> Handle {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         configureDefaults(defaults)
+        let persistence = FakeWorkspacePersistence()
+        persistence.restored = restored
         let model = AppModel(
             paneRegistry: PaneRegistry(), registrationTimeoutMs: 100, defaults: defaults,
             workspaceCoordinator: WorkspaceCoordinator(
-                persistence: FakeWorkspacePersistence(),
+                persistence: persistence,
                 registry: WorkspaceContentRegistry(),
                 adapters: [.chat: ChatContentAdapter()]))
         let worktree = Worktree(
@@ -49,7 +57,8 @@ enum UniversalChatFixture {
         model.worktrees = [worktree.projectId: [worktree]]
         // Without a restored layout there is no group to open a tab into.
         await model.workspaceCoordinator.restore(worktree: worktree)
-        return Handle(model: model, worktree: worktree, suiteName: suiteName)
+        return Handle(model: model, worktree: worktree, suiteName: suiteName,
+                      persistence: persistence)
     }
 
     /// Opens a chat tab and waits for it to appear. openChatTab's universal
