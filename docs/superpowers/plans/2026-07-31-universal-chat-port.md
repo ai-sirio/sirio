@@ -79,7 +79,7 @@ Legacy `terminalStack` keeps an opened chat mounted forever and mounts a never-o
 
 ---
 
-## Phase 1 — Adapter identity and dependency seam
+## Phase 1 — Adapter identity and dependency seam ✅ (`f595c1a`)
 
 *No UI yet. This phase makes a universal chat tab carry a real, resolvable conversation identity.*
 
@@ -127,7 +127,7 @@ Today `.newChat` sets `title = agentID` (the raw catalog id, e.g. `claude-acp`).
 
 ---
 
-## Phase 2 — Real chat host
+## Phase 2 — Real chat host ✅ (`f595c1a`)
 
 ### Task 2.1 — Failing test for controller construction
 
@@ -169,7 +169,7 @@ func chatController(for tab: WorkspaceTab, in worktree: Worktree,
 
 ---
 
-## Phase 3 — Entry points and agent identity
+## Phase 3 — Entry points and agent identity ✅ (`f595c1a`)
 
 *Everything above is reachable only if something creates a universal chat tab. Today nothing does.*
 
@@ -200,7 +200,7 @@ func chatController(for tab: WorkspaceTab, in worktree: Worktree,
 
 ---
 
-## Phase 4 — Terminal agent-session restore (D4 — carried, not chat)
+## Phase 4 — Terminal agent-session restore ✅ (`1f82a3f`)
 
 **Rewritten 2026-07-31 after investigation. The original task here was wrong and would have caused data loss** — it said to compute `paneIds` from the universal layout and reorder the call. That does not work, and shipping it would have turned an inert feature into a destructive one.
 
@@ -234,18 +234,11 @@ A second, independent break: under the universal engine nothing reads `paneComma
 
 ## Phase 5 — Parity verification
 
-### Task 5.1 — Automated parity sweep
+### Task 5.1 — Automated parity sweep ✅ (`b3ae197`)
 
-- [ ] One test per legacy chat behaviour that has no universal test yet, added to a single `UniversalChatParityTests` suite:
+- [x] `UniversalChatParityTests`, 7 tests: lazy controller on restore, teardown on close, empty-session cleanup, tab closure on session delete, no duplicate tab on reopen, agent identity registration, distinct sessions per fresh chat. Auto-rename is covered by the rewritten `AutoRenameWiringTests`.
 
-```swift
-@Test func autoRenameRetitlesAUniversalChatTab() async throws { }
-@Test func closingAUniversalChatTabDeletesAnEmptySessionRow() async throws { }
-@Test func closingAUniversalChatTabStopsItsController() async throws { }
-@Test func aRestoredChatTabDoesNotStartItsAgentUntilItIsViewed() async throws { }
-```
-
-The last one guards LC-3 / D5 and is the one most likely to regress silently: it fails only as "every agent launches at app start", which no other test observes.
+**Lesson worth keeping.** The restore test passed on its first run *against a build deliberately broken to create controllers eagerly* — the fixture had no session row, so the restore path bailed out early and the assertion never exercised anything. Any test claiming to guard this property must first be checked against a broken build. It now creates a real session row and asserts both that the agent identity is registered (proving the path ran in full) and that no controller exists.
 
 ### Task 5.2 — Manual acceptance (real hardware, gate on)
 
