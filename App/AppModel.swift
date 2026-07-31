@@ -1746,11 +1746,31 @@ final class AppModel {
         }
     }
 
+    /// worktreeId -> id dei pane terminale attualmente live, risolti tramite
+    /// il motore attivo. Sotto il motore universale un WorkspaceTab è già
+    /// una singola foglia, quindi ogni tab terminale risolve al più un pane
+    /// (via liveControlPaneId, mai cache: il generation id cambia a ogni
+    /// relaunch/retry).
+    private func liveScrollbackPaneIds() -> [UUID: [UUID]] {
+        guard WorkspaceEngineGate.isEnabled else {
+            return workspaceCoordinator.legacyStore.tabs.mapValues { $0.flatMap(\.leafIds) }
+        }
+        var result: [UUID: [UUID]] = [:]
+        for (worktreeId, layout) in workspaceCoordinator.layouts {
+            let ids = layout.allTabs.compactMap { tab -> UUID? in
+                guard case .terminal(let contentID) = tab.content else { return nil }
+                return workspaceCoordinator.liveControlPaneId(contentID: contentID, in: worktreeId)
+            }
+            if !ids.isEmpty { result[worktreeId] = ids }
+        }
+        return result
+    }
+
     /// Snapshot di tutti i pane vivi verso il DB. Chiamato al quit
     /// (AppDelegate). I pane non registrati (già chiusi) tornano nil da
     /// snapshot e sono saltati; saveScrollback salta i blob vuoti.
     func flushLiveScrollback() async {
-        for target in scrollbackFlushTargets(tabs: workspaceCoordinator.legacyStore.tabs) {
+        for target in scrollbackFlushTargets(paneIds: liveScrollbackPaneIds()) {
             if let data = await paneRegistry.snapshot(paneId: target.paneId) {
                 await saveScrollback(
                     worktreeId: target.worktreeId, paneId: target.paneId, data: data)

@@ -5,6 +5,7 @@ import Testing
 import TillerPersistence
 import TillerCore
 import TillerTerminal
+import TillerWorkspace
 @testable import TillerACP
 @testable import Tiller
 
@@ -598,22 +599,46 @@ extension ChatControllerTests {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let paneId = UUID()
-        let data = Data("last scrollback".utf8)
         let registry = PaneRegistry()
+        let workspaceCoordinator = WorkspaceCoordinator(
+            persistence: ChatTestWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [.terminal: TerminalContentAdapter()]
+        )
+        let model = AppModel(
+            paneRegistry: registry,
+            activateApplication: {},
+            persistenceCoordinator: coordinator,
+            workspaceCoordinator: workspaceCoordinator)
+        let worktree = Worktree(id: worktreeId, projectId: UUID(), branch: "main", path: root.path)
+        model.worktrees = [worktree.projectId: [worktree]]
+        await model.workspaceCoordinator.restore(worktree: worktree)
+        guard let groupID = model.workspaceCoordinator.activeOrFirstGroup(for: worktreeId) else {
+            Issue.record("no pane group after restore")
+            return
+        }
+        await model.workspaceCoordinator.handle(.requestNewTab(into: groupID), in: worktree)
+
+        // Il generation id del tab terminale è minted async da
+        // TerminalContentAdapter.prepare: poll finché liveControlPaneId non
+        // risolve, come fa AppModelControlTests per lo stesso motivo.
+        var paneId: UUID?
+        for _ in 0..<200 where paneId == nil {
+            if let tab = model.workspaceCoordinator.layouts[worktreeId]?.allTabs.first,
+               case .terminal(let contentID) = tab.content {
+                paneId = model.workspaceCoordinator.liveControlPaneId(contentID: contentID, in: worktreeId)
+            }
+            if paneId == nil { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        guard let paneId else {
+            Issue.record("universal terminal did not expose a live control id")
+            return
+        }
+        let data = Data("last scrollback".utf8)
         let buffer = ScrollbackBuffer()
         await buffer.append(data)
         await registry.register(
             paneId: paneId, pty: PtyProcess { _ in }, scrollback: buffer)
-        let model = AppModel(
-            paneRegistry: registry,
-            activateApplication: {},
-            persistenceCoordinator: coordinator)
-        model.workspaceCoordinator.setLegacyTabs([
-            LegacyWorkspaceTab(id: chatTabId, title: "Chat",
-                         content: .chat(agentId: "claude-acp", sessionId: nil)),
-            LegacyWorkspaceTab(id: UUID(), title: "Terminal 1", tree: .leaf(id: paneId))
-        ], for: worktreeId)
         model.chatControllers[chatTabId] = controller
 
         await model.flushLiveScrollback()
@@ -981,4 +1006,24 @@ private actor ChatTestDriver: AgentDriver {
     func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
         permissionAnswers.append((requestId, outcome))
     }
+}
+
+/// In-memory WorkspaceLayoutPersistence for driving a real WorkspaceCoordinator
+/// intent (.requestNewTab) in a test without touching disk.
+private actor ChatTestWorkspacePersistence: WorkspaceLayoutPersistence {
+    func restore(worktreeID: UUID) async -> RestoredWorkspace {
+        RestoredWorkspace(
+            layout: .empty(groupID: PaneGroupID(worktreeID)),
+            tabs: [:], revision: 0, diagnostics: [])
+    }
+
+    func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
+                          tabs: [WorkspaceTab],
+                          terminalContents: [TerminalContentRecordValue]) async throws {}
+
+    func checkpoint(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) async {}
+    func flush(worktreeID: UUID) async throws {}
+    nonisolated func writeRecoverySidecar(
+        worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) throws {}
+    func purge(worktreeID: UUID) async throws {}
 }

@@ -7,17 +7,31 @@ import TillerCore
 @MainActor
 enum AgentsPanelModel {
     static func nodes(appModel: AppModel, worktree: Worktree) -> [AgentNode] {
-        let tabs = appModel.workspaceTabs(for: worktree.id)
+        guard let layout = appModel.workspaceCoordinator.layouts[worktree.id] else { return [] }
+        let tabs = layout.allTabs
+        var livePaneIds: [WorkspaceTabID: UUID] = [:]
         var chatSubagents: [UUID: [ChatSubagentInput]] = [:]
-        for tab in tabs where tab.chatAgentId != nil {
-            guard let controller = appModel.chatControllers[tab.id] else { continue }
-            chatSubagents[tab.id] = controller.presentationSnapshot.activeSubagentTasks.map {
-                ChatSubagentInput(id: $0.toolCallId, title: $0.title,
-                                  status: agentStatus(for: $0.status))
+        for tab in tabs {
+            switch tab.content {
+            case .terminal(let contentID):
+                if let paneId = appModel.workspaceCoordinator.liveControlPaneId(
+                    contentID: contentID, in: worktree.id) {
+                    livePaneIds[tab.id] = paneId
+                }
+            case .chat:
+                let tabId = tab.id.rawValue
+                guard let controller = appModel.chatControllers[tabId] else { continue }
+                chatSubagents[tabId] = controller.presentationSnapshot.activeSubagentTasks.map {
+                    ChatSubagentInput(id: $0.toolCallId, title: $0.title,
+                                      status: agentStatus(for: $0.status))
+                }
+            case .document:
+                continue
             }
         }
         return AgentTreeBuilder.build(
             tabs: tabs,
+            livePaneIds: livePaneIds,
             agentStatus: appModel.agentActivity.agentStatus,
             paneAgents: appModel.agentActivity.paneAgents,
             chatSubagents: chatSubagents,

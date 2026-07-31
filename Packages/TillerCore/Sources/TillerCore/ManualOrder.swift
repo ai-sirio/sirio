@@ -7,8 +7,8 @@ public enum ManualOrder {
     /// Rimuove `id` e lo reinserisce immediatamente prima di `targetId`
     /// (`nil` = in coda). Id o target sconosciuti → lista invariata.
     public static func moving<T: Identifiable>(
-        _ list: [T], id: UUID, before targetId: UUID?
-    ) -> [T] where T.ID == UUID {
+        _ list: [T], id: T.ID, before targetId: T.ID?
+    ) -> [T] {
         guard id != targetId,
               let sourceIndex = list.firstIndex(where: { $0.id == id })
         else { return list }
