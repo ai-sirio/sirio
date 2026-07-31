@@ -438,31 +438,38 @@ final class AppModel {
             atPath: worktree.path + "/.claude/settings.local.json",
             tillerctlPath: ctl
         )
-        let loaded: (tabs: [LegacyWorkspaceTab], activeTabId: UUID?)
+        let loaded: (tabs: [LegacyWorkspaceTab], activeTabId: UUID?)?
         do {
             loaded = try await store.loadTabs(of: worktree.id)
         } catch {
-            // One unreadable worktree must not cost the others their layout.
+            // terminalTab is renamed away by the v17 migration (see
+            // WorkspaceMigrationV15/AppDatabase), so this throws on every
+            // worktree once a database has migrated — that must not also
+            // block workspaceCoordinator.restore() below, which is the only
+            // thing populating the universal engine's layout for this
+            // worktree. Legacy-tab bookkeeping is simply skipped for it.
             sessionRestoreLogger.warning("restore: loadTabs failed for worktree \(worktree.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
-            return
+            loaded = nil
         }
-        // Tab markdown il cui file è sparito tra le sessioni: scartate in silenzio.
-        let restoredTabs = loaded.tabs.filter { tab in
-            guard let url = tab.markdownFileURL else { return true }
-            return FileManager.default.fileExists(atPath: url.path)
+        if let loaded {
+            // Tab markdown il cui file è sparito tra le sessioni: scartate in silenzio.
+            let restoredTabs = loaded.tabs.filter { tab in
+                guard let url = tab.markdownFileURL else { return true }
+                return FileManager.default.fileExists(atPath: url.path)
+            }
+            workspaceCoordinator.setLegacyTabs(restoredTabs, for: worktree.id)
+            workspaceCoordinator.setLegacyActiveTabID(loaded.activeTabId.flatMap { active in
+                restoredTabs.contains { $0.id == active } ? active : nil
+            } ?? restoredTabs.first?.id, for: worktree.id)
+            for tab in restoredTabs {
+                guard let chatAgentId = tab.chatAgentId else { continue }
+                agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
+            }
+            await restoreAgentSessions(
+                for: worktree,
+                paneIds: Set(restoredTabs.flatMap { $0.leafIds })
+            )
         }
-        workspaceCoordinator.setLegacyTabs(restoredTabs, for: worktree.id)
-        workspaceCoordinator.setLegacyActiveTabID(loaded.activeTabId.flatMap { active in
-            restoredTabs.contains { $0.id == active } ? active : nil
-        } ?? restoredTabs.first?.id, for: worktree.id)
-        for tab in restoredTabs {
-            guard let chatAgentId = tab.chatAgentId else { continue }
-            agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
-        }
-        await restoreAgentSessions(
-            for: worktree,
-            paneIds: Set(restoredTabs.flatMap { $0.leafIds })
-        )
         if WorkspaceEngineGate.isEnabled {
             await workspaceCoordinator.restore(worktree: worktree)
         }
