@@ -266,6 +266,32 @@ final class AppModel {
                 .appendingPathComponent("Tiller/acp-agents", isDirectory: true))
         self.agentInstallStore = installStore
         self.agentCenter = AcpAgentCenter(installStore: installStore)
+        // Late-bound: the adapters are built above, before `self` exists, and
+        // chatStore itself only arrives once the database is open.
+        let chatAdapter = self.workspaceCoordinator.adapters[.chat] as? ChatContentAdapter
+        chatAdapter?.makeSession = { [weak self] worktreeID, agentID in
+            guard let store = self?.chatStore else { throw ContentAdapterError.noChatStore }
+            self?.rememberChatAgent(agentID)
+            return try store.createSession(
+                worktreeId: worktreeID.uuidString, agentId: agentID).id
+        }
+        chatAdapter?.makeContentViewController = { [weak self] tab, worktree, isFresh in
+            guard let self,
+                  let controller = self.chatController(
+                    for: tab, in: worktree,
+                    startNewConversation: isFresh, startDetached: !isFresh)
+            else { return nil }
+            return NSHostingController(
+                rootView: ChatPaneView(controller: controller, worktree: worktree, appModel: self))
+        }
+        chatAdapter?.releaseContent = { [weak self] tabID in
+            self?.teardownChatController(tabId: tabID.rawValue)
+        }
+        chatAdapter?.resolveTitle = { [weak self] contentID in
+            let stored = self?.chatSession(id: contentID.rawValue)?.title?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (stored?.isEmpty == false) ? stored : nil
+        }
     }
     /// Projects whose root currently contains a `.git` entry. Derived at
     /// runtime (bootstrap, add, in-app git init) — never persisted, so an
@@ -472,6 +498,19 @@ final class AppModel {
         }
         if WorkspaceEngineGate.isEnabled {
             await workspaceCoordinator.restore(worktree: worktree)
+            registerRestoredChatAgents(in: worktree.id)
+        }
+    }
+
+    /// Identity for restored chat tabs, so the Agents panel and badges know
+    /// which agent a tab belongs to before it is ever viewed (viewing it
+    /// builds a controller, which registers identity on its own).
+    private func registerRestoredChatAgents(in worktreeId: UUID) {
+        for tab in workspaceCoordinator.layouts[worktreeId]?.allTabs ?? [] {
+            guard case .chat(let contentID) = tab.content,
+                  let record = chatSession(id: contentID.rawValue) else { continue }
+            agentActivity.registerAgentId(
+                paneId: tab.id.rawValue, agentId: AgentIdMigration.canonical(record.agentId))
         }
     }
 
@@ -1263,6 +1302,25 @@ final class AppModel {
         if let document = codeDocuments[tabId], document.isDirty {
             guard resolveDirtyClose(fileURL: document.fileURL, save: document.save) else { return }
         }
+        if WorkspaceEngineGate.isEnabled {
+            let tabID = WorkspaceTabID(tabId)
+            // Documents live in the adapter now, so the dirty-close prompt has
+            // to ask it — otherwise closing a modified file drops the buffer
+            // without a word.
+            if let adapter = workspaceCoordinator.adapters[.document] as? DocumentContentAdapter,
+               adapter.isDirty(tabID: tabID) {
+                let dirty: (url: URL, save: () throws -> Void)? =
+                    adapter.markdownDocument(for: tabID).map { ($0.fileURL, $0.save) }
+                    ?? adapter.codeDocument(for: tabID).map { ($0.fileURL, $0.save) }
+                if let dirty,
+                   !resolveDirtyClose(fileURL: dirty.url, save: dirty.save) { return }
+            }
+            // The coordinator owns teardown: closeTab runs the content
+            // adapter's close, which reaches teardownChatController through
+            // ChatContentAdapter.releaseContent.
+            Task { await workspaceCoordinator.closeTab(tabID, in: worktree) }
+            return
+        }
         var list = workspaceCoordinator.legacyTabs(for: worktree.id)
         guard !list.isEmpty else { return }
         if let closing = list.first(where: { $0.id == tabId }) {
@@ -1293,6 +1351,15 @@ final class AppModel {
     }
 
     func renameTab(_ tabId: UUID, in worktreeId: UUID, to title: String) {
+        if WorkspaceEngineGate.isEnabled {
+            let trimmed = title.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, let worktree = worktree(byId: worktreeId) else { return }
+            Task {
+                await workspaceCoordinator.renameTab(
+                    WorkspaceTabID(tabId), title: trimmed, isAutoNamed: false, in: worktree)
+            }
+            return
+        }
         var tabs = workspaceCoordinator.legacyTabs(for: worktreeId)
         guard let idx = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         let trimmed = title.trimmingCharacters(in: .whitespaces)
@@ -1307,6 +1374,25 @@ final class AppModel {
     /// `renameTab`, non tocca `titleIsAutoNamed`: resta eleggibile per il
     /// prossimo pass finché l'utente non rinomina manualmente.
     func applyAutoTitle(_ tabId: UUID, in worktreeId: UUID, title: String) {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
+        if WorkspaceEngineGate.isEnabled {
+            guard !trimmedTitle.isEmpty,
+                  let worktree = worktree(byId: worktreeId),
+                  let tab = workspaceCoordinator.layouts[worktreeId]?
+                    .tab(WorkspaceTabID(tabId)),
+                  tab.titleIsAutoNamed
+            else { return }
+            // The history row outlives the tab, so the title has to live on
+            // the session too — no extra summarizer call, same string.
+            if case .chat(let contentID) = tab.content {
+                try? chatStore?.setTitle(trimmedTitle, sessionId: contentID.rawValue)
+            }
+            Task {
+                await workspaceCoordinator.renameTab(
+                    tab.id, title: trimmedTitle, isAutoNamed: true, in: worktree)
+            }
+            return
+        }
         var tabs = workspaceCoordinator.legacyTabs(for: worktreeId)
         guard let idx = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         let trimmed = title.trimmingCharacters(in: .whitespaces)
@@ -1877,6 +1963,21 @@ final class AppModel {
     /// Focus the tab already showing this conversation, or open it in a new
     /// detached tab.
     func openExistingChatSession(sessionId: String, in worktree: Worktree) {
+        if WorkspaceEngineGate.isEnabled {
+            selectedWorktree = worktree
+            if let existing = universalChatTab(sessionId: sessionId, in: worktree.id) {
+                Task { await workspaceCoordinator.handle(.activateTab(existing.id), in: worktree) }
+                return
+            }
+            guard chatSession(id: sessionId) != nil,
+                  let group = workspaceCoordinator.activeOrFirstGroup(for: worktree.id)
+            else { return }
+            Task {
+                await workspaceCoordinator.requestNewTab(
+                    into: group, choice: .resumeChat(ChatContentID(sessionId)), in: worktree)
+            }
+            return
+        }
         if let existing = workspaceCoordinator.legacyTabs(for: worktree.id).first(where: {
             $0.chatSessionId == sessionId
         }) {
@@ -1899,8 +2000,24 @@ final class AppModel {
         _ = chatController(for: tab, in: worktree, startDetached: true)
     }
 
+    /// The open tab showing this conversation, if any. A chat tab's content
+    /// id is its session id, so no side table is needed.
+    func universalChatTab(sessionId: String, in worktreeId: UUID) -> WorkspaceTab? {
+        workspaceCoordinator.layouts[worktreeId]?.allTabs.first {
+            if case .chat(let id) = $0.content { return id.rawValue == sessionId }
+            return false
+        }
+    }
+
     /// Deletes a conversation and closes the tab rendering it, if any.
     func deleteChatSession(sessionId: String, in worktree: Worktree) {
+        if WorkspaceEngineGate.isEnabled {
+            if let open = universalChatTab(sessionId: sessionId, in: worktree.id) {
+                Task { await workspaceCoordinator.closeTab(open.id, in: worktree) }
+            }
+            try? chatStore?.deleteSession(id: sessionId)
+            return
+        }
         if let open = workspaceCoordinator.legacyTabs(for: worktree.id).first(where: {
             $0.chatSessionId == sessionId
         }) {
@@ -1912,6 +2029,19 @@ final class AppModel {
     @discardableResult
     func openChatTab(agentId: String, in worktree: Worktree) -> LegacyWorkspaceTab? {
         rememberChatAgent(agentId)
+        if WorkspaceEngineGate.isEnabled {
+            selectedWorktree = worktree
+            guard let group = workspaceCoordinator.activeOrFirstGroup(for: worktree.id) else {
+                return nil
+            }
+            // The session row (and therefore the tab's identity) is minted by
+            // ChatContentAdapter.makeSession during preparation.
+            Task {
+                await workspaceCoordinator.requestNewTab(
+                    into: group, choice: .newChat(agentID: agentId), in: worktree)
+            }
+            return nil
+        }
         // The session row exists from the start so the tab knows which
         // conversation it owns even before the first turn is persisted.
         let sessionId = try? chatStore?.createSession(
@@ -1938,22 +2068,62 @@ final class AppModel {
                      startDetached: Bool = false) -> ChatController? {
         guard let agentId = tab.chatAgentId else { return nil }
         if let controller = chatControllers[tab.id] { return controller }
+        return makeChatController(
+            tabId: tab.id, agentId: agentId, sessionId: tab.chatSessionId, in: worktree,
+            startNewConversation: startNewConversation, startDetached: startDetached)
+    }
+
+    /// Universal-engine sibling of the overload above. The tab carries only a
+    /// ChatContentID, which *is* the session id, so the agent comes from the
+    /// session row — the workspace model never learns what an agent is.
+    func chatController(for tab: WorkspaceTab, in worktree: Worktree,
+                        startNewConversation: Bool = false,
+                        startDetached: Bool = true) -> ChatController? {
+        guard case .chat(let contentID) = tab.content else { return nil }
+        let tabId = tab.id.rawValue
+        if let controller = chatControllers[tabId] { return controller }
+        guard let record = chatSession(id: contentID.rawValue) else { return nil }
+        let agentId = AgentIdMigration.canonical(record.agentId)
+        // Mirrors the legacy split: a fresh chat spawns, a resumed one only
+        // declares identity — a detached chat has no process to report on.
+        if startNewConversation {
+            agentActivity.agentSpawned(paneId: tabId, agentId: agentId, now: Date())
+        } else {
+            agentActivity.registerAgentId(paneId: tabId, agentId: agentId)
+        }
+        return makeChatController(
+            tabId: tabId, agentId: agentId,
+            sessionId: contentID.rawValue, in: worktree,
+            startNewConversation: startNewConversation, startDetached: startDetached)
+    }
+
+    func chatSession(id: String) -> ChatSessionRecord? {
+        guard let chatStore else { return nil }
+        return try? chatStore.session(id: id)
+    }
+
+    /// Single construction site for both tab models: two hand-copied
+    /// ChatController(...) calls would drift.
+    private func makeChatController(tabId: UUID, agentId: String, sessionId: String?,
+                                    in worktree: Worktree,
+                                    startNewConversation: Bool,
+                                    startDetached: Bool) -> ChatController {
         let controller = ChatController(
-            tabId: tab.id, agentId: agentId, worktreeId: worktree.id,
+            tabId: tabId, agentId: agentId, worktreeId: worktree.id,
             worktreePath: worktree.path, store: chatStore,
             installStore: agentInstallStore,
-            sessionId: tab.chatSessionId,
+            sessionId: sessionId,
             startDetached: startDetached,
             persistenceCoordinator: persistenceCoordinator,
             startNewConversation: startNewConversation)
         controller.onStatusChange = { [weak self] status in
             guard let self else { return }
             let transition = self.agentActivity.notify(
-                paneId: tab.id, status: status, now: Date())
-            self.notifyTransition(paneId: tab.id,
+                paneId: tabId, status: status, now: Date())
+            self.notifyTransition(paneId: tabId,
                                   from: transition.old, to: transition.new)
         }
-        chatControllers[tab.id] = controller
+        chatControllers[tabId] = controller
         return controller
     }
 

@@ -154,4 +154,8 @@ final class DocumentContentAdapter: WorkspaceContentAdapter {
 
 enum ContentAdapterError: Error, Equatable, Sendable {
     case unsupportedRequest
+    /// A chat was requested before the database opened: without a store there
+    /// is no session id, and a chat tab without one could never find its
+    /// transcript.
+    case noChatStore
 }

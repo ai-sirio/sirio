@@ -18,14 +18,19 @@ struct AppModelFacadeTests {
         #expect(!storedLabels.contains("paneCaches"))
     }
 
-    @Test func autoRenameWritesThroughTheCoordinator() {
-        let (model, worktree) = makeModelAndWorktree()
-        let tab = model.openChatTab(agentId: "claude-acp", in: worktree)!
+    @Test func autoRenameWritesThroughTheCoordinator() async throws {
+        let fixture = try await UniversalChatFixture.make(
+            suiteName: "dev.tiller.Tiller.AppModelFacadeTests.autoRename")
+        defer { fixture.cleanUp() }
+        let tab = try #require(await UniversalChatFixture.openChatTab(fixture))
 
-        model.applyAutoTitle(tab.id, in: worktree.id, title: "Fix login bug")
+        fixture.model.applyAutoTitle(
+            tab.id.rawValue, in: fixture.worktree.id, title: "Fix login bug")
+        await UniversalChatFixture.settle(fixture) {
+            UniversalChatFixture.tab(fixture, id: tab.id)?.title == "Fix login bug"
+        }
 
-        let updated = model.workspaceCoordinator.legacyTabs(for: worktree.id)
-            .first { $0.id == tab.id }
+        let updated = UniversalChatFixture.tab(fixture, id: tab.id)
         #expect(updated?.title == "Fix login bug")
         #expect(updated?.titleIsAutoNamed == true)
     }
@@ -62,22 +67,25 @@ struct AppModelFacadeTests {
         #expect(model.workspaceCoordinator.layouts[worktree.id]?.allTabs.count == 1)
     }
 
-    @Test func everyMutationRouteReachesTheSameCoordinatorSeam() {
-        let (model, worktree) = makeModelAndWorktree()
-        let coordinator = model.workspaceCoordinator
-        let initialRevision = coordinator.legacyMutationRevision(for: worktree.id)
-        let tab = model.openChatTab(agentId: "claude-acp", in: worktree)!
-        let afterOpen = coordinator.legacyMutationRevision(for: worktree.id)
+    /// Open / rename / close all land in the coordinator's layout: AppModel
+    /// keeps no tab state of its own to diverge from it.
+    @Test func everyMutationRouteReachesTheSameCoordinatorSeam() async throws {
+        let fixture = try await UniversalChatFixture.make(
+            suiteName: "dev.tiller.Tiller.AppModelFacadeTests.seam")
+        defer { fixture.cleanUp() }
+        let tab = try #require(await UniversalChatFixture.openChatTab(fixture))
 
-        model.renameTab(tab.id, in: worktree.id, to: "Renamed")
-        let afterRename = coordinator.legacyMutationRevision(for: worktree.id)
-        model.closeTab(tab.id, in: worktree)
-        let afterClose = coordinator.legacyMutationRevision(for: worktree.id)
+        fixture.model.renameTab(tab.id.rawValue, in: fixture.worktree.id, to: "Renamed")
+        await UniversalChatFixture.settle(fixture) {
+            UniversalChatFixture.tab(fixture, id: tab.id)?.title == "Renamed"
+        }
+        #expect(UniversalChatFixture.tab(fixture, id: tab.id)?.title == "Renamed")
 
-        #expect(afterOpen > initialRevision)
-        #expect(afterRename > afterOpen)
-        #expect(afterClose > afterRename)
-        #expect(coordinator.legacyTabs(for: worktree.id).isEmpty)
+        fixture.model.closeTab(tab.id.rawValue, in: fixture.worktree)
+        await UniversalChatFixture.settle(fixture) {
+            UniversalChatFixture.tabs(fixture).isEmpty
+        }
+        #expect(UniversalChatFixture.tabs(fixture).isEmpty)
     }
 
     private func makeModel() -> AppModel {
