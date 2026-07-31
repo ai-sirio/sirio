@@ -126,6 +126,14 @@ private final class WorkspaceNativeSplitView: NSSplitView {
 
     override var dividerThickness: CGFloat { WorkspaceMetrics.dividerThickness }
 
+    // AppKit's default drawing for a thin style paints nothing that survives
+    // the translucent surface both panes share, which left two split panes
+    // visually continuous.
+    override func drawDivider(in rect: NSRect) {
+        NSColor.separatorColor.setFill()
+        WorkspaceMetrics.dividerHairline(in: rect, isVertical: isVertical).fill()
+    }
+
     override func layout() {
         super.layout()
         exchangeContentFramesIfNeeded()
