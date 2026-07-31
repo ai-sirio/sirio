@@ -1990,6 +1990,26 @@ final class AppModel {
     @discardableResult
     func openDocument(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
         let url = fileURL.standardizedFileURL
+        if WorkspaceEngineGate.isEnabled {
+            selectedWorktree = worktree
+            let editor: DocumentEditorKind = MarkdownFileLink.isMarkdown(url) ? .markdown : .code
+            let documentID = DocumentID.makeCanonical(worktreeID: worktree.id, path: url.path)
+            if let existing = workspaceCoordinator.layouts[worktree.id]?.allTabs.first(where: {
+                if case .document(let id, _) = $0.content { return id == documentID }
+                return false
+            }) {
+                Task { await workspaceCoordinator.handle(.activateTab(existing.id), in: worktree) }
+                return nil
+            }
+            guard let group = workspaceCoordinator.activeOrFirstGroup(for: worktree.id) else {
+                return nil
+            }
+            Task {
+                await workspaceCoordinator.requestNewTab(
+                    into: group, choice: .openFile(url, editor: editor), in: worktree)
+            }
+            return nil
+        }
         if let existing = workspaceCoordinator.legacyTabs(for: worktree.id).first(where: {
             $0.fileURL?.standardizedFileURL == url
         }) {
@@ -2054,8 +2074,21 @@ final class AppModel {
 
     /// ⌘S: salva il documento della tab attiva, se è un documento aperto.
     func saveActiveDocument() {
-        guard let worktree = selectedWorktree,
-              let tab = activeTab(for: worktree.id) else { return }
+        guard let worktree = selectedWorktree else { return }
+        if WorkspaceEngineGate.isEnabled {
+            guard let layout = workspaceCoordinator.layouts[worktree.id],
+                  let tabID = layout.group(layout.activeGroupID)?.activeTabID,
+                  let tab = layout.tab(tabID),
+                  let documentAdapter = workspaceCoordinator.adapters[.document] as? DocumentContentAdapter
+            else { return }
+            do {
+                try documentAdapter.save(tabID: tabID)
+            } catch {
+                lastError = "Could not save \(tab.title): " + error.localizedDescription
+            }
+            return
+        }
+        guard let tab = activeTab(for: worktree.id) else { return }
         do {
             if let document = markdownDocuments[tab.id] {
                 try document.save()
