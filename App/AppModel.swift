@@ -619,21 +619,84 @@ final class AppModel {
             }
 
         case "panel.split":
-            guard let sourceId = request.params["from"].flatMap(UUID.init(uuidString:)),
-                  let source = workspaceTabContaining(paneId: sourceId) else {
+            guard let sourceId = request.params["from"].flatMap(UUID.init(uuidString:)) else {
                 return .failure(id: request.id, error: "unknown source panel")
             }
             let axis: SplitAxis
             let placement: SplitPlacement
+            let splitPlacementSide: SplitPlacementSide
             switch request.params["direction"] {
-            case "left": axis = .horizontal; placement = .before
-            case "right": axis = .horizontal; placement = .after
-            case "up": axis = .vertical; placement = .before
-            case "down": axis = .vertical; placement = .after
+            case "left": axis = .horizontal; placement = .before; splitPlacementSide = .left
+            case "right": axis = .horizontal; placement = .after; splitPlacementSide = .right
+            case "up": axis = .vertical; placement = .before; splitPlacementSide = .above
+            case "down": axis = .vertical; placement = .after; splitPlacementSide = .below
             default:
                 return .failure(
                     id: request.id, error: "invalid direction (left|right|up|down)"
                 )
+            }
+            if WorkspaceEngineGate.isEnabled {
+                guard await paneRegistry.isRegistered(paneId: sourceId),
+                      let target = universalControlTarget(paneId: sourceId),
+                      let groupID = workspaceCoordinator.layouts[target.worktree.id]?
+                          .groupContaining(tab: target.tab.id) else {
+                    return .failure(id: request.id, error: "unknown source panel")
+                }
+                return await serializeControlLifecycle(for: target.worktree.id) {
+                    let mountLease = self.acquireControlMount(for: target.worktree.id)
+                    let tabsBefore = Set(
+                        self.workspaceCoordinator.layouts[target.worktree.id]?.allTabs.map(\.id) ?? [])
+                    await self.workspaceCoordinator.requestSplit(
+                        anchor: groupID, placement: splitPlacementSide,
+                        choice: .newTerminal(command: request.params["cmd"]), in: target.worktree)
+                    let insertedTab = self.workspaceCoordinator.layouts[target.worktree.id]?.allTabs
+                        .first(where: { !tabsBefore.contains($0.id) })
+                    guard let universalTabID = insertedTab,
+                          let contentID = self.workspaceCoordinator.terminalContentID(
+                              for: universalTabID.id, in: target.worktree.id) else {
+                        if let insertedTab {
+                            await self.workspaceCoordinator.closeTab(insertedTab.id, in: target.worktree)
+                        }
+                        self.releaseControlMount(mountLease, success: false)
+                        return .failure(id: request.id, error: "panel did not register before timeout")
+                    }
+                    let startedAt = Date()
+                    var livePaneId = self.workspaceCoordinator.liveControlPaneId(
+                        contentID: contentID, in: target.worktree.id)
+                    while livePaneId == nil
+                        && Date().timeIntervalSince(startedAt) * 1_000
+                            < Double(self.registrationTimeoutMs) {
+                        livePaneId = self.workspaceCoordinator.liveControlPaneId(
+                            contentID: contentID, in: target.worktree.id)
+                        if livePaneId == nil {
+                            try? await Task.sleep(for: .milliseconds(1))
+                        }
+                    }
+                    guard let livePaneId else {
+                        await self.workspaceCoordinator.closeTab(universalTabID.id, in: target.worktree)
+                        self.releaseControlMount(mountLease, success: false)
+                        return .failure(
+                            id: request.id, error: "panel did not register before timeout"
+                        )
+                    }
+                    let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1_000)
+                    let remainingMs = max(0, self.registrationTimeoutMs - elapsedMs)
+                    guard await self.paneRegistry.waitUntilRegistered(
+                        paneId: livePaneId, timeoutMs: remainingMs
+                    ) else {
+                        await self.paneRegistry.cancelRegistration(paneId: livePaneId)
+                        await self.workspaceCoordinator.closeTab(universalTabID.id, in: target.worktree)
+                        self.releaseControlMount(mountLease, success: false)
+                        return .failure(
+                            id: request.id, error: "panel did not register before timeout"
+                        )
+                    }
+                    self.releaseControlMount(mountLease, success: true)
+                    return .success(id: request.id, result: ["id": livePaneId.uuidString])
+                }
+            }
+            guard let source = workspaceTabContaining(paneId: sourceId) else {
+                return .failure(id: request.id, error: "unknown source panel")
             }
             return await serializeControlLifecycle(for: source.worktree.id) {
                 let paneId = self.paneIdGenerator()
