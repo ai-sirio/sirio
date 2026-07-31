@@ -347,12 +347,13 @@ public actor ProjectStore {
     // MARK: - Agent session refs (v6)
 
     /// Upserts the native session reference reported by an agent hook for a
-    /// pane. Written live (not at quit) so refs survive a crash.
-    public func saveAgentSessionRef(paneId: UUID, worktreeId: UUID,
+    /// terminal. Written live (not at quit) so refs survive a crash.
+    public func saveAgentSessionRef(contentID: TerminalContentID, worktreeId: UUID,
                                     agentId: String, sessionRef: String) throws {
         try database.write { db in
             try AgentSessionRecord(
-                paneId: paneId.uuidString, worktreeId: worktreeId.uuidString,
+                terminalContentId: contentID.rawValue.uuidString,
+                worktreeId: worktreeId.uuidString,
                 agentId: agentId, sessionRef: sessionRef, capturedAt: Date()
             ).save(db)
         }
@@ -364,21 +365,24 @@ public actor ProjectStore {
                 .filter(Column("worktreeId") == worktreeId.uuidString)
                 .fetchAll(db)
                 .compactMap { record in
-                    // paneId scritto da questo store come UUID().uuidString;
-                    // righe non parsabili = corruzione esterna
-                    guard let paneId = UUID(uuidString: record.paneId) else {
-                        logger.warning("agentSessionRefs: skipping corrupt AgentSessionRecord '\(record.paneId)'")
+                    // terminalContentId written by this store as
+                    // UUID().uuidString; unparsable rows = external corruption.
+                    // Rows written before the v16 rename hold a dead pane id:
+                    // they parse but match no content, so restore prunes them.
+                    guard let id = UUID(uuidString: record.terminalContentId) else {
+                        logger.warning("agentSessionRefs: skipping corrupt AgentSessionRecord '\(record.terminalContentId)'")
                         return nil
                     }
-                    return AgentSessionRef(paneId: paneId, agentId: record.agentId,
+                    return AgentSessionRef(contentID: TerminalContentID(id),
+                                           agentId: record.agentId,
                                            sessionRef: record.sessionRef)
                 }
         }
     }
 
-    public func deleteAgentSessionRef(paneId: UUID) throws {
+    public func deleteAgentSessionRef(contentID: TerminalContentID) throws {
         try database.write { db in
-            _ = try AgentSessionRecord.deleteOne(db, key: paneId.uuidString)
+            _ = try AgentSessionRecord.deleteOne(db, key: contentID.rawValue.uuidString)
         }
     }
 }

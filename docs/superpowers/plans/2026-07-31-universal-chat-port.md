@@ -202,12 +202,33 @@ func chatController(for tab: WorkspaceTab, in worktree: Worktree,
 
 ## Phase 4 — Terminal agent-session restore (D4 — carried, not chat)
 
-### Task 4.1 — Universal `restoreAgentSessions`
+**Rewritten 2026-07-31 after investigation. The original task here was wrong and would have caused data loss** — it said to compute `paneIds` from the universal layout and reorder the call. That does not work, and shipping it would have turned an inert feature into a destructive one.
 
-- [ ] Test: `@Test func agentSessionRefsForPanesMissingFromTheUniversalLayoutArePruned() async throws { }`
-- [ ] Compute `paneIds` from the universal layout instead of `restoredTabs.flatMap(\.leafIds)`: iterate `layouts[worktree.id]?.allTabs`, keep `.terminal(contentID)`, resolve via `workspaceCoordinator.liveControlPaneId(contentID:in:)`.
-- [ ] **Ordering hazard:** `restoreAgentSessions` must run *after* `workspaceCoordinator.restore(worktree:)`, not before as the legacy call site does — the layout does not exist yet at line 468. This inverts the current order inside `restoreWorktree`, and the pruning branch (`guard paneIds.contains(ref.paneId)`) will delete every ref if it runs against an empty layout. This is the single highest-risk step of the plan: getting it wrong silently discards users' agent session refs on first launch.
-- [ ] Verify: `Scripts/ci.sh` → `CI OK`. **Commit:** `fix: restore agent sessions from the universal workspace layout`
+### Why the original task was wrong
+
+| Link | Evidence |
+|------|----------|
+| `agentSession` rows are keyed by pane id | `AppDatabase.swift:130` — `t.primaryKey("paneId", .text)` |
+| the universal pane id is a `ResourceGenerationID` | `WorkspaceCoordinator.liveControlPaneId` returns `generation.rawValue`; `TerminalSurfaceHost` uses `generationID.rawValue` as the pane id |
+| that id is new on every relaunch | `TerminalContentAdapter` mints `ResourceGenerationID()` at every prepare/retry; nothing restores it |
+| it is not persisted | `TerminalContentRecordValue` stores only `id`, `worktreeID`, `launchKind`, `commandJSON` |
+
+So no stored ref can ever match a live pane after relaunch. Legacy worked only because pane ids lived inside the persisted `LegacyWorkspaceTab` tree. Consequences: **agent session resume is already dead in production under the gate-enabled default**, and simply making the existing pruning branch (`guard paneIds.contains(ref.paneId) else { delete }`) run reliably would delete every user's refs on every launch.
+
+A second, independent break: under the universal engine nothing reads `paneCommands` — its only consumer is `ContentView.swift:392`, inside the legacy `terminalStack`. The launch command comes from `TerminalContentAdapter`'s runtime token instead.
+
+### D7 — Re-key on `TerminalContentID`, and pass the command as a provider
+
+`TerminalContentID` is stable across relaunch by design, so it is the correct key. The resume command must embed `--session <paneId>`, but the pane id is minted *inside* `TerminalSurfaceHost` (`TerminalSurfaceHost.swift:59`), i.e. after the command string would have to exist. `TerminalSurfaceConfiguration` therefore gains an optional `commandProvider: (@Sendable (UUID) -> String?)?`, used when `command` is nil: the adapter hands over a closure that receives the real pane id, writes the agent hook config for it, and returns the resume command.
+
+### Tasks
+
+- [ ] **4.1 Schema.** Migration re-keying `agentSession` on `contentId` (TEXT primary key). Pre-existing rows cannot be mapped to a content id and are dropped — they are already unusable. Test: migration runs on a populated v-previous database and leaves a queryable table.
+- [ ] **4.2 Store.** `AgentSessionRef` + `ProjectStore.saveAgentSessionRef` / `deleteAgentSessionRef` / `agentSessionRefs(of:)` keyed by `TerminalContentID`. Tests for round-trip and delete.
+- [ ] **4.3 Write path.** `AppModel.saveAgentSessionRef(paneId:sessionRef:)` maps the live pane id to its `TerminalContentID` through the coordinator before storing. Test: a ref saved for a live pane is readable by content id.
+- [ ] **4.4 Command provider.** `TerminalSurfaceConfiguration.commandProvider`; `TerminalContentAdapter` calls it in `makeHost`. Test: the provider receives the same pane id the surface publishes.
+- [ ] **4.5 Restore.** `restoreAgentSessions` keyed by content id, pruning refs whose content id is absent from the restored layout, and feeding the resume command through the provider. Tests: **a ref whose content id is still in the layout survives** (the regression the old task would have caused), and one whose content id is gone is pruned.
+- [ ] **4.6** `Scripts/ci.sh` → `CI OK`. **Commit:** `fix: key agent session refs on terminal content id`
 
 ---
 

@@ -45,6 +45,60 @@ struct TerminalSurfaceHostTests {
         #expect(host.contentID == contentID)
     }
 
+    /// An agent resume command has to embed the pane id it will report status
+    /// under, but that id is this host's generation — minted here, after the
+    /// caller would have had to build the string. The provider closes the gap
+    /// by receiving the real pane id.
+    @Test func theCommandProviderReceivesThePaneIdTheSurfacePublishes() {
+        let seen = Box()
+        let configuration = TerminalSurfaceConfiguration(
+            commandProvider: { paneId in
+                seen.value.append(paneId)
+                return "claude --resume abc"
+            })
+
+        let host = TerminalSurfaceHost(contentID: contentID, configuration: configuration)
+
+        #expect(seen.value == [host.generationID.rawValue])
+    }
+
+    /// Relaunch mints a new pane id, so the command must be rebuilt for it —
+    /// reusing the first one would point the agent's hooks at a dead pane.
+    @Test func relaunchAsksTheCommandProviderAgainWithTheNewPaneId() {
+        let seen = Box()
+        let configuration = TerminalSurfaceConfiguration(
+            commandProvider: { paneId in
+                seen.value.append(paneId)
+                return nil
+            })
+        let host = TerminalSurfaceHost(contentID: contentID, configuration: configuration)
+
+        let second = host.relaunch()
+
+        #expect(seen.value.count == 2)
+        #expect(seen.value.last == second.rawValue)
+    }
+
+    /// An explicit command wins: the provider exists only to fill in a command
+    /// that could not be built before the pane id existed.
+    @Test func anExplicitCommandIsNotOverriddenByTheProvider() {
+        let seen = Box()
+        let configuration = TerminalSurfaceConfiguration(
+            command: "zsh",
+            commandProvider: { paneId in
+                seen.value.append(paneId)
+                return "claude --resume abc"
+            })
+
+        _ = TerminalSurfaceHost(contentID: contentID, configuration: configuration)
+
+        #expect(seen.value.isEmpty)
+    }
+
+    private final class Box: @unchecked Sendable {
+        var value: [UUID] = []
+    }
+
     @Test func theSurfaceHostExposesNoSplitTreeApi() {
         let host = TerminalSurfaceHost(contentID: contentID, configuration: configuration)
 
