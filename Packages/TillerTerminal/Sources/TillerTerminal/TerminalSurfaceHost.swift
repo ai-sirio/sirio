@@ -16,9 +16,16 @@ public struct TerminalSurfaceConfiguration: Sendable {
     public let onContentSignal: (@Sendable (UUID, String) -> Void)?
     public let onOpenURL: (@Sendable (UUID, String) -> Void)?
 
+    /// Builds the launch command once the pane id exists, for commands that
+    /// have to embed it — an agent's resume command carries the pane id its
+    /// hooks will report status under, and that id is minted per relaunch.
+    /// Consulted only when `command` is nil.
+    public let commandProvider: (@Sendable (UUID) -> String?)?
+
     public init(
         workingDirectory: String? = nil,
         command: String? = nil,
+        commandProvider: (@Sendable (UUID) -> String?)? = nil,
         extraEnvironment: [String: String] = [:],
         initialScrollback: Data? = nil,
         onScrollback: (@Sendable (UUID, Data) async -> Void)? = nil,
@@ -28,6 +35,7 @@ public struct TerminalSurfaceConfiguration: Sendable {
     ) {
         self.workingDirectory = workingDirectory
         self.command = command
+        self.commandProvider = commandProvider
         self.extraEnvironment = extraEnvironment
         self.initialScrollback = initialScrollback
         self.onScrollback = onScrollback
@@ -107,7 +115,8 @@ public final class TerminalSurfaceHost {
         AnyView(
             PtyTerminalPane(
                 workingDirectory: configuration.workingDirectory,
-                command: configuration.command,
+                command: configuration.command
+                    ?? configuration.commandProvider?(generationID.rawValue),
                 paneId: generationID.rawValue,
                 initialScrollback: configuration.initialScrollback,
                 extraEnvironment: configuration.extraEnvironment,

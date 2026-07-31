@@ -287,6 +287,15 @@ final class AppModel {
         chatAdapter?.releaseContent = { [weak self] tabID in
             self?.teardownChatController(tabId: tabID.rawValue)
         }
+        (self.workspaceCoordinator.adapters[.terminal] as? TerminalContentAdapter)?
+            .resumeCommandProvider = { [weak self] contentID, worktree, paneId in
+                // The surface builds its root view on the main actor, so this
+                // provider is only ever called there; the closure's type is
+                // nonisolated because it crosses the TillerTerminal boundary.
+                MainActor.assumeIsolated {
+                    self?.resumeCommand(contentID: contentID, worktree: worktree, paneId: paneId)
+                }
+            }
         chatAdapter?.resolveTitle = { [weak self] contentID in
             let stored = self?.chatSession(id: contentID.rawValue)?.title?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -491,15 +500,31 @@ final class AppModel {
                 guard let chatAgentId = tab.chatAgentId else { continue }
                 agentActivity.registerAgentId(paneId: tab.id, agentId: chatAgentId)
             }
-            await restoreAgentSessions(
-                for: worktree,
-                paneIds: Set(restoredTabs.flatMap { $0.leafIds })
-            )
+            if !WorkspaceEngineGate.isEnabled {
+                await restoreAgentSessions(
+                    for: worktree,
+                    contentIDs: Set(restoredTabs.flatMap { $0.leafIds }.map(TerminalContentID.init))
+                )
+            }
         }
         if WorkspaceEngineGate.isEnabled {
             await workspaceCoordinator.restore(worktree: worktree)
             registerRestoredChatAgents(in: worktree.id)
+            // After restore, so the layout exists: pruning against an empty
+            // layout would delete every ref. Before any host is built, so the
+            // parked resumes are in place when the first surface spawns —
+            // hosts are created lazily on mount, not by restore.
+            await restoreAgentSessions(
+                for: worktree, contentIDs: restoredTerminalContentIDs(in: worktree.id))
         }
+    }
+
+    private func restoredTerminalContentIDs(in worktreeId: UUID) -> Set<TerminalContentID> {
+        var ids: Set<TerminalContentID> = []
+        for tab in workspaceCoordinator.layouts[worktreeId]?.allTabs ?? [] {
+            if case .terminal(let contentID) = tab.content { ids.insert(contentID) }
+        }
+        return ids
     }
 
     /// Identity for restored chat tabs, so the Agents panel and badges know
@@ -929,9 +954,13 @@ final class AppModel {
                     guard await self.paneRegistry.isRegistered(paneId: paneId) else {
                         return .failure(id: request.id, error: "unknown panel")
                     }
+                    // Resolved before the close: afterwards the tab is gone
+                    // from the layout and the pane id maps to nothing.
+                    let closedContentID: TerminalContentID? =
+                        if case .terminal(let cid) = target.tab.content { cid } else { nil }
                     await self.workspaceCoordinator.closeTab(target.tab.id, in: target.worktree)
                     await self.paneRegistry.cancelRegistration(paneId: paneId)
-                    self.deleteAgentSessionRefs(paneIds: [paneId])
+                    self.deleteAgentSessionRefs(contentIDs: closedContentID.map { [$0] } ?? [])
                     self.paneCommands[paneId] = nil
                     return .success(id: request.id)
                 }
@@ -956,7 +985,7 @@ final class AppModel {
                     )
                 }
                 await self.paneRegistry.cancelRegistration(paneId: paneId)
-                self.deleteAgentSessionRefs(paneIds: [paneId])
+                self.deleteAgentSessionRefs(contentIDs: [TerminalContentID(paneId)])
                 self.paneCommands[paneId] = nil
                 self.workspaceCoordinator.legacyPaneCache(for: removal.worktreeId).prune(
                     keeping: self.workspaceLiveLeafIds(for: removal.worktreeId)
@@ -1324,7 +1353,7 @@ final class AppModel {
         var list = workspaceCoordinator.legacyTabs(for: worktree.id)
         guard !list.isEmpty else { return }
         if let closing = list.first(where: { $0.id == tabId }) {
-            deleteAgentSessionRefs(paneIds: closing.leafIds)
+            deleteAgentSessionRefs(contentIDs: closing.leafIds.map(TerminalContentID.init))
         }
         list.removeAll { $0.id == tabId }
         teardownDocument(tabId: tabId)
@@ -1670,7 +1699,7 @@ final class AppModel {
         guard let tuple = workspaceTabContaining(paneId: paneId),
               let tree = tuple.tab.terminalTree,
               let newTree = tree.removing(leaf: paneId) else { return }
-        deleteAgentSessionRefs(paneIds: [paneId])
+        deleteAgentSessionRefs(contentIDs: [TerminalContentID(paneId)])
         var tabs = workspaceCoordinator.legacyTabs(for: tuple.worktree.id)
         tabs[tuple.index].content = .terminal(newTree)
         workspaceCoordinator.setLegacyTabs(tabs, for: tuple.worktree.id)
@@ -1880,25 +1909,47 @@ final class AppModel {
     private func saveAgentSessionRef(paneId: UUID, sessionRef: String) {
         guard let store,
               let agentId = agentActivity.agentId(paneId: paneId),
-              let tuple = workspaceTabContaining(paneId: paneId) else {
+              let key = agentSessionKey(paneId: paneId) else {
             sessionRestoreLogger.warning("session ref for unknown pane \(paneId.uuidString, privacy: .public) dropped")
             return
         }
-        let worktreeId = tuple.worktree.id
         Task {
             try? await store.saveAgentSessionRef(
-                paneId: paneId, worktreeId: worktreeId,
+                contentID: key.contentID, worktreeId: key.worktreeId,
                 agentId: agentId, sessionRef: sessionRef
             )
         }
     }
 
-    /// Deletes stored session refs for panes the user closed explicitly —
+    /// The stable key a live pane's session ref is stored under.
+    ///
+    /// Under the universal engine the live pane id is a ResourceGenerationID,
+    /// minted anew at every spawn, so it has to be resolved to the tab's
+    /// TerminalContentID. Legacy pane ids are themselves persisted in the tab
+    /// tree, so they are already stable and are wrapped as-is — both engines
+    /// then share one key space.
+    private func agentSessionKey(
+        paneId: UUID
+    ) -> (worktreeId: UUID, contentID: TerminalContentID)? {
+        if WorkspaceEngineGate.isEnabled {
+            guard let target = universalControlTarget(paneId: paneId),
+                  case .terminal(let contentID) = target.tab.content else { return nil }
+            return (target.worktree.id, contentID)
+        }
+        guard let tuple = workspaceTabContaining(paneId: paneId) else { return nil }
+        return (tuple.worktree.id, TerminalContentID(paneId))
+    }
+
+    /// Deletes stored session refs for terminals the user closed explicitly —
     /// a deliberately ended pane must not resurrect its agent on relaunch.
-    private func deleteAgentSessionRefs<S: Sequence<UUID> & Sendable>(paneIds: S) {
+    /// Takes content ids, not pane ids: callers close the tab first, after
+    /// which a live pane id can no longer be resolved.
+    private func deleteAgentSessionRefs<S: Sequence<TerminalContentID> & Sendable>(
+        contentIDs: S
+    ) {
         guard let store else { return }
         Task {
-            for id in paneIds { try? await store.deleteAgentSessionRef(paneId: id) }
+            for id in contentIDs { try? await store.deleteAgentSessionRef(contentID: id) }
         }
     }
 
@@ -2359,14 +2410,16 @@ final class AppModel {
     /// Rewires restored panes that were running an agent so they relaunch
     /// with the agent's resume command instead of a fresh shell. Refs for
     /// panes no longer in the layout, or stale on disk, are pruned.
-    private func restoreAgentSessions(for worktree: Worktree, paneIds: Set<UUID>) async {
+    private func restoreAgentSessions(
+        for worktree: Worktree, contentIDs: Set<TerminalContentID>
+    ) async {
         guard let store else { return }
         let refs = (try? await store.agentSessionRefs(of: worktree.id)) ?? []
-        for ref in refs {
-            guard paneIds.contains(ref.paneId) else {
-                try? await store.deleteAgentSessionRef(paneId: ref.paneId)
-                continue
-            }
+        let plan = AgentSessionRestorePlan.plan(refs: refs, liveContentIDs: contentIDs)
+        for ref in plan.prunable {
+            try? await store.deleteAgentSessionRef(contentID: ref.contentID)
+        }
+        for ref in plan.resumable {
             guard resumeAgentSessionsEnabled,
                   let adapter = AgentCatalog.all.first(where: { $0.id == ref.agentId })
             else { continue }
@@ -2386,33 +2439,69 @@ final class AppModel {
                 )
             }.value
             guard isLikelyValid else {
-                sessionRestoreLogger.warning("restore: stale session ref for pane \(ref.paneId.uuidString, privacy: .public) (\(agentId, privacy: .public)) — pruning")
-                try? await store.deleteAgentSessionRef(paneId: ref.paneId)
+                sessionRestoreLogger.warning("restore: stale session ref for terminal \(ref.contentID.rawValue.uuidString, privacy: .public) (\(agentId, privacy: .public)) — pruning")
+                try? await store.deleteAgentSessionRef(contentID: ref.contentID)
                 continue
             }
-            let hc = tillerctlPath()
-            do {
-                try adapter.prepare(
-                    worktreePath: worktree.path,
-                    paneId: ref.paneId,
-                    tillerctlPath: hc,
-                    skillMarkdown: try TillerSkillResource.markdown.get()
-                )
-            } catch {
-                sessionRestoreLogger.warning("restore: prepare failed for pane \(ref.paneId.uuidString, privacy: .public): \(String(describing: error), privacy: .public) — falling back to fresh shell")
+            if WorkspaceEngineGate.isEnabled {
+                // The command cannot be built yet: it must embed the pane id,
+                // which the surface only mints when the host is created. Park
+                // the ref; resumeCommand(contentID:worktree:paneId:) finishes
+                // the job from TerminalContentAdapter's provider.
+                pendingAgentResume[ref.contentID] = ref
                 continue
             }
-            guard var command = adapter.resumeCommand(
-                worktreePath: worktree.path, paneId: ref.paneId,
-                tillerctlPath: hc, sessionRef: ref.sessionRef
-            ) else { continue }
-            if let override = configDirOverride(forAgentId: adapter.id) {
-                command = "\(override.envKey)=\(Self.shellQuote(override.path)) \(command)"
-            }
-            paneCommands[ref.paneId] = command
-            agentActivity.agentSpawned(paneId: ref.paneId, agentId: adapter.id, now: Date())
-            watchExit(paneId: ref.paneId)
+            // Legacy: the pane id is the content id and is already stable, so
+            // the command can be built and parked eagerly.
+            let paneId = ref.contentID.rawValue
+            guard let command = resumeCommand(ref: ref, worktree: worktree, paneId: paneId)
+            else { continue }
+            paneCommands[paneId] = command
         }
+    }
+
+    /// Terminals whose next spawn should resume an agent instead of opening a
+    /// shell, keyed by the identity that survives relaunch.
+    private var pendingAgentResume: [TerminalContentID: AgentSessionRef] = [:]
+
+    /// Completes a parked resume once the pane id exists: writes the agent's
+    /// hook config for that pane and returns the command that resumes it.
+    /// Consumed once — a relaunch of the same terminal starts a fresh shell
+    /// rather than replaying a conversation the user already resumed.
+    private func resumeCommand(
+        contentID: TerminalContentID, worktree: Worktree, paneId: UUID
+    ) -> String? {
+        guard let ref = pendingAgentResume.removeValue(forKey: contentID) else { return nil }
+        return resumeCommand(ref: ref, worktree: worktree, paneId: paneId)
+    }
+
+    private func resumeCommand(
+        ref: AgentSessionRef, worktree: Worktree, paneId: UUID
+    ) -> String? {
+        guard let adapter = AgentCatalog.all.first(where: { $0.id == ref.agentId })
+        else { return nil }
+        let hc = tillerctlPath()
+        do {
+            try adapter.prepare(
+                worktreePath: worktree.path,
+                paneId: paneId,
+                tillerctlPath: hc,
+                skillMarkdown: try TillerSkillResource.markdown.get()
+            )
+        } catch {
+            sessionRestoreLogger.warning("restore: prepare failed for pane \(paneId.uuidString, privacy: .public): \(String(describing: error), privacy: .public) — falling back to fresh shell")
+            return nil
+        }
+        guard var command = adapter.resumeCommand(
+            worktreePath: worktree.path, paneId: paneId,
+            tillerctlPath: hc, sessionRef: ref.sessionRef
+        ) else { return nil }
+        if let override = configDirOverride(forAgentId: adapter.id) {
+            command = "\(override.envKey)=\(Self.shellQuote(override.path)) \(command)"
+        }
+        agentActivity.agentSpawned(paneId: paneId, agentId: adapter.id, now: Date())
+        watchExit(paneId: paneId)
+        return command
     }
 
     func spawnAgent(_ adapter: any AgentAdapter, in worktree: Worktree) async {
@@ -2635,8 +2724,9 @@ final class AppModel {
         paneId: UUID, worktree: Worktree, agentId: String
     ) async -> TranscriptSource? {
         guard let store,
+              let key = agentSessionKey(paneId: paneId),
               let refs = try? await store.agentSessionRefs(of: worktree.id),
-              let ref = refs.first(where: { $0.paneId == paneId })
+              let ref = refs.first(where: { $0.contentID == key.contentID })
         else { return nil }
         switch agentId {
         case "claude":

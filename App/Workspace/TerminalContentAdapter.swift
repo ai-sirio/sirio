@@ -13,6 +13,11 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
     private var runtimes: [WorkspaceTabID: AdapterRuntimeToken] = [:]
     private var closedTabIDs: Set<WorkspaceTabID> = []
 
+    /// Builds the launch command for a terminal whose runtime token carries
+    /// none — the agent-resume case, where the command must embed the pane id
+    /// that only exists once the surface mints it. Assigned by AppModel.
+    var resumeCommandProvider: (@Sendable (TerminalContentID, Worktree, UUID) -> String?)?
+
     init(boundary: AdapterBoundary = AdapterBoundary()) { self.boundary = boundary }
 
     func prepare(request: ContentRequest, worktree: Worktree) async throws -> PreparedContent {
@@ -49,11 +54,13 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
         guard case .terminal(let contentID) = tab.content else {
             return WorkspaceContentHostAdapter(tabID: tab.id, viewController: NSViewController())
         }
+        let provider = resumeCommandProvider
         let surface = TerminalSurfaceHost(
             contentID: contentID,
             configuration: TerminalSurfaceConfiguration(
                 workingDirectory: worktree.path,
                 command: runtimes[tab.id]?.command,
+                commandProvider: { paneId in provider?(contentID, worktree, paneId) },
                 extraEnvironment: [
                     "TILLER_ENV": "1",
                     "TILLER_SOCKET": ControlSocket.defaultPath(),
