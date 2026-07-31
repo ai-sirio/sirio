@@ -35,7 +35,9 @@ struct WorkspaceContentAdapterTests {
     @Test func chatAndDocumentHydrateOnlyOnFirstActivation() async throws {
         let chatRecorder = AdapterBoundaryRecorder()
         let chat = ChatContentAdapter(boundary: chatRecorder.boundary)
-        let chatTab = try #require(chat.prepareTab(request: .newChat(agentID: "codex")))
+        chat.makeSession = { _, _ in "session-hydration" }
+        let chatTab = try #require(
+            chat.prepareTab(request: .newChat(agentID: "codex"), worktreeID: UUID()))
         let documentRecorder = AdapterBoundaryRecorder()
         let document = DocumentContentAdapter(boundary: documentRecorder.boundary)
         let documentTab = try #require(document.prepareTab(
@@ -99,7 +101,8 @@ struct WorkspaceContentAdapterTests {
     @Test func interruptedChatTurnsAreRetainedAndNeverReissued() async throws {
         let recorder = AdapterBoundaryRecorder()
         let adapter = ChatContentAdapter(boundary: recorder.boundary)
-        let tab = try #require(adapter.prepareTab(request: .resumeChat(ChatContentID("session-1"))))
+        let tab = try #require(adapter.prepareTab(
+            request: .resumeChat(ChatContentID("session-1")), worktreeID: UUID()))
         let worktree = fixtureWorktree()
         await adapter.recordInterruptedTurn(tabID: tab.id, text: "keep this")
 

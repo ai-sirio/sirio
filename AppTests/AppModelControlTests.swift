@@ -10,33 +10,69 @@ import TillerWorkspace
 @Suite(.serialized)
 @MainActor
 struct AppModelControlTests {
-    @Test func renameTabDisablesAutoNaming() {
-        let model = makeModel()
-        let worktree = makeWorktree(path: "/tmp/rename-tab")
-        let tab = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
-        model.worktrees = [worktree.projectId: [worktree]]
-        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
+    /// Title provenance: a manual rename is the user's word and must stop
+    /// auto-naming from overwriting it; an auto title must not claim to be
+    /// the user's.
+    @Test func renameTabDisablesAutoNaming() async throws {
+        let (model, worktree, tab) = try await makeDocumentTab(named: "rename-tab")
 
         #expect(tab.titleIsAutoNamed == true)
-        model.renameTab(tab.id, in: worktree.id, to: "My custom name")
+        model.renameTab(tab.id.rawValue, in: worktree.id, to: "My custom name")
+        let updated = try await settledTab(model, worktree: worktree, id: tab.id) {
+            $0.title == "My custom name"
+        }
 
-        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == "My custom name")
         #expect(updated.titleIsAutoNamed == false)
     }
 
-    @Test func applyAutoTitleLeavesProvenanceUntouched() {
-        let model = makeModel()
-        let worktree = makeWorktree(path: "/tmp/apply-auto-title")
-        let tab = LegacyWorkspaceTab(id: UUID(), title: "Terminale 1", tree: .leaf(id: UUID()))
-        model.worktrees = [worktree.projectId: [worktree]]
-        model.workspaceCoordinator.setLegacyTabs([tab], for: worktree.id)
+    @Test func applyAutoTitleLeavesProvenanceUntouched() async throws {
+        let (model, worktree, tab) = try await makeDocumentTab(named: "apply-auto-title")
 
-        model.applyAutoTitle(tab.id, in: worktree.id, title: "Fix login bug")
+        model.applyAutoTitle(tab.id.rawValue, in: worktree.id, title: "Fix login bug")
+        let updated = try await settledTab(model, worktree: worktree, id: tab.id) {
+            $0.title == "Fix login bug"
+        }
 
-        let updated = model.workspaceTabs(for: worktree.id).first { $0.id == tab.id }!
         #expect(updated.title == "Fix login bug")
         #expect(updated.titleIsAutoNamed == true)
+    }
+
+    /// A document tab is the cheapest real universal tab: no PTY, no database.
+    private func makeDocumentTab(named name: String) async throws
+        -> (AppModel, Worktree, WorkspaceTab) {
+        let coordinator = WorkspaceCoordinator(
+            persistence: ControlWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [.document: DocumentContentAdapter()])
+        let model = AppModel(
+            paneRegistry: PaneRegistry(), registrationTimeoutMs: 100,
+            workspaceCoordinator: coordinator)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("Note.md")
+        try "# Note\n".write(to: url, atomically: true, encoding: .utf8)
+        let worktree = makeWorktree(path: directory.path)
+        model.worktrees = [worktree.projectId: [worktree]]
+        await coordinator.restore(worktree: worktree)
+        model.openDocument(fileURL: url, in: worktree)
+        var tabs: [WorkspaceTab] = []
+        for _ in 0..<200 where tabs.isEmpty {
+            tabs = coordinator.layouts[worktree.id]?.allTabs ?? []
+            if tabs.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        return (model, worktree, try #require(tabs.first))
+    }
+
+    private func settledTab(_ model: AppModel, worktree: Worktree, id: WorkspaceTabID,
+                            until condition: (WorkspaceTab) -> Bool) async throws -> WorkspaceTab {
+        for _ in 0..<200 {
+            if let tab = model.workspaceCoordinator.layouts[worktree.id]?.tab(id),
+               condition(tab) { return tab }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return try #require(model.workspaceCoordinator.layouts[worktree.id]?.tab(id))
     }
 
     @Test func panelCreateWithTheEngineEnabledResolvesThroughLiveControlPaneId() async {

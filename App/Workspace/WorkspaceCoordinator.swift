@@ -301,6 +301,14 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         await registry.release(tabID: id)
     }
 
+    func renameTab(_ id: WorkspaceTabID, title: String, isAutoNamed: Bool,
+                   in worktree: Worktree) async {
+        worktrees[worktree.id] = worktree
+        let expectedRevision = revisions[worktree.id] ?? 0
+        await commit(.renameTab(id, title: title, isAutoNamed: isAutoNamed),
+                     in: worktree, expectedRevision: expectedRevision)
+    }
+
     func checkpointOnQuit() async {
         for (worktreeID, layout) in layouts {
             let worktree = worktrees[worktreeID] ?? Worktree(

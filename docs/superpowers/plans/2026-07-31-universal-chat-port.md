@@ -37,17 +37,33 @@
 
 ### D2 — Dependencies are injected as closures, late-bound after `AppModel.init`
 
-`AppModel.init` constructs the default adapters (`AppModel.swift:252-259`) *before* `self` is available, so constructor injection of `AppModel` is impossible without an implicitly-unwrapped cycle. `ChatContentAdapter` therefore exposes two settable closures, assigned at the end of `AppModel.init` with `[weak self]`:
+`AppModel.init` constructs the default adapters (`AppModel.swift:252-259`) *before* `self` is available, so constructor injection of `AppModel` is impossible without an implicitly-unwrapped cycle. `ChatContentAdapter` therefore exposes settable closures, assigned at the end of `AppModel.init` with `[weak self]`:
 
 ```swift
 // ChatContentAdapter
 var makeSession: ((_ worktreeID: UUID, _ agentID: String) throws -> String)?
-var makeController: ((WorkspaceTab, Worktree, _ startNewConversation: Bool) -> ChatController?)?
+var makeContentViewController: ((WorkspaceTab, Worktree, _ isFresh: Bool) -> NSViewController?)?
+var releaseContent: ((WorkspaceTabID) -> Void)?
+var resolveTitle: ((ChatContentID) -> String?)?
 ```
+
+**Amended during implementation (2026-07-31):** the host factory returns an `NSViewController`, *not* a `ChatController` as first drafted. `ChatController` needs a database and an install store, so an adapter-level unit test could not construct one — the whole adapter would have been testable only end-to-end. Returning a view controller also keeps the adapter ignorant of what a chat is, matching the rule that the universal model never learns what an agent is. `isFresh` is true only for a tab created by `.newChat` in this run: those start a conversation, resumed and restored ones stay detached.
 
 Rejected alternatives, and why:
 - **Extending `AdapterBoundary`** — it is a generic lifecycle-hook struct (hydrate/checkpoint/close/dispose/reissue) shared by all three adapters. Adding chat-specific fields makes every adapter carry chat concerns.
 - **Passing `chatStore`/`agentInstallStore`/`persistenceCoordinator`/`agentActivity` individually** — four dependencies to thread, and the adapter would then own the `onStatusChange` → `notifyTransition` wiring that belongs to the app's notification layer. The closure keeps one seam.
+
+### D6 — Legacy-only mutation entry points (discovered 2026-07-31, in scope)
+
+Porting chat surfaced that **every `AppModel` method that mutates tabs was still legacy-only**, so under the shipped gate-enabled default it silently did nothing:
+
+| Method | Symptom under the universal engine |
+|--------|-----------------------------------|
+| `applyAutoTitle` | auto-rename never retitles any tab |
+| `renameTab` | manual rename (tab bar, sidebar) does nothing |
+| `closeTab` | ⌘W and menu close do nothing; **and** the dirty-document prompt reads dictionaries that are always empty, so closing a modified file drops the buffer silently |
+
+Only the tab's own X button worked, because the renderer sends `.requestClose` straight to the coordinator without passing through `AppModel` — which is why none of this was noticed. These are the same family as the `openDocument` bug fixed in `74bdf84`. Each gets a gate branch here; `WorkspaceCoordinator` gains `renameTab(_:title:isAutoNamed:in:)` to back the first two.
 
 ### D3 — `chatControllers` stays keyed on `UUID`, using `tab.id.rawValue`
 
