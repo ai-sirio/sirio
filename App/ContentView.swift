@@ -204,6 +204,7 @@ struct ContentView: View {
                 }
                 if workspaceEngineEnabled {
                     workspaceStack
+                        .contextMenu { paneContextMenu }
                 } else {
                     terminalStack
                 }
@@ -276,31 +277,53 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
     }
 
+    private func splitMenuModel(
+        worktree: Worktree, layout: WorkspaceLayout
+    ) -> SplitContentMenuModel {
+        SplitContentMenuModel(
+            worktreeID: worktree.id,
+            sourceTabID: layout.group(layout.activeGroupID)?.activeTabID ?? WorkspaceTabID(),
+            layout: layout,
+            layoutsByWorktree: workspaceCoordinator.layouts,
+            groupSize: CGSize(width: 800, height: 600),
+            placement: .right,
+            installedAgents: model.agentCenter.installedAgents.map {
+                SplitMenuAgent(id: $0.id, name: $0.name)
+            },
+            resumedChats: model.chatHistory(for: worktree).map {
+                SplitMenuChat(id: $0.id, title: $0.title)
+            })
+    }
+
     @ViewBuilder
     private var universalSplitMenu: some View {
         if let worktree = model.selectedWorktree,
            let layout = workspaceCoordinator.layouts[worktree.id] {
-            let menu = SplitContentMenuModel(
-                worktreeID: worktree.id,
-                sourceTabID: layout.group(layout.activeGroupID)?.activeTabID ?? WorkspaceTabID(),
-                layout: layout,
-                layoutsByWorktree: workspaceCoordinator.layouts,
-                groupSize: CGSize(width: 800, height: 600),
-                placement: .right,
-                installedAgents: model.agentCenter.installedAgents.map {
-                    SplitMenuAgent(id: $0.id, name: $0.name)
-                },
-                resumedChats: model.chatHistory(for: worktree).map {
-                    SplitMenuChat(id: $0.id, title: $0.title)
+            SplitContentMenu(
+                model: splitMenuModel(worktree: worktree, layout: layout),
+                onAction: { action in
+                    handleUniversalSplitAction(action, worktree: worktree, layout: layout)
                 })
-            SplitContentMenu(model: menu, onAction: { action in
-                handleUniversalSplitAction(action, worktree: worktree, layout: layout)
-            })
             .help("Split Right With…")
             .accessibilityLabel("Split Right With…")
         } else {
             Button("Split Right With…") {}
                 .disabled(true)
+        }
+    }
+
+    /// The same menu the toolbar's Split button shows, reachable by
+    /// right-clicking the pane itself. It acts on the active pane, matching
+    /// what the toolbar button does.
+    @ViewBuilder
+    private var paneContextMenu: some View {
+        if let worktree = model.selectedWorktree,
+           let layout = workspaceCoordinator.layouts[worktree.id] {
+            SplitContentMenuItems(
+                model: splitMenuModel(worktree: worktree, layout: layout),
+                onAction: { action in
+                    handleUniversalSplitAction(action, worktree: worktree, layout: layout)
+                })
         }
     }
 

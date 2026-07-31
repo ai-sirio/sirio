@@ -195,6 +195,21 @@ struct SplitContentMenu: View {
 
     var body: some View {
         Menu {
+            SplitContentMenuItems(model: model, onAction: onAction)
+        } label: {
+            Label("Split", systemImage: "rectangle.split.2x1")
+        }
+    }
+}
+
+/// The menu body on its own, so the toolbar's Split button and the pane's
+/// right-click menu stay one definition rather than two that drift apart.
+struct SplitContentMenuItems: View {
+    let model: SplitContentMenuModel
+    let onAction: (SplitContentMenuAction) -> Void
+
+    var body: some View {
+        Group {
             Button("New Terminal") { onAction(.newTerminal) }
                 .disabled(!model.items[0].isEnabled)
             Menu("Agent Terminal") {
@@ -254,8 +269,6 @@ struct SplitContentMenu: View {
                 }
             }
             .disabled(!model.items[7].isEnabled)
-        } label: {
-            Label("Split", systemImage: "rectangle.split.2x1")
         }
     }
 }
