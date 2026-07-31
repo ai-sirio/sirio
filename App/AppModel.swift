@@ -530,7 +530,7 @@ final class AppModel {
     /// Identity for restored chat tabs, so the Agents panel and badges know
     /// which agent a tab belongs to before it is ever viewed (viewing it
     /// builds a controller, which registers identity on its own).
-    private func registerRestoredChatAgents(in worktreeId: UUID) {
+    func registerRestoredChatAgents(in worktreeId: UUID) {
         for tab in workspaceCoordinator.layouts[worktreeId]?.allTabs ?? [] {
             guard case .chat(let contentID) = tab.content,
                   let record = chatSession(id: contentID.rawValue) else { continue }
