@@ -28,6 +28,17 @@ struct SplitContentMenuTests {
         #expect(menu.defaultItem == .newTerminal)
     }
 
+    /// Closing is reachable from the pane's own right-click menu, not only from
+    /// the tab's × and ⌘W, and it must close the tab the menu was opened on.
+    @Test func closeTabIsOfferedForTheTabThatOpenedTheMenu() {
+        let opened = WorkspaceTabID()
+        let menu = makeMenu(sourceTabID: opened, tabs: [opened])
+
+        #expect(menu.topLevelLabels.contains("Close Tab"))
+        #expect(menu.closeItem?.action == .closeTab(opened))
+        #expect(menu.closeItem?.isEnabled == true)
+    }
+
     @Test func moveExistingTabExcludesTheTabThatOpenedTheMenu() {
         let opened = WorkspaceTabID()
         let other = WorkspaceTabID()

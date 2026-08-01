@@ -8,9 +8,13 @@ public final class WorkspaceViewController: NSViewController {
     private let reconciler: WorkspaceReconciler
     private let intentSink: WorkspaceIntentSink
 
-    public init(hostProvider: WorkspaceHostProvider, intentSink: WorkspaceIntentSink) {
+    public init(
+        hostProvider: WorkspaceHostProvider,
+        intentSink: WorkspaceIntentSink,
+        stripFactory: PaneTabStripFactory? = nil
+    ) {
         self.reconciler = WorkspaceReconciler(
-            hostProvider: hostProvider, intentSink: intentSink)
+            hostProvider: hostProvider, intentSink: intentSink, stripFactory: stripFactory)
         self.intentSink = intentSink
         super.init(nibName: nil, bundle: nil)
     }
