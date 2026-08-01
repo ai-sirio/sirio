@@ -1685,7 +1685,14 @@ scelto dal chiamante:
           }
 ```
 
-Aggiungi i tre casi nuovi dopo `case 'pane.write'`:
+**I tre casi esistono già come segnaposto.** Il Task 5 ha dovuto aggiungerli
+per far compilare lo `switch` esaustivo su `request.method`: `pane.resize`
+applica il resize direttamente al pty, `pane.read` e `pane.close` rispondono
+`metodo non ancora disponibile`. **Sostituisci quei tre rami**, non
+aggiungerne di nuovi accanto — due `case` con la stessa etichetta non
+compilano.
+
+Rimpiazza i tre casi esistenti con questi:
 
 ```ts
         case 'pane.resize': {
