@@ -889,8 +889,6 @@ pnpm add paneforge@1.0.2
 Nel blocco `<script>` dello stesso file:
 
 ```ts
-  import { splitOf } from '../../../../shared/workspace/layout-invariants'
-
   /**
    * Converte il puntatore in una frazione e la manda al riduttore.
    *
@@ -898,15 +896,17 @@ Nel blocco `<script>` dello stesso file:
    * divisore durante il trascinamento smette di consegnare eventi, e il
    * divisore resta incollato al mouse finche' non si clicca altrove.
    */
+  // L asse arriva da `dividerRects` della 4a, non da una ricerca nell albero:
+  // chi ha calcolato la geometria lo sapeva gia.
   function avviaTrascinamento(evento: PointerEvent, splitId: SplitID): void {
     const bersaglio = evento.currentTarget as HTMLElement
     bersaglio.setPointerCapture(evento.pointerId)
-    const split = splitOf(layout, splitId)
-    if (split === undefined) return
+    const divisore = divisori.find((d) => d.splitId === splitId)
+    if (divisore === undefined) return
 
     const muovi = (e: PointerEvent): void => {
       const frazione =
-        split.axis === 'vertical'
+        divisore.axis === 'vertical'
           ? (e.clientX - container.x) / container.w
           : (e.clientY - container.y) / container.h
       // Nessun clamp qui: i vincoli di dimensione minima sono un invariante

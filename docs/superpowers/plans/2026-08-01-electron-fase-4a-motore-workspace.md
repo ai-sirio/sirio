@@ -378,6 +378,49 @@ test('un gruppo nel registro ma assente dall albero e orfano', () => {
   if (!esito.ok) expect(esito.error.kind).toBe('orphanGroup')
 })
 
+test('un id di gruppo ripetuto nell albero riporta L ID, non una frase', () => {
+  // Il campo si chiama `id`: se ci finisce dentro una descrizione, chi mostra
+  // l errore stampa prosa al posto di un identificatore.
+  const [idA, gA] = gruppo()
+  const esito = makeLayout(
+    { kind: 'split', id: newSplitID(), axis: 'vertical', fraction: 0.5,
+      first: { kind: 'group', id: idA }, second: { kind: 'group', id: idA } },
+    new Map([[idA, gA]]),
+    idA
+  )
+  expect(esito.ok).toBe(false)
+  if (!esito.ok) {
+    expect(esito.error.kind).toBe('duplicateID')
+    if (esito.error.kind === 'duplicateID') expect(esito.error.id).toBe(idA)
+  }
+})
+
+test('un tab attivo che non sta nel gruppo e rifiutato', () => {
+  const [idA, gA] = gruppo()
+  const estraneo = newWorkspaceTabID()
+  const esito = makeLayout(
+    { kind: 'group', id: idA },
+    new Map([[idA, { ...gA, activeTabId: estraneo }]]),
+    idA
+  )
+  expect(esito.ok).toBe(false)
+  if (!esito.ok) expect(esito.error.kind).toBe('activeTabNotInGroup')
+})
+
+test('una frazione fuori dai limiti e rifiutata', () => {
+  const [idA, gA] = gruppo()
+  const [idB, gB] = gruppo()
+  const splitId = newSplitID()
+  const esito = makeLayout(
+    { kind: 'split', id: splitId, axis: 'vertical', fraction: 1.5,
+      first: { kind: 'group', id: idA }, second: { kind: 'group', id: idB } },
+    new Map([[idA, gA], [idB, gB]]),
+    idA
+  )
+  expect(esito.ok).toBe(false)
+  if (!esito.ok) expect(esito.error.kind).toBe('invalidFraction')
+})
+
 test('un gruppo attivo sconosciuto e rifiutato', () => {
   const [idA, gA] = gruppo()
   const esito = makeLayout({ kind: 'group', id: idA }, new Map([[idA, gA]]), newPaneGroupID())
@@ -484,13 +527,18 @@ export function validate(
     if (!insieme.has(id)) return { kind: 'orphanGroup', groupId: id }
   }
   if (insieme.size !== nell_albero.length) {
-    return { kind: 'duplicateID', id: 'gruppo ripetuto nell albero' }
+    // Il campo si chiama `id` e deve contenere UN ID: una frase descrittiva
+    // qui arriverebbe intatta a chi mostra l errore, che si aspetta un
+    // identificatore da cercare nel layout.
+    const ripetuto = nell_albero.find((id, i) => nell_albero.indexOf(id) !== i)
+    return { kind: 'duplicateID', id: ripetuto as string }
   }
 
   const splits: SplitID[] = []
   walkSplits(root, splits)
   if (new Set<string>(splits).size !== splits.length) {
-    return { kind: 'duplicateID', id: 'split ripetuto nell albero' }
+    const ripetuto = splits.find((id, i) => splits.indexOf(id) !== i)
+    return { kind: 'duplicateID', id: ripetuto as string }
   }
 
   if (!groups.has(activeGroupId)) {
@@ -1690,7 +1738,7 @@ git commit -m "feat: divisione dei gruppi e spostamento dei tab"
   `edgeBandFraction: 0.22`, `dragThreshold: 4`;
   `type Rect = { x: number; y: number; w: number; h: number }`;
   `groupRects(layout, container): Map<PaneGroupID, Rect>`;
-  `dividerRects(layout, container): { splitId: SplitID; band: Rect; hairline: Rect }[]`.
+  `dividerRects(layout, container): { splitId: SplitID; axis: WorkspaceSplitAxis; band: Rect; hairline: Rect }[]`.
 
 - [ ] **Passo 1: scrivere il test che fallisce**
 
@@ -1845,6 +1893,16 @@ export interface Rect {
 
 export interface DividerRects {
   splitId: SplitID
+  /**
+   * Asse dello split, portato qui e non lasciato da cercare.
+   *
+   * Chi trascina un divisore deve sapere se convertire la X o la Y del
+   * puntatore in frazione, e lo sa gia guardando questo rettangolo. Senza
+   * questo campo il consumatore dovrebbe risalire al nodo dello split
+   * attraversando l albero, oppure indovinare l asse dalla forma della banda:
+   * due modi per riscoprire una cosa che chi ha calcolato la geometria sapeva.
+   */
+  axis: WorkspaceSplitAxis
   /** Area afferrabile. */
   band: Rect
   /** Linea dipinta, al centro della banda. */
