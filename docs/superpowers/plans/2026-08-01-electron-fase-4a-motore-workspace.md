@@ -349,8 +349,9 @@ git commit -m "feat: identificatori brandizzati e tipi del layout del workspace"
 ```ts
 import { expect, test } from 'vitest'
 import { makeLayout, emptyLayout, allTabs, orderedGroupIds } from './layout-invariants.ts'
-import { newPaneGroupID, newSplitID } from './layout-ids.ts'
-import type { PaneGroup } from './layout-types.ts'
+import { newPaneGroupID, newSplitID, newWorkspaceTabID } from './layout-ids.ts'
+import { emptyViewState } from './layout-types.ts'
+import type { PaneGroup, PaneGroupID } from './layout-types.ts'
 
 const gruppo = (id = newPaneGroupID()): [typeof id, PaneGroup] => [
   id,
@@ -408,8 +409,23 @@ test('un tab attivo che non sta nel gruppo e rifiutato', () => {
 })
 
 test('una frazione fuori dai limiti e rifiutata', () => {
-  const [idA, gA] = gruppo()
-  const [idB, gB] = gruppo()
+  // I gruppi DEVONO avere un tab: sotto uno split un gruppo vuoto fa scattare
+  // `emptyNonRootGroup`, che nel corpo di `validate` viene prima delle
+  // frazioni. Con `gruppo()` nudo questo test proverebbe l invariante
+  // sbagliata e passerebbe lo stesso.
+  const conTab = (nome: string): [PaneGroupID, PaneGroup] => {
+    const [id, g] = gruppo()
+    const tab = {
+      id: newWorkspaceTabID(),
+      title: nome,
+      titleIsAutoNamed: true,
+      content: { kind: 'terminal' as const, id: `term-${nome}` },
+      viewState: emptyViewState()
+    }
+    return [id, { ...g, tabs: [tab], activeTabId: tab.id }]
+  }
+  const [idA, gA] = conTab('a')
+  const [idB, gB] = conTab('b')
   const splitId = newSplitID()
   const esito = makeLayout(
     { kind: 'split', id: splitId, axis: 'vertical', fraction: 1.5,
