@@ -542,7 +542,17 @@ git commit -m "feat: add authoritative pane state with subscriptions"
   - `createNodePtySpawner(): PtySpawner`
   - classe `PtyManager` con `spawn(paneId, options)`, `write(paneId, data)`, `kill(paneId)`, `onData(cb)`, `onExit(cb)`, `disposeAll()`
 
-**Perché lo spawner è iniettato:** `node-pty` è un modulo nativo ricompilato per l'ABI di Electron dallo script `postinstall`. Vitest gira in Node puro e non riuscirebbe a caricarlo. Iniettando lo spawner, `PtyManager` si testa a unità con un finto e il vero `node-pty` viene esercitato dall'e2e Playwright, che gira dentro Electron. Il vincolo di build diventa così un miglioramento di design invece che un ostacolo.
+**Perché lo spawner è iniettato:** per rendere `PtyManager` testabile senza processi reali. Spawnare shell vere in un test a unità significa dipendere da timing, da variabili d'ambiente e dalla shell dell'utente; con uno spawner finto le asserzioni sono deterministiche. Il `node-pty` vero è esercitato dall'e2e Playwright (Task 12).
+
+**Nota verificata sul campo, non assumere il contrario:** `node-pty` 1.1.0 è basato su N-API (`node-addon-api`), quindi lo **stesso** binario prebuilt carica sia in Node 24 sia in Electron 43. Non serve `electron-rebuild` e non c'è nessun conflitto di ABI fra Vitest e Electron. Se qualcuno "scopre" questo e ne deduce che l'iniezione dello spawner è inutile: non lo è, il motivo è il determinismo dei test, non l'ABI.
+
+**Trappola di packaging già incontrata (Task 1):** sotto pnpm, `node-pty/prebuilds/<piattaforma>/spawn-helper` viene installato **senza bit di esecuzione**, e il `postinstall` di node-pty non lo ripristina. Ogni spawn fallisce allora con `posix_spawnp failed`, messaggio che non nomina né il file né la causa. Il rimedio è già in `package.json`:
+
+```json
+"postinstall": "electron-builder install-app-deps && chmod +x node_modules/node-pty/prebuilds/*/spawn-helper"
+```
+
+più la guardia `src/main/pty/node-pty-packaging.test.ts`, che fa fallire la CI sul permesso invece che sullo spawn.
 
 - [ ] **Step 1: Scrivere i test che falliscono**
 
