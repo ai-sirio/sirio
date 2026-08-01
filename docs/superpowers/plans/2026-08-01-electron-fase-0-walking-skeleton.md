@@ -14,6 +14,7 @@
 - **Piattaforma:** macOS-first. Path e spawn vanno scritti astraendo la piattaforma, ma Windows e Linux non si testano né si spediscono in questa fase.
 - **Framework UI:** Svelte 5 con le **rune** (`$state`, `$derived`, `$effect`). Non Svelte 4 (niente `export let`, niente store `writable` per lo stato locale). Non SvelteKit.
 - **TypeScript strict:** `strict: true`, nessun `any` implicito, nessun `@ts-ignore` nuovo.
+- **Versioni di Node:** il runtime di sistema è Node 26.5.0 (Homebrew, `/opt/homebrew/bin/node`), Electron 43 include Node 24.18.1. `@types/node` va tenuto a **`^24`**, cioè al pavimento: così TypeScript rifiuta a compile-time ogni API che il Node di Electron non ha, invece di lasciarla fallire a runtime dentro l'app. Non allineare le versioni, non alzare `@types/node` a 26.
 - **Validazione ai confini:** ogni messaggio che entra dal socket o dall'IPC va validato con Zod prima di essere usato. Mai fidarsi del payload.
 - **Immutabilità:** nessuna mutazione in place delle strutture di dominio; le funzioni restituiscono nuove copie.
 - **Commit:** Conventional Commits, soggetto imperativo minuscolo (`feat:`, `fix:`, `test:`, `chore:`, `docs:`).
@@ -1593,10 +1594,10 @@ if (process.argv[1]?.endsWith('tillerctl.ts') || process.argv[1]?.endsWith('till
 In `package.json`, sezione `scripts`:
 
 ```json
-"tillerctl": "node --experimental-strip-types cli/tillerctl.ts"
+"tillerctl": "node cli/tillerctl.ts"
 ```
 
-Node 24 esegue TypeScript direttamente con `--experimental-strip-types`: nessuno step di build per la CLI in Fase 0.
+Da Node 24 in poi lo stripping dei tipi è attivo di default: nessun flag e nessuno step di build per la CLI in Fase 0. Verificato sul Node di questa macchina (26.5.0).
 
 - [ ] **Step 9: Eseguire i test e verificare che passino**
 
@@ -2525,7 +2526,7 @@ test.afterEach(async () => {
 })
 
 async function tillerctl(args: string[]): Promise<string> {
-  const { stdout } = await run('node', ['--experimental-strip-types', 'cli/tillerctl.ts', ...args], {
+  const { stdout } = await run('node', ['cli/tillerctl.ts', ...args], {
     env: { ...process.env, TILLER_SOCKET: socketPath }
   })
   return stdout.trim()
