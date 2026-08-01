@@ -7,6 +7,7 @@ public final class WorkspaceReconciler {
 
     private let hostProvider: WorkspaceHostProvider
     private weak var intentSink: WorkspaceIntentSink?
+    private let stripFactory: PaneTabStripFactory?
     public let focusCoordinator = WorkspaceFocusCoordinator()
     private var groupControllers: [PaneGroupID: PaneGroupController] = [:]
     private var splitControllers: [SplitID: WorkspaceSplitController] = [:]
@@ -15,9 +16,14 @@ public final class WorkspaceReconciler {
     public private(set) var groupControllerCreationCount = 0
     public private(set) var splitControllerCreationCount = 0
 
-    public init(hostProvider: WorkspaceHostProvider, intentSink: WorkspaceIntentSink? = nil) {
+    public init(
+        hostProvider: WorkspaceHostProvider,
+        intentSink: WorkspaceIntentSink? = nil,
+        stripFactory: PaneTabStripFactory? = nil
+    ) {
         self.hostProvider = hostProvider
         self.intentSink = intentSink
+        self.stripFactory = stripFactory
         self.rootViewController = WorkspaceRootController()
     }
 
@@ -69,7 +75,8 @@ public final class WorkspaceReconciler {
         switch node {
         case .group(let id):
             let controller = groupControllers[id] ?? {
-                let created = PaneGroupController(id: id, intentSink: intentSink)
+                let created = PaneGroupController(
+                    id: id, intentSink: intentSink, stripFactory: stripFactory)
                 groupControllerCreationCount += 1
                 groupControllers[id] = created
                 return created

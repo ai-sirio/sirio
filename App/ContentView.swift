@@ -334,6 +334,10 @@ struct ContentView: View {
     ) {
         let anchor = layout.activeGroupID
         switch action {
+        case .closeTab(let tabID):
+            // Goes through AppModel rather than straight to the coordinator so
+            // an unsaved document still gets its prompt.
+            model.closeTab(tabID.rawValue, in: worktree)
         case .configureAgents:
             model.openAgentsSettings()
         case .openFile:
@@ -499,7 +503,8 @@ struct ContentView: View {
                         delta: isSelected ? workspaceCoordinator.lastSemanticDelta : nil,
                         hostProvider: workspaceCoordinator,
                         intentSink: WorkspaceIntentRouter(
-                            coordinator: workspaceCoordinator, worktree: worktree))
+                            coordinator: workspaceCoordinator, worktree: worktree),
+                        stripFactory: makePaneTabStrip)
                         .focusedSceneValue(
                             \.workspaceMenuTarget,
                             WorkspaceMenuTarget(

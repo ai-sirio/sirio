@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 import TillerCore
 
 /// AppKit container for one pane group. The group owns its local tab chrome and
@@ -15,13 +14,22 @@ public final class PaneGroupController: NSViewController {
 
     private weak var mountedHost: WorkspaceContentHost?
     private weak var intentSink: WorkspaceIntentSink?
-    private var tabStrip: NSHostingView<PaneTabBar>?
+    private let stripModel = PaneTabStripModel()
+    private let stripFactory: PaneTabStripFactory?
     private let contentContainer = NSView()
 
-    public init(id: PaneGroupID, intentSink: WorkspaceIntentSink? = nil) {
+    public init(
+        id: PaneGroupID,
+        intentSink: WorkspaceIntentSink? = nil,
+        stripFactory: PaneTabStripFactory? = nil
+    ) {
         self.id = id
         self.intentSink = intentSink
+        self.stripFactory = stripFactory
         super.init(nibName: nil, bundle: nil)
+        stripModel.onActivate = { [weak self] in self?.activateTab($0) }
+        stripModel.onClose = { [weak self] in self?.closeTab($0) }
+        stripModel.onNewTab = { [weak self] in self?.requestNewTab() }
     }
 
     public func activateTab(_ tabID: WorkspaceTabID) {
@@ -46,12 +54,20 @@ public final class PaneGroupController: NSViewController {
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.group)
 
-        let strip = NSHostingView(rootView: makeTabBar())
-        strip.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(strip)
         view.addSubview(contentContainer)
-        tabStrip = strip
+
+        guard let strip = stripFactory?(stripModel) else {
+            NSLayoutConstraint.activate([
+                contentContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                contentContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                contentContainer.topAnchor.constraint(equalTo: view.topAnchor),
+                contentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            ])
+            return
+        }
+        strip.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(strip)
 
         NSLayoutConstraint.activate([
             strip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -63,14 +79,6 @@ public final class PaneGroupController: NSViewController {
             contentContainer.topAnchor.constraint(equalTo: strip.bottomAnchor),
             contentContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
-    }
-
-    private func makeTabBar() -> PaneTabBar {
-        PaneTabBar(
-            entries: tabEntries,
-            onActivate: { [weak self] in self?.activateTab($0) },
-            onClose: { [weak self] in self?.closeTab($0) },
-            onNewTab: { [weak self] in self?.requestNewTab() })
     }
 
     public var accessibilityPaneActions: [WorkspacePaneAccessibilityAction] {
@@ -97,7 +105,7 @@ public final class PaneGroupController: NSViewController {
 
     func update(group: PaneGroup, hostProvider: WorkspaceHostProvider) {
         tabEntries = PaneTabStripView.overflowMenuItems(for: group)
-        if isViewLoaded { tabStrip?.rootView = makeTabBar() }
+        stripModel.entries = tabEntries
 
         let nextTabID = group.activeTabID
         let nextHost = nextTabID.flatMap { hostProvider.host(for: $0) }

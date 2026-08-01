@@ -27,6 +27,7 @@ enum SplitContentMenuAction: Equatable {
     case openFile
     case moveExistingTab(WorkspaceTabID)
     case configureAgents
+    case closeTab(WorkspaceTabID)
 }
 
 struct SplitContentMenuItem: Equatable, Identifiable {
@@ -46,6 +47,8 @@ struct SplitContentMenuModel: Equatable {
     let defaultItem: SplitContentMenuAction
 
     var topLevelLabels: [String] { items.map(\.label) }
+    /// Appended last, so the indices the menu view reads stay put.
+    var closeItem: SplitContentMenuItem? { items.first { $0.id == "close-tab" } }
     var allMoveTabIDs: [WorkspaceTabID] {
         moveTabIDs(in: .thisPane) + moveTabIDs(in: .otherPanes)
     }
@@ -141,7 +144,12 @@ struct SplitContentMenuModel: Equatable {
                 isEnabled: splitEnabled, disabledReason: splitReason),
             SplitContentMenuItem(
                 id: "separator-2", label: "", action: nil, isEnabled: true, disabledReason: nil),
-            moveItem
+            moveItem,
+            SplitContentMenuItem(
+                id: "separator-3", label: "", action: nil, isEnabled: true, disabledReason: nil),
+            SplitContentMenuItem(
+                id: "close-tab", label: "Close Tab", action: .closeTab(sourceTabID),
+                isEnabled: true, disabledReason: nil)
         ]
         submenuItems = [.newChat: chatItems, .resumeChat: resumeItems]
         defaultItem = .newTerminal
@@ -269,6 +277,11 @@ struct SplitContentMenuItems: View {
                 }
             }
             .disabled(!model.items[7].isEnabled)
+            if let close = model.closeItem, let action = close.action {
+                Divider()
+                Button(close.label) { onAction(action) }
+                    .disabled(!close.isEnabled)
+            }
         }
     }
 }

@@ -7,22 +7,25 @@ public struct WorkspaceView: NSViewControllerRepresentable {
     private let delta: WorkspaceLayoutDelta?
     private let hostProvider: WorkspaceHostProvider
     private let intentSink: WorkspaceIntentSink
+    private let stripFactory: PaneTabStripFactory?
 
     public init(
         layout: WorkspaceLayout,
         delta: WorkspaceLayoutDelta?,
         hostProvider: WorkspaceHostProvider,
-        intentSink: WorkspaceIntentSink
+        intentSink: WorkspaceIntentSink,
+        stripFactory: PaneTabStripFactory? = nil
     ) {
         self.layout = layout
         self.delta = delta
         self.hostProvider = hostProvider
         self.intentSink = intentSink
+        self.stripFactory = stripFactory
     }
 
     public func makeNSViewController(context: Context) -> WorkspaceViewController {
         let controller = WorkspaceViewController(
-            hostProvider: hostProvider, intentSink: intentSink
+            hostProvider: hostProvider, intentSink: intentSink, stripFactory: stripFactory
         )
         controller.update(layout: layout, delta: delta)
         return controller
