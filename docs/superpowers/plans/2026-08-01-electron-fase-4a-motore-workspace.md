@@ -337,7 +337,7 @@ git commit -m "feat: identificatori brandizzati e tipi del layout del workspace"
 **Interfacce:**
 - Consuma: i tipi del Task 1.
 - Produce: `type WorkspaceLayout` (brandizzato, senza costruttore esportato);
-  `type LayoutError` (unione discriminata su `kind` con i dodici casi);
+  `type LayoutError` (unione discriminata su `kind` con gli undici casi);
   `validate(root, groups, activeGroupId): LayoutError | null`;
   `makeLayout(root, groups, activeGroupId): { ok: true; layout } | { ok: false; error }`;
   `emptyLayout(groupId?): WorkspaceLayout`;
@@ -376,12 +376,6 @@ test('un gruppo nel registro ma assente dall albero e orfano', () => {
   const esito = makeLayout({ kind: 'group', id: idA }, new Map([[idA, gA], [idB, gB]]), idA)
   expect(esito.ok).toBe(false)
   if (!esito.ok) expect(esito.error.kind).toBe('orphanGroup')
-})
-
-test('un registro vuoto e rifiutato', () => {
-  const [id] = gruppo()
-  const esito = makeLayout({ kind: 'group', id }, new Map(), id)
-  expect(esito.ok).toBe(false)
 })
 
 test('un gruppo attivo sconosciuto e rifiutato', () => {
