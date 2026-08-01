@@ -3328,3 +3328,110 @@ cd ~/Desktop/Progetti/tiller && git status --porcelain
 ```
 
 Atteso: nessun file sorgente modificato.
+
+---
+
+## Esito dell'esecuzione (2026-08-01)
+
+**13/13 task, 17 commit, 244 test unitari + 9 e2e, `bash scripts/ci.sh` → `CI OK`.**
+
+Eseguito delegando a codex `gpt-5.6-luna` un task alla volta, con revisione del
+diff e gate eseguito in proprio fra un task e l'altro.
+
+### Correzioni al piano emerse eseguendolo
+
+1. **Il Task 5 non poteva restare confinato al protocollo.** Aggiungere tre
+   rami a `ControlRequest` rompe lo `switch` esaustivo di `dispatch.ts`, che il
+   Task 5 non doveva toccare. L'esecutore ha aggiunto tre segnaposto — la
+   scelta giusta date le istruzioni — e il Task 7 è stato corretto per
+   *sostituirli* invece di affiancarli. Un tipo somma esaustivo lega chi lo
+   definisce a chi lo consuma: separarli in due task è un taglio che il
+   compilatore rifiuta.
+
+2. **Un vincolo sul "cosa non toccare" ha prodotto un tipo che mente.** Il
+   prompt del Task 7 diceva di non modificare l'helper `makeDispatcher()` dei
+   test; per obbedire, l'esecutore ha dichiarato `terminals?: TerminalRegistry`
+   **opzionale**, spargendo `terminals?.` nel dispatcher e `deps.pty.onData?.()`
+   su un metodo obbligatorio. Compilava, i test passavano, la produzione
+   funzionava — ma il tipo diceva "si può costruire un dispatcher senza
+   terminali", e una dimenticanza di cablaggio sarebbe diventata un guasto
+   silenzioso a runtime. Corretto in `56e198b`. I prompt successivi hanno
+   incluso: *"non indebolire mai un tipo di produzione per far compilare un
+   finto di test"*.
+
+### Quattro difetti trovati dai criteri end-to-end
+
+Nessuno era visibile ai test unitari: i componenti erano corretti singolarmente.
+
+- **Nascondere un pane lo distruggeva.** `display:none` → elemento 0×0 →
+  `FitAddon.fit()` propone una griglia degenere → `pane.resize` → il terminale
+  del main riflusce a due colonne e perde lo scrollback. Verificato per
+  causalità diretta: un resize a 2×1 porta il contenuto da 3 occorrenze a 0.
+  Guardia aggiunta in `sendResize`.
+- **Il database non veniva mai chiuso.** `app.exit(0)` sorprendeva
+  `better-sqlite3` a metà operazione, provocando
+  `libc++abi: terminating due to uncaught exception of type Napi::Error` — un
+  abort nativo che nessun gestore `unhandledRejection`/`uncaughtException`
+  intercetta. L'istanza morente lasciava il socket occupato e l'avvio
+  successivo non arrivava mai a creare la finestra. Risolto con
+  `closeDatabase(db)` e la cancellazione dei timer prima di uscire.
+- **Il criterio sul titolo OSC dipendeva dalla configurazione della shell.**
+  Molte configurazioni di zsh riscrivono il titolo a ogni prompt e
+  sovrascrivevano quello del test. Il comando ora tiene occupata la shell
+  mentre il titolo si legge.
+- **La soglia di memoria misurava l'intercetta invece della pendenza.** I
+  100 MB della spec venivano da un'aritmetica sui soli buffer, che ignorava i
+  quattro processi di Electron, la GPU e gli heap V8.
+
+### La curva di memoria, misurata
+
+| pane | delta rispetto alla baseline |
+|---|---|
+| 5 | +114 MB |
+| 10 | +120 MB |
+| 20 | +129 MB |
+| 30 | +132 MB |
+| 40 | +140 MB |
+
+**+114 MB sono costo fisso** (risveglio del renderer, compositing GPU, prima
+istanza xterm); il costo **marginale è ~0,7 MB per pane**, cioè i soli buffer.
+Il criterio 4 è stato riscritto per misurare la differenza fra 5 e 20 pane,
+non un totale contro una costante. Validato per mutazione: montando tutti i
+pane **visibili** il marginale sale a ~3,8 MB a pane e il criterio diventa
+rosso.
+
+Riferimento: in Swift i soli pane nascosti pesavano 497 MB di IOSurface.
+
+### Politica sui pane nascosti: resta la primaria di D5
+
+L'alternativa di riserva (smontare del tutto i pane nascosti) è stata provata e
+**non guadagna memoria**: a fare il lavoro è il meccanismo di visibilità
+(`display:none` più rilascio del contesto WebGL). Smontare renderebbe ogni
+cambio di pane una ricostruzione da snapshot, e romperebbe il criterio 2 della
+Fase 0, che asserisce la presenza di due `.xterm` nel DOM per dimostrare che lo
+stato vive nel main. La decisione D5 primaria resta quella in vigore.
+
+### Verificato a mano, oltre ai test
+
+Con l'app viva e un pane creato da `tillerctl`:
+
+```
+$ tillerctl read --pane <id>
+echo impronta-manuale-4711
+ tmp  echo impronta-manuale-4711
+impronta-manuale-4711
+
+$ tillerctl state
+{"panes":[{... "title":"zsh in tmp"}]}
+```
+
+`read` restituisce uno schermo interpretato, non byte. E `"title":"zsh in tmp"`
+è un titolo OSC emesso dalla zsh reale, non da una sequenza sintetica: la
+fondazione del Layer B della Fase 3 è provata su traffico vero.
+
+### Debito aperto
+
+- Warning Node `MODULE_TYPELESS_PACKAGE_JSON` a ogni invocazione di `tillerctl`
+  (ereditato dalla Fase 0, cosmetico).
+- `.tokensave/` è tracciato in git: un database SQLite generato che sporca ogni
+  diff.
