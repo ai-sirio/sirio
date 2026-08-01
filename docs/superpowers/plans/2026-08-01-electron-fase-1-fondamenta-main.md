@@ -98,7 +98,7 @@ sola; aggiungerli ora sarebbe codice senza lettori.
 
 ```bash
 cd ~/Desktop/Progetti/tiller-electron
-pnpm add better-sqlite3 kysely
+pnpm add better-sqlite3 kysely simple-git
 pnpm add -D @types/better-sqlite3 smol-toml
 ```
 
@@ -701,7 +701,7 @@ export const migration001Initial = {
 - [ ] **Step 4: scrivere `src/main/db/migrations/index.ts`**
 
 ```ts
-import type { Migration } from 'kysely'
+import type { Migration } from 'kysely/migration'
 import { migration001Initial } from './001-initial'
 
 /**
@@ -723,7 +723,8 @@ export const MIGRATIONS: Record<string, Migration> = {
 Aggiungere gli import in cima e la funzione in fondo:
 
 ```ts
-import { Kysely, Migrator, SqliteDialect } from 'kysely'
+import { Kysely, SqliteDialect } from 'kysely'
+import { Migrator } from 'kysely/migration'
 import { MIGRATIONS } from './migrations'
 
 /**
@@ -3362,3 +3363,71 @@ superficie di controllo (11), tillerctl (12), i tre criteri di successo (13).
 esistono sia in `db/repository.ts` sia in `git/worktrees.ts` con firme diverse.
 Il task 11 le importa entrambe rinominando quelle git (`addGitWorktree`,
 `removeGitWorktree`); l'avvertenza è ripetuta nel task 6.
+
+---
+
+## Esito dell'esecuzione (2026-08-01)
+
+**13/13 task, 19 commit, 175 test unitari + 5 e2e, `bash scripts/ci.sh` → `CI OK`.**
+
+Eseguito delegando a codex `gpt-5.6-luna` un task alla volta, con revisione del
+diff — non del report — fra un task e l'altro.
+
+### Correzioni al piano trovate eseguendolo
+
+1. **`Migrator` non si importa da `kysely`.** kysely 0.29 lo espone dal
+   sottopercorso `./migration`, insieme a `Migration` e `FileMigrationProvider`.
+   Il piano indicava la radice e i quattro test della migrazione erano rossi.
+2. **`simple-git` non veniva installato da nessun task.** L'unico `pnpm add`
+   stava nel Task 1, scritto pensando alla sola persistenza. Il Task 5 falliva
+   con `Cannot find package`.
+3. **`hasNativeHooks` di Claude è `true`**, non `false`: l'asserzione del piano
+   ne attendeva due (codex, omp) invece di tre.
+4. **Escape sbagliato nel valore atteso del comando di riassunto.** Scritto come
+   `"claude -p 'riassumi '\''questo'\'''"` in una stringa a doppi apici, dove
+   `\'` non è un escape di JavaScript e collassa in `'`. Risolto con
+   `String.raw`. È lo stesso errore di livello che il codice sotto test esiste
+   per evitare, commesso nel test che lo verifica.
+5. **La fixture e2e dell'import creava due tabelle su undici.** L'import legge
+   ogni tabella di `TABLES_IN_DEPENDENCY_ORDER`, quindi moriva con
+   `no such table: terminalContent`. Corretta la fixture, non l'import:
+   verificato che il database di produzione e il suo backup più vecchio
+   contengono tutte le tabelle, quindi una sorgente incompleta deve fallire
+   forte anziché saltare righe in silenzio.
+6. **Il codice trascritto dal piano non era formattato** e `migratedDb` non
+   dichiarava il tipo di ritorno: 48 avvisi prettier e un errore
+   `explicit-function-return-type`. Il lint è rimasto rosso per cinque task
+   perché i comandi di prova dei task 2–10 sono mirati alla propria area e solo
+   il Task 11 guarda il gate intero.
+7. **I cinque `prepare()` vuoti violano `no-empty-function`.** Annotati con
+   `eslint-disable-next-line` e un commento che rimanda alla decisione D4,
+   invece di riempirli di codice finto.
+
+### Verifiche eseguite in proprio, oltre ai report
+
+- **Import contro il database di produzione reale** (12,1 MB): conteggi identici
+  su tutte e 11 le tabelle — 10 progetti, 9 worktree, 121 scrollback, 62
+  sessioni di chat, 1000 chatItem, 9 layout, 8 tab, 2 terminalContent — e la
+  seconda esecuzione non duplica. La tabella `legacyTerminalTab_v15`, presente
+  nella sorgente ma non nel nostro schema, viene ignorata senza inciampi.
+- **Validazione per mutazione** di quattro guardie: il test di packaging di
+  `better-sqlite3` (binario rimosso → rosso), la validazione dei percorsi in
+  `git/actions.ts` (guardia disattivata → cadono i 3 test sui percorsi), la
+  guardia su `prepare()` (fatto scrivere un file → rosso), il criterio 2 e2e
+  (creazione git del worktree disattivata → rosso).
+- **Confine architetturale**: `control/dispatch.ts` continua a non importare né
+  `electron` né `net` dopo l'aggiunta di nove metodi.
+
+### Trappola da ricordare
+
+**La validazione per mutazione dei test e2e richiede una ricompilazione.**
+Playwright avvia l'app da `out/main/index.js`, il bundle prodotto da
+electron-vite, non dai sorgenti: mutare `src/` senza `pnpm exec electron-vite
+build` fa girare i test sul codice vecchio, tutto resta verde e si conclude a
+torto che il test non sorvegli nulla. Il gate `ci.sh` è immune perché costruisce
+prima di eseguire l'e2e.
+
+### Debito aperto
+
+Il warning Node `MODULE_TYPELESS_PACKAGE_JSON` a ogni invocazione di
+`tillerctl` (tre righe su stderr, cosmetico), ereditato dalla Fase 0.
