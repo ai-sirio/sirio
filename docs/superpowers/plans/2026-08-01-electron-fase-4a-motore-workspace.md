@@ -55,7 +55,7 @@ localmente con le funzioni pure, il main decide.
 | `src/shared/workspace/layout-commands.ts` | i nove comandi, `isStructuralCommand` |
 | `src/shared/workspace/layout-engine.ts` | `apply(comando, layout)` |
 | `src/shared/workspace/layout-metrics.ts` | le costanti misurate |
-| `src/shared/workspace/layout-geometry.ts` | `rects(layout, contenitore)` |
+| `src/shared/workspace/layout-geometry.ts` | `groupRects(layout, contenitore)`, `dividerRects(layout, contenitore)` |
 | `src/shared/workspace/drop-target.ts` | `resolveDropTarget(punto, rects)` |
 | `src/shared/workspace/spatial-neighbors.ts` | `neighbor(da, direzione, rects)` |
 | `src/main/workspace/layout-store.ts` | carica, salva, quarantena |
