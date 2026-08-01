@@ -2609,6 +2609,35 @@ git commit -m "test: add end-to-end gate for the walking skeleton criteria"
 
 ---
 
+## Esito dell'esecuzione (2026-08-01)
+
+Fase 0 completata: 12/12 task, 17 commit, 90 test unitari + 2 e2e, gate verde.
+Eseguita delegando a codex `gpt-5.6-luna` un task alla volta, con revisione del
+diff in mezzo.
+
+**Entrambi i criteri di successo passano.** Il criterio 2 — pane creato a
+finestra chiusa e ritrovato riaprendo — è quello che poteva falsificare la
+collocazione dello stato: non l'ha fatto.
+
+Correzioni al piano emerse eseguendolo:
+
+- **Task 4** — `node-pty` è N-API: lo stesso binario carica in Node 24 e in
+  Electron 43, nessun `electron-rebuild`. Lo spawner iniettato resta giusto, ma
+  per il determinismo dei test, non per l'ABI.
+- **Task 4** — `spawn-helper` di node-pty arriva senza bit di esecuzione sotto
+  pnpm: ogni spawn muore con `posix_spawnp failed`. Fix nel `postinstall` più
+  un test di guardia.
+- **Task 7** — `tsconfig.node.json` non copriva `cli/` né alcun file di test:
+  aggiunto `tsconfig.cli.json` al gate. Ha subito trovato un errore di tipo
+  reale in `protocol.test.ts`.
+- **Task 11** — Svelte 5.29+ ha gli **attachment** (`{@attach}`), che
+  sostituiscono `bind:this` + `$effect`. Il codice Svelte va validato con il
+  server MCP **prima** di delegarlo.
+- **Task 12** — xterm renderizza su **canvas**: il testo del terminale non
+  esiste nel DOM e `toContainText` su `.xterm-screen` non può funzionare. La
+  e2e legge il buffer di xterm tramite il seam `window.__tillerPaneBuffers`,
+  che espone un lettore e non l'oggetto Terminal. Verificato per mutazione.
+
 ## Definizione di fatto per la Fase 0
 
 - [ ] `bash scripts/ci.sh` stampa `CI OK`
