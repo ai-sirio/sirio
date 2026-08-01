@@ -440,7 +440,6 @@ export type WorkspaceLayout = {
 }
 
 export type LayoutError =
-  | { kind: 'emptyGroupRegistry' }
   | { kind: 'orphanGroup'; groupId: PaneGroupID }
   | { kind: 'unresolvedGroupLeaf'; groupId: PaneGroupID }
   | { kind: 'duplicateID'; id: string }
@@ -474,8 +473,10 @@ export function validate(
   groups: ReadonlyMap<PaneGroupID, PaneGroup>,
   activeGroupId: PaneGroupID
 ): LayoutError | null {
-  if (groups.size === 0) return { kind: 'emptyGroupRegistry' }
-
+  // Nessun controllo su `groups.size === 0`: ogni LayoutNode contiene almeno
+  // una foglia di gruppo, quindi un registro vuoto fa comunque scattare
+  // `unresolvedGroupLeaf` qui sotto. Un errore dedicato sarebbe un ramo che
+  // non si raggiunge mai, e nasconderebbe quello vero.
   const nell_albero: PaneGroupID[] = []
   walkGroups(root, nell_albero)
 
