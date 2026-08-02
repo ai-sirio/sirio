@@ -37,6 +37,11 @@ ripristino dalle Fasi 4a/4b.
   compila lascerebbe Playwright sul `out/` vecchio, che passa a vuoto.
 - Mai eseguire una mutazione su una base rossa: il rosso non sarebbe
   attribuibile.
+- **Committare prima di mutare.** `git checkout -- <file>` riporta a HEAD, non
+  "annulla la mutazione": su un file con lavoro non committato cancella anche
+  quello. Costato una riscrittura nel lotto 2 di questa fase.
+- Gli helper dei test git si chiamano `createTestRepo` (`src/main/git/test-repo.ts`),
+  non `createTestRepo`.
 
 ---
 
@@ -751,7 +756,7 @@ I Task 12 e 15 la usano. `base` è richiesto quando `source === 'branch'`.
 
 - [ ] **Passo 1: scrivere il test che fallisce**
 
-I test usano `makeTestRepo` di `src/main/git/test-repo.ts`, già presente e usato
+I test usano `createTestRepo` di `src/main/git/test-repo.ts`, già presente e usato
 da `status.test.ts`. Leggerlo per la firma esatta prima di scrivere.
 
 ```ts
@@ -759,13 +764,13 @@ da `status.test.ts`. Leggerlo per la firma esatta prima di scrivere.
 import { describe, expect, test } from 'vitest'
 import { writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { makeTestRepo } from './test-repo.ts'
+import { createTestRepo } from './test-repo.ts'
 import { gitIn } from './runner.ts'
 import { loadFileDiff, LIMITE_BYTE, LIMITE_RIGHE } from './diff.ts'
 
 describe('loadFileDiff', () => {
   test('legge il diff di un file modificato non committato', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'a.txt'), 'uno\ndue\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -786,7 +791,7 @@ describe('loadFileDiff', () => {
   })
 
   test('un file non tracciato si confronta con il vuoto', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'a.txt'), 'x\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -807,7 +812,7 @@ describe('loadFileDiff', () => {
   })
 
   test('la vista del ramo non mostra il lavoro fatto sulla base dopo il fork', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'comune.txt'), 'base\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -849,7 +854,7 @@ describe('loadFileDiff', () => {
   })
 
   test('un diff oltre il limite di righe viene rifiutato con il motivo', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'a.txt'), 'x\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -875,7 +880,7 @@ describe('loadFileDiff', () => {
   })
 
   test('un percorso fuori dal repo viene rifiutato', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     const esito = await loadFileDiff({
       repoPath: repo,
       path: '../fuori.txt',
@@ -889,7 +894,7 @@ describe('loadFileDiff', () => {
   })
 
   test('senza base la vista del ramo si rifiuta invece di indovinare', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     const esito = await loadFileDiff({
       repoPath: repo,
       path: 'a.txt',
@@ -1063,7 +1068,7 @@ I Task 6 e 12 le usano.
 import { describe, expect, test } from 'vitest'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { makeTestRepo } from './test-repo.ts'
+import { createTestRepo } from './test-repo.ts'
 import { gitIn } from './runner.ts'
 import { resolveBase, hasMergeBase } from './merge-base.ts'
 
@@ -1075,7 +1080,7 @@ async function commitVuoto(repo: string, nome: string): Promise<void> {
 
 describe('resolveBase', () => {
   test('ripiega sul ramo principale locale quando non c e un remoto', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await commitVuoto(repo, 'primo')
     const corrente = (await gitIn(repo).raw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
 
@@ -1087,7 +1092,7 @@ describe('resolveBase', () => {
   })
 
   test('si rifiuta invece di indovinare quando non trova nessuna base', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     // Repository senza commit: nessun ramo esiste ancora.
     const esito = await resolveBase(repo)
     expect(esito.ok).toBe(false)
@@ -1098,7 +1103,7 @@ describe('resolveBase', () => {
 
 describe('hasMergeBase', () => {
   test('e vero fra un ramo e la sua base', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await commitVuoto(repo, 'primo')
     const base = (await gitIn(repo).raw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
     await gitIn(repo).raw(['checkout', '-b', 'lavoro'])
@@ -1108,7 +1113,7 @@ describe('hasMergeBase', () => {
   })
 
   test('e falso verso un ramo orfano', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await commitVuoto(repo, 'primo')
     const base = (await gitIn(repo).raw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
     await gitIn(repo).raw(['checkout', '--orphan', 'orfano'])
@@ -1229,13 +1234,13 @@ I Task 12 e 13 la usano.
 import { describe, expect, test } from 'vitest'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { makeTestRepo } from './test-repo.ts'
+import { createTestRepo } from './test-repo.ts'
 import { gitIn } from './runner.ts'
 import { listChanged } from './changes.ts'
 
 describe('listChanged', () => {
   test('la vista non committato elenca i file con i conteggi', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'a.txt'), 'uno\ndue\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -1252,7 +1257,7 @@ describe('listChanged', () => {
   })
 
   test('la vista non committato include i file non tracciati', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'a.txt'), 'x\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -1266,7 +1271,7 @@ describe('listChanged', () => {
   })
 
   test('la vista del ramo elenca i file di tutti i suoi commit', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'base.txt'), 'base\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -1289,7 +1294,7 @@ describe('listChanged', () => {
   })
 
   test('la vista del ramo esclude il lavoro fatto sulla base dopo il fork', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'base.txt'), 'base\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -1314,7 +1319,7 @@ describe('listChanged', () => {
   })
 
   test('la vista del ramo senza base si rifiuta con il motivo', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     const esito = await listChanged({ repoPath: repo, source: 'branch', base: null })
     expect(esito.ok).toBe(false)
     if (esito.ok) return
@@ -1322,7 +1327,7 @@ describe('listChanged', () => {
   })
 
   test('la vista del ramo riporta la base usata', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     await writeFile(join(repo, 'a.txt'), 'x\n')
     await gitIn(repo).add('.')
     await gitIn(repo).commit('primo')
@@ -1346,9 +1351,21 @@ Atteso: FAIL, `Cannot find module './changes.ts'`.
 
 ```ts
 // src/main/git/changes.ts
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { gitIn } from './runner.ts'
 import { readStatus } from './status.ts'
 import type { ChangedFile, DiffSource } from '../../shared/diff/types.ts'
+
+interface Conteggio {
+  additions: number
+  deletions: number
+}
+
+const NIENTE: Conteggio = { additions: 0, deletions: 0 }
+
+/** La finestra su cui git decide se un contenuto e' binario. */
+const FINESTRA_BINARIO = 8000
 
 export type ChangesList =
   | { ok: true; branch: string | null; base: string | null; files: ChangedFile[] }
@@ -1380,16 +1397,41 @@ async function nonCommittato(repoPath: string): Promise<ChangesList> {
   const stato = await readStatus(repoPath)
   const conteggi = await numstat(repoPath, ['diff', '--numstat', 'HEAD'])
 
-  const files: ChangedFile[] = stato.entries.map((voce) => ({
-    path: voce.path,
-    state: voce.state,
-    staged: voce.staged,
-    // Un file non tracciato non compare in `git diff HEAD`: i suoi conteggi si
-    // ottengono contando le righe del file, che e' quel che fa `--no-index`.
-    additions: conteggi.get(voce.path)?.additions ?? 0,
-    deletions: conteggi.get(voce.path)?.deletions ?? 0
-  }))
+  const files: ChangedFile[] = await Promise.all(
+    stato.entries.map(async (voce) => {
+      // Un file non tracciato non compare in `git diff HEAD`: git non ha
+      // niente con cui confrontarlo. Le sue righe si contano dal disco, o la
+      // lista mostrerebbe `+0` su un file appena scritto pieno di codice.
+      const conteggio =
+        conteggi.get(voce.path) ??
+        (voce.state === 'untracked' ? await righeSulDisco(repoPath, voce.path) : NIENTE)
+      return {
+        path: voce.path,
+        state: voce.state,
+        staged: voce.staged,
+        additions: conteggio.additions,
+        deletions: conteggio.deletions
+      }
+    })
+  )
   return { ok: true, branch: stato.branch, base: null, files }
+}
+
+async function righeSulDisco(repoPath: string, path: string): Promise<Conteggio> {
+  try {
+    const dati = await readFile(join(repoPath, path))
+    // Un byte nullo nella prima finestra: e' l euristica di git stesso, e
+    // contare "righe" in un binario non vuol dire niente.
+    if (dati.subarray(0, FINESTRA_BINARIO).includes(0)) return NIENTE
+    const testo = dati.toString('utf8')
+    if (testo === '') return NIENTE
+    const senzaCoda = testo.endsWith('\n') ? testo.slice(0, -1) : testo
+    return { additions: senzaCoda.split('\n').length, deletions: 0 }
+  } catch {
+    // Una cartella non tracciata, o un file sparito fra status e lettura:
+    // nessun conteggio, non un errore che nasconde tutta la lista.
+    return NIENTE
+  }
 }
 
 async function delRamo(repoPath: string, base: string): Promise<ChangesList> {
@@ -1407,17 +1449,35 @@ async function delRamo(repoPath: string, base: string): Promise<ChangesList> {
   return { ok: true, branch, base, files }
 }
 
-async function numstat(
-  repoPath: string,
-  argomenti: string[]
-): Promise<Map<string, { additions: number; deletions: number }>> {
-  const uscita = await gitIn(repoPath).raw(argomenti)
-  const out = new Map<string, { additions: number; deletions: number }>()
-  for (const riga of uscita.split('\n')) {
-    if (riga.trim() === '') continue
-    const [agg, canc, ...resto] = riga.split('\t')
-    const path = resto.join('\t')
+/**
+ * Legge `--numstat -z`. Il `-z` non e' un dettaglio: senza, git fonde la
+ * rinomina in UN campo solo (`vecchio.txt => rinominato.txt`), che non
+ * corrisponde a nessun percorso di `git status`, e i conteggi si perdono in
+ * silenzio. Con `-z` il percorso nuovo — quello che l utente vede nella
+ * lista — arriva intero.
+ *
+ * Formato, verificato su git 2.x:
+ *   normale:  `1\t0\tnormale.txt\0`
+ *   rinomina: `1\t2\t\0lungo.txt\0rinominato.txt\0`
+ */
+async function numstat(repoPath: string, argomenti: string[]): Promise<Map<string, Conteggio>> {
+  const pezzi = (await gitIn(repoPath).raw(argomenti)).split('\0')
+  const out = new Map<string, Conteggio>()
+
+  for (let i = 0; i < pezzi.length; i++) {
+    const campi = pezzi[i].split('\t')
+    if (campi.length < 3) continue
+    const [agg, canc, forse] = campi
+
+    let path = forse
+    if (path === '') {
+      // Terzo campo vuoto: e' una rinomina, e i due pezzi che seguono sono il
+      // percorso vecchio e quello nuovo. Interessa il nuovo.
+      path = pezzi[i + 2] ?? ''
+      i += 2
+    }
     if (path === '') continue
+
     // Il trattino segna un file binario: nessun conteggio di righe.
     out.set(path, {
       additions: agg === '-' ? 0 : Number(agg),
@@ -1794,7 +1854,7 @@ pnpm add chokidar
 import { describe, expect, test } from 'vitest'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { makeTestRepo } from './test-repo.ts'
+import { createTestRepo } from './test-repo.ts'
 import { shouldIgnore, watchWorktree } from './watch.ts'
 
 describe('shouldIgnore', () => {
@@ -1821,7 +1881,7 @@ describe('shouldIgnore', () => {
 
 describe('watchWorktree', () => {
   test('segnala una scrittura entro un tempo ragionevole', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     let segnalazioni = 0
     const watcher = watchWorktree({ repoPath: repo, onChange: () => { segnalazioni += 1 } })
 
@@ -1834,7 +1894,7 @@ describe('watchWorktree', () => {
   })
 
   test('una raffica produce molte meno segnalazioni che eventi', async () => {
-    const repo = await makeTestRepo()
+    const repo = await createTestRepo()
     let segnalazioni = 0
     const watcher = watchWorktree({ repoPath: repo, onChange: () => { segnalazioni += 1 } })
 
@@ -2390,7 +2450,7 @@ test('git.bases elenca i rami e segnala il default', async () => {
 ```
 
 Scriverli per intero seguendo i test già presenti nel file: `makeChatDeps`
-mostra come si costruisce un `dispatch` provabile, e `makeTestRepo` come si
+mostra come si costruisce un `dispatch` provabile, e `createTestRepo` come si
 ottiene un repo vero.
 
 - [ ] **Passo 2: eseguire il test e vederlo fallire**
