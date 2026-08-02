@@ -1185,12 +1185,17 @@ export function apply(
 
     // I quattro comandi strutturali arrivano nei Task 5 e 6. Sono qui perche
     // lo switch su un'unione discriminata deve essere esaustivo.
+    //
+    // Un `throw`, non un errore di dominio: restituire per esempio
+    // `unknownGroup` per un comando perfettamente valido significa inventare
+    // un errore che non descrive niente, e un test potrebbe soddisfarlo per
+    // caso — facendo sembrare finito un lavoro che non e' nemmeno iniziato.
+    // Questi quattro rami vengono SOSTITUITI nei Task 5 e 6.
     case 'insertTab':
     case 'closeTab':
     case 'splitGroup':
     case 'moveTab':
-      void strutturale
-      return { ok: false, error: { kind: 'unknownGroup', groupId: layout.activeGroupId } }
+      throw new Error(`comando non ancora implementato: ${command.kind}`)
   }
 }
 ```
@@ -1474,7 +1479,6 @@ test('splitGroup a destra mette l ancora come primo figlio', () => {
   expect(esito.delta.insertedGroups).toEqual([nuovoGruppo])
   expect(esito.delta.insertedSplits).toEqual([nuovoSplit])
   expect(esito.delta.isStructural).toBe(true)
-  void t1
 })
 
 test('splitGroup a sinistra mette il nuovo contenuto come primo figlio', () => {
