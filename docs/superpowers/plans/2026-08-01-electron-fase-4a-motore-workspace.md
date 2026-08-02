@@ -2355,6 +2355,16 @@ test('un payload valido ma con un tab mancante viene rifiutato', () => {
   expect(esito.ok).toBe(false)
 })
 
+// Gemello del test sul payload di spazzatura, per l'ALTRO JSON: il viewState
+// dei tab e una seconda colonna, e si corrompe indipendentemente dal payload.
+test('un viewState di spazzatura viene rifiutato con un motivo, non con un errore', () => {
+  const { payload, tabs } = encodeLayout(layoutDiProva())
+  const rovinati = tabs.map((t) => ({ ...t, viewStateJSON: '{non json' }))
+  const esito = decodeLayout(payload, rovinati)
+  expect(esito.ok).toBe(false)
+  if (!esito.ok) expect(esito.reason).toContain('non interpretabile')
+})
+
 test('il checksum cambia se il payload cambia', () => {
   expect(checksumOf('a')).not.toBe(checksumOf('b'))
   expect(checksumOf('a')).toBe(checksumOf('a'))
@@ -2462,9 +2472,17 @@ export function decodeLayout(
 
   const perId = new Map<string, WorkspaceTab>()
   for (const riga of tabs) {
-    const viewState = WorkspaceTabViewStateSchema.safeParse(
-      riga.viewStateJSON === null ? {} : JSON.parse(riga.viewStateJSON)
-    )
+    // Anche questo `JSON.parse` va protetto, come quello del payload:
+    // `decodeLayout` deve SEMPRE restituire un motivo, mai lanciare. Una
+    // eccezione qui salterebbe la quarantena del Task 10 — che esiste
+    // esattamente per il caso di un database con dentro spazzatura.
+    let grezzoViewState: unknown
+    try {
+      grezzoViewState = riga.viewStateJSON === null ? {} : JSON.parse(riga.viewStateJSON)
+    } catch {
+      return { ok: false, reason: `stato di vista non interpretabile per il tab ${riga.id}` }
+    }
+    const viewState = WorkspaceTabViewStateSchema.safeParse(grezzoViewState)
     if (!viewState.success) {
       return { ok: false, reason: `stato di vista non conforme per il tab ${riga.id}` }
     }
