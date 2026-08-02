@@ -2565,6 +2565,7 @@ import { openDatabase, migrateToLatest } from '../db/database'
 import type { TillerDatabase } from '../db/schema'
 import { loadLayout, saveLayout } from './layout-store'
 import { emptyLayout } from '../../shared/workspace/layout-invariants.ts'
+import { checksumOf } from '../../shared/workspace/layout-codec.ts'
 
 /**
  * Database in memoria con il worktree padre gia' inserito.
@@ -2636,9 +2637,17 @@ test('una scrittura con revisione non piu recente viene scartata', async () => {
   expect((await loadLayout(database, 'wt-1')).revision).toBe(5)
 })
 
+// Le due guardie di `loadLayout` vanno provate SEPARATAMENTE, e in
+// quest'ordine, perche' la prima nasconde la seconda: se si corrompe il solo
+// payload, il checksum se ne accorge e `decodeLayout` non viene mai raggiunto.
+// Un test unico che corrompe il payload e pretende un motivo di JSON malformato
+// non puo' passare — verifica una guardia e ne asserisce un'altra.
+
 test('un payload corrotto finisce in quarantena e il worktree riparte vuoto', async () => {
   const database = await db()
   await saveLayout(database, 'wt-1', emptyLayout(), 1)
+  // Solo il payload: e' la corruzione realistica (scrittura parziale, bit rot),
+  // e la prende il checksum.
   await database
     .updateTable('workspaceLayout')
     .set({ payload: '{spazzatura' })
@@ -2647,6 +2656,31 @@ test('un payload corrotto finisce in quarantena e il worktree riparte vuoto', as
 
   const { layout, revision } = await loadLayout(database, 'wt-1')
   // L'app resta viva: e la differenza fra perdere una sessione e perdere tutto.
+  expect(revision).toBe(0)
+  expect(layout.groups.size).toBe(1)
+
+  const quarantena = await database
+    .selectFrom('workspaceLayoutQuarantine')
+    .selectAll()
+    .where('worktreeId', '=', 'wt-1')
+    .execute()
+  expect(quarantena).toHaveLength(1)
+  expect(quarantena[0].reason).toContain('checksum')
+})
+
+test('un payload illeggibile con checksum coerente finisce comunque in quarantena', async () => {
+  const database = await db()
+  await saveLayout(database, 'wt-1', emptyLayout(), 1)
+  // Payload E checksum aggiornati insieme: il checksum non ha nulla da
+  // ridire, quindi tocca a `decodeLayout` rifiutare. Senza questo caso la
+  // seconda guardia resterebbe senza copertura, mascherata dalla prima.
+  await database
+    .updateTable('workspaceLayout')
+    .set({ payload: '{spazzatura', checksum: checksumOf('{spazzatura') })
+    .where('worktreeId', '=', 'wt-1')
+    .execute()
+
+  const { layout, revision } = await loadLayout(database, 'wt-1')
   expect(revision).toBe(0)
   expect(layout.groups.size).toBe(1)
 
@@ -2682,7 +2716,7 @@ import { emptyLayout, type WorkspaceLayout } from '../../shared/workspace/layout
 /** Quante righe di quarantena conservare per worktree. */
 export const QUARANTINE_KEEP = 10
 
-async function metti_in_quarantena(
+async function mettiInQuarantena(
   db: Kysely<TillerDatabase>,
   worktreeId: string,
   payload: string,
@@ -2739,7 +2773,7 @@ export async function loadLayout(
   if (record === undefined) return { layout: emptyLayout(), revision: 0 }
 
   if (checksumOf(record.payload) !== record.checksum) {
-    await metti_in_quarantena(db, worktreeId, record.payload, 'checksum non corrispondente')
+    await mettiInQuarantena(db, worktreeId, record.payload, 'checksum non corrispondente')
     return { layout: emptyLayout(), revision: 0 }
   }
 
@@ -2751,7 +2785,7 @@ export async function loadLayout(
 
   const esito = decodeLayout(record.payload, tabs)
   if (!esito.ok) {
-    await metti_in_quarantena(db, worktreeId, record.payload, esito.reason)
+    await mettiInQuarantena(db, worktreeId, record.payload, esito.reason)
     return { layout: emptyLayout(), revision: 0 }
   }
   return { layout: esito.layout, revision: record.revision }
