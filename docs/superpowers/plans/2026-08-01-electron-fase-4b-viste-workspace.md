@@ -2398,6 +2398,38 @@ Atteso: albero pulito.
 Comando: `bash scripts/ci.sh`
 Atteso: `CI OK`.
 
+**Esito (2026-08-02): due mutazioni su tre hanno ucciso il criterio, la terza
+no — e la terza era la scoperta.**
+
+| Mutazione | Criterio | Esito |
+|---|---|---|
+| `onkeydown` del divisore neutralizzato | 7 | **rosso** ✓ |
+| precedenza del rollup invertita | 4 | **rosso** ✓ |
+| `no-drag` tolto dal tab | 1 | **verde** ✗ |
+
+Il criterio 1 era **vacuo rispetto alla trappola che dichiarava**. Un click di
+Playwright arriva via CDP al hit-testing del renderer, mentre
+`-webkit-app-region` lo applica il processo browser al solo input reale del
+sistema: il click sintetico riesce anche su un tab sepolto in una regione di
+trascinamento. Il commento nel componente affermava il contrario — «la sua
+validazione per mutazione toglie proprio questa classe» — e sarebbe rimasto lì
+a certificare una copertura inesistente.
+
+Correzione: il criterio osserva la proprieta' **dove e' osservabile**, cioe'
+nello stile calcolato (`getComputedStyle(el)['-webkit-app-region'] === 'no-drag'`).
+Rifatta la mutazione, ora e' rossa: `Expected: "no-drag" / Received: "none"`.
+
+Due trappole di procedura incontrate eseguendo queste mutazioni, entrambe
+capaci di produrre un falso verde:
+
+- **`pnpm build` include il typecheck.** Neutralizzare un gestore rende
+  `tastiera` inutilizzata, `svelte-check` fallisce, la build non produce nulla e
+  Playwright gira sul vecchio `out/` — passando. Per mutare serve
+  `npx electron-vite build`, che compila senza typecheck.
+- **Una mutazione deve compilare.** Sostituire un attributo con un commento
+  `/* ... */` e' un errore di sintassi Svelte: stessa dinamica, stesso falso
+  verde. La mutazione va scritta come codice valido (`onkeydown={() => {}}`).
+
 ---
 
 ## Checklist manuale (una volta, con la finestra vera)
