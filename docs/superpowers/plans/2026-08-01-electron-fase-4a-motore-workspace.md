@@ -936,14 +936,18 @@ git commit -m "feat: comandi del layout, delta e classificazione strutturale"
 - Produce:
   `apply(command, layout): { ok: true } & LayoutTransition | { ok: false; error: LayoutError }`.
   In questo task gestisce `activateTab`, `activateGroup`, `renameTab`,
-  `updateViewState`, `setPreferredFraction`; gli altri quattro restituiscono
-  temporaneamente `{ ok: false, error: { kind: 'unknownTab', tabId } }` e
-  vengono completati nei Task 5 e 6.
+  `updateViewState`, `setPreferredFraction`; gli altri quattro **lanciano**
+  temporaneamente (`throw new Error(...)`) e vengono completati nei Task 5 e 6.
 
 **Nota sul taglio:** `apply` fa uno `switch` esaustivo su un'unione
 discriminata. I quattro comandi strutturali devono comparire fin dal primo
 task, altrimenti il compilatore rifiuta il file. Sono presenti come rami che
-falliscono, e i Task 5 e 6 li **sostituiscono**.
+**lanciano**, e i Task 5 e 6 li **sostituiscono**.
+
+Lanciano, invece di restituire un `LayoutError`, perche' un errore di dominio
+inventato — `unknownTab` per un comando che non ha nulla di sbagliato — non
+descrive niente e puo' essere soddisfatto per caso da un test che si limita ad
+asserire `ok === false`, facendo sembrare finito un lavoro mai iniziato.
 
 - [ ] **Passo 1: scrivere il test che fallisce**
 
