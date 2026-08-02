@@ -1791,6 +1791,24 @@ In `src/main/index.ts`, alla lettura dell'impostazione:
 nativeTheme.themeSource = appearance // 'system' | 'light' | 'dark'
 ```
 
+**DEBITO NOTO, aperto il 2026-08-02.** Questo passo non dice DOVE vive
+l'impostazione, e l'esecuzione ha prodotto due posti scollegati: il renderer la
+persiste in `localStorage`, il main la legge da `TILLER_APPEARANCE` all'avvio.
+Oggi coincidono per caso — nessuna interfaccia chiama ancora `setAppearance` —
+ma appena esistera' un pannello impostazioni si vedra' ESATTAMENTE il glitch
+descritto nel Contesto qui sopra: token chiari e semafori scuri.
+
+La regola dell'architettura decide da che parte sistemarlo: *se lo persisti e'
+del main*. L'impostazione va quindi nel main, con un metodo del protocollo per
+leggerla e cambiarla, e il renderer che applica l'attributo su `<html>` in
+risposta — non una seconda copia in `localStorage`. Da fare insieme al pannello
+impostazioni, non prima: senza interfaccia che la cambi, un percorso di
+protocollo sarebbe codice senza consumatori.
+
+Nel frattempo `theme.svelte.ts` ascolta `matchMedia('(prefers-color-scheme:
+light)')`, altrimenti `system` significherebbe "com'era all'avvio" e l'app
+resterebbe scura quando il sistema passa a chiaro.
+
 - [ ] **Passo 3: vibrancy solo sul chrome**
 
 Sidebar, barra superiore e barra inferiore ricevono la superficie traslucida.
