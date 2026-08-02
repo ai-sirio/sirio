@@ -1809,6 +1809,13 @@ function dueRiquadri(fraction = 0.5): {
     ],
     activeTabId: null
   })
+  // `g` genera un id di tab nuovo a ogni chiamata: va invocata UNA volta per
+  // gruppo. Chiamarla due volte — una per i tab, una per l'id attivo — darebbe
+  // un `activeTabId` che punta a un tab non presente, e `makeLayout`
+  // respingerebbe il fixture con `activeTabNotInGroup` prima ancora che la
+  // geometria venga calcolata.
+  const ga = g(a)
+  const gb = g(b)
   const layout = makeLayout(
     {
       kind: 'split',
@@ -1819,8 +1826,8 @@ function dueRiquadri(fraction = 0.5): {
       second: { kind: 'group', id: b }
     },
     new Map([
-      [a, { ...g(a), activeTabId: g(a).tabs[0].id }],
-      [b, { ...g(b), activeTabId: g(b).tabs[0].id }]
+      [a, { ...ga, activeTabId: ga.tabs[0].id }],
+      [b, { ...gb, activeTabId: gb.tabs[0].id }]
     ]),
     a
   )
