@@ -3388,11 +3388,22 @@ In `src/renderer/src/lib/app-model.svelte.ts`, accanto agli altri rami:
 ```ts
       case 'workspace.layout':
         // Stile immutabile e `return`, come gli altri rami di questo switch.
-        this.layouts = new Map(this.layouts).set(event.worktreeId, event.layout)
+        this.layouts = new SvelteMap(this.layouts).set(event.worktreeId, event.layout)
         return
 ```
 
-con il campo `layouts = $state(new Map<string, unknown>())` accanto a `panes`.
+con l'import `import { SvelteMap } from 'svelte/reactivity'` e il campo
+`layouts = $state(new SvelteMap<string, unknown>())` accanto a `panes`.
+
+**`SvelteMap`, non `Map`.** Dentro un file `.svelte.ts` una `Map` nativa non e
+reattiva: `$state` rende osservabile il RIFERIMENTO, non il contenuto, quindi
+una vista che leggesse `layouts.get(id)` non si aggiornerebbe mai al cambio di
+quella chiave. La regola `svelte/prefer-svelte-reactivity` e obbligatoria nel
+repo e fa fallire il gate. `SvelteMap` e esportato da `svelte/reactivity`
+(verificato sulla 5.56.8 installata). Il finto `fakeWorkspace` di
+`dispatch.test.ts` resta invece su `Map` nativa: e un file di test, non un
+modulo Svelte, e li la reattivita non serve.
+
 Il tipo resta `unknown`: in Fase 4a nessuna vista lo legge ancora, e tipizzarlo
 qui significherebbe decidere in anticipo la forma che serve alla 4b.
 

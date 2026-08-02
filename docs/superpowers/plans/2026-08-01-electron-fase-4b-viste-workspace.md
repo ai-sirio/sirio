@@ -40,6 +40,12 @@ vitest, Playwright.
   antialiasing e insegnano a ignorare il gate.
 - **Svelte 5 con le rune** (`$state`, `$derived`, `$props`), come il codice
   esistente in `src/renderer/src/lib/app-model.svelte.ts`.
+- **Nei file `.svelte` e `.svelte.ts`, collezioni da `svelte/reactivity`**:
+  `SvelteMap`, `SvelteSet`, `SvelteDate`, mai le native. `$state` rende
+  osservabile il RIFERIMENTO, non il contenuto: una `Map` nativa dentro
+  `$state` non notifica il cambio di una chiave, e la vista che la legge non si
+  aggiorna. La regola `svelte/prefer-svelte-reactivity` fa fallire il gate.
+  Nei file `.ts` e `.test.ts` normali restano le collezioni native.
 - **Stringhe dell'interfaccia in inglese**, anche quando il piano e i commenti
   sono in italiano.
 - Baseline all'inizio della fase: gate verde con la Fase 4a completa.
