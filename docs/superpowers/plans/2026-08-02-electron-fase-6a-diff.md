@@ -2553,6 +2553,103 @@ git commit -m "feat: git changes and diff over the control protocol"
 
 ---
 
+## Task 12b: Le mutazioni git sul protocollo
+
+**Task aggiunto durante l'esecuzione.** Il Task 12 esponeva solo letture —
+`git.changes`, `git.diff`, `git.bases` — e la spec chiede che la vista non
+committato abbia stage, unstage e scarta. Senza queste richieste i pulsanti
+esistono ma sono `disabled`: presenti nel DOM, inerti.
+
+**File:**
+- Modifica: `src/shared/protocol.ts`
+- Modifica: `src/main/control/dispatch.ts`
+- Test: `src/main/control/dispatch.test.ts`
+
+**Interfacce:**
+- Consuma: `stage`, `unstage`, `discardChanges`, `discardUntracked` da
+  `src/main/git/actions.ts` — portate in Fase 1, finora senza consumatori.
+- Produce:
+
+```ts
+  | { kind: 'git.stage'; worktreeId: string; paths: string[] }
+  | { kind: 'git.unstage'; worktreeId: string; paths: string[] }
+  | { kind: 'git.discard'; worktreeId: string; paths: string[] }
+```
+
+Ogni richiesta emette `git.changed` dopo aver mutato, così la lista si
+aggiorna senza aspettare il watcher.
+
+**`git.discard` distrugge lavoro non committato.** `discardChanges` esegue
+`git checkout --` e `discardUntracked` cancella il file dal disco: nessuna
+delle due è annullabile, e non passano dal cestino. Perciò:
+
+- il dispatcher ricostruisce le `GitStatusEntry` da `readStatus`, e **scarta
+  solo i percorsi che risultano davvero modificati**: un percorso arbitrario
+  dal renderer non deve poter cancellare un file pulito;
+- la UI (Task 13) chiede conferma prima di chiamarla, nominando i file.
+
+- [ ] **Passo 1: scrivere il test che fallisce**
+
+```ts
+test('git.stage mette in stage e annuncia il cambiamento', async () => {
+  // Arrange: dispatch su un repo con un file modificato non in stage.
+  // Act: dispatch({ method: 'git.stage', params: { worktreeId, paths: ['a.txt'] } }).
+  // Assert: ok true; `readStatus` mostra il file staged; e' stato emesso
+  //         un evento { type: 'git.changed', worktreeId }.
+})
+
+test('git.discard ignora un percorso che non risulta modificato', async () => {
+  // Arrange: repo pulito con un file committato.
+  // Act: dispatch({ method: 'git.discard', params: { worktreeId, paths: ['pulito.txt'] } }).
+  // Assert: il file esiste ancora con il suo contenuto.
+})
+
+test('git.discard riporta un file modificato al contenuto committato', async () => {
+  // Arrange: file committato, poi riscritto.
+  // Act: git.discard su quel percorso.
+  // Assert: il contenuto e' tornato quello del commit.
+})
+
+test('git.stage su un worktree non git risponde con il motivo', async () => {
+  // Assert: ok false, motivo che nomina il repository.
+})
+```
+
+Scriverli per intero seguendo gli helper già presenti in
+`dispatch.test.ts` e `createTestRepo`.
+
+- [ ] **Passo 2: eseguire e vedere il rosso**
+
+Comando: `npx vitest run src/main/control/dispatch.test.ts`
+Atteso: FAIL — i metodi non esistono nell'unione.
+
+- [ ] **Passo 3: implementare protocollo e rami**
+
+I tre rami risolvono il percorso del worktree come fanno `git.changes` e
+`git.diff`, verificano `isGitRepository`, filtrano i percorsi contro
+`readStatus`, chiamano la funzione di `actions.ts` corrispondente e poi
+emettono `git.changed`.
+
+- [ ] **Passo 4: verde**
+
+Comando: `npx vitest run src/main/control/dispatch.test.ts`
+
+- [ ] **Passo 5: verificare per mutazione**
+
+Togliere il filtro contro `readStatus` in `git.discard`. Atteso: ROSSO su
+"git.discard ignora un percorso che non risulta modificato" — il file pulito
+verrebbe toccato. Ripristinare.
+
+- [ ] **Passo 6: lint e commit**
+
+```bash
+npx eslint src/shared/protocol.ts src/main/control/
+git add src/shared/protocol.ts src/main/control/
+git commit -m "feat: git stage, unstage and discard over the control protocol"
+```
+
+---
+
 ## Task 13: Pannello e lista dei cambiati
 
 **File:**
@@ -2752,8 +2849,16 @@ Seguire `e2e/fase-4b-viste.spec.ts` per gli helper (avvio dell'app,
 4. **La vista Ramo esclude il lavoro fatto sulla base dopo il fork.** Costruire
    il caso con git nel repo di prova; la lista mostra il file del ramo e **non**
    quello aggiunto sulla base.
-5. **Le azioni di stage esistono solo sul non committato.** Sulla vista Ramo il
-   controllo di stage non è presente nel DOM.
+5. **Le azioni di stage funzionano sul non committato e mancano sul Ramo.**
+   Sulla vista Ramo il controllo non è presente nel DOM. Sul non committato non
+   basta che ci sia: deve essere **abilitato**, e dopo il click il file deve
+   risultare in stage.
+
+   **Perché la forma del criterio conta.** La prima stesura diceva soltanto
+   "esiste nel DOM", e l'implementazione consegnò un pulsante `disabled` —
+   presente, etichettato, con l'attributo giusto, e inerte. Il criterio sarebbe
+   stato verde su una funzione che non esisteva. Un'asserzione di *presenza* non
+   distingue un controllo che agisce da uno che sta lì.
 6. **Una modifica da fuori dell'app compare senza interazione.** Scrivere un
    file con `fs` mentre l'app è aperta; entro pochi secondi la riga compare
    nella lista.
