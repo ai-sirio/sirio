@@ -350,8 +350,11 @@ git commit -m "feat: identificatori brandizzati e tipi del layout del workspace"
 import { expect, test } from 'vitest'
 import { makeLayout, emptyLayout, allTabs, orderedGroupIds } from './layout-invariants.ts'
 import { newPaneGroupID, newSplitID, newWorkspaceTabID } from './layout-ids.ts'
+// I tipi marchiati degli id stanno in `layout-ids.ts`, insieme alle factory che
+// li producono; `layout-types.ts` esporta le forme del layout, non gli id.
+import type { PaneGroupID } from './layout-ids.ts'
 import { emptyViewState } from './layout-types.ts'
-import type { PaneGroup, PaneGroupID } from './layout-types.ts'
+import type { PaneGroup } from './layout-types.ts'
 
 const gruppo = (id = newPaneGroupID()): [typeof id, PaneGroup] => [
   id,
