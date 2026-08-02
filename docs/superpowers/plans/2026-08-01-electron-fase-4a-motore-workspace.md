@@ -3071,6 +3071,7 @@ git commit -m "feat: politica di persistenza guidata dalla classe del comando"
 - Modifica: `src/main/control/dispatch.ts`
 - Modifica: `src/main/control/dispatch.test.ts`
 - Modifica: `src/renderer/src/lib/app-model.svelte.ts`
+- Modifica: `src/main/index.ts`
 
 **Interfacce:**
 - Consuma: Task 3 (schemi dei comandi), Task 10–11.
@@ -3083,13 +3084,27 @@ git commit -m "feat: politica di persistenza guidata dalla classe del comando"
 con `switch` esaustivi nel dispatcher e nel renderer. Protocollo e rami vanno
 nello stesso task, o il compilatore rifiuta il file.
 
+Per la stessa ragione `src/main/index.ts` sta QUI e non nel Task 13: rendere
+`DispatchDeps.workspace` obbligatorio rompe ogni sito che costruisce
+`DispatchDeps`, e l'unico e in `index.ts`. Rimandare il cablaggio al task
+successivo lascerebbe il branch rosso al typecheck fra i due commit, e
+l'alternativa — dichiarare `workspace` opzionale per far quadrare i confini dei
+task — indebolirebbe un tipo di produzione per comodita di pianificazione.
+Un campo obbligatorio e i suoi siti di costruzione sono un taglio solo.
+
 **Attenzione ai livelli:** `src/shared/protocol.ts` importerà da
 `src/shared/workspace/layout-commands.ts`. Gli import relativi dentro
 `src/shared/` **devono portare l'estensione `.ts`** — vedi i vincoli globali.
 
 - [ ] **Passo 1: scrivere il test che fallisce**
 
-In `dispatch.test.ts`:
+In `dispatch.test.ts`, aggiungere agli import in cima al file:
+
+```ts
+import { newWorkspaceTabID, PaneGroupIDSchema } from '../../shared/workspace/layout-ids.ts'
+```
+
+poi i test:
 
 ```ts
 test('workspace.get su un worktree nuovo restituisce un layout vuoto', async () => {
@@ -3107,8 +3122,14 @@ test('workspace.apply inserisce un tab e lo si rilegge', async () => {
     method: 'workspace.get',
     params: { worktreeId: 'wt-1' }
   })
-  const groupId = (iniziale as { result: { layout: { activeGroupId: string } } }).result.layout
-    .activeGroupId
+  // Il layout arriva dal dispatcher come JSON, quindi `activeGroupId` e una
+  // stringa qualunque: `PaneGroupIDSchema.parse` la riporta al tipo marchiato
+  // invece di forzarla con un cast. Un `as PaneGroupID` compilerebbe uguale ma
+  // non verificherebbe nulla — ed e proprio il controllo che i tipi marchiati
+  // esistono per fare.
+  const groupId = PaneGroupIDSchema.parse(
+    (iniziale as { result: { layout: { activeGroupId: string } } }).result.layout.activeGroupId
+  )
 
   const applicato = await dispatch({
     id: 'r2',
@@ -3118,7 +3139,7 @@ test('workspace.apply inserisce un tab e lo si rilegge', async () => {
       command: {
         kind: 'insertTab',
         tab: {
-          id: crypto.randomUUID(),
+          id: newWorkspaceTabID(),
           title: 'Terminale 1',
           titleIsAutoNamed: true,
           content: { kind: 'terminal', id: 'term-1' },
@@ -3160,7 +3181,7 @@ test('un comando che viola un invariante risponde con errore e non cambia il lay
     method: 'workspace.apply',
     params: {
       worktreeId: 'wt-1',
-      command: { kind: 'activateTab', tabId: crypto.randomUUID() }
+      command: { kind: 'activateTab', tabId: newWorkspaceTabID() }
     }
   })
   expect(r.ok).toBe(false)
@@ -3309,28 +3330,77 @@ con il campo `layouts = $state(new Map<string, unknown>())` accanto a `panes`.
 Il tipo resta `unknown`: in Fase 4a nessuna vista lo legge ancora, e tipizzarlo
 qui significherebbe decidere in anticipo la forma che serve alla 4b.
 
-- [ ] **Passo 6: gate e commit**
+- [ ] **Passo 6: cablare il main**
+
+In `src/main/index.ts`, accanto alle altre istanze:
+
+```ts
+import { loadLayout, saveLayout } from './workspace/layout-store'
+import { createLayoutPersister } from './workspace/persistence-policy'
+import { apply as applyLayout } from '../shared/workspace/layout-engine.ts'
+import type { WorkspaceLayout } from '../shared/workspace/layout-invariants.ts'
+
+/** Layout vivi per worktree: il database e la copia durevole, questa e quella corrente. */
+const layouts = new Map<string, WorkspaceLayout>()
+const persister = createLayoutPersister({
+  save: (worktreeId, layout, revision) => saveLayout(db, worktreeId, layout, revision),
+  schedule: (fn, ms) => setTimeout(fn, ms),
+  cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+})
+```
+
+e la dipendenza del dispatcher:
+
+```ts
+    workspace: {
+      load: async (worktreeId) => {
+        const gia = layouts.get(worktreeId)
+        if (gia !== undefined) return gia
+        const { layout } = await loadLayout(db, worktreeId)
+        layouts.set(worktreeId, layout)
+        return layout
+      },
+      apply: async (worktreeId, command) => {
+        let corrente = layouts.get(worktreeId)
+        if (corrente === undefined) {
+          corrente = (await loadLayout(db, worktreeId)).layout
+          layouts.set(worktreeId, corrente)
+        }
+        const esito = applyLayout(command, corrente)
+        if (!esito.ok) return { ok: false, error: esito.error.kind }
+        layouts.set(worktreeId, esito.layout)
+        persister.record(worktreeId, esito.layout, command)
+        return { ok: true, layout: esito.layout, delta: esito.delta }
+      }
+    }
+```
+
+Nel gestore di `before-quit`, prima di `closeDatabase(db)`, aggiungere
+`await persister.flushAll()`: i cambiamenti ritardati non devono morire con
+l'app.
+
+- [ ] **Passo 7: gate e commit**
 
 ```bash
 bash scripts/ci.sh
-git add src/shared/protocol.ts src/main/control/ src/renderer/src/lib/app-model.svelte.ts
+git add src/shared/protocol.ts src/main/control/ src/renderer/src/lib/app-model.svelte.ts src/main/index.ts
 git commit -m "feat: metodi workspace.get e workspace.apply nel protocollo"
 ```
 
 ---
 
-## Task 13: `tillerctl workspace` e cablaggio nel main
+## Task 13: `tillerctl workspace`
 
 **File:**
 - Modifica: `cli/args.ts`
 - Modifica: `cli/args.test.ts`
-- Modifica: `src/main/index.ts`
 
 **Interfacce:**
 - Consuma: Task 12.
 - Produce: comandi CLI `workspace-get --worktree <id>` e
-  `workspace-apply --worktree <id> --command <json>`; la dipendenza
-  `workspace` del dispatcher costruita sul database reale.
+  `workspace-apply --worktree <id> --command <json>`. Il cablaggio della
+  dipendenza `workspace` sul database reale sta nel Task 12, insieme alla
+  dichiarazione che lo rende obbligatorio.
 
 - [ ] **Passo 1: scrivere il test che fallisce**
 
@@ -3400,61 +3470,12 @@ function jsonValido(raw: string, nome: string): unknown {
 
 Aggiornare anche `HELP_TEXT` con le due righe nuove.
 
-- [ ] **Passo 4: cablare il main**
-
-In `src/main/index.ts`, accanto alle altre istanze:
-
-```ts
-import { loadLayout, saveLayout } from './workspace/layout-store'
-import { createLayoutPersister } from './workspace/persistence-policy'
-import { apply as applyLayout } from '../shared/workspace/layout-engine.ts'
-import type { WorkspaceLayout } from '../shared/workspace/layout-invariants.ts'
-
-/** Layout vivi per worktree: il database e la copia durevole, questa e quella corrente. */
-const layouts = new Map<string, WorkspaceLayout>()
-const persister = createLayoutPersister({
-  save: (worktreeId, layout, revision) => saveLayout(db, worktreeId, layout, revision),
-  schedule: (fn, ms) => setTimeout(fn, ms),
-  cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
-})
-```
-
-e la dipendenza del dispatcher:
-
-```ts
-    workspace: {
-      load: async (worktreeId) => {
-        const gia = layouts.get(worktreeId)
-        if (gia !== undefined) return gia
-        const { layout } = await loadLayout(db, worktreeId)
-        layouts.set(worktreeId, layout)
-        return layout
-      },
-      apply: async (worktreeId, command) => {
-        let corrente = layouts.get(worktreeId)
-        if (corrente === undefined) {
-          corrente = (await loadLayout(db, worktreeId)).layout
-          layouts.set(worktreeId, corrente)
-        }
-        const esito = applyLayout(command, corrente)
-        if (!esito.ok) return { ok: false, error: esito.error.kind }
-        layouts.set(worktreeId, esito.layout)
-        persister.record(worktreeId, esito.layout, command)
-        return { ok: true, layout: esito.layout, delta: esito.delta }
-      }
-    }
-```
-
-Nel gestore di `before-quit`, prima di `closeDatabase(db)`, aggiungere
-`await persister.flushAll()`: i cambiamenti ritardati non devono morire con
-l'app.
-
-- [ ] **Passo 5: gate e commit**
+- [ ] **Passo 4: gate e commit**
 
 ```bash
 bash scripts/ci.sh
-git add cli/ src/main/index.ts
-git commit -m "feat: comandi workspace in tillerctl e cablaggio del layout nel main"
+git add cli/
+git commit -m "feat: comandi workspace in tillerctl"
 ```
 
 ---
