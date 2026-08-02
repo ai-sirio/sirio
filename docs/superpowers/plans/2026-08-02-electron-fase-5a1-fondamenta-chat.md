@@ -1845,6 +1845,45 @@ Atteso: FAIL — il modulo non esiste.
 Nota per chi implementa: `events` è un `AsyncIterable`, quindi serve una coda
 con risvegli. Non usare un array letto a intervalli.
 
+**Difetto trovato eseguendo questo task il 2026-08-02, corretto qui.** La coda
+ha **una sveglia sola**: se due iterazioni partono insieme, la seconda
+sovrascrive `#sveglia` e la prima non si risveglia mai più. Verificato con una
+riproduzione: due `for await` sullo stesso driver, e il primo resta appeso per
+sempre — senza errore e senza traccia, cioè una chat che sembra pensare e non
+risponde. Il getter, restituendo un generatore nuovo a ogni accesso, invita
+proprio a quell'uso.
+
+La guardia sotto rende il secondo consumatore un errore rumoroso invece di un
+blocco silenzioso del primo. Chi ha più destinatari li smista a valle: è quel
+che fa `pompaEventi` nel Task 13, che legge una volta sola e diffonde.
+
+```ts
+  #iteratore: AsyncGenerator<ChatSessionEvent, void, unknown> | null = null
+
+  get events(): AsyncIterable<ChatSessionEvent> {
+    if (this.#iteratore !== null) {
+      throw new Error('gli eventi della sessione hanno un solo consumatore')
+    }
+    this.#iteratore = this.#iterEvents()
+    return this.#iteratore
+  }
+```
+
+con il suo test:
+
+```ts
+test('un secondo consumatore degli eventi fallisce invece di appendere il primo', async () => {
+  const t = agenteFinto({ loadSession: false })
+  const s = new ACPSession(new ACPClient(t), {
+    readTextFile: async () => '',
+    writeTextFile: async () => {}
+  })
+  await s.start()
+  void s.events
+  expect(() => s.events).toThrow(/un solo consumatore/)
+})
+```
+
 ```ts
 import { encodeContentBlock, type ContentBlock } from '../../../shared/chat/content-block.ts'
 import type { JSONRPCID } from '../../../shared/chat/json-rpc.ts'
