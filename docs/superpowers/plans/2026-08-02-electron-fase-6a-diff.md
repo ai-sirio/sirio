@@ -523,8 +523,66 @@ index 111..000
   test('un testo vuoto produce zero diff', () => {
     expect(parseUnifiedDiff('')).toEqual([])
   })
+
+  // I tre casi qui sotto sono indistinguibili da un binario guardando la
+  // struttura: parse-diff produce per tutti zero chunk e zero conteggi. Solo
+  // il testo grezzo di git li separa, ed e' li' che va cercato il marchio.
+  test('una rinomina pura non e un file binario', () => {
+    const testo = `diff --git a/vecchio.ts b/nuovo.ts
+similarity index 100%
+rename from vecchio.ts
+rename to nuovo.ts
+`
+    const [diff] = parseUnifiedDiff(testo)
+    expect(diff.isBinary).toBe(false)
+    expect(diff.path).toBe('nuovo.ts')
+  })
+
+  test('un cambio di permessi non e un file binario', () => {
+    const testo = `diff --git a/script.sh b/script.sh
+old mode 100644
+new mode 100755
+`
+    expect(parseUnifiedDiff(testo)[0].isBinary).toBe(false)
+  })
+
+  test('un file nuovo vuoto non e un file binario', () => {
+    const testo = `diff --git a/vuoto.txt b/vuoto.txt
+new file mode 100644
+index 0000000..e69de29
+`
+    expect(parseUnifiedDiff(testo)[0].isBinary).toBe(false)
+  })
+
+  test('riconosce anche la forma GIT binary patch', () => {
+    const testo = `diff --git a/logo.png b/logo.png
+index 111..222 100644
+GIT binary patch
+delta 42
+zcmV
+`
+    expect(parseUnifiedDiff(testo)[0].isBinary).toBe(true)
+  })
+
+  test('distingue il binario dalla rinomina nello stesso diff', () => {
+    const testo = `diff --git a/logo.png b/logo.png
+index 111..222 100644
+Binary files a/logo.png and b/logo.png differ
+diff --git a/vecchio.ts b/nuovo.ts
+similarity index 100%
+rename from vecchio.ts
+rename to nuovo.ts
+`
+    expect(parseUnifiedDiff(testo).map((d) => d.isBinary)).toEqual([true, false])
+  })
 })
 ```
+
+**Trappola registrata:** dedurre "binario" dall'assenza di chunk sembra
+naturale e passa i test ovvi, perché il binario *ha* davvero zero chunk. Ma
+l'implicazione non si inverte: hanno zero chunk anche la rinomina pura, il
+cambio di permessi e il file nuovo vuoto. Il primo giro di questo task ha
+prodotto esattamente quel difetto, e nessuno dei test originari lo vedeva.
 
 - [ ] **Passo 3: eseguire il test e vederlo fallire**
 
@@ -544,6 +602,39 @@ const ASSENTE = '/dev/null'
 /** Il modo di git di segnare un gitlink, cioe' un submodule. */
 const MODO_SUBMODULE = '160000'
 
+/**
+ * Le due forme in cui git dichiara un contenuto binario: la prima e' il
+ * comportamento predefinito, la seconda arriva con `--binary`.
+ */
+const MARCHIO_BINARIO = /^(Binary files .* differ|GIT binary patch)$/m
+
+/**
+ * Il testo grezzo di ciascun file, nell ordine in cui parse-diff li restituisce.
+ *
+ * Serve perche' parse-diff NON distingue un binario da una rinomina pura, da un
+ * cambio di permessi o da un file nuovo vuoto: per tutti e quattro produce zero
+ * chunk e conteggi a zero. Dedurre "binario" da quella struttura marcherebbe
+ * come illeggibili tre casi perfettamente leggibili.
+ *
+ * Lo spezzettamento su `diff --git` a inizio riga e' sicuro: dentro il corpo di
+ * un diff ogni riga porta un prefisso (` `, `+`, `-`), quindi una riga di
+ * contenuto che dicesse `diff --git` non comincerebbe mai a colonna zero.
+ */
+function sezioni(testo: string): string[] {
+  const out: string[] = []
+  let corrente: string[] | null = null
+  for (const riga of testo.split('\n')) {
+    if (riga.startsWith('diff --git ')) {
+      if (corrente !== null) out.push(corrente.join('\n'))
+      corrente = [riga]
+      continue
+    }
+    corrente?.push(riga)
+  }
+  if (corrente !== null) out.push(corrente.join('\n'))
+  return out
+}
+
 function percorso(file: parse.File): string {
   // Sul rinominato interessa il nome NUOVO: e' quello che l utente clicchera'
   // nell elenco e che esiste su disco.
@@ -554,7 +645,8 @@ function percorso(file: parse.File): string {
 }
 
 export function parseUnifiedDiff(testo: string): FileDiff[] {
-  return parse(testo).map((file) => {
+  const grezze = sezioni(testo)
+  return parse(testo).map((file, indice) => {
     const righe: DiffLine[] = []
     let submodule = false
 
@@ -594,9 +686,11 @@ export function parseUnifiedDiff(testo: string): FileDiff[] {
       }
     }
 
-    const binario = file.chunks.length === 0 && (file.deletions ?? 0) === 0 &&
-      (file.additions ?? 0) === 0
-    const gitlink = submodule || (file.new_mode ?? file.old_mode ?? '') === MODO_SUBMODULE
+    // Il marchio nel testo, non l assenza di chunk: senza chunk stanno anche
+    // rinomine, cambi di permessi e file vuoti, che binari non sono.
+    const sezione = grezze[indice]
+    const binario = sezione !== undefined && MARCHIO_BINARIO.test(sezione)
+    const gitlink = submodule || (file.newMode ?? file.oldMode ?? '') === MODO_SUBMODULE
 
     return {
       path: percorso(file),
