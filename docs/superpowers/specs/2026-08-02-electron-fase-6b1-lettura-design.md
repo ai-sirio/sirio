@@ -206,9 +206,19 @@ In 6a questi due campi erano stati deliberatamente non portati, con la
 motivazione scritta che servivano solo all'evidenziatore. È il punto previsto in
 cui si riaprono.
 
-Il renderer tokenizza `oldText` e `newText` con `highlightTree`, proietta gli
-intervalli sulle righe, e `InlineSegments.svelte` — che già segmenta le righe del
-diff — riceve i colori.
+Il renderer tokenizza `oldText` e `newText` con `highlightTree` e proietta gli
+intervalli sulle righe. L'innesto è in **`DiffTab.svelte`**, dove oggi una riga è
+un singolo nodo di testo:
+
+```svelte
+<span class="line-text">{row.left.text}</span>
+```
+
+che diventa una sequenza di span, uno per intervallo di token. La resa è
+affiancata, quindi la colonna sinistra usa la mappa costruita su `oldText` e la
+destra quella su `newText`: sono due file diversi e due tokenizzazioni diverse.
+
+(`InlineSegments.svelte` non c'entra: è la barra dei tab dei gruppi di pane.)
 
 **Quando i testi mancano** (file binario, oltre i limiti, file nuovo senza
 versione precedente) il diff resta esattamente come oggi: righe non colorate,
