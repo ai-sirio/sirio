@@ -2302,11 +2302,13 @@ contenuto e stato di vista. La codifica deve rispettare quella divisione.
 ```ts
 import { expect, test } from 'vitest'
 import { encodeLayout, decodeLayout, checksumOf, LAYOUT_SCHEMA_VERSION } from './layout-codec.ts'
-import { makeLayout } from './layout-invariants.ts'
+import { makeLayout, type WorkspaceLayout } from './layout-invariants.ts'
 import { newPaneGroupID, newWorkspaceTabID } from './layout-ids.ts'
 import { emptyViewState } from './layout-types.ts'
 
-function layoutDiProva() {
+// Tipo di ritorno esplicito: `@typescript-eslint/explicit-function-return-type`
+// e attivo anche sui file di test, e il gate fallisce senza.
+function layoutDiProva(): WorkspaceLayout {
   const id = newPaneGroupID()
   const tab = {
     id: newWorkspaceTabID(),
@@ -2779,7 +2781,15 @@ import { createLayoutPersister, LAYOUT_DEBOUNCE_MS } from './persistence-policy'
 import { emptyLayout } from '../../shared/workspace/layout-invariants.ts'
 import { newSplitID, newWorkspaceTabID } from '../../shared/workspace/layout-ids.ts'
 
-function orologioFinto() {
+interface OrologioFinto {
+  schedule: (fn: () => void) => number
+  cancel: () => void
+  esegui: () => void
+}
+
+// Tipo di ritorno esplicito, come in `layoutDiProva`: la regola ESLint vale
+// anche qui.
+function orologioFinto(): OrologioFinto {
   const lavori: (() => void)[] = []
   return {
     schedule: (fn: () => void) => {
