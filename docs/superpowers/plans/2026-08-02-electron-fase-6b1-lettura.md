@@ -367,10 +367,9 @@ export function languageForFileName(name: string): CodeLanguageId | null {
 }
 ```
 
-**Nota sulla parità:** Swift copre anche Swift stesso via tree-sitter. Non
-esiste un `@codemirror/lang-swift` ufficiale: i file `.swift` restano senza
-colore. È una perdita reale e va scritta, non nascosta — ma riguarda solo il
-codice Swift letto **dentro** Tiller Electron, non il codice dell'app.
+**Questo task copre 15 linguaggi. Non è parità: Swift ne copre 42.** Il Task 3b
+colma il divario. Non allargare qui la tabella: prima va verificato che i modi
+legacy funzionino con `highlightTree`.
 
 - [ ] **Passo 4: eseguire e vedere passare**
 
@@ -382,6 +381,74 @@ codice Swift letto **dentro** Tiller Electron, non il codice dell'app.
 git add src/shared/files/language.ts src/shared/files/language.test.ts
 git commit -m "feat: resolve a code language from a file name"
 ```
+
+---
+
+## Task 3b: Colmare il divario di linguaggi
+
+**File:**
+- Modifica: `src/shared/files/language.ts`, `src/shared/files/language.test.ts`
+- Modifica: `package.json`
+
+**Perché esiste:** il Task 3 copre 15 linguaggi, Tiller Swift ne copre **42** via
+`CodeEditLanguages`. Mancano bash, ruby, kotlin, toml, dockerfile, lua, perl,
+scala, dart, elixir, haskell, objc e Swift stesso. Un visualizzatore che non
+colora uno script bash è una perdita visibile al primo uso.
+
+- [ ] **Passo 1: verificare l'assunzione, prima di costruirci sopra**
+
+```bash
+pnpm add @codemirror/legacy-modes
+```
+
+Scrivere una sonda usa e getta che tokenizza uno script bash con
+`StreamLanguage.define(shell)` e `highlightTree`, e **conta gli intervalli
+prodotti**:
+
+```ts
+import { StreamLanguage } from '@codemirror/language'
+import { shell } from '@codemirror/legacy-modes/mode/shell'
+import { classHighlighter, highlightTree } from '@lezer/highlight'
+
+const parser = StreamLanguage.define(shell).parser
+const albero = parser.parse('#!/bin/bash\nif [ -f x ]; then echo "ciao"; fi\n')
+let intervalli = 0
+highlightTree(albero, classHighlighter, () => { intervalli++ })
+// intervalli deve essere > 0
+```
+
+**Se gli intervalli sono zero, FERMARSI e segnalarlo.** I modi legacy sono a
+flusso e non alberi Lezer: la compatibilità con `highlightTree` è plausibile ma
+**non verificata**. Non aggirare il problema con un secondo motore.
+
+- [ ] **Passo 2: estendere la tabella e l'unione**
+
+Aggiungere a `CodeLanguageId` e a `BY_EXTENSION` i linguaggi coperti dai modi
+legacy: `sh`/`bash`/`zsh` → shell, `rb` → ruby, `kt`/`kts` → kotlin, `toml` →
+toml, `lua`, `pl` → perl, `scala`/`sc`, `dart`, `ex`/`exs` → elixir,
+`hs` → haskell, `m`/`mm` → objc, `swift`. Il nome esatto `Dockerfile` va gestito
+dove si gestiscono i nomi esatti, non fra le estensioni.
+
+- [ ] **Passo 3: estendere i test** con un caso per ogni linguaggio aggiunto, più
+  la verifica che i 15 originali non siano cambiati.
+
+- [ ] **Passo 4: eseguire**
+
+`npx vitest run src/shared/files/` → PASS.
+
+- [ ] **Passo 5: committare**
+
+```bash
+git add package.json pnpm-lock.yaml src/shared/files/language.ts src/shared/files/language.test.ts
+git commit -m "feat: cover the languages missing from the official grammars"
+```
+
+**Resta scoperto** ciò che nessuna delle due strade offre (agda, verilog, zig,
+julia, ocaml): marginale, si accetta.
+
+**Si perde comunque** il rilevamento dal contenuto che Swift fa sui primi e
+ultimi 4 KB (uno shebang in un file senza estensione). La porta è basata solo
+sull'estensione: scriverlo, non nasconderlo.
 
 ---
 

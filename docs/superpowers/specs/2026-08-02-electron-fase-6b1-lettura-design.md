@@ -45,9 +45,39 @@ scrive il diff. Ma 6b-2 introduce comunque CodeMirror per l'editing, e si
 resterebbe con due motori e due sistemi di tema: lo stesso file TypeScript
 colorato in due modi fra il diff e l'editor.
 
-Copertura linguaggi: i pacchetti `@codemirror/lang-*` coprono una ventina di
-linguaggi, **la stessa copertura che Tiller ha oggi** con tree-sitter e
-`CodeEditLanguages`. Non è una regressione: è parità.
+### Copertura linguaggi: c'è una regressione, e va colmata
+
+Una prima stesura di questa spec affermava che i pacchetti `@codemirror/lang-*`
+davano **parità** con tree-sitter. È falso, verificato contando le definizioni in
+`CodeLanguage+Definitions.swift`:
+
+| | Linguaggi |
+| --- | --- |
+| Tiller Swift, via `CodeEditLanguages` | **42** |
+| `@codemirror/lang-*` ufficiali | **15** |
+
+Mancano fra gli altri **bash, ruby, kotlin, toml, dockerfile, lua, perl, scala,
+dart, elixir, haskell, objc** — e Swift stesso. Un visualizzatore di file che non
+colora uno script bash è una perdita che si vede al primo uso.
+
+Il rimedio è **`@codemirror/legacy-modes` 6.5.3**, che impacchetta i modi di
+CodeMirror 5 utilizzabili attraverso `StreamLanguage` e copre quasi tutto il
+buco. Costo: una dipendenza e altre voci nella stessa tabella.
+
+**Caveat non verificato:** i modi legacy sono a flusso, non alberi Lezer.
+`StreamLanguage.define(...).parser` espone un parser compatibile con
+`highlightTree`, ma la granularità dei token è più grossa di quella di una
+grammatica Lezer. Il piano lo fa verificare come **primo passo**, con
+l'istruzione di fermarsi e segnalare se non funziona, invece di assumerlo.
+
+Resta comunque scoperto ciò che nessuna delle due strade offre (agda, verilog,
+zig, julia, ocaml): sono marginali e si accetta di perderli.
+
+`CodeLanguageResolver.swift` non contiene alcuna tabella da portare — delega
+interamente a `CodeLanguage.detectLanguageFrom(url:prefixBuffer:suffixBuffer:)`.
+Si perde anche il **rilevamento dal contenuto** (i primi e ultimi 4 KB, che
+riconoscono per esempio uno shebang in un file senza estensione): la porta è
+basata solo sull'estensione.
 
 ### La tokenizzazione parte dal file intero, non dalla riga
 
