@@ -2560,13 +2560,55 @@ puro senza cambiare la firma.
 
 ```ts
 import { expect, test } from 'vitest'
+import type { Kysely } from 'kysely'
 import { openDatabase, migrateToLatest } from '../db/database'
+import type { TillerDatabase } from '../db/schema'
 import { loadLayout, saveLayout } from './layout-store'
 import { emptyLayout } from '../../shared/workspace/layout-invariants.ts'
 
-async function db() {
+/**
+ * Database in memoria con il worktree padre gia' inserito.
+ *
+ * `workspaceLayout.worktreeId` ha una foreign key su `worktree.id`, che a sua
+ * volta ne ha una su `project.id`: senza i due record padre ogni `saveLayout`
+ * muore con `FOREIGN KEY constraint failed`. Migrare lo schema NON basta.
+ * Stessa forma del fixture di `scrollback-store.test.ts`, che risolve lo
+ * stesso problema per la sua tabella.
+ */
+async function db(): Promise<Kysely<TillerDatabase>> {
   const database = openDatabase(':memory:')
   await migrateToLatest(database)
+  await database
+    .insertInto('project')
+    .values({
+      id: 'prj',
+      name: 'Test',
+      rootPath: '/tmp/test',
+      createdAt: '2026-01-01T00:00:00Z',
+      colorHex: null,
+      displayName: null,
+      iconKind: 'icon',
+      iconValue: null,
+      avatarImage: null,
+      defaultWorktreeBase: null,
+      worktreeLocationOverride: null,
+      orderIdx: 0
+    })
+    .execute()
+  await database
+    .insertInto('worktree')
+    .values({
+      id: 'wt-1',
+      projectId: 'prj',
+      branch: 'main',
+      path: '/tmp/test',
+      createdAt: '2026-01-01T00:00:00Z',
+      comment: null,
+      commentUpdatedAt: null,
+      isPrimary: 1,
+      orderIdx: 0
+    })
+    .execute()
   return database
 }
 
