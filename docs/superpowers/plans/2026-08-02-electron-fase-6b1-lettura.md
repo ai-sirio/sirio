@@ -963,6 +963,14 @@ attraversa più righe: una stringa multilinea o un commento a blocchi deve
 comparire su **tutte** le righe che tocca, con gli offset rimappati sull'inizio
 di ciascuna.
 
+**`@codemirror/language` e `@lezer/highlight` vanno aggiunti esplicitamente,
+anche se compaiono già in `pnpm-lock.yaml`.** Ci sono finiti come peer di
+`@codemirror/legacy-modes` (Task 3b), ma pnpm non li espone in
+`node_modules/@codemirror/`: un `import` diretto fallisce con
+`Cannot find package '@codemirror/language'`. Verificato: sono nello store
+`.pnpm` ma non collegati. Dipendere da una risoluzione transitiva qui non è una
+scorciatoia, è una build che si rompe.
+
 Installare prima:
 
 ```bash
