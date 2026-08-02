@@ -2103,10 +2103,32 @@ export const WorkspaceTabSchema = z.object({
    * nuova. NON si persiste — al ripristino tutte le tab tornano permanenti,
    * perche' una sessione appena riaperta non deve contenere una tab che
    * sparisce al primo click.
+   *
+   * Con un default, non obbligatorio: questo schema NON e' solo un tipo, e' il
+   * contratto del socket di controllo. Un payload di `workspace-apply` scritto
+   * prima di questo campo — uno spec e2e, o lo script tillerctl di un utente —
+   * verrebbe respinto da un campo richiesto, e nessun compilatore lo direbbe,
+   * perche' quel payload e' JSON che nessuno typechecka.
+   *
+   * L assenza del campo significa "non e' un anteprima", che e' una risposta
+   * corretta e non un ripiego. In uscita resta `boolean` garantito.
    */
-  isPreview: z.boolean()
+  isPreview: z.boolean().default(false)
 })
 ```
+
+**Trappola, la terza della fase e la peggiore.** Un campo richiesto aggiunto a
+`WorkspaceTabSchema` fa fallire tre criteri e2e della Fase 4b con
+`richiesta non valida: Invalid input: expected boolean, received undefined`.
+
+Il compilatore trova ogni costruzione **TypeScript** di `WorkspaceTab` — test,
+fixture, `bootstrapPaneTab`, le callback di `App.svelte`. Ma il payload che
+arriva dal socket è **JSON**: lo valida zod a runtime, e nessun compilatore può
+puntare a una stringa dentro uno spec o a uno script `tillerctl` di un utente.
+
+La regola generale: **ogni campo nuovo su uno schema che è anche un protocollo
+va con un default**, o rompe silenziosamente ogni chiamante esterno. Il default
+non è una comodità, è la retrocompatibilità del filo.
 
 Aggiornare il commento sopra `WorkspaceContentRefSchema`, che oggi dice "le
 Fasi 5 e 6 aggiungeranno `chat` e `document`".
@@ -2180,6 +2202,30 @@ Ogni costruzione di `WorkspaceTab` ora richiede `isPreview`. I punti attesi
 sono i test del workspace, `src/main/control/dispatch.ts` (in
 `bootstrapPaneTab`) e le fixture. Aggiungere `isPreview: false` a ciascuno: è
 il valore giusto per ogni tab esistente, perché nessuna di esse è provvisoria.
+
+**Il renderer fallisce anche lui, e in un modo che sorprende.**
+`src/renderer/src/App.svelte` legge `tab.content.id` in due punti, e li
+**protegge già** con una guardia sul `kind` — eppure `svelte-check` li segnala:
+
+```
+Property 'id' does not exist on type
+'{ kind: "terminal"; id: string } | { kind: "diff"; path: string; source: ... }'
+```
+
+TypeScript scarta il restringimento di una **proprietà** appena si entra in una
+funzione, perché non può dimostrare che nessuno l'abbia riassegnata nel
+frattempo. `tabAttivo.content.kind === 'terminal'` non protegge
+`tabAttivo.content.id` letto dentro la callback di una `.find()`. Su una
+**const locale** il restringimento sopravvive:
+
+```ts
+const contenuto = tab.content
+if (contenuto.kind !== 'terminal') return []
+const pane = model.panes.find((candidate) => candidate.id === contenuto.id)
+```
+
+Questo task ha quindi il permesso di toccare `src/renderer/src/App.svelte`
+limitatamente a queste due estrazioni, che non cambiano il comportamento.
 
 - [ ] **Passo 6: eseguire i test e vederli passare**
 
