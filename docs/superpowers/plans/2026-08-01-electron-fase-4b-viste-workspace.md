@@ -791,7 +791,8 @@ git commit -m "feat: strisce di tab inline per i gruppi sotto il bordo superiore
 
 **File:**
 - Crea: `src/renderer/src/lib/workspace/PaneGrid.svelte`
-- Modifica: `package.json` (dipendenza `paneforge`)
+- Modifica: `PaneGrid.svelte` include la gestione da tastiera del divisore
+  (nessuna dipendenza nuova: vedi la nota su `paneforge` più sotto)
 
 **Interfacce:**
 - Consuma: `groupRects`, `dividerRects`, comando `setSplitFraction` della 4a.
@@ -930,12 +931,31 @@ Nel blocco `<script>` dello stesso file:
   }
 ```
 
-Nota su `paneforge`: la libreria è installata per i suoi vincoli di dimensione e
-la sua gestione da tastiera, che questo trascinamento a mano **non** copre. Se
-alla verifica del Passo 3 il gesto risulta già adeguato e la tastiera è l'unica
-lacuna, sostituire questo blocco con `PaneResizer` di `paneforge` invece di
-scrivere anche la parte da tastiera. Decidere lì, con il gesto sotto mano, non
-qui.
+**`paneforge`: DECISO, non si usa (2026-08-02).** La nota originale prevedeva di
+sostituire questo blocco con il suo `PaneResizer` se la tastiera fosse rimasta
+l'unica lacuna. Verificato sul `.d.ts` spedito della 1.0.2, il fatto decisivo è:
+
+```ts
+constructor(opts: PaneResizerStateOpts, group: PaneGroupState)
+```
+
+`PaneResizer` **non è usabile da solo**: esige un `PaneGroup` che possiede il
+layout ed esprime le dimensioni come `number[]` piatto per gruppo. Qui la
+geometria arriva dalla Fase 4a — un albero di split ricorsivi, ciascuno con la
+sua frazione — ed è la stessa a cui si allineano la barra superiore (Task 4) e
+le strisce inline (Task 5). Adottare `paneforge` significherebbe due sorgenti di
+verità per la geometria, o buttare `groupRects`/`dividerRects`. È la stessa
+ragione per cui la spec ha respinto `dockview`, e va verificata allo stesso
+modo: leggendo i tipi spediti, non la documentazione.
+
+La dipendenza è stata rimossa da `package.json`. La gestione da tastiera è
+scritta a mano in `PaneGrid.svelte`: circa quindici righe, perché la frazione si
+ricava dal centro della banda e il comando `setPreferredFraction` esiste già.
+Il divisore implementa il pattern **Window Splitter** delle WAI-ARIA Authoring
+Practices (`role="separator"` focalizzabile, `aria-valuenow/min/max`,
+`aria-orientation`, frecce). I due `svelte-ignore` accanto sono documentati:
+la regola a11y di Svelte tiene `separator` in un elenco fisso di ruoli non
+interattivi e non modella il separator focalizzabile, che in ARIA è un widget.
 
 - [ ] **Passo 3: verificare a mano che i riquadri compaiano**
 
