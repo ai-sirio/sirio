@@ -12,8 +12,10 @@ pannello agenti, stato vuoto, temi.
 (`groupRects`, `dividerRects`) e **non viene mai ricalcolata**: nessun
 `getBoundingClientRect` per sapere dove si trova qualcosa.
 
-**Stack:** Svelte 5 (rune), TypeScript, `paneforge`, `svelte-dnd-action`,
-vitest, Playwright.
+**Stack:** Svelte 5 (rune), TypeScript, `svelte-dnd-action`, vitest, Playwright.
+`paneforge` era in questo elenco ed è stato **respinto** durante il Task 6: vedi
+la nota nel task: pretendeva la proprietà permanente della geometria, che qui
+appartiene alla Fase 4a.
 
 **Repo:** `~/Desktop/Progetti/tiller-electron`. Il repo Swift
 `~/Desktop/Progetti/tiller` è **sola lettura**.
@@ -23,6 +25,14 @@ vitest, Playwright.
 **Dipende da:** Fase 4a completa (modello, geometria, protocollo
 `workspace.get` / `workspace.apply` / evento `workspace.layout`) e Fase 3
 (`AgentStatus`, `PaneSnapshot.agentId`, `PaneSnapshot.status`).
+
+> **Difetto di questo piano, trovato il 2026-08-02 dal Task 15.** Questa riga
+> elencava la dipendenza dal protocollo della 4a, e **nessuno dei Task 1–15 la
+> consumava**: quindici task costruiscono viste che ricevono un
+> `WorkspaceLayout` e nessuno lo procura dal main. Dichiarare una dipendenza in
+> testa a un piano non la realizza; serve un task che faccia la chiamata. I
+> Task 16–18 sono quel task, ed esistono perché i criteri e2e — non i 411 test
+> unitari verdi — hanno reso visibile il buco.
 
 ## Vincoli globali
 
@@ -68,7 +78,9 @@ vitest, Playwright.
 | `e2e/fase-4b-viste.spec.ts` | i sette criteri |
 
 Modificati: `src/main/index.ts` (chrome della finestra, titolo, tema nativo),
-`src/renderer/src/App.svelte`, `src/renderer/src/assets/` (token CSS).
+`src/renderer/src/App.svelte`, `src/renderer/src/assets/` (token CSS),
+`src/shared/protocol.ts` e `src/main/control/dispatch.ts` (Task 16:
+`PaneSnapshot.worktreeId` ed emissione di `workspace.layout`).
 
 ---
 
@@ -2050,6 +2062,341 @@ Atteso: `CI OK`.
 git add e2e/
 git commit -m "test: i sette criteri end-to-end delle viste del workspace"
 ```
+
+**Esito reale del Task 15 (2026-08-02):** due criteri verdi su sette. I cinque
+rossi non sono difetti dei criteri: sono il difetto che i criteri esistono per
+trovare. I Task 1–14 hanno costruito viste che **consumano** un
+`WorkspaceLayout`, e nessun task lo **procura** — il renderer se lo fabbrica da
+`model.panes` a ogni render (`App.svelte:97`), non esiste una sola chiamata a
+`workspace.get`/`workspace.apply` in `src/renderer` o `src/preload`, e
+`PaneGrid` è montato con `onFraction={() => {}}`. Tutta la Fase 4a è codice
+vivo che l'applicazione non usa. Le tre mutazioni obbligatorie **non** sono
+state eseguite, e la scelta è giusta: mutare un baseline rosso produce tre
+rossi non attribuibili alla mutazione, cioè una verifica che non verifica.
+
+I Task 16–18 chiudono il buco. Le mutazioni si eseguono alla fine del Task 18,
+sul baseline verde.
+
+---
+
+## Task 16: il main dice a quale worktree appartiene un pane, e quando il layout cambia
+
+**File:**
+- Modifica: `src/shared/protocol.ts` (`PaneSnapshot`)
+- Modifica: `src/main/control/dispatch.ts`
+- Modifica: `src/main/index.ts`
+- Test: `src/main/control/dispatch.test.ts`
+
+**Interfacce:**
+- Consuma: `worktreeByPane` (già in `dispatch.ts`), `StateEvent` `workspace.layout`
+  (già dichiarato in `protocol.ts:177`).
+- Produce: `PaneSnapshot.worktreeId: string | null`; emissione effettiva
+  dell'evento `workspace.layout` dopo ogni `workspace.apply` andato a buon fine.
+
+**Contesto:** due omissioni simmetriche, entrambe invisibili ai test unitari
+perché riguardano ciò che il main **non** dice al renderer.
+
+`PaneSnapshot` porta `cwd` ma non `worktreeId`, benché `dispatch.ts:157` lo
+registri in `worktreeByPane`. Il renderer, non avendo altro, ha usato il
+percorso come se fosse un identificatore — ed è per questo che il criterio 6
+non trova la riga del pannello agenti.
+
+L'evento `workspace.layout` è **dichiarato nel protocollo e mai emesso**. È il
+guasto più insidioso dei due: uno schema Zod che nessuno costruisce non fallisce
+mai la validazione, quindi il tipo resta verde per sempre. Senza quell'evento,
+un layout cambiato da `tillerctl workspace-apply` non raggiunge mai la finestra
+— cioè esattamente il canale su cui poggiano i criteri 2, 3 e 7.
+
+- [ ] **Passo 1: test rosso per il `worktreeId` nello snapshot**
+
+In `src/main/control/dispatch.test.ts`:
+
+```ts
+test('lo snapshot di stato riporta il worktree di provenienza del pane', async () => {
+  // Arrange — un pane creato con --worktree.
+  const dispatch = creaDispatch()
+  await dispatch({
+    id: 'r1',
+    method: 'pane.create',
+    params: { cmd: 'sleep 60', cwd: '/tmp', worktreeId: 'wt-7' }
+  })
+
+  // Act
+  const r = await dispatch({ id: 'r2', method: 'state.get', params: {} })
+
+  // Assert — senza questo campo il renderer usa il cwd come identificatore.
+  assert(r.ok)
+  expect(r.result.panes[0].worktreeId).toBe('wt-7')
+})
+
+test('un pane senza worktree riporta worktreeId null, non il cwd', async () => {
+  const dispatch = creaDispatch()
+  await dispatch({
+    id: 'r1',
+    method: 'pane.create',
+    params: { cmd: 'sleep 60', cwd: '/tmp' }
+  })
+
+  const r = await dispatch({ id: 'r2', method: 'state.get', params: {} })
+
+  assert(r.ok)
+  expect(r.result.panes[0].worktreeId).toBeNull()
+})
+```
+
+- [ ] **Passo 2: eseguirlo e vederlo fallire**
+
+Comando: `pnpm test:unit -- dispatch`
+Atteso: FAIL — `worktreeId` non esiste su `PaneSnapshot`.
+
+- [ ] **Passo 3: aggiungere il campo**
+
+In `src/shared/protocol.ts`, dentro `PaneSnapshot`:
+
+```ts
+  /**
+   * Worktree di provenienza, o null per un pane creato fuori da uno.
+   * Il `cwd` NON è un sostituto: due worktree possono condividere un
+   * percorso, e un percorso non sopravvive alla rimozione del worktree.
+   */
+  worktreeId: z.string().nullable().default(null)
+```
+
+In `dispatch.ts`, dove si costruisce lo snapshot dei pane, leggere
+`worktreeByPane.get(pane.id) ?? null`.
+
+- [ ] **Passo 4: eseguirlo e vederlo passare**
+
+Comando: `pnpm test:unit -- dispatch`
+Atteso: PASS.
+
+- [ ] **Passo 5: test rosso per l'emissione di `workspace.layout`**
+
+```ts
+test('workspace.apply emette un evento di layout verso la finestra', async () => {
+  // Arrange — raccoglie gli eventi di stato spediti al renderer.
+  const emessi: StateEvent[] = []
+  const dispatch = creaDispatch({ emit: (evento) => emessi.push(evento) })
+
+  // Act — un comando strutturale qualsiasi.
+  await dispatch({
+    id: 'r1',
+    method: 'workspace.apply',
+    params: { worktreeId: 'wt-1', command: comandoInsertTab() }
+  })
+
+  // Assert — senza questo evento la finestra non vede mai i cambi fatti
+  // dalla CLI, e i criteri e2e degli split non possono funzionare.
+  const layout = emessi.filter((e) => e.type === 'workspace.layout')
+  expect(layout).toHaveLength(1)
+  expect(layout[0]).toMatchObject({ worktreeId: 'wt-1' })
+})
+
+test('un workspace.apply rifiutato non emette nessun evento di layout', async () => {
+  const emessi: StateEvent[] = []
+  const dispatch = creaDispatch({ emit: (evento) => emessi.push(evento) })
+
+  // Un activateTab su un tab inesistente: il riduttore lo rifiuta.
+  await dispatch({
+    id: 'r1',
+    method: 'workspace.apply',
+    params: { worktreeId: 'wt-1', command: { kind: 'activateTab', tabId: newWorkspaceTabID() } }
+  })
+
+  expect(emessi.filter((e) => e.type === 'workspace.layout')).toHaveLength(0)
+})
+```
+
+- [ ] **Passo 6: eseguirlo e vederlo fallire**
+
+Comando: `pnpm test:unit -- dispatch`
+Atteso: FAIL — nessun evento emesso.
+
+- [ ] **Passo 7: emettere l'evento**
+
+Nel `case 'workspace.apply'` di `dispatch.ts`, **dopo** il controllo
+`if (!esito.ok)` e prima del `return`:
+
+```ts
+deps.emit({
+  type: 'workspace.layout',
+  worktreeId: request.params.worktreeId,
+  layout: serializza(esito.layout),
+  delta: esito.delta
+})
+```
+
+L'ordine conta: emettere prima del controllo spedirebbe un layout anche quando
+il comando è stato rifiutato, e il renderer sovrascriverebbe uno stato valido
+con uno che il main non ha accettato.
+
+- [ ] **Passo 8: eseguirlo e vederlo passare**
+
+Comando: `pnpm test:unit -- dispatch`
+Atteso: PASS.
+
+- [ ] **Passo 9: gate e commit**
+
+Comando: `bash scripts/ci.sh`
+Atteso: i 5 criteri e2e della 4b restano rossi (li chiude il Task 17); tutto il
+resto verde.
+
+```bash
+git add src/shared/protocol.ts src/main/
+git commit -m "feat: il main espone il worktree del pane e annuncia i cambi di layout"
+```
+
+---
+
+## Task 17: il renderer legge il layout invece di inventarselo
+
+**File:**
+- Modifica: `src/renderer/src/App.svelte`
+- Modifica: `src/renderer/src/lib/workspace/SidebarTree.svelte`
+- Test: nessun test unitario nuovo (i componenti non si testano in isolamento
+  in questo repo); la verifica è il Task 18.
+
+**Interfacce:**
+- Consuma: `PaneSnapshot.worktreeId` e l'evento `workspace.layout` del Task 16;
+  `workspace.get`/`workspace.apply` via `window.tiller.request`.
+- Produce: niente verso altri task.
+
+**Contesto:** questo è il task che mancava al piano. `App.svelte:97` costruisce
+un `WorkspaceLayout` sintetico — un gruppo solo, tab derivati dai pane — e lo
+passa a `TopBar`, `PaneGrid` e `InlineSegments`. Le viste sono corrette; i dati
+che ricevono non vengono dal motore. Finché resta così, nessuno split può
+esistere nella finestra, `setPreferredFraction` non ha destinatario, e la
+persistenza della 4a non ha effetto visibile.
+
+**Il layout non si ricostruisce nel renderer.** Arriva dal main e basta: il main
+è la sorgente di verità, il renderer è una vista. Ogni riga che *deriva* un
+layout invece di leggerlo è la ricomparsa dello stesso difetto.
+
+- [ ] **Passo 1: sostituire il layout sintetico con quello vero**
+
+In `App.svelte`, al posto del blocco `workspaceLayout = $derived.by(...)`:
+
+```ts
+  let layoutCorrente = $state<WorkspaceLayout | null>(null)
+
+  async function caricaLayout(worktreeId: string): Promise<void> {
+    const risposta = await window.tiller.request({
+      id: crypto.randomUUID(),
+      method: 'workspace.get',
+      params: { worktreeId }
+    })
+    if (!risposta.ok) return
+    const decodificato = deserializza(risposta.result.layout)
+    if (decodificato.ok) layoutCorrente = decodificato.layout
+  }
+
+  // Il main annuncia ogni cambio, incluso quello arrivato dalla CLI.
+  $effect(() => {
+    return window.tiller.onStateEvent((evento) => {
+      if (evento.type !== 'workspace.layout') return
+      if (evento.worktreeId !== worktreeAttivo) return
+      const decodificato = deserializza(evento.layout)
+      if (decodificato.ok) layoutCorrente = decodificato.layout
+    })
+  })
+```
+
+- [ ] **Passo 2: dare un destinatario a `onFraction`**
+
+```ts
+  function cambiaFrazione(splitId: SplitID, fraction: number): void {
+    if (worktreeAttivo === null) return
+    void window.tiller.request({
+      id: crypto.randomUUID(),
+      method: 'workspace.apply',
+      params: { worktreeId: worktreeAttivo, command: { kind: 'setPreferredFraction', splitId, fraction } }
+    })
+  }
+```
+
+e nel markup `<PaneGrid ... onFraction={cambiaFrazione} />`. La funzione vuota
+di prima ingoiava silenziosamente sia il trascinamento sia la tastiera: il
+codice del divisore era già scritto e già morto.
+
+- [ ] **Passo 3: worktree vero nelle righe degli agenti**
+
+In `agentRows`, sostituire `worktreeId: pane.cwd` con `worktreeId: pane.worktreeId`,
+scartando i pane senza worktree. `revealAgent` deve **riaprire** il worktree
+prima di selezionare il tab, non limitarsi a selezionarlo:
+
+```ts
+  async function revealAgent(worktreeId: string, paneId: string): Promise<void> {
+    if (worktreeId !== worktreeAttivo) {
+      worktreeAttivo = worktreeId
+      await caricaLayout(worktreeId)
+    }
+    selectTab(paneId as WorkspaceTabID)
+  }
+```
+
+- [ ] **Passo 4: sidebar aperta sul worktree attivo**
+
+In `SidebarTree.svelte`, il set `expanded` parte vuoto e nasconde le righe dei
+worktree. Inizializzarlo con gli antenati del worktree attivo. Un albero che si
+apre chiuso su ciò che l'utente sta guardando è una schermata vuota al primo
+avvio, non solo un criterio rosso.
+
+- [ ] **Passo 5: gate**
+
+Comando: `bash scripts/ci.sh`
+Atteso: `CI OK`, con i sette criteri della 4b verdi. Se qualcuno resta rosso,
+è un difetto di cablaggio ancora aperto: **non** indebolire il criterio.
+
+- [ ] **Passo 6: commit**
+
+```bash
+git add src/renderer/
+git commit -m "feat: il renderer legge il layout dal motore invece di derivarlo"
+```
+
+---
+
+## Task 18: le tre mutazioni, sul verde
+
+**File:** nessuno (verifica).
+
+**Contesto:** solo ora le mutazioni dicono qualcosa. Su un baseline rosso il
+rosso della mutazione non è attribuibile; su un baseline verde è una prova.
+
+**Committare prima di mutare.** Le mutazioni si annullano con
+`git checkout <file>`, e su lavoro non committato quel comando lo cancella — è
+già successo due volte in questo progetto.
+
+- [ ] **Passo 1: mutazione del criterio 1**
+
+Togliere `no-drag` dal contenitore dei tab in `TabSegment.svelte`.
+Atteso: criterio 1 **FALLISCE** (il click finisce nella regione di trascinamento
+della finestra). Ripristinare con `git checkout`.
+
+- [ ] **Passo 2: mutazione del criterio 7**
+
+In `PaneGrid.svelte`, commentare `onkeydown={(e) => tastiera(e, divisore.splitId)}`.
+Atteso: criterio 7 **FALLISCE**. Ripristinare.
+
+Questa è la mutazione che conta di più: il criterio 7 è nato perché quelle
+quindici righe non erano coperte da nulla, e il Task 15 ha poi dimostrato che
+non erano nemmeno collegate.
+
+- [ ] **Passo 3: mutazione del criterio 4**
+
+Nel rollup degli stati, invertire la precedenza mettendo `running` sopra
+`needs-input`.
+Atteso: criterio 4 **FALLISCE**. Ripristinare.
+
+- [ ] **Passo 4: verificare che tutte le mutazioni siano annullate**
+
+Comando: `git status -sb`
+Atteso: albero pulito.
+
+- [ ] **Passo 5: gate finale**
+
+Comando: `bash scripts/ci.sh`
+Atteso: `CI OK`.
 
 ---
 
