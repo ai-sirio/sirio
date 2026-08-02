@@ -3730,6 +3730,47 @@ test('criterio 4: un comando che viola un invariante non tocca il layout', async
   // Assert
   expect(JSON.stringify(await layoutDi(worktreeId))).toBe(prima)
 })
+
+test('criterio 5: una modifica fatta DOPO un riavvio sopravvive al riavvio successivo', async () => {
+  // Questo criterio esiste per un guasto preciso e gia' accaduto: il persister
+  // numera le revisioni da zero, il database ne conserva una dai riavvii
+  // precedenti, e `saveLayout` scarta ogni revisione non piu' recente. Senza
+  // il `seed` della revisione al caricamento, le prime scritture dopo un
+  // riavvio vengono rifiutate come obsolete MENTRE il dispatcher risponde
+  // `ok` — l'utente vede la modifica applicata e la ritrova sparita al
+  // riavvio dopo.
+  //
+  // Nessuno degli altri quattro criteri lo prende: scrivono tutti prima del
+  // riavvio, o non riavviano affatto. Serve una scrittura DOPO un riavvio, e
+  // un secondo riavvio che la verifichi.
+  const { worktreeId } = await worktreeReale()
+  const gruppo = (await layoutDi(worktreeId)).activeGroupId
+  await applica(worktreeId, {
+    kind: 'insertTab',
+    tab: { id: crypto.randomUUID(), title: 'T1', titleIsAutoNamed: true,
+           content: { kind: 'terminal', id: 'term-1' }, viewState: TAB_VUOTO },
+    into: gruppo, index: null, activate: true
+  })
+
+  // Primo riavvio: da qui in poi il database porta gia' una revisione.
+  await app.close()
+  await launch()
+
+  const gruppoDopo = (await layoutDi(worktreeId)).activeGroupId
+  await applica(worktreeId, {
+    kind: 'insertTab',
+    tab: { id: crypto.randomUUID(), title: 'T2', titleIsAutoNamed: true,
+           content: { kind: 'terminal', id: 'term-2' }, viewState: TAB_VUOTO },
+    into: gruppoDopo, index: null, activate: true
+  })
+
+  // Secondo riavvio: e' qui che una scrittura rifiutata in silenzio si vede.
+  await app.close()
+  await launch()
+
+  const finale = await layoutDi(worktreeId)
+  expect(finale.groups.flatMap((g) => g.tabs)).toHaveLength(2)
+})
 ```
 
 Aggiungere in testa al file
@@ -3738,12 +3779,17 @@ Aggiungere in testa al file
 - [ ] **Passo 2: eseguire gli e2e**
 
 Comando: `pnpm exec electron-vite build && pnpm test:e2e`
-Atteso: 17 test passati (13 delle fasi precedenti + 4 nuovi).
+Atteso: 18 test passati (13 delle fasi precedenti + 5 nuovi).
 
-- [ ] **Passo 3: validare per mutazione il criterio 2**
+- [ ] **Passo 3: validare per mutazione i criteri 2 e 5**
 
-In `src/main/workspace/persistence-policy.ts`, rendere temporaneamente
-`isStructuralCommand` sempre vero:
+Un criterio che non puo' fallire non e' un criterio. Questi due si provano
+mutando il codice che dovrebbero difendere. **Committare PRIMA di mutare**: si
+annulla con `git checkout`, e su lavoro non committato quel comando cancella
+tutto.
+
+Criterio 2 — in `src/main/workspace/persistence-policy.ts`, rendere
+temporaneamente `isStructuralCommand` sempre vero:
 
 ```ts
       if (true) {   // MUTAZIONE TEMPORANEA
@@ -3753,10 +3799,23 @@ Comando: `pnpm exec electron-vite build && pnpm test:e2e -- --grep "criterio 2"`
 Atteso: **FAIL** (cento scritture). Se passa, il criterio è vacuo e va
 riscritto.
 
-Poi annullare la mutazione:
+Criterio 5 — in `src/main/index.ts`, togliere temporaneamente la semina della
+revisione dentro `layoutCorrente`:
+
+```ts
+  // persister.seed(worktreeId, revision)   // MUTAZIONE TEMPORANEA
+```
+
+Comando: `pnpm exec electron-vite build && pnpm test:e2e -- --grep "criterio 5"`
+Atteso: **FAIL**, con un solo tab invece di due: la scrittura fatta dopo il
+primo riavvio nasce con revisione 1 contro una revisione gia' presente e viene
+scartata in silenzio. Se passa, il criterio non copre il guasto per cui e'
+stato scritto.
+
+Poi annullare entrambe le mutazioni:
 
 ```bash
-git checkout src/main/workspace/persistence-policy.ts
+git checkout src/main/workspace/persistence-policy.ts src/main/index.ts
 pnpm exec electron-vite build && pnpm test:e2e
 ```
 
@@ -3765,7 +3824,7 @@ pnpm exec electron-vite build && pnpm test:e2e
 ```bash
 bash scripts/ci.sh
 git add e2e/
-git commit -m "test: quattro criteri e2e del motore del workspace"
+git commit -m "test: cinque criteri e2e del motore del workspace"
 ```
 
 ---
