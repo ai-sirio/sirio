@@ -935,8 +935,30 @@ test('fermare il watcher smette di segnalare', async () => { /* ... */ })
 
 `npx vitest run src/main/files/watch.test.ts` → PASS.
 
-- [ ] **Passo 5: collegare l'evento `files.changed`** nel punto in cui
-  `git.changed` è già emesso, e committare.
+- [ ] **Passo 5: collegare l'evento `files.changed`**, e committare.
+
+  **Non** agganciarlo dove `git.changed` è già emesso. Quel punto
+  (`ensureWorktreeWatcher`) è raggiungibile solo da `git.changes`, e **solo dopo
+  il controllo `isGitRepository`**. Agganciarlo lì produce due buchi:
+
+  - chi apre `Files` senza mai aprire `Changes` non riceve alcun evento;
+  - un progetto **non-git**, che Tiller supporta, non riceve eventi mai.
+
+  Serve un `ensureFileWatcher(worktreeId, rootPath)` separato, chiamato sia da
+  `files.list` sia da `ensureWorktreeWatcher`, con la sua mappa e senza
+  dipendenza dalla git-ità del percorso. Il test che lo copre:
+
+  ```ts
+  test('files.list avvia il watcher anche fuori da un repository git', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tiller-nogit-'))
+    const osservati: string[] = []
+    const dispatch = await makeDispatcher(root, {
+      watchFiles: (rootPath: string) => { osservati.push(rootPath); return () => {} }
+    })
+    await dispatch({ id: 'x', method: 'files.list', params: { worktreeId: 'worktree-1', path: '' } })
+    expect(osservati).toEqual([root])
+  })
+  ```
 
 ```bash
 git add src/main/files/watch.ts src/main/files/watch.test.ts src/main/
