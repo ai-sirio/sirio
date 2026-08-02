@@ -2864,8 +2864,18 @@ git commit -m "feat: store del layout con quarantena e guardia sulla revisione"
 **Interfacce:**
 - Consuma: Task 3 (`isStructuralCommand`), Task 10 (`saveLayout`).
 - Produce: `createLayoutPersister(deps)` con
-  `record(worktreeId, layout, command): void` e `flushAll(): Promise<void>`;
-  `LAYOUT_DEBOUNCE_MS = 500`.
+  `record(worktreeId, layout, command): void`, `flushAll(): Promise<void>` e
+  `seed(worktreeId, revision): void`; `LAYOUT_DEBOUNCE_MS = 500`.
+
+**Perche' `seed` esiste.** Il persister numera le revisioni da zero, ma il
+database ne conserva una dai riavvii precedenti, e `saveLayout` scarta ogni
+revisione non piu' recente di quella memorizzata. Senza `seed`, dopo un riavvio
+con revisione 5 nel database le prime cinque scritture nascerebbero con
+revisioni 1-5 e verrebbero tutte rifiutate come obsolete — mentre il dispatcher
+risponde `ok` e la copia in memoria si aggiorna. Il risultato e' la peggiore
+specie di guasto: modifiche che sembrano salvate e spariscono al riavvio
+successivo. `loadLayout` la revisione la restituisce gia': va passata, non
+buttata.
 
 - [ ] **Passo 1: scrivere il test che fallisce**
 
@@ -2914,6 +2924,48 @@ test('un comando strutturale scrive subito', async () => {
   p.record('wt-1', emptyLayout(), { kind: 'closeTab', tabId: newWorkspaceTabID() })
   await p.flushAll()
   expect(scritture).toEqual([1])
+})
+
+test('dopo un seed la prima scrittura riparte dalla revisione successiva', async () => {
+  const scritture: number[] = []
+  const clock = orologioFinto()
+  const p = createLayoutPersister({
+    save: async (_w, _l, revision) => {
+      scritture.push(revision)
+      return 'scritto'
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    delayMs: LAYOUT_DEBOUNCE_MS
+  })
+  // Il database porta gia' la revisione 5 da una sessione precedente.
+  p.seed('wt-1', 5)
+  p.record('wt-1', emptyLayout(), { kind: 'closeTab', tabId: newWorkspaceTabID() })
+  await p.flushAll()
+  // Senza `seed` sarebbe 1, e `saveLayout` la scarterebbe come obsoleta.
+  expect(scritture).toEqual([6])
+})
+
+test('il seed vale per worktree, non globalmente', async () => {
+  const scritture: [string, number][] = []
+  const clock = orologioFinto()
+  const p = createLayoutPersister({
+    save: async (worktreeId, _l, revision) => {
+      scritture.push([worktreeId, revision])
+      return 'scritto'
+    },
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+    delayMs: LAYOUT_DEBOUNCE_MS
+  })
+  p.seed('wt-1', 5)
+  p.record('wt-1', emptyLayout(), { kind: 'closeTab', tabId: newWorkspaceTabID() })
+  p.record('wt-2', emptyLayout(), { kind: 'closeTab', tabId: newWorkspaceTabID() })
+  await p.flushAll()
+  expect(scritture).toEqual([
+    ['wt-1', 6],
+    ['wt-2', 1]
+  ])
 })
 
 test('cento comandi non strutturali producono una scrittura sola', async () => {
@@ -2998,6 +3050,7 @@ export interface PersisterDeps {
 export function createLayoutPersister(deps: PersisterDeps): {
   record(worktreeId: string, layout: WorkspaceLayout, command: WorkspaceLayoutCommand): void
   flushAll(): Promise<void>
+  seed(worktreeId: string, revision: number): void
 } {
   const revisioni = new Map<string, number>()
   const inAttesa = new Map<string, { layout: WorkspaceLayout; handle: unknown }>()
@@ -3014,6 +3067,19 @@ export function createLayoutPersister(deps: PersisterDeps): {
   }
 
   return {
+    /**
+     * Dichiara da dove ripartire per un worktree: la revisione che
+     * `loadLayout` ha appena letto dal database.
+     *
+     * Va chiamata UNA volta, subito dopo il caricamento e prima di qualunque
+     * `record`. Senza, la prima scrittura dopo un riavvio nasce con revisione
+     * 1 contro una revisione gia' piu' alta nel database, e `saveLayout` la
+     * scarta come obsoleta senza che nessuno se ne accorga.
+     */
+    seed(worktreeId, revision): void {
+      revisioni.set(worktreeId, revision)
+    },
+
     record(worktreeId, layout, command): void {
       const pendente = inAttesa.get(worktreeId)
 
@@ -3347,25 +3413,33 @@ const persister = createLayoutPersister({
   schedule: (fn, ms) => setTimeout(fn, ms),
   cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
 })
+
+/**
+ * Layout corrente del worktree, caricandolo dal database la prima volta.
+ *
+ * UNA sola funzione per entrambi i rami del dispatcher, non due copie: il
+ * `seed` va fatto esattamente dove si carica, e due copie della stessa lettura
+ * sono due occasioni per dimenticarlo in una sola. La revisione che
+ * `loadLayout` restituisce NON va scartata — vedi la nota su `seed` nel
+ * Task 11.
+ */
+const layoutCorrente = async (worktreeId: string): Promise<WorkspaceLayout> => {
+  const gia = layouts.get(worktreeId)
+  if (gia !== undefined) return gia
+  const { layout, revision } = await loadLayout(db, worktreeId)
+  persister.seed(worktreeId, revision)
+  layouts.set(worktreeId, layout)
+  return layout
+}
 ```
 
 e la dipendenza del dispatcher:
 
 ```ts
     workspace: {
-      load: async (worktreeId) => {
-        const gia = layouts.get(worktreeId)
-        if (gia !== undefined) return gia
-        const { layout } = await loadLayout(db, worktreeId)
-        layouts.set(worktreeId, layout)
-        return layout
-      },
+      load: (worktreeId) => layoutCorrente(worktreeId),
       apply: async (worktreeId, command) => {
-        let corrente = layouts.get(worktreeId)
-        if (corrente === undefined) {
-          corrente = (await loadLayout(db, worktreeId)).layout
-          layouts.set(worktreeId, corrente)
-        }
+        const corrente = await layoutCorrente(worktreeId)
         const esito = applyLayout(command, corrente)
         if (!esito.ok) return { ok: false, error: esito.error.kind }
         layouts.set(worktreeId, esito.layout)
