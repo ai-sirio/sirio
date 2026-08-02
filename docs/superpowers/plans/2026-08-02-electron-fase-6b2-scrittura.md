@@ -591,8 +591,15 @@ git commit -m "feat: keep file buffers outside the tab components"
 **Interfacce:**
 - Consuma: `documentStore` (Task 5).
 
-- [ ] **Passo 1: scrivere il criterio e2e 1** (scrivere fa comparire il pallino)
-  e **lasciarlo rosso**. Se è già verde, il criterio è scritto male.
+- [ ] **Passo 1: scrivere il criterio e2e 7** (cambiare tab e tornare indietro
+  conserva il buffer sporco) e **lasciarlo rosso**. Se è già verde, il criterio è
+  scritto male.
+
+Il criterio **1**, il pallino, appartiene al Task 7: il pallino lo disegna
+`TabSegment.svelte`, che qui non si tocca, quindi qui resterebbe rosso qualunque
+cosa si scriva. Il criterio giusto per questo task è il **7**, ed è anche quello
+che misura la decisione architetturale del §1 della spec: se il buffer finisse
+dentro il componente, sarebbe l'unico a diventare rosso.
 
 - [ ] **Passo 2: eseguire e vedere fallire** → FAIL.
 
@@ -631,8 +638,10 @@ git commit -m "feat: edit a file in its tab"
 - Modifica: `src/renderer/src/lib/workspace/TabSegment.svelte` (il pallino)
 - Modifica: `src/renderer/src/App.svelte` (`⌘S`)
 
-- [ ] **Passo 1: scrivere i criteri e2e 2 e 8** (`⌘S` cambia il file sul disco; un
-  salvataggio fallito lascia il buffer intatto e mostra l'errore) e lasciarli rossi.
+- [ ] **Passo 1: scrivere i criteri e2e 1, 2 e 8** (il pallino compare scrivendo;
+  `⌘S` cambia il file sul disco; un salvataggio fallito lascia il buffer intatto e
+  mostra l'errore) e lasciarli rossi. Il criterio 1 arriva qui e non nel Task 6
+  perché il pallino lo disegna `TabSegment.svelte`, che è di questo task.
 
 - [ ] **Passo 2: eseguire e vedere fallire** → FAIL.
 
