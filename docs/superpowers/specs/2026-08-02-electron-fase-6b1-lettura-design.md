@@ -64,14 +64,29 @@ Il rimedio è **`@codemirror/legacy-modes` 6.5.3**, che impacchetta i modi di
 CodeMirror 5 utilizzabili attraverso `StreamLanguage` e copre quasi tutto il
 buco. Costo: una dipendenza e altre voci nella stessa tabella.
 
-**Caveat non verificato:** i modi legacy sono a flusso, non alberi Lezer.
+**Caveat, ora verificato:** i modi legacy sono a flusso, non alberi Lezer.
 `StreamLanguage.define(...).parser` espone un parser compatibile con
-`highlightTree`, ma la granularità dei token è più grossa di quella di una
-grammatica Lezer. Il piano lo fa verificare come **primo passo**, con
-l'istruzione di fermarsi e segnalare se non funziona, invece di assumerlo.
+`highlightTree` — provato in Task 3b e in Task 9 — ma la granularità dei token è
+più grossa di quella di una grammatica Lezer.
+
+**Elixir è l'eccezione, e non è una parità.** `@codemirror/legacy-modes` 6.5.3
+non contiene un modo Elixir: si ripiega su `clike` configurato con le parole
+chiave del linguaggio. Parole chiave e stringhe escono corrette; **i commenti no,
+finché non si aggiunge un gancio esplicito su `#`**, perché `clike` cabla la
+sintassi dei commenti nel tokenizer invece di prenderla dalla configurazione —
+senza il gancio un intero blocco commentato viene colorato come codice vivo.
+Il gancio c'è ed è coperto da un test. Restano resi come identificatori gli
+atomi (`:nome`) e i sigilli (`~s()`): è una resa parziale, non la parità con il
+parser Elixir dedicato della versione Swift.
 
 Resta comunque scoperto ciò che nessuna delle due strade offre (agda, verilog,
 zig, julia, ocaml): sono marginali e si accetta di perderli.
+
+**Limite di byte per l'evidenziazione.** Swift protegge il tokenizzatore con un
+limite proprio, `DiffHighlights.byteLimit = 500_000`, dieci volte più stretto di
+quello di lettura. Sono due domande diverse: quanto testo si può *mostrare* e
+quanto se ne può *parsare* senza bloccare il thread. Il diff applica lo stesso
+limite: oltre, resta senza colore, con la struttura intatta.
 
 `CodeLanguageResolver.swift` non contiene alcuna tabella da portare — delega
 interamente a `CodeLanguage.detectLanguageFrom(url:prefixBuffer:suffixBuffer:)`.

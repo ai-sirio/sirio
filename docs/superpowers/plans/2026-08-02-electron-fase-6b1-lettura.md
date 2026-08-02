@@ -1052,12 +1052,35 @@ test('il testo vuoto non esplode', () => {
 
 - [ ] **Passo 3: implementare**
 
+**Nota (corretta in esecuzione):** il tipo del parser va preso come
+`Language['parser']` da `@codemirror/language`, **non** come `Parser` da
+`@lezer/common`. `@lezer/common` non è fra le dipendenze dirette installate
+sopra, e con pnpm un import da lì fa fallire `pnpm typecheck` — la stessa
+trappola del pacchetto presente nel lock ma non collegato.
+
+I linguaggi che arrivano da `@codemirror/legacy-modes` (Task 3b) si avvolgono
+con `StreamLanguage.define(modo).parser`. **Elixir non ha un modo legacy**: si
+ripiega su `clike` con le parole chiave del linguaggio, e serve il gancio
+esplicito sui commenti, perché `clike` cabla `//` nel tokenizer:
+
+```ts
+hooks: {
+  '#': (stream: StringStream): string => {
+    stream.skipToEnd()
+    return 'comment'
+  }
+}
+```
+
+Senza il gancio un intero blocco commentato esce come `tok-variableName`, cioè
+come codice vivo. Va coperto da un test dedicato.
+
 ```ts
 import { classHighlighter, highlightTree } from '@lezer/highlight'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
 // ... gli altri lang-* come sopra
-import type { Parser } from '@lezer/common'
+import type { Language } from '@codemirror/language'
 import type { CodeLanguageId } from '../../../../shared/files/language.ts'
 
 export interface TokenRange {
@@ -1067,7 +1090,7 @@ export interface TokenRange {
   className: string
 }
 
-function parserFor(language: CodeLanguageId): Parser {
+function parserFor(language: CodeLanguageId): Language['parser'] {
   switch (language) {
     case 'typescript':
       return javascript({ typescript: true }).language.parser
@@ -1493,6 +1516,19 @@ I testi si prendono con `git show <rev>:<path>` per il lato precedente e dal
 disco (o `git show HEAD:<path>`) per quello nuovo, applicando gli stessi limiti
 del Task 6. Oltre i limiti, o su binario, restano `null`.
 
+**Oltre a quelli, serve un limite proprio dell'evidenziatore**, più stretto:
+
+```ts
+/** Parita' con DiffHighlights.byteLimit in Swift. */
+export const LIMITE_BYTE_EVIDENZIAZIONE = 500_000
+```
+
+Swift lo tiene a 500 KB contro i 5 MB del lettore, e la differenza è voluta:
+*quanto testo posso mostrare* e *quanto testo posso parsare senza bloccare il
+thread* sono due domande diverse. Un file da 3 MB si legge bene e si tokenizza
+malissimo — e qui la tokenizzazione è sincrona nel renderer, quindi il blocco si
+vede. Il limite si applica nel Task 16, sul testo, non sul diff.
+
 - [ ] **Passo 4: eseguire e vedere passare**
 
 `npx vitest run src/main/git/ src/shared/diff/` → PASS.
@@ -1523,6 +1559,11 @@ le righe cancellate con i token del file nuovo.
 
 Le mappe si calcolano **una volta per diff** in un `$derived`, non per riga:
 tokenizzare a ogni riga rifà l'intero albero sintattico per ogni riga del file.
+
+Il `$derived` applica `LIMITE_BYTE_EVIDENZIAZIONE` (Task 15): oltre i 500 KB il
+testo non si tokenizza affatto e la mappa resta vuota, esattamente come per un
+testo `null`. Il ramo "senza colore" esiste già, quindi il limite non aggiunge un
+caso, ne riusa uno.
 
 - [ ] **Passo 1: scrivere il criterio e2e 6** (il diff di un `.ts` mostra token
   colorati) e lasciarlo rosso.
