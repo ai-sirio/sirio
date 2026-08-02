@@ -65,7 +65,7 @@ vitest, Playwright.
 | `src/renderer/src/lib/workspace/AgentsPanel.svelte` | agenti di tutti i worktree |
 | `src/renderer/src/lib/workspace/EmptyState.svelte` | stato vuoto della finestra |
 | `src/renderer/src/lib/theme.svelte.ts` | tema corrente e token |
-| `e2e/fase-4b-viste.spec.ts` | i sei criteri |
+| `e2e/fase-4b-viste.spec.ts` | i sette criteri |
 
 Modificati: `src/main/index.ts` (chrome della finestra, titolo, tema nativo),
 `src/renderer/src/App.svelte`, `src/renderer/src/assets/` (token CSS).
@@ -1840,7 +1840,7 @@ git commit -m "feat: temi chiaro e scuro con chrome nativo allineato"
 
 ---
 
-## Task 15: i sei criteri end-to-end
+## Task 15: i sette criteri end-to-end
 
 **File:**
 - Crea: `e2e/fase-4b-viste.spec.ts`
@@ -1857,7 +1857,7 @@ già costato una diagnosi lunga (commit `862e79c`).
 
 Asserzioni sul DOM e sulla geometria. **Niente confronto di screenshot.**
 
-- [ ] **Passo 1: scrivere i sei criteri**
+- [ ] **Passo 1: scrivere i sette criteri**
 
 ```ts
 test('criterio 1: un tab nella barra del titolo si clicca', async () => {
@@ -1943,7 +1943,50 @@ test('criterio 6: il pannello agenti elenca un worktree chiuso e lo riapre', asy
   await riga.click()
   await expect(window.locator('[data-tab-id].active')).toHaveCount(1)
 })
+
+test('criterio 7: il divisore si muove da tastiera', async () => {
+  // Aggiunto il 2026-08-02, dopo aver respinto `paneforge`: la gestione da
+  // tastiera del divisore e' scritta a mano e NESSUN altro criterio la tocca.
+  // Il criterio 2 verifica che i segmenti siano allineati ai divisori, ma non
+  // muove mai niente; `PaneGrid.svelte` non ha test unitari perche' in questo
+  // repo i componenti non si testano in isolamento. Senza questo criterio,
+  // quelle quindici righe non sono coperte da nulla.
+  //
+  // Copre anche il giro completo della frazione: tasto -> comando
+  // `setPreferredFraction` -> riduttore -> layout di ritorno -> geometria
+  // ridisegnata. Un solo anello rotto e il divisore non si sposta.
+  const window = await app.firstWindow()
+  await splitVerticale()
+
+  const divisore = window.locator('[data-split-id]').first()
+  const xPrima = await divisore.evaluate(
+    (el) => Number.parseFloat((el as HTMLElement).style.left)
+  )
+
+  // Act — le frecce muovono il divisore di `PASSO_TASTIERA` (0.02) per volta.
+  await divisore.focus()
+  await divisore.press('ArrowRight')
+
+  // Assert — si e' spostato a destra di una quantita' visibile. La soglia e'
+  // volutamente larga: il criterio prova CHE si muova nella direzione giusta,
+  // non di quanti pixel esatti — quello e' un test del riduttore, non della
+  // vista, ed e' gia' coperto dai test unitari della Fase 4a.
+  await expect
+    .poll(async () =>
+      divisore.evaluate((el) => Number.parseFloat((el as HTMLElement).style.left))
+    )
+    .toBeGreaterThan(xPrima + 4)
+})
 ```
+
+**Copertura che questi sette criteri NON danno, e va saputo:** il
+trascinamento dei tab fra gruppi (Task 7) resta senza criterio end-to-end.
+Pilotare un gesto di drag-and-drop da Playwright e' possibile
+(`mouse.down`/`move`/`up`) ma notoriamente fragile, e un criterio che fallisce a
+caso insegna a ignorare il gate — la stessa ragione per cui questo piano vieta
+il confronto di screenshot. La logica che decide DOVE cade un tab e' pura e
+testata nella Fase 4a (`resolveDropTarget`); quello che resta scoperto e' il
+solo collegamento fra il gesto della libreria e quella funzione.
 
 - [ ] **Passo 2: eseguire gli e2e**
 
@@ -1971,7 +2014,20 @@ git checkout src/renderer/src/lib/workspace/TabSegment.svelte
 pnpm exec electron-vite build && pnpm test:e2e
 ```
 
-- [ ] **Passo 4: validare per mutazione il criterio 4**
+- [ ] **Passo 4: validare per mutazione il criterio 7**
+
+In `src/renderer/src/lib/workspace/PaneGrid.svelte`, togliere temporaneamente
+il gestore da tastiera dal divisore:
+
+```svelte
+      <!-- onkeydown={(e) => tastiera(e, divisore.splitId)}   MUTAZIONE -->
+```
+
+Comando: `pnpm exec electron-vite build && pnpm test:e2e -- --grep "criterio 7"`
+Atteso: **FAIL** — il divisore non si sposta. Se passa, il criterio non sta
+provando la tastiera. Poi annullare con `git checkout` e riverificare.
+
+- [ ] **Passo 5: validare per mutazione il criterio 4**
 
 In `src/shared/status-rollup.ts`, invertire i primi due elementi della
 precedenza:
@@ -1983,16 +2039,16 @@ const PRECEDENZA: readonly AgentStatus[] = ['error', 'needs-input', 'running', '
 Comando: `pnpm test:unit -- status-rollup`
 Atteso: **FAIL** sul test «needs-input batte error». Poi annullare.
 
-- [ ] **Passo 5: gate completo**
+- [ ] **Passo 6: gate completo**
 
 Comando: `bash scripts/ci.sh`
 Atteso: `CI OK`.
 
-- [ ] **Passo 6: commit**
+- [ ] **Passo 7: commit**
 
 ```bash
 git add e2e/
-git commit -m "test: i sei criteri end-to-end delle viste del workspace"
+git commit -m "test: i sette criteri end-to-end delle viste del workspace"
 ```
 
 ---
