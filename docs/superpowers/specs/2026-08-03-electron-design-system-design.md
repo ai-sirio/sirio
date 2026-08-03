@@ -216,6 +216,20 @@ nessuno aveva torto perché non c'era niente da sbagliare.
 **Le eccezioni si dichiarano.** Il terminale ha i propri colori (tema xterm) e
 non passa dai token: è un'esclusione esplicita nel test, non un buco.
 
+E i valori che la scala non contiene ma che non si possono arrotondare — un
+rientro che deve allineare, il ritaglio `-1px` di `.sr-only` — vivono in
+`tokens.css` col prefisso **`--t-except-*`**. Il prefisso è il punto: rende le
+eccezioni contabili. Se quella lista cresce, è la scala a essere sbagliata.
+
+**`calc()` non è una scappatoia.** Il primo controllo cercava «nessun `px`
+scritto», che è un *surrogato* di «sta sulla scala»: `calc(var(--t-space-8) *
+2.5)` fa 80px e lo superava, `calc(var(--t-space-8) + var(--t-space-2) +
+var(--t-space-1))` fa 38px e pure. La guardia rifiuta perciò anche la
+moltiplicazione o divisione per un numero nudo (tranne `* -1`, che nega un valore
+di scala senza inventarne uno) e le espressioni con più di un token. Un token
+solo accanto a termini non-token — `calc(100% - var(--t-space-4))` — resta
+lecito: lì il token è una correzione, non un addendo di un numero da ricostruire.
+
 **Quello che i test non coprono, e va detto:** che il risultato sia *bello*, e
 che le tre gerarchie di sidebar stiano in 230px. Si vede guardando. La verifica
 visiva manuale resta, ed è la prima cosa da fare quando il lotto rientra —
