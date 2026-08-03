@@ -43,17 +43,37 @@ a sinistra progetto · branch · conteggio modifiche, a destra la quota provider
 (`QuotaBar`). Oggi vive dentro la colonna centrale: esce al livello della
 finestra.
 
-### 5. Chat: la grammatica delle card (conferma della 5c, con rail)
+### 5. Chat: prosa prima, card come eccezione (rivisto sul riferimento
+JetBrains/Junie, approvato 2026-08-03)
 
-- Bolla utente a destra, `--t-row-selected`, raggio asimmetrico (angolo
-  interno più stretto).
-- Risposta agente: card `--t-surface-card` con **rail colorato a sinistra**
-  (angoli sinistri a zero): `--t-rail-tool` per la prosa, `--t-rail-task` per
-  le card Insight/Task. Titolo card in maiuscoletto `--t-text-title`.
-- Separatore di ragionamento alla Waku: «Worked for N seconds ›»,
-  `--t-text-meta`, collassato di default.
-- Composer: campo `--t-surface-field` con bordo `--t-row-ring`, raggio
-  `--t-radius-3`.
+**La prosa dell'agente scorre libera sul fondo contenuto — nessuna card
+attorno al testo.** Corpo `--t-text-subtitle`, affermazioni chiave in
+`--t-text-title` con peso 500. Questo sostituisce la card-per-messaggio della
+prima stesura.
+
+- **Codice inline ambra**: `--t-git-modified`, monospace, un punto in meno del
+  corpo — il tratto più riconoscibile del riferimento.
+- **Tool call = riga compatta**, non card: sfondo `--t-surface-field`, bordo
+  `--t-row-ring`, raggio `--t-radius-3`; dentro: icona, nome tool monospace
+  `--t-text-title`, check `--t-git-staged` a esito, genere a destra in
+  `--t-text-meta`, chevron per espandere. Sopra, la riga label
+  «Running <server> MCP Server tool:» in meta con il nome server come chip
+  monospace su chrome.
+- **Passi collassati**: «✓ Processed» / «Worked for N seconds ›» come
+  separatori muti in `--t-text-meta`, collassati di default.
+- **Card SOLO per contenuto strutturato**: Insight/Task (`--t-surface-card`,
+  rail `--t-rail-task`, angoli sinistri a zero, titolo in maiuscoletto),
+  permission, plan, diff. La prosa non entra mai in card.
+- **Errori = banner**: sfondo `--t-diff-del-bg`, bordo e testo
+  `--t-git-conflict`, larghezza piena.
+- **Utente = pillola compatta a destra**: `--t-surface-pill`,
+  `--t-text-subtitle`, raggio `--t-radius-3` — non una bolla larga.
+- **Composer col control bar dentro**: campo `--t-surface-field` con bordo
+  `--t-row-ring`; sotto il testo, separata da un hairline `--t-row-selected`,
+  la riga controlli: «+» allegati e selettore agente·modello (monogramma
+  `AgentIcon`) a sinistra; modalità permessi e **Send** a destra. Send è
+  l'unico elemento a colore pieno della superficie: `--t-rail-task` con testo
+  bianco.
 
 ### 6. Sidebar (già in costruzione nel lotto tre-livelli)
 
