@@ -75,7 +75,16 @@ prima stesura.
   l'unico elemento a colore pieno della superficie: `--t-rail-task` con testo
   bianco.
 
-### 6. Sidebar (già in costruzione nel lotto tre-livelli)
+### 6. Finestra: grande all'avvio, e con memoria
+
+Oggi la finestra nasce fissa a 1100×720 (`src/main/index.ts:126`). Deciso
+(utente, 2026-08-03): **al primo avvio la finestra parte massimizzata**
+(`maximize()`, non fullscreen macOS — niente Spaces separati); dagli avvii
+successivi si **ripristinano posizione e dimensioni dell'ultima sessione**
+(bounds salvati alla chiusura, nello stesso posto delle altre preferenze).
+Se il display salvato non esiste più, si torna alla massimizzata.
+
+### 7. Sidebar (già in costruzione nel lotto tre-livelli)
 
 La selezione come card staccata `--t-surface-card` coi margini interni, il
 contatore ambra sull'intestazione collassata, monogrammi e `Zzz`: decisi nella
