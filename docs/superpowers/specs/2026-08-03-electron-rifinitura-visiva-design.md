@@ -91,10 +91,30 @@ contatore ambra sull'intestazione collassata, monogrammi e `Zzz`: decisi nella
 spec della sidebar, il mockup li conferma visivamente. Qui non si rifà niente:
 se il lotto sidebar consegna righe diverse dal mockup, la rifinitura le adegua.
 
+### 8. I loghi degli harness (deciso: in scopo, 2026-08-03)
+
+`AgentIcon.svelte` (nato coi monogrammi nel lotto sidebar) prende i marchi
+veri, portati 1:1 da `App/AgentIcon.swift` del repo Swift (sola lettura):
+
+- **claude**: `App/Assets.xcassets/agent-claude.imageset/claude.svg`, tinta
+  `#D97757` (arancio Claude, colore di marca);
+- **codex**: `App/Assets.xcassets/agent-codex.imageset/openai.svg`, tinta
+  `currentColor` (segue il testo);
+- **opencode**: due rettangoli even-odd, viewBox 240×300 (cornice piena +
+  interno scuro 60,120,120,120) — coordinate in `OpenCodeFrameShape`/`Inner`;
+- **pi**: path even-odd viewBox 800×800 — coordinate esatte in `PiShape`;
+- **omp**: path viewBox 64×64 con gradiente lineare `#ED4ABF → #9B4DFF →
+  #5AD8E6` — coordinate in `OmpShape`;
+- **sconosciuti**: monogramma su cerchio colorato (arancio/verde/blu/viola/
+  teal per id noto, grigio altrimenti) — già la semantica Swift.
+
+I colori di marca sono **eccezioni dichiarate e delimitate al componente**: non
+sono token UI e non devono diventarlo; se lo scale-guard li intercetta, si
+estende la sua lista di eccezioni al solo `AgentIcon.svelte`, con il motivo
+scritto accanto. Gli id con suffisso `-acp` si normalizzano come in Swift.
+
 ## Fuori scopo
 
-- Icone vere degli agenti al posto dei monogrammi (richiede asset; il
-  componente `AgentIcon` è già il punto di sostituzione).
 - Animazioni/transizioni oltre l'esistente (pulse del needs-input).
 - Tema chiaro: **stessa grammatica, token già pronti** nel blocco
   `[data-theme='light']` — la rifinitura non tocca i valori, e la direzione
