@@ -19,6 +19,13 @@ un task di cablaggio esplicito, con criteri propri.
 - Conventional Commits in inglese minuscolo imperativo.
 - `npm run lint` deve dare **0 errori**.
 - Nessuna dipendenza nuova: il rendering del Markdown è già in casa dalla 6b-3.
+- **Ogni colore e ogni misura passano dai token** di `assets/tokens.css`
+  (`--t-surface-*`, `--t-text-*`, `--t-space-*`, `--t-radius-*`,
+  `--t-text-size-*`). Un esadecimale letterale o un `px` fuori scala in
+  `padding`, `margin`, `gap`, `border-radius` o `font-size` fa fallire
+  `src/renderer/src/lib/design/scale-guard.test.ts`. Non è una convenzione da
+  ricordare: è un test che gira nel gate. Le superfici della chat sono
+  `--t-surface-content` per il fondo e `--t-surface-card` per le schede.
 
 ## L'ordine dei task, e perché
 

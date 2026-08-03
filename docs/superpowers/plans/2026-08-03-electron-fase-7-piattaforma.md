@@ -23,6 +23,11 @@ precedente; gli altri cinque non si toccano fra loro.
   worktree e mai quella globale dell'utente.
 - Stringhe rivolte all'utente in inglese; commenti e nomi interni in italiano.
 - Conventional Commits in inglese minuscolo imperativo; `npm run lint` a 0 errori.
+- **Ogni colore e ogni misura passano dai token** di `assets/tokens.css`. Riguarda
+  i due componenti nuovi di questa fase — `PermissionsPanel.svelte` (Task 3) e
+  `UpdateToast.svelte` (Task 6): un esadecimale letterale o un `px` fuori scala li
+  fa fallire in `src/renderer/src/lib/design/scale-guard.test.ts`, che gira nel
+  gate.
 
 ## Regola d'ordine
 
