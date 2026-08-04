@@ -126,7 +126,7 @@ struct DropTargetResolverTests {
             Issue.record("a 400-point horizontal group should reject this split")
             return
         }
-        #expect(reason == .insufficientWidth(available: 197, required: 240))
+        #expect(reason == .insufficientWidth(available: 195, required: 240))
     }
 
     @Test
@@ -149,6 +149,6 @@ struct DropTargetResolverTests {
             Issue.record("a 300-point vertical group should reject this split")
             return
         }
-        #expect(heightReason == .insufficientHeight(available: 147, required: 160))
+        #expect(heightReason == .insufficientHeight(available: 145, required: 160))
     }
 }

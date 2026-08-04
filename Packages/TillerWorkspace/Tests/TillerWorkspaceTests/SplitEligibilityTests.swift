@@ -7,20 +7,20 @@ import Testing
 /// split while refusing a top/bottom one, or the other way round, purely
 /// because of its shape — no content type is involved.
 @Test func splitMinimumsDifferPerAxis() {
-    // (width - dividerThickness) / 2 >= 240  ->  width >= 486
+    // (width - dividerThickness) / 2 >= 240  ->  width >= 490
     #expect(SplitEligibility.check(
-        groupSize: CGSize(width: 486, height: 1000),
+        groupSize: CGSize(width: 490, height: 1000),
         placement: .right, isSplittingItsOwnSoleGroup: false).isSuccess)
     #expect(!SplitEligibility.check(
-        groupSize: CGSize(width: 485, height: 1000),
+        groupSize: CGSize(width: 489, height: 1000),
         placement: .right, isSplittingItsOwnSoleGroup: false).isSuccess)
 
-    // (height - dividerThickness) / 2 >= 160  ->  height >= 326
+    // (height - dividerThickness) / 2 >= 160  ->  height >= 330
     #expect(SplitEligibility.check(
-        groupSize: CGSize(width: 1000, height: 326),
+        groupSize: CGSize(width: 1000, height: 330),
         placement: .below, isSplittingItsOwnSoleGroup: false).isSuccess)
     #expect(!SplitEligibility.check(
-        groupSize: CGSize(width: 1000, height: 325),
+        groupSize: CGSize(width: 1000, height: 329),
         placement: .below, isSplittingItsOwnSoleGroup: false).isSuccess)
 }
 

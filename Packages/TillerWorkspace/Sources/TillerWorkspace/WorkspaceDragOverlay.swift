@@ -54,6 +54,39 @@ public final class WorkspaceDragOverlay: NSView {
         }
     }
 
+    /// Cursor rects alone are not enough here: measured in the running app, the
+    /// overlay won the hit test over a divider and then never received a single
+    /// `cursorUpdate`, so the pointer kept whatever the pane had set. Tracking
+    /// areas raise those events themselves instead of waiting on the window's
+    /// cursor-rect cycle.
+    override public func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self {
+            removeTrackingArea(area)
+        }
+        for band in measureDividerBands() {
+            addTrackingArea(NSTrackingArea(
+                rect: band.rect,
+                options: [.activeInKeyWindow, .cursorUpdate, .mouseEnteredAndExited],
+                owner: self,
+                userInfo: ["isVertical": band.isVertical]))
+        }
+    }
+
+    /// Re-measures the bands after a divider drag, which moves them without
+    /// changing the overlay's own frame.
+    public func refreshDividerTracking() {
+        updateTrackingAreas()
+    }
+
+    override public func mouseEntered(with event: NSEvent) {
+        guard let isVertical = event.trackingArea?.userInfo?["isVertical"] as? Bool else {
+            super.mouseEntered(with: event)
+            return
+        }
+        Self.cursor(isVertical: isVertical).set()
+    }
+
     /// Claiming the hit without an installed cursor rect would leave whatever
     /// the last pane set — an I-beam, in a terminal — sitting over the divider,
     /// so set the cursor outright rather than trusting the rects to be current.
@@ -69,6 +102,7 @@ public final class WorkspaceDragOverlay: NSView {
     override public func layout() {
         super.layout()
         window?.invalidateCursorRects(for: self)
+        updateTrackingAreas()
     }
 
     private static func cursor(isVertical: Bool) -> NSCursor {
@@ -89,8 +123,7 @@ public final class WorkspaceDragOverlay: NSView {
                 let measured = DividerCursorRects.rects(
                     subviewFrames: split.subviews.map(\.frame),
                     bounds: split.bounds,
-                    isVertical: split.isVertical,
-                    minimumThickness: WorkspaceMetrics.dividerHoverBand)
+                    isVertical: split.isVertical)
                 for rect in measured {
                     bands.append((convert(rect, from: split), split.isVertical))
                 }

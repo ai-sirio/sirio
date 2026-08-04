@@ -22,14 +22,10 @@ public enum DividerCursorHitPolicy {
 }
 
 public enum DividerCursorRects {
-    /// - Parameter minimumThickness: widens each band around the gap it was
-    ///   measured from, leaving the painted hairline where it is. The pointer
-    ///   target and the visible seam are deliberately different sizes.
     public static func rects(
         subviewFrames: [CGRect],
         bounds: CGRect,
-        isVertical: Bool,
-        minimumThickness: CGFloat = 0
+        isVertical: Bool
     ) -> [CGRect] {
         guard subviewFrames.count >= 2 else { return [] }
         let ordered = subviewFrames.sorted {
@@ -40,26 +36,13 @@ public enum DividerCursorRects {
             if isVertical {
                 let gap = trailing.minX - leading.maxX
                 guard gap > 0 else { return nil }
-                return widened(
-                    CGRect(x: leading.maxX, y: bounds.minY, width: gap, height: bounds.height),
-                    to: minimumThickness, isVertical: isVertical)
+                return CGRect(
+                    x: leading.maxX, y: bounds.minY, width: gap, height: bounds.height)
             }
             let gap = trailing.minY - leading.maxY
             guard gap > 0 else { return nil }
-            return widened(
-                CGRect(x: bounds.minX, y: leading.maxY, width: bounds.width, height: gap),
-                to: minimumThickness, isVertical: isVertical)
+            return CGRect(
+                x: bounds.minX, y: leading.maxY, width: bounds.width, height: gap)
         }
-    }
-
-    private static func widened(
-        _ band: CGRect, to thickness: CGFloat, isVertical: Bool
-    ) -> CGRect {
-        let current = isVertical ? band.width : band.height
-        guard current < thickness else { return band }
-        let growth = (thickness - current) / 2
-        return isVertical
-            ? band.insetBy(dx: -growth, dy: 0)
-            : band.insetBy(dx: 0, dy: -growth)
     }
 }

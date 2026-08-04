@@ -71,6 +71,87 @@ struct DividerHitTestDiagnosticTests {
 
         #expect(hit === splitView)
     }
+
+    /// A divider drag relayouts the split view but not the overlay, whose own
+    /// frame never changes — so the overlay's tracking areas only follow the
+    /// divider if the split view's layout explicitly refreshes them. Without
+    /// that, the resize cursor keeps appearing at the divider's old position.
+    @Test func draggingTheDividerMovesTheOverlayTrackingBands() throws {
+        let fixture = makeDiagnosticLayout()
+        let controller = WorkspaceViewController(
+            hostProvider: DiagnosticHostProvider(tabs: fixture.layout.allTabs),
+            intentSink: DiagnosticIntentSink())
+        controller.update(layout: fixture.layout, delta: nil)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = controller.view
+        controller.view.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        controller.view.layoutSubtreeIfNeeded()
+
+        let overlay = try #require(findOverlay(in: controller.view))
+        let split = try #require(controller.splitController(fixture.splitID))
+        let splitView = split.splitView
+
+        splitView.setPosition(600, ofDividerAt: 0)
+        splitView.layoutSubtreeIfNeeded()
+
+        let bands = DividerCursorRects.rects(
+            subviewFrames: splitView.subviews.map(\.frame), bounds: splitView.bounds,
+            isVertical: splitView.isVertical)
+        let expected = try #require(bands.first, "no divider band after the drag")
+        let expectedInOverlay = overlay.convert(expected, from: splitView)
+
+        let tracked = overlay.trackingAreas.filter { $0.owner === overlay }.map(\.rect)
+        #expect(tracked.contains(expectedInOverlay),
+                "tracking areas \(tracked) never followed the divider to \(expectedInOverlay)")
+    }
+
+    /// The cursor must only advertise a drag where AppKit can actually begin
+    /// one. A wider invisible hover band makes the resize cursor appear beside
+    /// the native divider, which feels offset and leaves part of the advertised
+    /// target inert.
+    @Test func overlayCursorBandMatchesTheWidenedNativeDivider() throws {
+        let fixture = makeDiagnosticLayout()
+        let controller = WorkspaceViewController(
+            hostProvider: DiagnosticHostProvider(tabs: fixture.layout.allTabs),
+            intentSink: DiagnosticIntentSink())
+        controller.update(layout: fixture.layout, delta: nil)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = controller.view
+        controller.view.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+        controller.view.layoutSubtreeIfNeeded()
+
+        let overlay = try #require(findOverlay(in: controller.view))
+        let split = try #require(controller.splitController(fixture.splitID))
+        let splitView = split.splitView
+        let nativeBand = try #require(DividerCursorRects.rects(
+            subviewFrames: splitView.subviews.map(\.frame),
+            bounds: splitView.bounds,
+            isVertical: splitView.isVertical
+        ).first)
+        let expectedInOverlay = overlay.convert(nativeBand, from: splitView)
+        let tracked = try #require(overlay.trackingAreas.first {
+            $0.owner === overlay
+                && ($0.userInfo?["isVertical"] as? Bool) == splitView.isVertical
+        })
+
+        #expect(splitView.dividerThickness == 10)
+        #expect(tracked.rect == expectedInOverlay)
+    }
+}
+
+@MainActor
+private func findOverlay(in view: NSView) -> WorkspaceDragOverlay? {
+    if let overlay = view as? WorkspaceDragOverlay { return overlay }
+    for subview in view.subviews {
+        if let overlay = findOverlay(in: subview) { return overlay }
+    }
+    return nil
 }
 
 @MainActor

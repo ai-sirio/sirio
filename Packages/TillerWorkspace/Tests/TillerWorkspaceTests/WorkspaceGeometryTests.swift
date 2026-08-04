@@ -58,7 +58,7 @@ struct WorkspaceGeometryTests {
         let window = install(controller)
         let split = try #require(controller.splitController(fixture.splitID))
 
-        #expect(WorkspaceMetrics.dividerThickness == 6)
+        #expect(WorkspaceMetrics.dividerThickness == 10)
         #expect(split.splitView.dividerThickness == WorkspaceMetrics.dividerThickness)
         _ = window
     }
