@@ -54,18 +54,6 @@ struct RightPanelLoaders: Sendable {
     let diff: DiffLoader
     let stats: StatsLoader
 
-    init(
-        directory: @escaping DirectoryLoader,
-        status: @escaping StatusLoader,
-        diff: @escaping DiffLoader,
-        stats: @escaping StatsLoader = { _, _ in [:] }
-    ) {
-        self.directory = directory
-        self.status = status
-        self.diff = diff
-        self.stats = stats
-    }
-
     static let live = Self(
         directory: { key, rootURL in
             try FileTreeLoader.children(at: key, rootURL: rootURL)

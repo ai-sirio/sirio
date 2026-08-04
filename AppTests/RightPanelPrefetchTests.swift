@@ -40,7 +40,8 @@ struct RightPanelPrefetchTests {
             loaders: .init(
                 directory: { key, _ in await probe.loadDirectory(key) },
                 status: { _ in .empty },
-                diff: { _, _ in fatalError("unused") }),
+                diff: { _, _ in fatalError("unused") },
+                stats: { _, _ in fatalError("unused") }),
             monitoringEnabled: false)
     }
 
