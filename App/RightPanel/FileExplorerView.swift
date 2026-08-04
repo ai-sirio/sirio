@@ -99,9 +99,9 @@ struct FileExplorerView: View {
             }
             Spacer(minLength: 4)
             if let entry = panelModel.statusByPath[node.relativePath] {
-                Text(statusSymbol(entry))
+                Text(GitStatusStyle.symbol(entry))
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(statusColor(entry))
+                    .foregroundStyle(GitStatusStyle.color(entry))
                     .help(statusLabel(entry))
             } else if node.kind.isDirectory,
                       let dirStatus = panelModel.directoryStatusByPath[node.relativePath] {
@@ -182,16 +182,10 @@ struct FileExplorerView: View {
 
     @ViewBuilder
     private func iconView(for node: FileTreeNode) -> some View {
-        switch iconTheme.iconRef(for: iconKey(for: node)) {
-        case .system(let name):
-            Image(systemName: name)
-                .foregroundStyle(node.kind.isDirectory ? AppTheme.meta : AppTheme.subtitle)
-        case .asset(let name):
-            Image(name)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 14, height: 14)
-        }
+        FileTypeIcon(
+            key: iconKey(for: node),
+            theme: iconTheme,
+            tint: node.kind.isDirectory ? AppTheme.meta : AppTheme.subtitle)
     }
 
     private func iconKey(for node: FileTreeNode) -> FileIconKey {
@@ -202,15 +196,6 @@ struct FileExplorerView: View {
         }
     }
 
-    private func statusSymbol(_ entry: GitStatusEntry) -> String {
-        if entry.isConflicted { return "U" }
-        if entry.isUntracked { return "?" }
-        if entry.indexState == .added { return "A" }
-        if entry.indexState == .deleted || entry.worktreeState == .deleted { return "D" }
-        if entry.indexState == .renamed || entry.worktreeState == .renamed { return "R" }
-        return "M"
-    }
-
     private func statusLabel(_ entry: GitStatusEntry) -> String {
         if entry.isConflicted { return "Conflicted" }
         if entry.isUntracked { return "Untracked" }
@@ -219,16 +204,9 @@ struct FileExplorerView: View {
         return "Modified"
     }
 
-    private func statusColor(_ entry: GitStatusEntry) -> Color {
-        if entry.isConflicted { return AppTheme.gitConflict }
-        if entry.isUntracked { return AppTheme.gitUntracked }
-        if entry.isStaged { return AppTheme.gitStaged }
-        return AppTheme.gitModified
-    }
-
     private func nameColor(for node: FileTreeNode) -> Color {
         if let entry = panelModel.statusByPath[node.relativePath] {
-            return statusColor(entry)
+            return GitStatusStyle.color(entry)
         }
         if node.kind.isDirectory,
            let dirStatus = panelModel.directoryStatusByPath[node.relativePath] {

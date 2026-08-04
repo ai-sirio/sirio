@@ -48,6 +48,7 @@
 		31213898B6E63011C844618F /* HideOnCloseWindowDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 526AD5B187E48B97E58C72C4 /* HideOnCloseWindowDelegate.swift */; };
 		31A47B2EC680554D9708A54C /* PlanCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3592EBDE2DC633F0652BF83 /* PlanCardView.swift */; };
 		34ABBA6D4CC8DB0EB488A3A9 /* empty.json in Resources */ = {isa = PBXBuildFile; fileRef = E43846C31F68C86DF209FA20 /* empty.json */; };
+		350C9207BDE5E582F869F389 /* FileTypeIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8F94C0E8C8E927A7EBCD147 /* FileTypeIcon.swift */; };
 		35AA088F5D35B0BC11F56298 /* ChatHistoryMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41BF5DD410CA46C997EAC28A /* ChatHistoryMenu.swift */; };
 		35B6C8C1B2DE068133EA349C /* WorkspaceResourceLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9F089866C3D1A14A15BF512 /* WorkspaceResourceLifecycleTests.swift */; };
 		38FF3B1CD1CB02E364BD065C /* MarkdownAttributedStringRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */; };
@@ -75,6 +76,7 @@
 		4DEEA0FA5F26940EB3266EE4 /* AttributedCodeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AE45D2D91E50E33633D11C9 /* AttributedCodeRenderer.swift */; };
 		4ED691D5A1EEB98DBC8030FB /* CodeBlockHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A69A4378ADAA0562DD45A8EE /* CodeBlockHeaderView.swift */; };
 		5057E70080B555E2390F80E1 /* MarkdownAttributedStringRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECA70E0E64ED452E4CB5A0B2 /* MarkdownAttributedStringRendererTests.swift */; };
+		50730C1DE8B61E01FC93C012 /* GitPanelTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B210BD09F1D32AE168CCFF21 /* GitPanelTypes.swift */; };
 		50C86763ACB027DBD925D42F /* TillerTerminal in Frameworks */ = {isa = PBXBuildFile; productRef = 238DCD7AA25319E277DDC65C /* TillerTerminal */; };
 		5136DA22AFFB8781ABAFA195 /* ChatHistoryRowsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B91E0609AE4D591DDF0268A /* ChatHistoryRowsTests.swift */; };
 		56F6326918B120798BBFB105 /* Phase1FixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24951BA69B5DA5E148D1079A /* Phase1FixtureTests.swift */; };
@@ -357,6 +359,7 @@
 		A7F8AC528E2F79471B04996C /* AgentRosterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentRosterView.swift; sourceTree = "<group>"; };
 		A7FBBDB62EF95306888EA950 /* ChatContentAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatContentAdapter.swift; sourceTree = "<group>"; };
 		A920FB57F5E592E941A80135 /* UniversalChatFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UniversalChatFixture.swift; sourceTree = "<group>"; };
+		B210BD09F1D32AE168CCFF21 /* GitPanelTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitPanelTypes.swift; sourceTree = "<group>"; };
 		B2D0E40DB15B01BECE29240E /* TerminalContextMenuProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalContextMenuProvider.swift; sourceTree = "<group>"; };
 		B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandSelection.swift; sourceTree = "<group>"; };
 		B3DE1ACB6973F4D78FBE0263 /* MarkdownEditorTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownEditorTabView.swift; sourceTree = "<group>"; };
@@ -390,6 +393,7 @@
 		D3CB01E518F8CD7DC085D5C0 /* TillerSkillResource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerSkillResource.swift; sourceTree = "<group>"; };
 		D804AADA29051BF13CAA1B3C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalOutputView.swift; sourceTree = "<group>"; };
+		D8F94C0E8C8E927A7EBCD147 /* FileTypeIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTypeIcon.swift; sourceTree = "<group>"; };
 		D9F089866C3D1A14A15BF512 /* WorkspaceResourceLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceResourceLifecycleTests.swift; sourceTree = "<group>"; };
 		D9F2694CADD3007D3E9A4BDB /* WorkspaceCheckpointQueueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCheckpointQueueTests.swift; sourceTree = "<group>"; };
 		D9FFD107104E9659E16F4A00 /* WorkspaceCheckpointQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCheckpointQueue.swift; sourceTree = "<group>"; };
@@ -504,7 +508,9 @@
 				0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */,
 				D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */,
 				66D18AD8984B39142C8D80EC /* FileExplorerView.swift */,
+				D8F94C0E8C8E927A7EBCD147 /* FileTypeIcon.swift */,
 				56A0B2497A79763F2B2707AD /* GitDiffView.swift */,
+				B210BD09F1D32AE168CCFF21 /* GitPanelTypes.swift */,
 				62524A82001D878B38DEDBDB /* GitStatusView.swift */,
 				754ED987A43572FB14EBB2FD /* RightPanelMode.swift */,
 				844693D2B1409A3195820CDE /* RightPanelModel.swift */,
@@ -1017,9 +1023,11 @@
 				0BD4B70930C1E4B669B26856 /* EditorTheme+Tiller.swift in Sources */,
 				C03FBAC9486C5494F80AC8EB /* EmptyWorktreeView.swift in Sources */,
 				4C26CA87D4A3CCF8C7FDE929 /* FileExplorerView.swift in Sources */,
+				350C9207BDE5E582F869F389 /* FileTypeIcon.swift in Sources */,
 				6C3B119F8CCC258257B30A09 /* ForegroundProcessAgent.swift in Sources */,
 				239F75AA5FFE783526C382CD /* GeneralSettingsView.swift in Sources */,
 				896DB6FB17EDCFBB89C1F6BC /* GitDiffView.swift in Sources */,
+				50730C1DE8B61E01FC93C012 /* GitPanelTypes.swift in Sources */,
 				3B14B1A274934BB9ED0B6343 /* GitStatusView.swift in Sources */,
 				96B92E17A1A9A34BA592F374 /* GlassStyle.swift in Sources */,
 				31213898B6E63011C844618F /* HideOnCloseWindowDelegate.swift in Sources */,
