@@ -155,6 +155,48 @@ struct ChangesListTests {
         #expect(await loadedPaths.values == ["open.swift"])
     }
 
+    @Test func refreshDropsExpansionForFilesThatLeftTheStatus() async throws {
+        let gone = try makeEntry("gone.swift")
+        let snapshots = SnapshotSequence(values: [
+            GitStatusSnapshot(entries: [gone]),
+            GitStatusSnapshot(entries: [])
+        ])
+        let model = RightPanelModel(
+            loaders: makeLoaders(status: { _ in await snapshots.next() }),
+            monitoringEnabled: false)
+        await model.activate(worktree: makeWorktree(), isGitRepository: true)
+        await model.diffStore.expand(gone, repoPath: "/tmp")
+        #expect(model.diffStore.isExpanded(gone.path))
+
+        await model.refresh()
+
+        #expect(!model.diffStore.isExpanded(gone.path))
+    }
+
+    @Test func refreshReloadsOnlyExpandedDiffs() async throws {
+        let open = try makeEntry("open.swift")
+        let closed = try makeEntry("closed.swift")
+        let loadedPaths = LoadedPaths()
+        let snapshot = GitStatusSnapshot(entries: [open, closed])
+        let model = RightPanelModel(
+            loaders: makeLoaders(
+                status: { _ in snapshot },
+                diff: { entry, _ in
+                    await loadedPaths.record(entry.path.value)
+                    return GitFileDiff(
+                        path: entry.path, lines: [], additions: 0, deletions: 0,
+                        isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+                }),
+            monitoringEnabled: false)
+        await model.activate(worktree: makeWorktree(), isGitRepository: true)
+        await model.diffStore.expand(open, repoPath: "/tmp")
+        await loadedPaths.clear()
+
+        await model.refresh()
+
+        #expect(await loadedPaths.values == ["open.swift"])
+    }
+
     @Test func diffBodySkipsMetadataLines() throws {
         let patch = """
         diff --git a/file.txt b/file.txt
@@ -206,6 +248,18 @@ actor LoadedPaths {
 
     func record(_ path: String) { values.append(path) }
     func clear() { values.removeAll() }
+}
+
+actor SnapshotSequence {
+    private var values: [GitStatusSnapshot]
+    private var index = 0
+
+    init(values: [GitStatusSnapshot]) { self.values = values }
+
+    func next() -> GitStatusSnapshot {
+        defer { index = min(index + 1, values.count - 1) }
+        return values[min(index, values.count - 1)]
+    }
 }
 
 @MainActor

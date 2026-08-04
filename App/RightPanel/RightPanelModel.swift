@@ -80,15 +80,11 @@ final class RightPanelModel {
     private(set) var statusByPath: [String: GitStatusEntry] = [:]
     private(set) var directoryStatusByPath: [String: DirectoryGitStatus] = [:]
     private(set) var diffStats: [GitPath: GitDiffStat] = [:]
-    private(set) var selectedDiffPath: GitPath?
-    private(set) var diff: GitFileDiff?
     private(set) var filesLoading = false
     private(set) var gitLoading = false
-    private(set) var diffLoading = false
     private(set) var mutationInProgress = false
     var filesError: String?
     var gitError: String?
-    var diffError: String?
     var monitorError: String?
 
     /// Not observed: the reference never changes, and views observe the store
@@ -176,15 +172,11 @@ final class RightPanelModel {
         directoryStatusByPath = [:]
         diffStats = [:]
         diffStore.reset()
-        selectedDiffPath = nil
-        diff = nil
         filesLoading = false
         gitLoading = false
-        diffLoading = false
         mutationInProgress = false
         filesError = nil
         gitError = nil
-        diffError = nil
         monitorError = nil
     }
 }
@@ -458,8 +450,6 @@ extension RightPanelModel {
                 "panelRefresh", state, message: "paths: \(changedPaths.count)")
         }
         guard token == generation, let rootURL, let worktree else { return }
-        let selectedPathBefore = selectedDiffPath
-        let selectedEntryBefore = selectedEntry
         let loadedKeys = childrenByDirectory.keys.filter { key in
             if forceAllLoadedDirectories || changedPaths.isEmpty { return true }
             let directory = key.isEmpty ? rootURL.path : rootURL.appendingPathComponent(key).path
@@ -478,55 +468,19 @@ extension RightPanelModel {
             gitError = nil
             await loadStats(token: token)
             guard token == generation else { return }
-            let selectedChanged = selectedPathBefore != selectedDiffPath
-                || selectedEntryBefore != selectedEntry
-            let selectedAffected = selectedEntry.map {
-                changedPathsAffecting($0.path, changedPaths: changedPaths, rootURL: rootURL)
-            } ?? false
-            if selectedChanged || selectedAffected, let selectedEntry {
-                await loadDiff(selectedEntry)
-                guard token == generation else { return }
-            }
+            await diffStore.reloadExpanded(
+                entries: status.entries, repoPath: worktree.path)
+            guard token == generation else { return }
         } catch {
             guard token == generation else { return }
             gitError = error.localizedDescription
         }
     }
 
-    private func changedPathsAffecting(
-        _ path: GitPath, changedPaths: [String], rootURL: URL
-    ) -> Bool {
-        let selectedPath = rootURL.appendingPathComponent(path.value).path
-        return changedPaths.contains { changed in
-            let changedPath = changed.hasPrefix("/")
-                ? URL(fileURLWithPath: changed).standardizedFileURL.path
-                : rootURL.appendingPathComponent(changed).standardizedFileURL.path
-            return selectedPath == changedPath
-                || selectedPath.hasPrefix(changedPath + "/")
-        }
-    }
 }
 
 extension RightPanelModel {
     var allChangedEntries: [GitStatusEntry] { status.entries }
-
-    var selectedEntry: GitStatusEntry? {
-        guard let selectedDiffPath else { return nil }
-        return status.entries.first { $0.path == selectedDiffPath }
-    }
-
-    func selectDiff(_ entry: GitStatusEntry) async {
-        selectedDiffPath = entry.path
-        await loadDiff(entry)
-    }
-
-    func ensureDiffLoaded() async {
-        if let selectedEntry {
-            if diff?.path != selectedEntry.path { await loadDiff(selectedEntry) }
-        } else if let first = status.entries.first {
-            await selectDiff(first)
-        }
-    }
 
     func stage(_ entries: [GitStatusEntry]) async {
         await mutate { try await GitActions.stage(entries, in: $0) }
@@ -550,31 +504,7 @@ extension RightPanelModel {
             snapshot.entries.map { ($0.path.value, $0) },
             uniquingKeysWith: { first, _ in first })
         directoryStatusByPath = DirectoryStatusAggregator.directoryStatuses(from: statusByPath)
-        if let selectedDiffPath,
-           snapshot.entries.contains(where: { $0.path == selectedDiffPath }) {
-            return
-        }
-        selectedDiffPath = snapshot.entries.first?.path
-        diff = nil
-        diffError = nil
-    }
-
-    private func loadDiff(_ entry: GitStatusEntry) async {
-        guard let worktree else { return }
-        let token = generation
-        let diffLoader = loaders.diff
-        diffLoading = true
-        defer { if token == generation { diffLoading = false } }
-        do {
-            let loaded = try await diffLoader(entry, worktree.path)
-            guard token == generation, selectedDiffPath == entry.path else { return }
-            diff = loaded
-            diffError = nil
-        } catch {
-            guard token == generation, selectedDiffPath == entry.path else { return }
-            diff = nil
-            diffError = error.localizedDescription
-        }
+        diffStore.prune(to: Set(snapshot.entries.map(\.path)))
     }
 
     /// Counts are a nicety: a failure hides the numbers and leaves the list

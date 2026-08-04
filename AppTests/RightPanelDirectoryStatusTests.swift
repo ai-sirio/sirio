@@ -179,20 +179,20 @@ struct RightPanelDirectoryStatusTests {
         #expect(model.status.entries.first?.path.value == "new/file.swift")
     }
 
-    @Test func unrelatedChangesDoNotReloadSelectedDiff() async throws {
+    @Test func unrelatedChangesReloadExpandedDiff() async throws {
         let selected = try makeEntry("src/file.swift")
         let probe = RightPanelProbe(
             snapshots: [GitStatusSnapshot(entries: [selected]), GitStatusSnapshot(entries: [selected])])
         let model = makeModel(probe: probe)
         await model.activate(worktree: makeWorktree(), isGitRepository: true)
-        await model.selectDiff(selected)
+        await model.diffStore.expand(selected, repoPath: "/tmp/right-panel-phase6")
         await probe.resetRecordedCalls()
 
         await model.refresh(
             changedPaths: [absolute("docs/readme.md")],
             forceAllLoadedDirectories: false)
 
-        #expect(await probe.diffCallCount == 0)
+        #expect(await probe.diffCallCount == 1)
     }
 
     @Test func selectedFileChangeReloadsItsDiff() async throws {
@@ -201,7 +201,7 @@ struct RightPanelDirectoryStatusTests {
             snapshots: [GitStatusSnapshot(entries: [selected]), GitStatusSnapshot(entries: [selected])])
         let model = makeModel(probe: probe)
         await model.activate(worktree: makeWorktree(), isGitRepository: true)
-        await model.selectDiff(selected)
+        await model.diffStore.expand(selected, repoPath: "/tmp/right-panel-phase6")
         await probe.resetRecordedCalls()
 
         await model.refresh(
@@ -218,7 +218,7 @@ struct RightPanelDirectoryStatusTests {
             snapshots: [GitStatusSnapshot(entries: [initial]), GitStatusSnapshot(entries: [updated])])
         let model = makeModel(probe: probe)
         await model.activate(worktree: makeWorktree(), isGitRepository: true)
-        await model.selectDiff(initial)
+        await model.diffStore.expand(initial, repoPath: "/tmp/right-panel-phase6")
         await probe.resetRecordedCalls()
 
         await model.refresh(
@@ -228,7 +228,7 @@ struct RightPanelDirectoryStatusTests {
         #expect(await probe.diffCallCount == 1)
     }
 
-    @Test func changingSelectedFileDuringRefreshReloadsNewDiff() async throws {
+    @Test func expandingAnotherFileDuringRefreshReloadsBothDiffs() async throws {
         let first = try makeEntry("src/first.swift")
         let second = try makeEntry("src/second.swift")
         let probe = RightPanelProbe(
@@ -236,7 +236,7 @@ struct RightPanelDirectoryStatusTests {
             blockingStatusCall: 2)
         let model = makeModel(probe: probe)
         await model.activate(worktree: makeWorktree(), isGitRepository: true)
-        await model.selectDiff(first)
+        await model.diffStore.expand(first, repoPath: "/tmp/right-panel-phase6")
         await probe.resetRecordedCalls()
 
         let refreshTask = Task { @MainActor in
@@ -245,12 +245,12 @@ struct RightPanelDirectoryStatusTests {
                 forceAllLoadedDirectories: false)
         }
         await probe.waitForStatusCall(2)
-        await model.selectDiff(second)
+        await model.diffStore.expand(second, repoPath: "/tmp/right-panel-phase6")
         await probe.releaseStatusCall(2)
         await refreshTask.value
 
-        #expect(await probe.diffCallCount == 2)
-        #expect(model.selectedDiffPath == second.path)
+        #expect(await probe.diffCallCount == 3)
+        #expect(model.diffStore.isExpanded(second.path))
     }
 
     private func makeModel(probe: RightPanelProbe) -> RightPanelModel {
