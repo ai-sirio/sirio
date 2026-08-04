@@ -39,6 +39,26 @@ struct WorkspaceReconcilerTests {
     }
 
     @Test
+    func closingActiveTabDetachesViewEvenWhenHostWasReleased() throws {
+        let tab = makeTab()
+        let group = PaneGroup(id: PaneGroupID(), tabs: [tab], activeTabID: tab.id)
+        let layout = makeLayout(root: .group(group.id), groups: [group], activeGroupID: group.id)
+        let provider = FakeHostProvider(hosts: [tab.id: FakeContentHost(tabID: tab.id)])
+        let reconciler = WorkspaceReconciler(hostProvider: provider)
+
+        reconciler.reconcile(to: layout, delta: nil)
+        let mountedView = provider.hosts[tab.id]!.viewController.view
+        #expect(mountedView.superview != nil)
+
+        provider.hosts = [:]
+        let emptyGroup = PaneGroup(id: group.id, tabs: [], activeTabID: nil)
+        let layoutAfterClose = makeLayout(root: .group(group.id), groups: [emptyGroup], activeGroupID: group.id)
+        reconciler.reconcile(to: layoutAfterClose, delta: WorkspaceLayoutDelta(removedTabs: [tab.id]))
+
+        #expect(mountedView.superview == nil)
+    }
+
+    @Test
     func exactlyOneHostIsMountedPerVisibleGroup() {
         let groups = (0..<4).map { _ in
             PaneGroup(id: PaneGroupID(), tabs: [makeTab(), makeTab(), makeTab()], activeTabID: nil)
