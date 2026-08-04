@@ -258,7 +258,8 @@ struct RightPanelDirectoryStatusTests {
             loaders: .init(
                 directory: { key, _ in await probe.loadDirectory(key) },
                 status: { _ in await probe.loadStatus() },
-                diff: { entry, _ in try await probe.loadDiff(entry) }),
+                diff: { entry, _ in try await probe.loadDiff(entry) },
+                stats: { _, _ in [:] }),
             monitoringEnabled: false)
     }
 
