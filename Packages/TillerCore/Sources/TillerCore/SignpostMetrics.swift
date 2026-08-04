@@ -32,4 +32,16 @@ public enum SignpostMetrics {
     public static func makeSignpostID() -> OSSignpostID {
         signposter.makeSignpostID()
     }
+
+    /// A layout measurement, formatted for a signpost message.
+    ///
+    /// SwiftUI proposes unbounded widths during layout, and `Int(_:)` traps on
+    /// infinity, NaN, or any value past `Int`'s range. Instrumentation must
+    /// never be able to kill the process it is measuring.
+    public static func lengthLabel(_ value: CGFloat) -> String {
+        guard value.isFinite,
+              value >= CGFloat(Int.min),
+              value <= CGFloat(Int.max) else { return "unbounded" }
+        return String(Int(value))
+    }
 }
