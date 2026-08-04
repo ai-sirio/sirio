@@ -67,7 +67,7 @@ struct SplitContentMenuModel: Equatable {
         let eligibility = SplitEligibility.check(
             groupSize: groupSize,
             placement: placement,
-            isSoleTabOfSourceGroup: activeGroup?.tabs.count == 1)
+            isSplittingItsOwnSoleGroup: activeGroup?.tabs.count == 1)
         let splitEnabled: Bool
         let splitReason: String?
         switch eligibility {
