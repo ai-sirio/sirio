@@ -110,10 +110,16 @@ public enum AppSettings {
     public static let rightPanelModeKey = "rightPanel.mode"
 
     public static let defaultRightPanelVisible = false
-    public static let defaultRightPanelWidth = 360.0
-    public static let rightPanelWidthRange: ClosedRange<Double> = 280...600
+    public static let defaultRightPanelWidth = 320.0
+    public static let rightPanelWidthRange: ClosedRange<Double> = 240...400
 
     public static func clampRightPanelWidth(_ width: Double) -> Double {
         min(max(width, rightPanelWidthRange.lowerBound), rightPanelWidthRange.upperBound)
+    }
+
+    public static let defaultSidebarWidth = 260.0
+    public static let sidebarWidthRange: ClosedRange<Double> = 240...320
+    public static func clampSidebarWidth(_ width: Double) -> Double {
+        min(max(width, sidebarWidthRange.lowerBound), sidebarWidthRange.upperBound)
     }
 }
