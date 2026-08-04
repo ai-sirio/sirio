@@ -60,10 +60,9 @@ struct RightPanelView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Picker("Worktree tools", selection: selectedMode) {
-                    ForEach(RightPanelMode.allCases) { mode in
+                    ForEach(RightPanelMode.available(isGitRepository: isGitRepository)) { mode in
                         Label(mode.title, systemImage: mode.systemImage)
                             .tag(mode)
-                            .disabled(mode.requiresGit && !isGitRepository)
                     }
                 }
                 .pickerStyle(.segmented)
