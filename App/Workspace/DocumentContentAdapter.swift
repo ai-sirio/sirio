@@ -74,8 +74,15 @@ final class DocumentContentAdapter: WorkspaceContentAdapter {
             details[tab.id] = .missing
             return WorkspaceContentHostAdapter(tabID: tab.id, viewController: NSViewController())
         }
+        let hostingController = NSHostingController(rootView: rootView)
+        // A live NSSplitView divider drag calls setFrameSize synchronously many
+        // times per second; SwiftUI's own layout pass can't always keep up, and
+        // CoreAnimation then presents a blank intermediate layer. Synchronous
+        // drawing avoids that gap.
+        hostingController.view.wantsLayer = true
+        hostingController.view.layer?.drawsAsynchronously = false
         return WorkspaceContentHostAdapter(
-            tabID: tab.id, viewController: NSHostingController(rootView: rootView))
+            tabID: tab.id, viewController: hostingController)
     }
 
     /// Saves the tab's document, if it has unsaved changes. No-op for tabs
