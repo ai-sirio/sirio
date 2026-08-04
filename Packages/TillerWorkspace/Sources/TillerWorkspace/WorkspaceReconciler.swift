@@ -223,6 +223,14 @@ private final class WorkspaceRootController: NSViewController {
     override func loadView() { view = NSView() }
 
     func setContent(_ child: NSViewController) {
+        // Reinstalling the child that is already installed would take the whole
+        // pane tree out of the window and put it back — a focus loss for every
+        // terminal in it, on every reconcile.
+        if children.count == 1, children[0] === child,
+           child.viewIfLoaded?.superview === view {
+            return
+        }
+
         children.forEach { $0.removeFromParent() }
         view.subviews.forEach { $0.removeFromSuperview() }
         child.removeFromParent()

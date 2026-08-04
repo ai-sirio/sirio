@@ -18,6 +18,18 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
     /// that only exists once the surface mints it. Assigned by AppModel.
     var resumeCommandProvider: (@Sendable (TerminalContentID, Worktree, UUID) -> String?)?
 
+    /// Announces a freshly prepared agent terminal, before its tab reaches the
+    /// layout. AppModel parks the launch under this content id and builds the
+    /// real command from `resumeCommandProvider` once the surface mints a pane
+    /// id — the agent's hooks report under that id, so it cannot be known any
+    /// earlier. Registering here, not after `requestNewTab` returns, keeps the
+    /// launch ahead of a render that may create the surface first.
+    var onAgentTerminalPrepared: ((TerminalContentID, String) -> Void)?
+
+    /// An agent id's human label, for the tab title. Assigned by AppModel,
+    /// which owns the agent catalog.
+    var agentDisplayName: ((String) -> String)?
+
     init(boundary: AdapterBoundary = AdapterBoundary()) { self.boundary = boundary }
 
     func prepare(request: ContentRequest, worktree: Worktree) async throws -> PreparedContent {
@@ -31,6 +43,10 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
             throw ContentAdapterError.unsupportedRequest
         }
         let tab = makeTab(request: request)
+        if case .agentTerminal(let agentID) = request,
+           case .terminal(let contentID) = tab.content {
+            onAgentTerminalPrepared?(contentID, agentID)
+        }
         let token = AdapterRuntimeToken(
             tabID: tab.id, contentID: tab.content.contentIdentifierString,
             generationID: ResourceGenerationID(), command: command)
@@ -138,7 +154,7 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
         let title: String
         switch request {
         case .newTerminal: title = "Terminal"
-        case .agentTerminal(let agentID): title = agentID
+        case .agentTerminal(let agentID): title = agentDisplayName?(agentID) ?? agentID
         default: title = "Terminal"
         }
         return WorkspaceTab(id: tabID, title: title, titleIsAutoNamed: true,

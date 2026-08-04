@@ -128,6 +128,17 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         return layout.orderedGroupIDs.first
     }
 
+    /// The group a new tab can be inserted into, restoring the worktree first
+    /// if the coordinator has never seen it. Only bootstrap calls `restore`,
+    /// so a worktree added during the session has no layout — and every
+    /// creation route that stopped at `activeOrFirstGroup` returning nil
+    /// looked, from the outside, like nothing happened at all.
+    func ensureGroup(for worktree: Worktree) async -> PaneGroupID? {
+        if let group = activeOrFirstGroup(for: worktree.id) { return group }
+        await restore(worktree: worktree)
+        return activeOrFirstGroup(for: worktree.id)
+    }
+
     func terminalContentID(for tabID: WorkspaceTabID, in worktreeID: UUID)
         -> TerminalContentID? {
         guard let tab = layouts[worktreeID]?.tab(tabID),

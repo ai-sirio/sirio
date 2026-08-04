@@ -296,6 +296,14 @@ final class AppModel {
                     self?.resumeCommand(contentID: contentID, worktree: worktree, paneId: paneId)
                 }
             }
+        (self.workspaceCoordinator.adapters[.terminal] as? TerminalContentAdapter)?
+            .onAgentTerminalPrepared = { [weak self] contentID, agentId in
+                self?.pendingAgentLaunch[contentID] = agentId
+            }
+        (self.workspaceCoordinator.adapters[.terminal] as? TerminalContentAdapter)?
+            .agentDisplayName = { agentId in
+                AgentCatalog.all.first { $0.id == agentId }?.displayName ?? agentId
+            }
         chatAdapter?.resolveTitle = { [weak self] contentID in
             let stored = self?.chatSession(id: contentID.rawValue)?.title?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -581,8 +589,8 @@ final class AppModel {
             }
             return await serializeControlLifecycle(for: worktree.id) {
                 if WorkspaceEngineGate.isEnabled {
-                    guard let group = self.workspaceCoordinator.activeOrFirstGroup(
-                        for: worktree.id) else {
+                    guard let group = await self.workspaceCoordinator.ensureGroup(
+                        for: worktree) else {
                         return .failure(id: request.id, error: "workspace layout unavailable")
                     }
                     let mountLease = self.acquireControlMount(for: worktree.id)
@@ -1268,19 +1276,36 @@ final class AppModel {
     }
 
     func activeTab(for worktreeId: UUID) -> LegacyWorkspaceTab? {
-        let list = workspaceCoordinator.legacyTabs(for: worktreeId)
+        let list = workspaceTabs(for: worktreeId)
         guard !list.isEmpty else { return nil }
         return list.first {
-            $0.id == workspaceCoordinator.legacyActiveTabID(for: worktreeId)
+            $0.id == workspaceActiveTabID(for: worktreeId)
         } ?? list.first
     }
 
     func workspaceTabs(for worktreeID: UUID) -> [LegacyWorkspaceTab] {
-        workspaceCoordinator.legacyTabs(for: worktreeID)
+        guard WorkspaceEngineGate.isEnabled,
+              let layout = workspaceCoordinator.layouts[worktreeID] else {
+            return workspaceCoordinator.legacyTabs(for: worktreeID)
+        }
+        return SidebarTabProjection.rows(
+            layout: layout,
+            livePaneID: { [weak self] contentID in
+                self?.workspaceCoordinator.liveControlPaneId(
+                    contentID: contentID, in: worktreeID)
+            },
+            chatAgentID: { [weak self] contentID in
+                self?.chatSession(id: contentID.rawValue)
+                    .map { AgentIdMigration.canonical($0.agentId) }
+            })
     }
 
     func workspaceActiveTabID(for worktreeID: UUID) -> UUID? {
-        workspaceCoordinator.legacyActiveTabID(for: worktreeID)
+        guard WorkspaceEngineGate.isEnabled,
+              let layout = workspaceCoordinator.layouts[worktreeID] else {
+            return workspaceCoordinator.legacyActiveTabID(for: worktreeID)
+        }
+        return layout.group(layout.activeGroupID)?.activeTabID?.rawValue
     }
 
     /// Apre una nuova tab con un singolo pane e la attiva. Punto unico usato
@@ -1301,10 +1326,14 @@ final class AppModel {
 
     func newShellTab(in worktree: Worktree) {
         if WorkspaceEngineGate.isEnabled {
-            guard let groupID = workspaceCoordinator.activeOrFirstGroup(for: worktree.id) else {
-                return
-            }
+            // Selecting first: the sidebar's context menu can target a
+            // worktree that is not on screen, and a tab nobody switches to
+            // reads as "the menu did nothing".
+            selectedWorktree = worktree
             Task {
+                guard let groupID = await workspaceCoordinator.ensureGroup(for: worktree) else {
+                    return
+                }
                 await workspaceCoordinator.handle(
                     .requestNewTab(into: groupID), in: worktree)
             }
@@ -2082,12 +2111,12 @@ final class AppModel {
         rememberChatAgent(agentId)
         if WorkspaceEngineGate.isEnabled {
             selectedWorktree = worktree
-            guard let group = workspaceCoordinator.activeOrFirstGroup(for: worktree.id) else {
-                return nil
-            }
             // The session row (and therefore the tab's identity) is minted by
             // ChatContentAdapter.makeSession during preparation.
             Task {
+                guard let group = await workspaceCoordinator.ensureGroup(for: worktree) else {
+                    return
+                }
                 await workspaceCoordinator.requestNewTab(
                     into: group, choice: .newChat(agentID: agentId), in: worktree)
             }
@@ -2464,6 +2493,11 @@ final class AppModel {
     /// shell, keyed by the identity that survives relaunch.
     private var pendingAgentResume: [TerminalContentID: AgentSessionRef] = [:]
 
+    /// Terminals whose next spawn should launch a fresh agent CLI. Same shape
+    /// as a parked resume and for the same reason: the agent's hook config
+    /// embeds the pane id, which only exists once the surface mints one.
+    private var pendingAgentLaunch: [TerminalContentID: String] = [:]
+
     /// Completes a parked resume once the pane id exists: writes the agent's
     /// hook config for that pane and returns the command that resumes it.
     /// Consumed once — a relaunch of the same terminal starts a fresh shell
@@ -2471,8 +2505,39 @@ final class AppModel {
     private func resumeCommand(
         contentID: TerminalContentID, worktree: Worktree, paneId: UUID
     ) -> String? {
-        guard let ref = pendingAgentResume.removeValue(forKey: contentID) else { return nil }
-        return resumeCommand(ref: ref, worktree: worktree, paneId: paneId)
+        if let ref = pendingAgentResume.removeValue(forKey: contentID) {
+            return resumeCommand(ref: ref, worktree: worktree, paneId: paneId)
+        }
+        guard let agentId = pendingAgentLaunch.removeValue(forKey: contentID) else { return nil }
+        return launchCommand(agentId: agentId, worktree: worktree, paneId: paneId)
+    }
+
+    /// Builds a fresh agent launch for a pane the surface has just minted:
+    /// writes the worktree-local hook config, records the command, and starts
+    /// the activity/exit bookkeeping the badges read.
+    private func launchCommand(agentId: String, worktree: Worktree, paneId: UUID) -> String? {
+        guard let adapter = AgentCatalog.all.first(where: { $0.id == agentId }) else { return nil }
+        let hc = tillerctlPath()
+        do {
+            try adapter.prepare(
+                worktreePath: worktree.path,
+                paneId: paneId,
+                tillerctlPath: hc,
+                skillMarkdown: try TillerSkillResource.markdown.get()
+            )
+        } catch {
+            lastError = "Spawn \(adapter.displayName) failed: \(error)"
+            return nil
+        }
+        var command = adapter.command(
+            worktreePath: worktree.path, paneId: paneId, tillerctlPath: hc)
+        if let override = configDirOverride(forAgentId: adapter.id) {
+            command = "\(override.envKey)=\(Self.shellQuote(override.path)) \(command)"
+        }
+        paneCommands[paneId] = command
+        agentActivity.agentSpawned(paneId: paneId, agentId: adapter.id, now: Date())
+        watchExit(paneId: paneId)
+        return command
     }
 
     private func resumeCommand(
@@ -2505,14 +2570,18 @@ final class AppModel {
     }
 
     func spawnAgent(_ adapter: any AgentAdapter, in worktree: Worktree) async {
-        // Kept on the legacy tab path regardless of the engine gate:
-        // TerminalContentAdapter's .agentTerminal(agentID:) only tags a plain
-        // shell tab with the agent's name — it never calls
-        // AgentAdapter.prepare/command or wires paneCommands/agentActivity, so
-        // routing through the universal engine here would silently spawn an
-        // agent-less shell instead of the agent CLI. Wiring that through the
-        // content-adapter/host pipeline is its own task, not part of this fix.
         Task { await notifier.ensureAuthorization() }
+        if WorkspaceEngineGate.isEnabled {
+            // The launch itself is parked by the terminal adapter's
+            // onAgentTerminalPrepared hook and completed once the surface
+            // mints a pane id: prepare/command need that id, and on this path
+            // it does not exist until the tab is rendered.
+            selectedWorktree = worktree
+            guard let group = await workspaceCoordinator.ensureGroup(for: worktree) else { return }
+            await workspaceCoordinator.requestNewTab(
+                into: group, choice: .agentTerminal(agentID: adapter.id), in: worktree)
+            return
+        }
         do {
             let hc = tillerctlPath()
             let paneId = UUID()

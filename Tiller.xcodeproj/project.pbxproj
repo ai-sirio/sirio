@@ -128,6 +128,7 @@
 		87FF0CFBD55268ED0ADA4770 /* UniversalChatFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A920FB57F5E592E941A80135 /* UniversalChatFixture.swift */; };
 		8A1083A5E14CD5C7AD36AA79 /* FileDiffBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03C57CFA628F44D68B6DBA19 /* FileDiffBody.swift */; };
 		8A4A2707324A17F3BE027B92 /* ChatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5309B32D170F4FF73CE6BE24 /* ChatCard.swift */; };
+		8AA361A924BD1CFC83A30CC1 /* SidebarTabProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64C1658F860ED743A9F6CFC /* SidebarTabProjection.swift */; };
 		8D9D1C05D835E0BA7A7B0D14 /* TabBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80DC2F061B4A286C7ADF990F /* TabBarView.swift */; };
 		8E5D8ACB74A4F8DB576AB990 /* SummarizerSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 829705C11FEAE19AF6E58E77 /* SummarizerSelection.swift */; };
 		8ECABD13D02543070A0AD0F9 /* MenuBarStatusIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED264D1B3306C90BC890ECE /* MenuBarStatusIcon.swift */; };
@@ -209,6 +210,7 @@
 		EE95BCE4291756DF14F7C993 /* ComposerDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81756ED657FF327299FA133E /* ComposerDocumentTests.swift */; };
 		EE9CB8AB856EAAF50F6784F3 /* ChatStreamFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF220F5964A9EC73D5E56484 /* ChatStreamFixture.swift */; };
 		EF9FAEDD510D9448C5B9EF49 /* ChatTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081A763ACD4658E3107C248C /* ChatTextEditor.swift */; };
+		F2C552423566C7290017B489 /* SidebarEngineParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16B323027542BA38D5D5DB6B /* SidebarEngineParityTests.swift */; };
 		F443351C43D1A5F28DBB7E91 /* SKILL.md in Resources */ = {isa = PBXBuildFile; fileRef = ED802856C38F484D5CC6D6C6 /* SKILL.md */; };
 		F58EDD6213BE3AA8EF5359E0 /* OpenCodeGoUsageFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089712CC679CF6D60EAEF02A /* OpenCodeGoUsageFetcher.swift */; };
 		F6AD882DD7A4C16F04FB30A3 /* TillerWorkspace in Frameworks */ = {isa = PBXBuildFile; productRef = D611F155987DE8B06DE6CAB8 /* TillerWorkspace */; };
@@ -251,6 +253,7 @@
 		0D8A9258F770814E2207A7E1 /* CodeHighlighterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlighterTests.swift; sourceTree = "<group>"; };
 		150990AF30F26D11CD77AD24 /* PermissionsOnboardingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsOnboardingSheet.swift; sourceTree = "<group>"; };
 		151A96CDE3F828AEDD1094D9 /* nested-split.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "nested-split.json"; sourceTree = "<group>"; };
+		16B323027542BA38D5D5DB6B /* SidebarEngineParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarEngineParityTests.swift; sourceTree = "<group>"; };
 		1BC79D907740805481818B7D /* FakeWorkspacePersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeWorkspacePersistence.swift; sourceTree = "<group>"; };
 		1BE1AC17EADF4CD667F5B721 /* DividerCursorStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DividerCursorStrip.swift; sourceTree = "<group>"; };
 		1FE0F25AF11FFCF1C640CB80 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -418,6 +421,7 @@
 		E43846C31F68C86DF209FA20 /* empty.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = empty.json; sourceTree = "<group>"; };
 		E5C26563F4760C9F22B2AF31 /* TranscriptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptView.swift; sourceTree = "<group>"; };
 		E5CFF13A5A9E0340964D2171 /* GlassStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassStyle.swift; sourceTree = "<group>"; };
+		E64C1658F860ED743A9F6CFC /* SidebarTabProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarTabProjection.swift; sourceTree = "<group>"; };
 		E75C88B95B0A66ECC447B04F /* ChatTextEditorSlashTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTextEditorSlashTests.swift; sourceTree = "<group>"; };
 		E78AB8A516CF2F33D8CAFF4E /* TillerMarkdownTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerMarkdownTheme.swift; sourceTree = "<group>"; };
 		E7C527C8AC93385A92EB8002 /* SlashCommandSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandSelectionTests.swift; sourceTree = "<group>"; };
@@ -685,6 +689,7 @@
 				A7FBBDB62EF95306888EA950 /* ChatContentAdapter.swift */,
 				96531962D46C0E179912D99D /* DocumentContentAdapter.swift */,
 				30EEB69355DE18720F5DE1D9 /* LegacyWorkspaceStore.swift */,
+				E64C1658F860ED743A9F6CFC /* SidebarTabProjection.swift */,
 				4754F38C4D2FACDC47D74C1A /* SplitContentMenu.swift */,
 				F67821CF41F860369657183B /* SQLiteWorkspacePersistence.swift */,
 				EA0DA0110A1318FD9FB97B57 /* TerminalContentAdapter.swift */,
@@ -756,6 +761,7 @@
 				23CE84CAAD5C3995436C6CB7 /* AppModelFacadeTests.swift */,
 				D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */,
 				1BC79D907740805481818B7D /* FakeWorkspacePersistence.swift */,
+				16B323027542BA38D5D5DB6B /* SidebarEngineParityTests.swift */,
 				0827B3A31C9FB0EDA486EFA6 /* SplitContentMenuTests.swift */,
 				411AB5ECF79B23F45889AA5C /* SQLiteWorkspacePersistenceTests.swift */,
 				A920FB57F5E592E941A80135 /* UniversalChatFixture.swift */,
@@ -1076,6 +1082,7 @@
 				1953178B207AF54C263C9116 /* SQLiteWorkspacePersistence.swift in Sources */,
 				019D3540F6FCBC157AC2208A /* SettingsSurface.swift in Sources */,
 				778067675E9E63867EB07193 /* SidebarMaterialContainer.swift in Sources */,
+				8AA361A924BD1CFC83A30CC1 /* SidebarTabProjection.swift in Sources */,
 				81FDA9F633A3A9B4B05FACBA /* SidebarView.swift in Sources */,
 				71D3778396F3D2C1A933DA72 /* SlashCommandSelection.swift in Sources */,
 				6A50CF0356E4EB5585ED1D74 /* SplitContentMenu.swift in Sources */,
@@ -1161,6 +1168,7 @@
 				153AF8225BF7E8493C6014ED /* RightPanelFixture.swift in Sources */,
 				050DD729DA6D995C7E044D2F /* RightPanelPrefetchTests.swift in Sources */,
 				CE40B618334CCFB47BDF0B71 /* SQLiteWorkspacePersistenceTests.swift in Sources */,
+				F2C552423566C7290017B489 /* SidebarEngineParityTests.swift in Sources */,
 				63EAF339EA1D5FB645774912 /* SlashCommandSelectionTests.swift in Sources */,
 				2558008776CB5A2FE435C3AD /* SplitContentMenuTests.swift in Sources */,
 				5D01DF589E56A829C5EC12C8 /* StreamingTextBufferTests.swift in Sources */,

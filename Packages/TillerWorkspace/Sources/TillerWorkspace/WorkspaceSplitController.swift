@@ -71,9 +71,25 @@ public final class WorkspaceSplitController: NSSplitViewController {
         first: NSViewController,
         second: NSViewController
     ) {
+        // Rebuilding the items detaches both panes from the window, which is
+        // how a terminal loses its surface focus mid divider drag. Nothing but
+        // the fraction changes on most reconciles, so keep the children in
+        // place and re-apply the position only when it actually moved.
+        let keepsChildren = axis == self.axis
+            && splitViewItems.count == 2
+            && splitViewItems[0].viewController === first
+            && splitViewItems[1].viewController === second
+        let fractionMoved = preferredFraction != self.preferredFraction
+
         self.axis = axis
         self.preferredFraction = preferredFraction
         accessibilityDivider = nil
+
+        if keepsChildren {
+            if fractionMoved { didApplyInitialPosition = false }
+            return
+        }
+
         didApplyInitialPosition = false
         removeAllChildren()
         add(first, minimumThickness: minimumThickness(for: axis))
