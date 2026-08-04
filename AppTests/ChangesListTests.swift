@@ -8,6 +8,12 @@ import TillerCore
 @Suite("ChangesList")
 @MainActor
 struct ChangesListTests {
+    @Test func savedDiffModeMigratesToStatus() {
+        #expect(RightPanelMode.effective(rawValue: "diff", isGitRepository: true) == .status)
+        #expect(RightPanelMode.effective(rawValue: "diff", isGitRepository: false) == .files)
+        #expect(RightPanelMode.allCases.count == 2)
+    }
+
     @Test func refreshPopulatesDiffStats() async throws {
         let entry = try makeEntry("a.swift")
         let model = RightPanelModel(
