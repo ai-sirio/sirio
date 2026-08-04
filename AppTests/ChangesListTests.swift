@@ -164,6 +164,23 @@ struct ChangesListTests {
         #expect(FileDiffBody.renderableLines(of: diff).allSatisfy { $0.kind != .metadata })
         #expect(FileDiffBody.renderableLines(of: diff).contains { $0.kind == .hunk })
     }
+
+    @Test func countLabelShowsSignedAdditionsAndDeletions() {
+        #expect(ChangedFileCounts.label(
+            for: GitDiffStat(additions: 24, deletions: 7, isBinary: false)) == "−7 +24")
+        #expect(ChangedFileCounts.label(
+            for: GitDiffStat(additions: 26, deletions: 0, isBinary: false)) == "+26")
+        #expect(ChangedFileCounts.label(
+            for: GitDiffStat(additions: 0, deletions: 3, isBinary: false)) == "−3")
+    }
+
+    @Test func countLabelReportsBinaryAndMissingStats() {
+        #expect(ChangedFileCounts.label(
+            for: GitDiffStat(additions: 0, deletions: 0, isBinary: true)) == "bin")
+        #expect(ChangedFileCounts.label(for: nil) == nil)
+        #expect(ChangedFileCounts.label(
+            for: GitDiffStat(additions: 0, deletions: 0, isBinary: false)) == nil)
+    }
 }
 
 enum ChangesListTestFailure: Error { case boom }

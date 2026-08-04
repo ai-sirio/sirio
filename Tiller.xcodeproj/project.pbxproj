@@ -60,6 +60,7 @@
 		3E0C7F3C743B17D97F55B798 /* AcpAgentCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE4EAE5FC325A0ED79995A1 /* AcpAgentCenter.swift */; };
 		3FAAE9B86EB4A5E9070737C2 /* AutoRenameWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */; };
 		3FCBCCC78EECEFD8DB8379D9 /* RowReorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC09CBEB3675C8DB62CD694B /* RowReorder.swift */; };
+		402D8BD4EEF63D052F385475 /* ChangedFileRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ADF81B45EE2D658E0500C1C /* ChangedFileRow.swift */; };
 		427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DCD6339C795A9A8572D9994 /* ComposerTextKit2Tests.swift */; };
 		43DAE27D1CFFC7E6CFE202B5 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = AEBE46F4501BDA0084835FD4 /* MarkdownUI */; };
 		44D002186AD3C17D9452C4FD /* AppModelControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 516A0EC113C050943267DA86 /* AppModelControlTests.swift */; };
@@ -345,6 +346,7 @@
 		96531962D46C0E179912D99D /* DocumentContentAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentContentAdapter.swift; sourceTree = "<group>"; };
 		97285D78A3AC7770BF2290DE /* mixed-tabs.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "mixed-tabs.json"; sourceTree = "<group>"; };
 		9A4F40CB425225370C05E048 /* TillerTerminal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerTerminal; path = Packages/TillerTerminal; sourceTree = SOURCE_ROOT; };
+		9ADF81B45EE2D658E0500C1C /* ChangedFileRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChangedFileRow.swift; sourceTree = "<group>"; };
 		9B5A41F673927F0554385559 /* TillerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerApp.swift; sourceTree = "<group>"; };
 		9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTabMenuItems.swift; sourceTree = "<group>"; };
 		9D233B788F9A2E9FBBEBA323 /* WorkspaceHostAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceHostAdapters.swift; sourceTree = "<group>"; };
@@ -508,6 +510,7 @@
 			children = (
 				BA9A53AFFA17AAC600C15585 /* AgentsPanelModel.swift */,
 				0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */,
+				9ADF81B45EE2D658E0500C1C /* ChangedFileRow.swift */,
 				D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */,
 				03C57CFA628F44D68B6DBA19 /* FileDiffBody.swift */,
 				66D18AD8984B39142C8D80EC /* FileExplorerView.swift */,
@@ -999,6 +1002,7 @@
 				71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */,
 				4DEEA0FA5F26940EB3266EE4 /* AttributedCodeRenderer.swift in Sources */,
 				A5FE4417E2CE7408481A645C /* AutoNamer.swift in Sources */,
+				402D8BD4EEF63D052F385475 /* ChangedFileRow.swift in Sources */,
 				8A4A2707324A17F3BE027B92 /* ChatCard.swift in Sources */,
 				70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */,
 				66D9243C99772AF84C5D2838 /* ChatContentAdapter.swift in Sources */,
