@@ -1,26 +1,6 @@
 import SwiftUI
 import TillerGit
 
-struct PendingGitDiscard: Identifiable {
-    enum Kind: Equatable { case changes, untracked }
-
-    let id = UUID()
-    let kind: Kind
-    let entries: [GitStatusEntry]
-
-    var title: String {
-        entries.count == 1
-            ? "Discard \(entries[0].path.value)?"
-            : "Discard \(entries.count) files?"
-    }
-
-    var message: String {
-        kind == .untracked
-            ? "Untracked files will be permanently deleted."
-            : "Unstaged changes will be restored from the Git index."
-    }
-}
-
 struct GitStatusView: View {
     private enum SectionKind: Equatable { case staged, changes, untracked }
 
@@ -131,9 +111,9 @@ struct GitStatusView: View {
 
     private func statusRow(_ entry: GitStatusEntry, section: SectionKind) -> some View {
         HStack(spacing: 7) {
-            Text(symbol(entry))
+            Text(GitStatusStyle.symbol(entry))
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundStyle(color(entry))
+                .foregroundStyle(GitStatusStyle.color(entry))
                 .frame(width: 14)
             Text(entry.path.value)
                 .font(.system(size: 12))
@@ -179,19 +159,4 @@ struct GitStatusView: View {
         .help(entry.isConflicted ? "Conflicted" : entry.path.value)
     }
 
-    private func symbol(_ entry: GitStatusEntry) -> String {
-        if entry.isConflicted { return "U" }
-        if entry.isUntracked { return "?" }
-        if entry.indexState == .added { return "A" }
-        if entry.indexState == .deleted || entry.worktreeState == .deleted { return "D" }
-        if entry.indexState == .renamed || entry.worktreeState == .renamed { return "R" }
-        return "M"
-    }
-
-    private func color(_ entry: GitStatusEntry) -> Color {
-        if entry.isConflicted { return AppTheme.gitConflict }
-        if entry.isUntracked { return AppTheme.gitUntracked }
-        if entry.isStaged { return AppTheme.gitStaged }
-        return AppTheme.gitModified
-    }
 }
