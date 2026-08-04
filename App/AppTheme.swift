@@ -4,32 +4,52 @@ import AppKit
 import TillerCore
 
 /// Shared color tokens for Tiller's chrome, adaptive to the effective
-/// appearance (dark values are the original palette; light is a hand-tuned
-/// cool-gray mirror with a subtle indigo tint). `background` is the opaque
-/// main-pane and terminal surface, and it tints the native sidebar material
-/// through `SidebarMaterialContainer`. The remaining tokens style sidebar
-/// rows, labels, filter controls, hover, and selection. Agent accent colors
-/// live in `AgentIcon`.
+/// appearance. `background` is the sidebar/chrome surface; `chatSurface` and
+/// `terminalSurface` are the central-pane surface. The remaining tokens style
+/// sidebar rows, labels, filter controls, hover, and selection. Agent accent
+/// colors live in `AgentIcon`.
 enum AppTheme {
     static let background = dynamic(
-        light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
+        light: NSColor(srgbRed: AppSurfaceColor.lightRed,
+                       green: AppSurfaceColor.lightGreen,
+                       blue: AppSurfaceColor.lightBlue,
+                       alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
-    /// Near-black surface for the terminal main pane (#121216 dark) — same
-    /// value as `chatSurface` below, so terminal and chat panes match.
-    /// Light mode mirrors `background` — translucency is a dark-mode look.
+    /// Central surface for the terminal main pane (#101112 dark, #F6F6F8 light).
+    /// It matches `chatSurface` so terminal and chat panes share one surface.
     static let terminalSurface = dynamic(
-        light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
-        dark: NSColor(srgbRed: AppSurfaceColor.terminalRed, green: AppSurfaceColor.terminalGreen, blue: AppSurfaceColor.terminalBlue, alpha: 1))
-    /// Near-black surface for the chat main pane (#121216 dark).
-    /// Light mode mirrors `background` — translucency is a dark-mode look.
+        light: NSColor(srgbRed: AppSurfaceColor.chatLightRed,
+                       green: AppSurfaceColor.chatLightGreen,
+                       blue: AppSurfaceColor.chatLightBlue,
+                       alpha: 1),
+        dark: NSColor(srgbRed: AppSurfaceColor.terminalRed,
+                      green: AppSurfaceColor.terminalGreen,
+                      blue: AppSurfaceColor.terminalBlue,
+                      alpha: 1))
+    /// Central surface for the chat main pane (#101112 dark, #F6F6F8 light).
+    /// It matches `terminalSurface` so terminal and chat panes share one surface.
     static let chatSurface = dynamic(
-        light: NSColor(srgbRed: 0.965, green: 0.965, blue: 0.975, alpha: 1),
-        dark: NSColor(srgbRed: AppSurfaceColor.chatRed, green: AppSurfaceColor.chatGreen, blue: AppSurfaceColor.chatBlue, alpha: 1))
-    /// Near-black tint for the sidebar/tab bar/usage bar material — the same
-    /// components as `background`, so the two never drift apart.
-    static let chromeTint = dynamic(
-        light: NSColor(srgbRed: 0.92, green: 0.92, blue: 0.96, alpha: 1),
-        dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
+        light: NSColor(srgbRed: AppSurfaceColor.chatLightRed,
+                       green: AppSurfaceColor.chatLightGreen,
+                       blue: AppSurfaceColor.chatLightBlue,
+                       alpha: 1),
+        dark: NSColor(srgbRed: AppSurfaceColor.chatRed,
+                      green: AppSurfaceColor.chatGreen,
+                      blue: AppSurfaceColor.chatBlue,
+                      alpha: 1))
+    /// Sidebar/tab bar/usage bar material tint. It intentionally matches
+    /// `background` so both sidebars stay one chrome layer.
+    static let chromeTint = background
+    /// Border and inset geometry for the central floating surface.
+    static let mainSurfaceCornerRadius: CGFloat = 18
+    static let mainSurfaceHorizontalInset: CGFloat = 10
+    static let mainSurfaceVerticalInset: CGFloat = 12
+    static let mainSurfaceShadowRadius: CGFloat = 18
+    static let mainSurfaceShadowYOffset: CGFloat = 6
+    static let mainSurfaceBorder = dynamic(
+        light: NSColor.white.withAlphaComponent(0.72),
+        dark: NSColor.white.withAlphaComponent(0.08))
+
     /// Shared border/divider stroke: sidebar dividers, settings field outlines,
     /// the update toast. Dark sits at ~1.9:1 against the chrome — readable as a
     /// boundary without turning every settings field into a hard-edged box.
@@ -155,4 +175,3 @@ struct HoverIconButtonStyle: ButtonStyle {
         }
     }
 }
-

@@ -3,9 +3,8 @@ import GhosttyTerminal
 import TillerCore
 
 /// Terminal color theme matching the app's unified surface color family:
-/// charcoal #1F1F26 translucent surface for dark mode (see
-/// `AppSurfaceColor.terminalHex`) and the stock alabaster preset for light
-/// mode. Font size is injected into both configurations.
+/// #101112 for dark mode and #F6F6F8 for light mode. Font size is injected
+/// into both configurations.
 enum TillerTerminalTheme {
     static func theme(fontSize: Float, translucencyEnabled: Bool = true) -> TerminalTheme {
         // Ghostty's surface scrollback defaults to 10MB/pane; Tiller keeps
@@ -27,10 +26,12 @@ enum TillerTerminalTheme {
                 .appending(TerminalConfigCommand.custom(
                     key: "background-blur-radius", value: "20"))
         }
-        return TerminalTheme(
-            light: TerminalConfiguration.alabaster
+        let lightConfiguration = TerminalConfiguration.alabaster
+                .appending(.background(AppSurfaceColor.terminalLightHex))
                 .appending(.fontSize(fontSize))
-                .appending(scrollbackLimit),
+                .appending(scrollbackLimit)
+        return TerminalTheme(
+            light: lightConfiguration,
             dark: darkConfiguration
                 .appending(.fontSize(fontSize))
                 .appending(scrollbackLimit)
