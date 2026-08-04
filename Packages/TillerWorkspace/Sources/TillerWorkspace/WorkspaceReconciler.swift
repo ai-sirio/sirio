@@ -16,15 +16,43 @@ public final class WorkspaceReconciler {
     public private(set) var groupControllerCreationCount = 0
     public private(set) var splitControllerCreationCount = 0
 
+    private let overlayView: WorkspaceDragOverlay
+
+    /// Built lazily because it closes over `self`, and shared by every pane: one
+    /// drag is in flight at a time, and it may cross any number of panes.
+    public private(set) lazy var dragCoordinator = WorkspaceDragCoordinator(
+        sink: intentSink,
+        frames: { [weak self] in self?.hitFrames() ?? [] },
+        overlay: { [weak self] in self?.overlayView },
+        convertToRoot: { [weak self] screenPoint in
+            guard let self, let root = self.rootViewController.viewIfLoaded,
+                  let window = root.window else { return screenPoint }
+            let inWindow = window.convertPoint(fromScreen: screenPoint)
+            let inRoot = root.convert(inWindow, from: nil)
+            return root.isFlipped
+                ? inRoot
+                : CGPoint(x: inRoot.x, y: root.bounds.height - inRoot.y)
+        }
+    )
+
     public init(
         hostProvider: WorkspaceHostProvider,
         intentSink: WorkspaceIntentSink? = nil,
         stripFactory: PaneTabStripFactory? = nil
     ) {
+        let overlay = WorkspaceDragOverlay(frame: .zero)
         self.hostProvider = hostProvider
         self.intentSink = intentSink
         self.stripFactory = stripFactory
-        self.rootViewController = WorkspaceRootController()
+        self.overlayView = overlay
+        self.rootViewController = WorkspaceRootController(overlay: overlay)
+    }
+
+    /// Every mounted pane's geometry in root space. Read fresh on each pointer
+    /// move: a drag can outlive the layout it started in.
+    public func hitFrames() -> [PaneGroupHitFrame] {
+        guard let root = rootViewController.viewIfLoaded else { return [] }
+        return groupControllers.values.compactMap { $0.hitFrame(in: root) }
     }
 
     /// Applies a new layout, reusing cached controllers by stable ID.
@@ -77,6 +105,7 @@ public final class WorkspaceReconciler {
             let controller = groupControllers[id] ?? {
                 let created = PaneGroupController(
                     id: id, intentSink: intentSink, stripFactory: stripFactory)
+                created.connectDrag(to: dragCoordinator)
                 groupControllerCreationCount += 1
                 groupControllers[id] = created
                 return created
@@ -178,6 +207,18 @@ public final class WorkspaceReconciler {
 
 @MainActor
 private final class WorkspaceRootController: NSViewController {
+    private let overlay: WorkspaceDragOverlay
+
+    init(overlay: WorkspaceDragOverlay) {
+        self.overlay = overlay
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     override func loadView() { view = NSView() }
 
     func setContent(_ child: NSViewController) {
@@ -193,6 +234,18 @@ private final class WorkspaceRootController: NSViewController {
             child.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             child.view.topAnchor.constraint(equalTo: view.topAnchor),
             child.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+
+        // Re-added on every reconcile so it stays above a freshly built pane
+        // tree. It returns nil from `hitTest`, so it costs the panes nothing.
+        overlay.removeFromSuperview()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(overlay, positioned: .above, relativeTo: child.view)
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
     }
 }
