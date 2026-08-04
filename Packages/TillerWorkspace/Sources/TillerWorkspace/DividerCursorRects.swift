@@ -1,0 +1,33 @@
+import CoreGraphics
+
+/// The bands where a split's dividers sit, for installing resize cursors.
+///
+/// Measured from the gaps between laid-out subviews rather than from subview
+/// order: `WorkspaceNativeSplitView` exchanges the two content frames after
+/// layout, so index 0 is not reliably the leading pane. `DividerPosition`
+/// already learned this lesson for divider tracking.
+public enum DividerCursorRects {
+    public static func rects(
+        subviewFrames: [CGRect],
+        bounds: CGRect,
+        isVertical: Bool
+    ) -> [CGRect] {
+        guard subviewFrames.count >= 2 else { return [] }
+        let ordered = subviewFrames.sorted {
+            isVertical ? $0.minX < $1.minX : $0.minY < $1.minY
+        }
+
+        return zip(ordered, ordered.dropFirst()).compactMap { leading, trailing in
+            if isVertical {
+                let gap = trailing.minX - leading.maxX
+                guard gap > 0 else { return nil }
+                return CGRect(
+                    x: leading.maxX, y: bounds.minY, width: gap, height: bounds.height)
+            }
+            let gap = trailing.minY - leading.maxY
+            guard gap > 0 else { return nil }
+            return CGRect(
+                x: bounds.minX, y: leading.maxY, width: bounds.width, height: gap)
+        }
+    }
+}

@@ -172,6 +172,19 @@ private final class WorkspaceNativeSplitView: NSSplitView {
     override func layout() {
         super.layout()
         exchangeContentFramesIfNeeded()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    /// Declares the resize cursor over each divider band. AppKit infers its own
+    /// divider rects from subview order, which the frame exchange below breaks,
+    /// so the bands are measured from the laid-out geometry instead.
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        let cursor: NSCursor = isVertical ? .resizeLeftRight : .resizeUpDown
+        for rect in DividerCursorRects.rects(
+            subviewFrames: subviews.map(\.frame), bounds: bounds, isVertical: isVertical) {
+            addCursorRect(rect, cursor: cursor)
+        }
     }
 
     override func adjustSubviews() {
