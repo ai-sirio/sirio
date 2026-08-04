@@ -38,9 +38,136 @@ struct ChangesListTests {
         #expect(model.diffStats.isEmpty)
         #expect(model.gitError == nil)
     }
+
+    @Test func expandingIdlePathLoadsItsDiff() async throws {
+        let entry = try makeEntry("a.swift")
+        let store = DiffLoadStore(loader: { entry, _ in
+            GitFileDiff(path: entry.path, lines: [], additions: 1, deletions: 0,
+                        isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        })
+
+        #expect(store.state(for: entry.path) == .idle)
+        await store.expand(entry, repoPath: "/tmp")
+
+        #expect(store.isExpanded(entry.path))
+        guard case .loaded(let diff) = store.state(for: entry.path) else {
+            Issue.record("expected a loaded diff")
+            return
+        }
+        #expect(diff.additions == 1)
+    }
+
+    @Test func concurrentExpansionsOfSamePathLoadOnce() async throws {
+        let entry = try makeEntry("a.swift")
+        let counter = LoadCounter()
+        let store = DiffLoadStore(loader: { entry, _ in
+            await counter.increment()
+            try? await Task.sleep(for: .milliseconds(20))
+            return GitFileDiff(path: entry.path, lines: [], additions: 0, deletions: 0,
+                               isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        })
+
+        async let first: Void = store.expand(entry, repoPath: "/tmp")
+        async let second: Void = store.expand(entry, repoPath: "/tmp")
+        _ = await (first, second)
+
+        #expect(await counter.value == 1)
+    }
+
+    @Test func collapsingKeepsTheLoadedDiff() async throws {
+        let entry = try makeEntry("a.swift")
+        let store = DiffLoadStore(loader: { entry, _ in
+            GitFileDiff(path: entry.path, lines: [], additions: 3, deletions: 0,
+                        isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        })
+
+        await store.expand(entry, repoPath: "/tmp")
+        store.collapse(entry.path)
+
+        #expect(!store.isExpanded(entry.path))
+        guard case .loaded = store.state(for: entry.path) else {
+            Issue.record("collapsing must not discard the loaded diff")
+            return
+        }
+    }
+
+    @Test func failedLoadIsReportedAndRetryable() async throws {
+        let entry = try makeEntry("a.swift")
+        let attempts = LoadCounter()
+        let store = DiffLoadStore(loader: { entry, _ in
+            let count = await attempts.increment()
+            if count == 1 { throw ChangesListTestFailure.boom }
+            return GitFileDiff(path: entry.path, lines: [], additions: 9, deletions: 0,
+                               isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        })
+
+        await store.expand(entry, repoPath: "/tmp")
+        guard case .failed = store.state(for: entry.path) else {
+            Issue.record("expected a failed state")
+            return
+        }
+
+        await store.retry(entry, repoPath: "/tmp")
+        guard case .loaded(let diff) = store.state(for: entry.path) else {
+            Issue.record("expected retry to succeed")
+            return
+        }
+        #expect(diff.additions == 9)
+    }
+
+    @Test func pruneDropsPathsThatLeftTheStatus() async throws {
+        let kept = try makeEntry("kept.swift")
+        let gone = try makeEntry("gone.swift")
+        let store = DiffLoadStore(loader: { entry, _ in
+            GitFileDiff(path: entry.path, lines: [], additions: 0, deletions: 0,
+                        isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        })
+        await store.expand(kept, repoPath: "/tmp")
+        await store.expand(gone, repoPath: "/tmp")
+
+        store.prune(to: [kept.path])
+
+        #expect(store.isExpanded(kept.path))
+        #expect(!store.isExpanded(gone.path))
+        #expect(store.state(for: gone.path) == .idle)
+    }
+
+    @Test func reloadExpandedRefreshesOnlyExpandedPaths() async throws {
+        let expanded = try makeEntry("open.swift")
+        let collapsed = try makeEntry("closed.swift")
+        let loadedPaths = LoadedPaths()
+        let store = DiffLoadStore(loader: { entry, _ in
+            await loadedPaths.record(entry.path.value)
+            return GitFileDiff(path: entry.path, lines: [], additions: 0, deletions: 0,
+                               isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        })
+        await store.expand(expanded, repoPath: "/tmp")
+        await loadedPaths.clear()
+
+        await store.reloadExpanded(entries: [expanded, collapsed], repoPath: "/tmp")
+
+        #expect(await loadedPaths.values == ["open.swift"])
+    }
 }
 
 enum ChangesListTestFailure: Error { case boom }
+
+actor LoadCounter {
+    private(set) var value = 0
+
+    @discardableResult
+    func increment() -> Int {
+        value += 1
+        return value
+    }
+}
+
+actor LoadedPaths {
+    private(set) var values: [String] = []
+
+    func record(_ path: String) { values.append(path) }
+    func clear() { values.removeAll() }
+}
 
 @MainActor
 func makeLoaders(
