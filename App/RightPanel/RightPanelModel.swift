@@ -46,10 +46,25 @@ struct RightPanelLoaders: Sendable {
     typealias DirectoryLoader = @Sendable (String, URL) async throws -> [FileTreeNode]
     typealias StatusLoader = @Sendable (String) async throws -> GitStatusSnapshot
     typealias DiffLoader = @Sendable (GitStatusEntry, String) async throws -> GitFileDiff
+    typealias StatsLoader =
+        @Sendable ([GitStatusEntry], String) async throws -> [GitPath: GitDiffStat]
 
     let directory: DirectoryLoader
     let status: StatusLoader
     let diff: DiffLoader
+    let stats: StatsLoader
+
+    init(
+        directory: @escaping DirectoryLoader,
+        status: @escaping StatusLoader,
+        diff: @escaping DiffLoader,
+        stats: @escaping StatsLoader = { _, _ in [:] }
+    ) {
+        self.directory = directory
+        self.status = status
+        self.diff = diff
+        self.stats = stats
+    }
 
     static let live = Self(
         directory: { key, rootURL in
@@ -60,6 +75,9 @@ struct RightPanelLoaders: Sendable {
         },
         diff: { entry, path in
             try await GitDiff.load(entry: entry, in: path)
+        },
+        stats: { entries, path in
+            try await GitDiff.stats(entries: entries, in: path)
         })
 }
 
@@ -73,6 +91,7 @@ final class RightPanelModel {
     private(set) var status = GitStatusSnapshot.empty
     private(set) var statusByPath: [String: GitStatusEntry] = [:]
     private(set) var directoryStatusByPath: [String: DirectoryGitStatus] = [:]
+    private(set) var diffStats: [GitPath: GitDiffStat] = [:]
     private(set) var selectedDiffPath: GitPath?
     private(set) var diff: GitFileDiff?
     private(set) var filesLoading = false
@@ -161,6 +180,7 @@ final class RightPanelModel {
         status = .empty
         statusByPath = [:]
         directoryStatusByPath = [:]
+        diffStats = [:]
         selectedDiffPath = nil
         diff = nil
         filesLoading = false
@@ -242,6 +262,7 @@ extension RightPanelModel {
             guard token == generation else { return }
             apply(snapshot)
             gitError = nil
+            await loadStats(token: token)
         } catch {
             guard token == generation else { return }
             gitError = error.localizedDescription
@@ -460,6 +481,7 @@ extension RightPanelModel {
             guard token == generation else { return }
             apply(snapshot)
             gitError = nil
+            await loadStats(token: token)
             guard token == generation else { return }
             let selectedChanged = selectedPathBefore != selectedDiffPath
                 || selectedEntryBefore != selectedEntry
@@ -557,6 +579,25 @@ extension RightPanelModel {
             guard token == generation, selectedDiffPath == entry.path else { return }
             diff = nil
             diffError = error.localizedDescription
+        }
+    }
+
+    /// Counts are a nicety: a failure hides the numbers and leaves the list
+    /// working, so it must never surface as `gitError`.
+    private func loadStats(token: Int) async {
+        guard let worktree else { return }
+        let entries = status.entries
+        guard !entries.isEmpty else {
+            diffStats = [:]
+            return
+        }
+        do {
+            let loaded = try await loaders.stats(entries, worktree.path)
+            guard token == generation else { return }
+            diffStats = loaded
+        } catch {
+            guard token == generation else { return }
+            diffStats = [:]
         }
     }
 
