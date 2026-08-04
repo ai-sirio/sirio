@@ -1,32 +1,28 @@
 import Testing
 @testable import TillerCore
 
-@Test func chromeIsWarmGraphite1A1A1E() {
-    #expect(AppSurfaceColor.red == 0.102)
-    #expect(AppSurfaceColor.green == 0.102)
-    #expect(AppSurfaceColor.blue == 0.118)
-    #expect(AppSurfaceColor.hex == "1A1A1E")
+@Test func chromeMatchesApprovedDarkAndLightValues() {
+    #expect(AppSurfaceColor.red == 8.0 / 255.0)
+    #expect(AppSurfaceColor.green == 9.0 / 255.0)
+    #expect(AppSurfaceColor.blue == 10.0 / 255.0)
+    #expect(AppSurfaceColor.hex == "08090A")
+    #expect(AppSurfaceColor.lightHex == "E9EAED")
 }
 
-@Test func chatSurfaceIsNearBlack121216() {
-    #expect(AppSurfaceColor.chatRed == 0.070)
-    #expect(AppSurfaceColor.chatGreen == 0.072)
-    #expect(AppSurfaceColor.chatBlue == 0.086)
-    #expect(AppSurfaceColor.chatHex == "121216")
+@Test func chatSurfaceMatchesApprovedDarkAndLightValues() {
+    #expect(AppSurfaceColor.chatRed == 16.0 / 255.0)
+    #expect(AppSurfaceColor.chatGreen == 17.0 / 255.0)
+    #expect(AppSurfaceColor.chatBlue == 18.0 / 255.0)
+    #expect(AppSurfaceColor.chatHex == "101112")
+    #expect(AppSurfaceColor.chatLightHex == "F6F6F8")
 }
 
-/// The chrome carries the same blue lean as the terminal surface: both sit in
-/// one color family, which a neutral gray chrome broke.
-@Test func chromeAndTerminalSurfaceShareABlueLean() {
-    #expect(AppSurfaceColor.blue > AppSurfaceColor.red)
-    #expect(AppSurfaceColor.terminalBlue > AppSurfaceColor.terminalRed)
-}
-
-@Test func terminalSurfaceMatchesChatSurface121216() {
+@Test func terminalSurfaceMatchesChatSurfaceInBothAppearances() {
     #expect(AppSurfaceColor.terminalRed == AppSurfaceColor.chatRed)
     #expect(AppSurfaceColor.terminalGreen == AppSurfaceColor.chatGreen)
     #expect(AppSurfaceColor.terminalBlue == AppSurfaceColor.chatBlue)
-    #expect(AppSurfaceColor.terminalHex == "121216")
+    #expect(AppSurfaceColor.terminalHex == AppSurfaceColor.chatHex)
+    #expect(AppSurfaceColor.terminalLightHex == AppSurfaceColor.chatLightHex)
 }
 
 @Test func sharedSurfaceOpacityIs096() {
