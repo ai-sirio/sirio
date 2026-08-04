@@ -120,6 +120,7 @@ public final class WorkspaceReconciler {
                 let created = WorkspaceSplitController(
                     id: id, axis: axis, preferredFraction: fraction
                 )
+                if let intentSink { created.connectDivider(sink: intentSink) }
                 splitControllerCreationCount += 1
                 splitControllers[id] = created
                 return created

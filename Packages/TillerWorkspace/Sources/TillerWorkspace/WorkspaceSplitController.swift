@@ -8,6 +8,41 @@ public final class WorkspaceSplitController: NSSplitViewController {
     public private(set) var preferredFraction: Double
     public private(set) var accessibilityDivider: WorkspaceDividerAccessibility?
     private var didApplyInitialPosition = false
+    private var tracking: DividerTracking?
+
+    /// The sink arrives after construction: the reconciler builds split
+    /// controllers while walking a layout it has not finished applying.
+    public func connectDivider(sink: WorkspaceIntentSink) {
+        tracking = DividerTracking(sink: sink)
+    }
+
+    override public func splitViewDidResizeSubviews(_ notification: Notification) {
+        super.splitViewDidResizeSubviews(notification)
+        guard let tracking, splitView.subviews.count >= 2 else { return }
+
+        let step = DividerCommitPolicy.step(for: NSApp.currentEvent?.type)
+        guard step != .ignore else { return }
+
+        let isVertical = splitView.isVertical
+        let total = isVertical ? splitView.bounds.width : splitView.bounds.height
+        let position = DividerPosition.readingOrder(
+            first: splitView.subviews[0].frame,
+            second: splitView.subviews[1].frame,
+            bounds: splitView.bounds,
+            isVertical: isVertical
+        )
+
+        // `began` resets the gesture, so restarting it on every move keeps the
+        // tracker in step with a drag whose start we never observed.
+        tracking.began(
+            split: id,
+            total: total,
+            minimum: minimumThickness(for: axis),
+            thickness: splitView.dividerThickness
+        )
+        tracking.moved(to: position)
+        if step == .commit { tracking.ended() }
+    }
 
     public init(id: SplitID, axis: WorkspaceSplitAxis, preferredFraction: Double) {
         self.id = id
