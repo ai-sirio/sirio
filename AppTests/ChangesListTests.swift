@@ -148,6 +148,22 @@ struct ChangesListTests {
 
         #expect(await loadedPaths.values == ["open.swift"])
     }
+
+    @Test func diffBodySkipsMetadataLines() throws {
+        let patch = """
+        diff --git a/file.txt b/file.txt
+        --- a/file.txt
+        +++ b/file.txt
+        @@ -1,2 +1,3 @@
+         one
+        -two
+        +second
+        """
+        let diff = try GitDiff.parse(patch, path: try GitPath("file.txt"))
+
+        #expect(FileDiffBody.renderableLines(of: diff).allSatisfy { $0.kind != .metadata })
+        #expect(FileDiffBody.renderableLines(of: diff).contains { $0.kind == .hunk })
+    }
 }
 
 enum ChangesListTestFailure: Error { case boom }
