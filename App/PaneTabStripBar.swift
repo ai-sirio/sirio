@@ -3,16 +3,23 @@ import SwiftUI
 import TillerCore
 import TillerWorkspace
 
+/// The space tab frames are measured in. The drag coordinator offsets them
+/// into workspace-root space, so they must all share one origin. A free-standing
+/// constant because the strip is generic over its menu, and a generic type
+/// cannot hold a static stored property.
+enum PaneTabStripSpace {
+    static let name = "paneTabStrip"
+}
+
 /// The tab chrome for one pane group, drawn in the app's own theme. It lives
 /// here rather than in TillerWorkspace because AppTheme and
 /// MainSurfaceMaterial belong to the app target; the package supplies only the
 /// model and calls back for the view.
-struct PaneTabStripBar: View {
+struct PaneTabStripBar<NewTabMenu: View>: View {
     @Bindable var model: PaneTabStripModel
-
-    /// The space tab frames are measured in. The drag coordinator offsets them
-    /// into workspace-root space, so they must all share one origin.
-    static let stripSpace = "paneTabStrip"
+    /// The "+" menu's items. Supplied by the caller, which owns AppModel and
+    /// knows the worktree this strip belongs to.
+    @ViewBuilder var newTabMenu: () -> NewTabMenu
 
     @State private var escapeMonitor: Any?
 
@@ -32,18 +39,24 @@ struct PaneTabStripBar: View {
                 .padding(.leading, 6)
             }
 
-            Button(action: model.onNewTab) {
+            // A menu, not a button: the legacy tab bar's "+" offered terminal,
+            // agent and chat, and a plain button silently dropped every choice
+            // but "new terminal".
+            Menu {
+                newTabMenu()
+            } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11))
                     .foregroundStyle(AppTheme.meta)
             }
             .buttonStyle(.plain)
+            .menuIndicator(.hidden)
             .help("New tab (⌘T)")
             .accessibilityLabel("New tab")
             .padding(.trailing, 8)
         }
         .frame(height: 32)
-        .coordinateSpace(name: Self.stripSpace)
+        .coordinateSpace(name: PaneTabStripSpace.name)
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
         .onChange(of: model.entries.map(\.tabID)) { _, ids in
             model.removeTabFrames(notIn: Set(ids))
@@ -125,7 +138,7 @@ private struct PaneTabStripItem: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .onGeometryChange(for: CGRect.self) { proxy in
-            proxy.frame(in: .named(PaneTabStripBar.stripSpace))
+            proxy.frame(in: .named(PaneTabStripSpace.name))
         } action: { frame in
             onFrameChange(frame)
         }
@@ -147,6 +160,9 @@ private struct PaneTabStripItem: View {
 }
 
 @MainActor
-func makePaneTabStrip(_ model: PaneTabStripModel) -> NSView {
-    NSHostingView(rootView: PaneTabStripBar(model: model))
+func makePaneTabStrip<NewTabMenu: View>(
+    _ model: PaneTabStripModel,
+    @ViewBuilder newTabMenu: @escaping () -> NewTabMenu
+) -> NSView {
+    NSHostingView(rootView: PaneTabStripBar(model: model, newTabMenu: newTabMenu))
 }

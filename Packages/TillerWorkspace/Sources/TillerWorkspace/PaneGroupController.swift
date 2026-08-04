@@ -30,6 +30,7 @@ public final class PaneGroupController: NSViewController {
         stripModel.onActivate = { [weak self] in self?.activateTab($0) }
         stripModel.onClose = { [weak self] in self?.closeTab($0) }
         stripModel.onNewTab = { [weak self] in self?.requestNewTab() }
+        stripModel.onActivateGroup = { [weak self] in self?.activateGroup() }
     }
 
     /// The strip's model. Exposed so the collector and the drag wiring can read
@@ -86,6 +87,10 @@ public final class PaneGroupController: NSViewController {
 
     public func requestNewTab() {
         intentSink?.send(.requestNewTab(into: id))
+    }
+
+    public func activateGroup() {
+        intentSink?.send(.activateGroup(id))
     }
 
     @available(*, unavailable)
@@ -153,6 +158,16 @@ public final class PaneGroupController: NSViewController {
 
         let nextTabID = group.activeTabID
         let nextHost = nextTabID.flatMap { hostProvider.host(for: $0) }
+
+        // Re-mounting a host that is already mounted takes its view out of the
+        // window and puts it straight back, and a terminal surface reads that
+        // round trip as losing focus. Reconciles are not rare — a divider drag
+        // runs one per frame — so an unchanged mount has to be a no-op.
+        if let nextTabID, let nextHost, mountedTabID == nextTabID,
+           nextHost.viewController.viewIfLoaded?.superview === contentContainer {
+            mountedHost = nextHost
+            return
+        }
 
         if let mountedHost {
             mountedHost.setVisible(false)

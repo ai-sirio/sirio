@@ -68,6 +68,19 @@ struct PaneTabChromeTests {
         #expect(sink.intents == [.requestNewTab(into: groupID)])
     }
 
+    /// The "+" opens a menu whose agent and chat entries go through AppModel,
+    /// which opens into the *active* group. Without this the menu of a pane
+    /// the user just clicked would silently open its tab in another pane.
+    @Test func theStripCanActivateTheGroupItBelongsTo() {
+        let groupID = PaneGroupID()
+        let sink = RecordingTabIntentSink()
+        let controller = PaneGroupController(id: groupID, intentSink: sink)
+
+        controller.strip.onActivateGroup()
+
+        #expect(sink.intents == [.activateGroup(groupID)])
+    }
+
     /// The reconciler builds group controllers itself, so the sink has to reach
     /// them through it — otherwise the chrome renders but no click does
     /// anything, which reads as a dead UI rather than a missing wire.

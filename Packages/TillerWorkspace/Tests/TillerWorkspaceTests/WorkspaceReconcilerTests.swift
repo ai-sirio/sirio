@@ -164,6 +164,72 @@ struct WorkspaceReconcilerTests {
         #expect(window.firstResponder === paneView)
     }
 
+    /// A divider drag re-evaluates the SwiftUI body on every frame, and
+    /// `WorkspaceView` reconciles on every body pass. Re-mounting a pane that
+    /// has not changed leaves the window, which is how a terminal ends up
+    /// unfocused — Ghostty drops its surface focus on detach and nothing here
+    /// gives it back.
+    @Test
+    func reconcilingAnUnchangedLayoutKeepsTheMountedPaneInTheWindow() throws {
+        let tab = makeTab()
+        let group = PaneGroup(id: PaneGroupID(), tabs: [tab], activeTabID: tab.id)
+        let layout = makeLayout(root: .group(group.id), groups: [group], activeGroupID: group.id)
+        let paneView = WindowTrackingView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let provider = FakeHostProvider(
+            hosts: [tab.id: FakeContentHost(
+                tabID: tab.id,
+                viewController: FocusableViewController(paneView: paneView))]
+        )
+        let reconciler = WorkspaceReconciler(hostProvider: provider)
+        let window = makeOffscreenWindow()
+
+        reconciler.reconcile(to: layout, delta: nil)
+        window.contentView = reconciler.rootViewController.view
+        reconciler.rootViewController.view.frame = NSRect(x: 0, y: 0, width: 200, height: 200)
+        reconciler.rootViewController.view.layoutSubtreeIfNeeded()
+        #expect(paneView.window === window)
+        paneView.resetDetachCount()
+
+        reconciler.reconcile(to: layout, delta: nil)
+
+        #expect(paneView.detachCount == 0)
+        #expect(paneView.window === window)
+    }
+
+    /// The same churn one level up: a split rebuilt its items on every pass,
+    /// detaching both panes with them.
+    @Test
+    func reconcilingAnUnchangedSplitKeepsBothPanesInTheWindow() throws {
+        let tabA = makeTab()
+        let tabB = makeTab()
+        let groupA = PaneGroup(id: PaneGroupID(), tabs: [tabA], activeTabID: tabA.id)
+        let groupB = PaneGroup(id: PaneGroupID(), tabs: [tabB], activeTabID: tabB.id)
+        let layout = splitLayout(split: SplitID(), first: groupA, second: groupB)
+        let paneView = WindowTrackingView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        let provider = FakeHostProvider(
+            hosts: [
+                tabA.id: FakeContentHost(
+                    tabID: tabA.id,
+                    viewController: FocusableViewController(paneView: paneView)),
+                tabB.id: FakeContentHost(tabID: tabB.id)
+            ]
+        )
+        let reconciler = WorkspaceReconciler(hostProvider: provider)
+        let window = makeOffscreenWindow()
+
+        reconciler.reconcile(to: layout, delta: nil)
+        window.contentView = reconciler.rootViewController.view
+        reconciler.rootViewController.view.frame = NSRect(x: 0, y: 0, width: 200, height: 200)
+        reconciler.rootViewController.view.layoutSubtreeIfNeeded()
+        #expect(paneView.window === window)
+        paneView.resetDetachCount()
+
+        reconciler.reconcile(to: layout, delta: nil)
+
+        #expect(paneView.detachCount == 0)
+        #expect(paneView.window === window)
+    }
+
     @Test
     func focusIntentIsRetriedOnceAfterHostAttachment() async throws {
         let tab = makeTab()
@@ -263,6 +329,23 @@ private final class FocusableViewController: NSViewController {
 
 private final class FocusableTestView: NSView {
     override var acceptsFirstResponder: Bool { true }
+}
+
+/// Counts the times AppKit took this view out of a window — the signal a
+/// terminal surface reads as "you are no longer focused".
+private final class WindowTrackingView: NSView {
+    private(set) var detachCount = 0
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { detachCount += 1 }
+    }
+
+    func resetDetachCount() {
+        detachCount = 0
+    }
 }
 
 @MainActor

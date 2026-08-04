@@ -89,12 +89,15 @@ struct AppModelControlTests {
         model.worktrees = [target.projectId: [target], selected.projectId: [selected]]
         await model.workspaceCoordinator.restore(worktree: target)
         await model.workspaceCoordinator.restore(worktree: selected)
-        let selectedPaneId = UUID()
-        let selectedTab = LegacyWorkspaceTab(
-            id: UUID(), title: "Selected", tree: .leaf(id: selectedPaneId)
-        )
-        model.workspaceCoordinator.setLegacyTabs([selectedTab], for: selected.id)
-        model.workspaceCoordinator.setLegacyActiveTabID(selectedTab.id, for: selected.id)
+        // A real engine tab, not a legacy-store one: the active-tab accessor
+        // reads the layout, which is what panel.create must leave untouched.
+        model.newShellTab(in: selected)
+        await poll {
+            model.workspaceCoordinator.layouts[selected.id]?.allTabs.isEmpty == false
+        }
+        let selectedTabID = model.workspaceActiveTabID(for: selected.id)
+        // Otherwise the two comparisons below could both be nil == nil.
+        #expect(selectedTabID != nil)
         model.selectedWorktree = selected
         let priorOpenIds = model.openWorktreeIds
         let response = ResponseBox()
@@ -112,7 +115,7 @@ struct AppModelControlTests {
 
         #expect(await response.value == nil)
         #expect(model.selectedWorktree?.id == selected.id)
-        #expect(model.workspaceActiveTabID(for: selected.id) == selectedTab.id)
+        #expect(model.workspaceActiveTabID(for: selected.id) == selectedTabID)
         #expect(model.workspaceCoordinator.legacyTabs(for: target.id).isEmpty)
         guard let tab = model.workspaceCoordinator.layouts[target.id]?.allTabs.first,
               case .terminal(let contentID) = tab.content,
@@ -131,7 +134,7 @@ struct AppModelControlTests {
         #expect(result.ok)
         #expect(result.result == ["id": livePaneId.uuidString])
         #expect(model.selectedWorktree?.id == selected.id)
-        #expect(model.workspaceActiveTabID(for: selected.id) == selectedTab.id)
+        #expect(model.workspaceActiveTabID(for: selected.id) == selectedTabID)
         #expect(Set(model.openWorktreeIds) == Set(priorOpenIds + [target.id]))
         #expect(activation.count == 0)
     }

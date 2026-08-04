@@ -15,7 +15,7 @@ struct ContentView: View {
     var updater: UpdaterModel
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
     @AppStorage("sidebar.visible") private var sidebarVisible = true
-    @State private var sidebarWidth: CGFloat = 240
+    @State private var sidebarWidth = CGFloat(AppSettings.defaultSidebarWidth)
     /// Titlebar height, reserved inside the centre surface. The surface itself
     /// runs to the window's top edge, but its content must not: the transparent
     /// `NSTitlebarContainerView` sits above the content view and keeps taking
@@ -246,7 +246,11 @@ struct ContentView: View {
         HSplitView {
             if sidebarVisible {
                 SidebarView(model: model)
-                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 400, maxHeight: .infinity)
+                    .frame(
+                        minWidth: CGFloat(AppSettings.sidebarWidthRange.lowerBound),
+                        idealWidth: CGFloat(AppSettings.defaultSidebarWidth),
+                        maxWidth: CGFloat(AppSettings.sidebarWidthRange.upperBound),
+                        maxHeight: .infinity)
                     .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
                         sidebarWidth = $0
                     }
@@ -546,7 +550,14 @@ struct ContentView: View {
                         hostProvider: workspaceCoordinator,
                         intentSink: WorkspaceIntentRouter(
                             coordinator: workspaceCoordinator, worktree: worktree),
-                        stripFactory: makePaneTabStrip)
+                        stripFactory: { stripModel in
+                            makePaneTabStrip(stripModel) {
+                                NewTabMenuItems(
+                                    model: model, worktree: worktree,
+                                    onBeforeAction: stripModel.onActivateGroup,
+                                    onNewTerminal: stripModel.onNewTab)
+                            }
+                        })
                         .focusedSceneValue(
                             \.workspaceMenuTarget,
                             WorkspaceMenuTarget(

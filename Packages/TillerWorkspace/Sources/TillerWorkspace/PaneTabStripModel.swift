@@ -19,6 +19,12 @@ public final class PaneTabStripModel {
     public var onClose: (WorkspaceTabID) -> Void = { _ in }
     public var onNewTab: () -> Void = {}
 
+    /// Makes this strip's group the active one. The "+" menu's agent and chat
+    /// entries are routed by the app through the active group, so the menu
+    /// calls this first — otherwise it would open its tab in whichever pane
+    /// happened to be active before the click.
+    public var onActivateGroup: () -> Void = {}
+
     /// Called continuously while a tab is pressed. The point is in screen
     /// coordinates: a SwiftUI drag's local translation cannot address a pane it
     /// does not belong to, and screen space is what both worlds share.
