@@ -55,14 +55,25 @@ import Testing
 
 @Test func rightPanelDefaultsAreStable() {
     #expect(AppSettings.defaultRightPanelVisible == false)
-    #expect(AppSettings.defaultRightPanelWidth == 360)
-    #expect(AppSettings.rightPanelWidthRange == 280...600)
+    #expect(AppSettings.defaultRightPanelWidth == 180)
+    #expect(AppSettings.rightPanelWidthRange == 160...320)
 }
 
 @Test func rightPanelWidthClampsToSupportedRange() {
-    #expect(AppSettings.clampRightPanelWidth(120) == 280)
-    #expect(AppSettings.clampRightPanelWidth(420) == 420)
-    #expect(AppSettings.clampRightPanelWidth(900) == 600)
+    #expect(AppSettings.clampRightPanelWidth(60) == 160)
+    #expect(AppSettings.clampRightPanelWidth(210) == 210)
+    #expect(AppSettings.clampRightPanelWidth(900) == 320)
+}
+
+@Test func sidebarWidthRangeIsStable() {
+    #expect(AppSettings.sidebarWidthRange == 160...240)
+    #expect(AppSettings.defaultSidebarWidth == 200)
+}
+
+@Test func sidebarWidthClampsToSupportedRange() {
+    #expect(AppSettings.clampSidebarWidth(60) == 160)
+    #expect(AppSettings.clampSidebarWidth(200) == 200)
+    #expect(AppSettings.clampSidebarWidth(900) == 240)
 }
 
 @Test func signpostMetricsKeyIsCorrect() {
