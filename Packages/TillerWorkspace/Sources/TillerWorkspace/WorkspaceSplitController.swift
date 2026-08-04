@@ -177,6 +177,7 @@ private final class WorkspaceNativeSplitView: NSSplitView {
         // has to invalidate its rects too, not only ours.
         if let overlay = enclosingDragOverlay {
             window?.invalidateCursorRects(for: overlay)
+            overlay.refreshDividerTracking()
         }
     }
 

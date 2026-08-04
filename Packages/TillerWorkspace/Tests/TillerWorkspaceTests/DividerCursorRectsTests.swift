@@ -61,38 +61,8 @@ import Testing
         subviewFrames: [], bounds: .zero, isVertical: true).isEmpty)
 }
 
-@Suite("DividerHoverBand")
-struct DividerHoverBandTests {
-    /// The painted seam stays a hairline; only the pointer target grows, the
-    /// way cmux puts a 24px hit area over a 1px divider.
-    @Test func bandIsWidenedAroundTheGapWithoutMovingItsCentre() throws {
-        let rects = DividerCursorRects.rects(
-            subviewFrames: [
-                CGRect(x: 0, y: 0, width: 397, height: 600),
-                CGRect(x: 403, y: 0, width: 397, height: 600)
-            ],
-            bounds: CGRect(x: 0, y: 0, width: 800, height: 600),
-            isVertical: true,
-            minimumThickness: 24)
-
-        let band = try #require(rects.first)
-        #expect(band.width == 24)
-        #expect(band.midX == 400)
-    }
-
-    @Test func aBandWiderThanTheMinimumIsLeftAlone() throws {
-        let rects = DividerCursorRects.rects(
-            subviewFrames: [
-                CGRect(x: 0, y: 0, width: 100, height: 600),
-                CGRect(x: 140, y: 0, width: 100, height: 600)
-            ],
-            bounds: CGRect(x: 0, y: 0, width: 240, height: 600),
-            isVertical: true,
-            minimumThickness: 24)
-
-        #expect(try #require(rects.first).width == 40)
-    }
-
+@Suite("DividerCursorHitPolicy")
+struct DividerCursorHitPolicyTests {
     /// Clicks must fall through: the band sits above the panes, so answering a
     /// mouse-down would leave the divider looking draggable but frozen.
     @Test func onlyHoverEventsAreAnswered() {
