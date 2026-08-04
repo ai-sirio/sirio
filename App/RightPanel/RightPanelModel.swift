@@ -91,6 +91,10 @@ final class RightPanelModel {
     var diffError: String?
     var monitorError: String?
 
+    /// Not observed: the reference never changes, and views observe the store
+    /// itself. Observing it here would invalidate the whole panel per load.
+    @ObservationIgnored let diffStore: DiffLoadStore
+
     private let loaders: RightPanelLoaders
     private let monitoringEnabled: Bool
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
@@ -104,6 +108,8 @@ final class RightPanelModel {
     ) {
         self.loaders = loaders
         self.monitoringEnabled = monitoringEnabled
+        let diffLoader = loaders.diff
+        self.diffStore = DiffLoadStore(loader: diffLoader)
     }
 
     @ObservationIgnored private var generation = 0
@@ -169,6 +175,7 @@ final class RightPanelModel {
         statusByPath = [:]
         directoryStatusByPath = [:]
         diffStats = [:]
+        diffStore.reset()
         selectedDiffPath = nil
         diff = nil
         filesLoading = false

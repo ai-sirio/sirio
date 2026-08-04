@@ -210,6 +210,7 @@
 		FA02E7A2441C7BBCA5152F15 /* background-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 09EE812CA04BE25192955CA0 /* background-1024.png */; };
 		FACE3803227ABE03D36D87B1 /* NewTabMenuItems.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */; };
 		FB1E5C152EE1759663D5077F /* chat-null-session.json in Resources */ = {isa = PBXBuildFile; fileRef = 4749D109F24B9A3C1D17E46C /* chat-null-session.json */; };
+		FF9414FF0E5065A840B5EE23 /* DiffLoadStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -382,6 +383,7 @@
 		CD056107EF0EA40BDCC86276 /* CodeFileTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeFileTabTests.swift; sourceTree = "<group>"; };
 		CF220F5964A9EC73D5E56484 /* ChatStreamFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamFixture.swift; sourceTree = "<group>"; };
 		D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatContentAdapterTests.swift; sourceTree = "<group>"; };
+		D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffLoadStore.swift; sourceTree = "<group>"; };
 		D1E0285EBF1B63D3A2E607DE /* CodeBlockStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockStyle.swift; sourceTree = "<group>"; };
 		D1E46DF390E43B7EA1794BB7 /* ChatController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatController.swift; sourceTree = "<group>"; };
 		D2BA4247A916A8C34143444D /* icon-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-1024.png"; sourceTree = "<group>"; };
@@ -500,6 +502,7 @@
 			children = (
 				BA9A53AFFA17AAC600C15585 /* AgentsPanelModel.swift */,
 				0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */,
+				D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */,
 				66D18AD8984B39142C8D80EC /* FileExplorerView.swift */,
 				56A0B2497A79763F2B2707AD /* GitDiffView.swift */,
 				62524A82001D878B38DEDBDB /* GitStatusView.swift */,
@@ -1008,6 +1011,7 @@
 				618ADEBEB5C341497226E298 /* ComposerControlBar.swift in Sources */,
 				641B072F23BAD4883E77F891 /* ComposerDocument.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
+				FF9414FF0E5065A840B5EE23 /* DiffLoadStore.swift in Sources */,
 				9F7A522E977E7FB1FEE6454A /* DocumentContentAdapter.swift in Sources */,
 				6ABCA221B30C94B74744F851 /* EditSummaryCardView.swift in Sources */,
 				0BD4B70930C1E4B669B26856 /* EditorTheme+Tiller.swift in Sources */,
