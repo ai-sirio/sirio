@@ -262,6 +262,9 @@ struct ContentView: View {
                     .offset(x: sidebarWidth)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+                DividerCursorStrip()
+                    .frame(width: DividerCursorStrip.width)
+                    .offset(x: sidebarWidth - DividerCursorStrip.width / 2 + 1)
             }
         }
         .overlay(alignment: .trailing) {
@@ -271,6 +274,9 @@ struct ContentView: View {
                     .offset(x: -liveRightPanelWidth)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
+                DividerCursorStrip()
+                    .frame(width: DividerCursorStrip.width)
+                    .offset(x: -liveRightPanelWidth + DividerCursorStrip.width / 2 - 1)
             }
         }
         .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
