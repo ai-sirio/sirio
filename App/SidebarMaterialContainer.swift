@@ -8,7 +8,7 @@ struct SidebarMaterialContainer: View {
     /// Chrome translucency: < 1 lets the raw desktop show through the blur.
     /// Requires the non-opaque window set up in `WindowChromeConfigurator`.
     static let backgroundOpacity = AppSurfaceColor.translucentSurfaceOpacity
-    /// Indigo tint for the sidebar/tab bar/usage bar material
+    /// Shared chrome tint for the sidebar, tab bar, and usage bar material.
     static let tintOpacity = 0.30
     @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 

@@ -195,30 +195,33 @@ struct ContentView: View {
                         sidebarWidth = $0
                     }
             }
-            VStack(spacing: 0) {
-                if let worktree = model.selectedWorktree {
-                    if !workspaceEngineEnabled {
-                        TabBarView(model: model, worktree: worktree)
-                        Divider()
+            ZStack {
+                AppTheme.background
+                FloatingMainSurface {
+                    VStack(spacing: 0) {
+                        if let worktree = model.selectedWorktree {
+                            if !workspaceEngineEnabled {
+                                TabBarView(model: model, worktree: worktree)
+                                Divider()
+                            }
+                        }
+                        if workspaceEngineEnabled {
+                            workspaceStack
+                                .contextMenu { paneContextMenu }
+                        } else {
+                            terminalStack
+                        }
+                        if showUsageBar {
+                            Divider()
+                            UsageBarView(store: model.usage, worktree: model.selectedWorktree)
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                if workspaceEngineEnabled {
-                    workspaceStack
-                        .contextMenu { paneContextMenu }
-                } else {
-                    terminalStack
-                }
-                if showUsageBar {
-                    Divider()
-                    UsageBarView(store: model.usage, worktree: model.selectedWorktree)
-                }
+                .padding(.horizontal, AppTheme.mainSurfaceHorizontalInset)
+                .padding(.vertical, AppTheme.mainSurfaceVerticalInset)
             }
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-            // Translucent terminal/chat surface only below the titlebar; the
-            // shared material behind the whole ZStack shows through above it,
-            // so the titlebar matches the sidebar.
-            .background { MainSurfaceMaterial() }
-            .clipShape(RoundedRectangle(cornerRadius: 10))
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
                       let url = urls.first(where: {
