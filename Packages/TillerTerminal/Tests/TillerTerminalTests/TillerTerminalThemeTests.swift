@@ -8,6 +8,7 @@ import TillerCore
     let theme = TillerTerminalTheme.theme(fontSize: 14, translucencyEnabled: true)
     let scrollbackLimit = TerminalConfigCommand.custom(key: "scrollback-limit", value: "262144")
     #expect(theme.light == TerminalConfiguration.alabaster
+        .appending(.background(AppSurfaceColor.terminalLightHex))
         .appending(.fontSize(14))
         .appending(scrollbackLimit))
     #expect(theme.dark == TerminalConfiguration.afterglow
