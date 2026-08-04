@@ -16,6 +16,14 @@ public enum EdgePlacement: Equatable, Sendable {
 }
 
 public enum DropTargetResolver {
+    /// All geometry is in workspace-root flipped coordinates: the origin is the
+    /// top-left of the workspace and `y` grows downward, so the tab strip
+    /// occupies the band starting at `groupBounds.minY` and the edge nearest
+    /// the strip is `.top`.
+    ///
+    /// `sourceGroup` is where the dragged tab came from; `hoveredGroup` is the
+    /// group under the pointer. They differ on every cross-pane drag, and
+    /// conflating them makes a one-tab pane reject splits it should accept.
     public static func resolve(
         pointInGroup: CGPoint,
         groupBounds: CGRect,
@@ -23,6 +31,7 @@ public enum DropTargetResolver {
         tabFrames: [CGRect],
         draggedTab: WorkspaceTabID,
         sourceGroup: PaneGroupID,
+        hoveredGroup: PaneGroupID,
         groupTabCount: Int
     ) -> DropTarget {
         _ = draggedTab
@@ -36,25 +45,29 @@ public enum DropTargetResolver {
             height: min(max(0, tabStripHeight), groupBounds.height)
         )
         if strip.contains(pointInGroup) {
-            return .tabStrip(sourceGroup, insertionIndex: insertionIndex(
+            return .tabStrip(hoveredGroup, insertionIndex: insertionIndex(
                 for: pointInGroup.x, in: tabFrames
             ))
         }
 
-        if groupTabCount == 1 {
-            return .center(sourceGroup)
+        // Rule 7: only the tab's *own* group is barred, and only when taking
+        // that tab out would leave the group empty.
+        if hoveredGroup == sourceGroup, groupTabCount == 1 {
+            return .center(hoveredGroup)
         }
 
+        let horizontalBand = groupBounds.width * WorkspaceMetrics.edgeBandFraction
+        let verticalBand = groupBounds.height * WorkspaceMetrics.edgeBandFraction
         let distances: [(EdgePlacement, CGFloat, CGFloat)] = [
-            (.left, pointInGroup.x - groupBounds.minX, groupBounds.width * WorkspaceMetrics.edgeBandFraction),
-            (.right, groupBounds.maxX - pointInGroup.x, groupBounds.width * WorkspaceMetrics.edgeBandFraction),
-            (.bottom, pointInGroup.y - groupBounds.minY, groupBounds.height * WorkspaceMetrics.edgeBandFraction),
-            (.top, groupBounds.maxY - pointInGroup.y, groupBounds.height * WorkspaceMetrics.edgeBandFraction)
+            (.left, pointInGroup.x - groupBounds.minX, horizontalBand),
+            (.right, groupBounds.maxX - pointInGroup.x, horizontalBand),
+            (.top, pointInGroup.y - groupBounds.minY, verticalBand),
+            (.bottom, groupBounds.maxY - pointInGroup.y, verticalBand)
         ]
         guard let nearest = distances.min(by: { $0.1 < $1.1 }), nearest.1 <= nearest.2 else {
-            return .center(sourceGroup)
+            return .center(hoveredGroup)
         }
-        return .edge(sourceGroup, placement: nearest.0)
+        return .edge(hoveredGroup, placement: nearest.0)
     }
 
     private static func insertionIndex(for x: CGFloat, in frames: [CGRect]) -> Int {

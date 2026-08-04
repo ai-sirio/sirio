@@ -8,12 +8,15 @@ public enum SplitEligibility {
         case soleTabOfItsOwnGroup
     }
 
+    /// `isSplittingItsOwnSoleGroup` means the dragged tab is the only tab of the
+    /// very group being split — the one case rule 7 bars. A one-tab group is a
+    /// legal target for any tab that came from elsewhere.
     public static func check(
         groupSize: CGSize,
         placement: SplitPlacementSide,
-        isSoleTabOfSourceGroup: Bool
+        isSplittingItsOwnSoleGroup: Bool
     ) -> Result<Void, Reason> {
-        if isSoleTabOfSourceGroup {
+        if isSplittingItsOwnSoleGroup {
             return .failure(.soleTabOfItsOwnGroup)
         }
 
