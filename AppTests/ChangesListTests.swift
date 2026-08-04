@@ -14,6 +14,11 @@ struct ChangesListTests {
         #expect(RightPanelMode.allCases.count == 2)
     }
 
+    @Test func onlyGitlessModesAreOfferedOutsideARepository() {
+        #expect(RightPanelMode.available(isGitRepository: false) == [.files])
+        #expect(RightPanelMode.available(isGitRepository: true) == [.files, .status])
+    }
+
     @Test func refreshPopulatesDiffStats() async throws {
         let entry = try makeEntry("a.swift")
         let model = RightPanelModel(
