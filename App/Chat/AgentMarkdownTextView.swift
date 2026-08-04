@@ -140,7 +140,8 @@ struct AgentMarkdownTextView: NSViewRepresentable {
         let state = SignpostMetrics.beginInterval("streamLayout", id: sid)
         defer {
             SignpostMetrics.endInterval(
-                "streamLayout", state, message: "width: \(Int(width))")
+                "streamLayout", state,
+                message: "width: \(SignpostMetrics.lengthLabel(width))")
         }
         container.size = CGSize(width: max(0, width), height: .greatestFiniteMagnitude)
         layoutManager.ensureLayout(for: container)
