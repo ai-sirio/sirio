@@ -35,6 +35,13 @@ public final class WorkspaceDragCoordinator {
 
     public var isDragging: Bool { session.isActive }
 
+    /// True from the press until the release, whether or not the pointer has
+    /// crossed the drag threshold yet. Callers use this — not `isDragging` — to
+    /// decide whether a press has already begun: re-pressing on every pointer
+    /// event would move the origin the threshold is measured from, and the drag
+    /// would never start.
+    public var isPressing: Bool { tab != nil }
+
     public func pressBegan(
         tab: WorkspaceTabID,
         in group: PaneGroupID,

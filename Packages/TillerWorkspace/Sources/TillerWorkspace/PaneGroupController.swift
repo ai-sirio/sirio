@@ -32,6 +32,50 @@ public final class PaneGroupController: NSViewController {
         stripModel.onNewTab = { [weak self] in self?.requestNewTab() }
     }
 
+    /// The strip's model. Exposed so the collector and the drag wiring can read
+    /// the tab rectangles the app-side view measured.
+    public var strip: PaneTabStripModel { stripModel }
+
+    /// This group's geometry in `space`'s coordinates with a top-left origin.
+    /// AppKit's default is bottom-left; the flip happens here, once, so nothing
+    /// downstream has to think about it.
+    public func hitFrame(in space: NSView) -> PaneGroupHitFrame? {
+        guard isViewLoaded, view.superview != nil else { return nil }
+        let converted = view.convert(view.bounds, to: space)
+        let flipped = CGRect(
+            x: converted.minX,
+            y: space.bounds.height - converted.maxY,
+            width: converted.width,
+            height: converted.height
+        )
+        let tabFrames = stripModel.orderedTabFrames.map {
+            $0.offsetBy(dx: flipped.minX, dy: flipped.minY)
+        }
+        return PaneGroupHitFrame(
+            id: id, bounds: flipped, tabFrames: tabFrames, tabCount: tabEntries.count
+        )
+    }
+
+    /// The strip lives in the app target and speaks in screen points; the
+    /// coordinator owns the rest of the gesture.
+    public func connectDrag(to coordinator: WorkspaceDragCoordinator) {
+        stripModel.onDragChanged = { [weak self, weak coordinator] tab, screenPoint in
+            guard let self, let coordinator else { return }
+            if !coordinator.isPressing {
+                coordinator.pressBegan(
+                    tab: tab, in: self.id, atScreenPoint: screenPoint,
+                    tabFrame: self.stripModel.tabFrames[tab] ?? .zero,
+                    title: self.tabEntries.first { $0.tabID == tab }?.title ?? ""
+                )
+            }
+            coordinator.pointerMoved(toScreenPoint: screenPoint)
+        }
+        stripModel.onDragEnded = { [weak coordinator] _ in coordinator?.released() }
+        stripModel.onDragCancelled = { [weak coordinator] in
+            coordinator?.cancel(reason: .pointerCancelled)
+        }
+    }
+
     public func activateTab(_ tabID: WorkspaceTabID) {
         intentSink?.send(.activateTab(tabID))
     }

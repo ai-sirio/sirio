@@ -50,6 +50,10 @@ public final class WorkspaceViewController: NSViewController {
         reconciler.focusCoordinator
     }
 
+    public var dragCoordinator: WorkspaceDragCoordinator {
+        reconciler.dragCoordinator
+    }
+
     private func attachRootIfNeeded() {
         let root = reconciler.rootViewController
         guard !children.contains(where: { $0 === root }) else { return }
