@@ -173,6 +173,23 @@ private final class WorkspaceNativeSplitView: NSSplitView {
         super.layout()
         exchangeContentFramesIfNeeded()
         window?.invalidateCursorRects(for: self)
+        // The overlay measures its bands from this geometry, so a divider drag
+        // has to invalidate its rects too, not only ours.
+        if let overlay = enclosingDragOverlay {
+            window?.invalidateCursorRects(for: overlay)
+        }
+    }
+
+    private var enclosingDragOverlay: WorkspaceDragOverlay? {
+        var node: NSView? = self
+        while let current = node {
+            if let overlay = current.superview?.subviews
+                .compactMap({ $0 as? WorkspaceDragOverlay }).first {
+                return overlay
+            }
+            node = current.superview
+        }
+        return nil
     }
 
     /// Declares the resize cursor over each divider band. AppKit infers its own

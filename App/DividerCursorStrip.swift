@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TillerWorkspace
 
 /// A hover-only resize cursor for an `HSplitView` divider.
 ///
@@ -21,21 +22,6 @@ struct DividerCursorStrip: NSViewRepresentable {
 
     func updateNSView(_ nsView: DividerCursorStripView, context: Context) {
         nsView.cursor = cursor
-    }
-}
-
-/// Which events the cursor strip answers.
-///
-/// AppKit dispatches `cursorUpdate` through `hitTest`, so a view that refuses
-/// every hit test never shows its cursor rect either — measured, not assumed.
-/// The strip therefore has to answer hover events, and must keep refusing
-/// clicks so a mouse-down still reaches the divider underneath.
-enum DividerCursorHitPolicy {
-    static func acceptsHit(eventType: NSEvent.EventType?) -> Bool {
-        switch eventType {
-        case .mouseMoved, .cursorUpdate, .mouseEntered, .mouseExited: true
-        default: false
-        }
     }
 }
 
