@@ -167,14 +167,12 @@ public final class PaneGroupController: NSViewController {
     }
 
     private func detachMountedHost() {
-        guard let mountedHost else {
-            mountedTabID = nil
-            return
+        if let mountedHost {
+            let controller = mountedHost.viewController
+            controller.removeFromParent()
+            self.mountedHost = nil
         }
-        let controller = mountedHost.viewController
-        controller.removeFromParent()
-        controller.viewIfLoaded?.removeFromSuperview()
-        self.mountedHost = nil
+        contentContainer.subviews.forEach { $0.removeFromSuperview() }
         mountedTabID = nil
     }
 
