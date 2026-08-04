@@ -95,8 +95,8 @@ struct ContentView: View {
                 ? String(request.path.dropFirst(root.count + 1))
                 : request.path
             guard let entry = rightPanelModel.statusByPath[relative] else { return }
-            rightPanelModeRaw = RightPanelMode.diff.rawValue
-            Task { await rightPanelModel.selectDiff(entry) }
+            rightPanelModeRaw = RightPanelMode.status.rawValue
+            Task { await rightPanelModel.diffStore.expand(entry, repoPath: worktree.path) }
         }
         .onDisappear { rightPanelModel.deactivate() }
         .configuresWindowChrome()

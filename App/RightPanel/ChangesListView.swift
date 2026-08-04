@@ -1,13 +1,20 @@
 import SwiftUI
+import TillerCore
 import TillerGit
 
-struct GitStatusView: View {
+struct ChangesListView: View {
     private enum SectionKind: Equatable { case staged, changes, untracked }
 
     @Bindable var panelModel: RightPanelModel
-    let onOpenDiff: (GitStatusEntry) -> Void
-    let onOpenFile: (GitStatusEntry) -> Void
+    let worktree: Worktree
+    let onOpenFile: (URL) -> Void
     let requestDiscard: (PendingGitDiscard) -> Void
+
+    @AppStorage(AppSettings.fileIconThemeKey) private var fileIconThemeRaw = FileIconTheme.sfSymbols.rawValue
+
+    private var iconTheme: FileIconTheme {
+        FileIconTheme(rawValue: fileIconThemeRaw) ?? .sfSymbols
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,7 +26,7 @@ struct GitStatusView: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
-                .help("Refresh Status")
+                .help("Refresh Changes")
             }
             .padding(8)
             Divider()
@@ -84,79 +91,99 @@ struct GitStatusView: View {
                         .buttonStyle(.plain)
                         .font(.caption)
                         .disabled(actionable.isEmpty)
-                    if kind == .changes {
+                    if kind == .changes || kind == .untracked {
                         Button("Discard all", role: .destructive) {
                             requestDiscard(PendingGitDiscard(
-                                kind: .changes, entries: actionable))
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption)
-                        .disabled(actionable.isEmpty)
-                    } else if kind == .untracked {
-                        Button("Discard all", role: .destructive) {
-                            requestDiscard(PendingGitDiscard(
-                                kind: .untracked, entries: actionable))
+                                kind: kind == .untracked ? .untracked : .changes,
+                                entries: actionable))
                         }
                         .buttonStyle(.plain)
                         .font(.caption)
                         .disabled(actionable.isEmpty)
                     }
                 }
+
                 ForEach(entries, id: \.path) { entry in
-                    statusRow(entry, section: kind)
+                    changedFile(entry, section: kind)
                 }
             }
         }
     }
 
-    private func statusRow(_ entry: GitStatusEntry, section: SectionKind) -> some View {
-        HStack(spacing: 7) {
-            Text(GitStatusStyle.symbol(entry))
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundStyle(GitStatusStyle.color(entry))
-                .frame(width: 14)
-            Text(entry.path.value)
-                .font(.system(size: 12))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Spacer()
-            if entry.isConflicted {
-                Text("Resolve in terminal")
-                    .font(.caption2)
-                    .foregroundStyle(AppTheme.gitConflict)
-            } else if section == .staged {
-                Button("Unstage") {
-                    Task { await panelModel.unstage([entry]) }
-                }
-                .buttonStyle(.plain)
-            } else {
-                Button("Discard", role: .destructive) {
+    private func changedFile(_ entry: GitStatusEntry, section: SectionKind) -> some View {
+        VStack(spacing: 0) {
+            ChangedFileRow(
+                entry: entry,
+                stat: panelModel.diffStats[entry.path],
+                isExpanded: panelModel.diffStore.isExpanded(entry.path),
+                iconTheme: iconTheme,
+                isStagedSection: section == .staged,
+                onToggle: {
+                    Task { await panelModel.diffStore.toggle(entry, repoPath: worktree.path) }
+                },
+                onStage: { Task { await panelModel.stage([entry]) } },
+                onUnstage: { Task { await panelModel.unstage([entry]) } },
+                onDiscard: {
                     requestDiscard(PendingGitDiscard(
                         kind: entry.isUntracked ? .untracked : .changes,
                         entries: [entry]))
-                }
-                .buttonStyle(.plain)
-                Button("Stage") {
-                    Task { await panelModel.stage([entry]) }
-                }
-                .buttonStyle(.plain)
+                },
+                onOpenFile: { onOpenFile(fileURL(for: entry)) })
+
+            if panelModel.diffStore.isExpanded(entry.path) {
+                diffBody(for: entry)
             }
-            Button { onOpenFile(entry) } label: {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-            }
-            .buttonStyle(.plain)
-            .help("Open in editor")
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .background(AppTheme.rowHover.opacity(0.001),
-                    in: RoundedRectangle(cornerRadius: 6))
-        .onTapGesture { onOpenDiff(entry) }
-        .contextMenu {
-            Button("Open in editor") { onOpenFile(entry) }
-        }
-        .help(entry.isConflicted ? "Conflicted" : entry.path.value)
     }
 
+    @ViewBuilder
+    private func diffBody(for entry: GitStatusEntry) -> some View {
+        switch panelModel.diffStore.state(for: entry.path) {
+        case .idle, .loading:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading diff…")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.meta)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        case .loaded(let diff):
+            if diff.isBinary {
+                ContentUnavailableView(
+                    "Binary diff unavailable", systemImage: "doc.richtext")
+                    .padding(.vertical, 8)
+            } else {
+                FileDiffBody(diff: diff, fileURL: fileURL(for: entry))
+            }
+        case .failed(let error):
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(AppTheme.gitModified)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Diff unavailable")
+                        .font(.caption.weight(.semibold))
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(AppTheme.meta)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button("Retry") {
+                    Task { await panelModel.diffStore.retry(entry, repoPath: worktree.path) }
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+    }
+
+    private func fileURL(for entry: GitStatusEntry) -> URL {
+        URL(fileURLWithPath: worktree.path, isDirectory: true)
+            .appendingPathComponent(entry.path.value)
+    }
 }

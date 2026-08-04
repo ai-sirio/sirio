@@ -37,9 +37,6 @@ struct RightPanelView: View {
                 .frame(maxHeight: .infinity)
             }
         }
-        .task(id: effectiveMode) {
-            if effectiveMode == .diff { await panelModel.ensureDiffLoaded() }
-        }
         .alert(item: $pendingDiscard) { pending in
             Alert(
                 title: Text(pending.title),
@@ -58,7 +55,7 @@ struct RightPanelView: View {
         }
     }
 
-    /// Existing panel content (header picker + Files/Diff/Status), unchanged.
+    /// Existing panel content (header picker + Files/Changes), unchanged.
     private var toolsRegion: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -98,24 +95,11 @@ struct RightPanelView: View {
                             appModel: appModel,
                             panelModel: panelModel,
                             worktree: worktree)
-                    case .diff:
-                        GitDiffView(
-                            panelModel: panelModel,
-                            onOpenFile: { url in appModel.openDocument(fileURL: url, in: worktree) },
-                            requestDiscard: { pendingDiscard = $0 })
                     case .status:
-                        GitStatusView(
+                        ChangesListView(
                             panelModel: panelModel,
-                            onOpenDiff: { entry in
-                                modeRaw = RightPanelMode.diff.rawValue
-                                Task { await panelModel.selectDiff(entry) }
-                            },
-                            onOpenFile: { entry in
-                                guard let root = panelModel.rootURL else { return }
-                                appModel.openDocument(
-                                    fileURL: root.appendingPathComponent(entry.path.value),
-                                    in: worktree)
-                            },
+                            worktree: worktree,
+                            onOpenFile: { url in appModel.openDocument(fileURL: url, in: worktree) },
                             requestDiscard: { pendingDiscard = $0 })
                     }
                 } else {
