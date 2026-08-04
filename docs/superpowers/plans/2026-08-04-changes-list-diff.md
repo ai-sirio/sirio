@@ -13,7 +13,9 @@
 ## Global Constraints
 
 - Test prima dell'implementazione, `swift-testing` (`@Test` / `#expect`), mai XCTest.
-- Ogni file nuovo richiede `xcodegen generate` prima di compilare: `Tiller.xcodeproj` è generato da `project.yml` e non va mai editato a mano.
+- Ogni file nuovo richiede `xcodegen generate` prima di compilare: `Tiller.xcodeproj` è generato da `project.yml` e non va mai editato a mano. **Ma è tracciato da git** (`CLAUDE.md` dice il contrario, ed è inesatto): va incluso nel commit del task che aggiunge file, altrimenti resta sporco nel working tree.
+- Il target dei test dell'app si chiama **`TillerTests`**, non `AppTests` (`AppTests/` è solo la cartella). Il selector giusto è `-only-testing:TillerTests/<NomeStruct>`.
+- Dal Task 2 esistono già in `AppTests/ChangesListTests.swift` gli helper `makeLoaders`, `makeEntry`, `makeWorktree` e `ChangesListTestFailure`: riusali, non ridichiararli.
 - Stringhe UI in inglese, sempre, anche quando la conversazione è in italiano.
 - Commit message in [Conventional Commits](https://www.conventionalcommits.org/), soggetto imperativo minuscolo.
 - Domain logic senza SwiftUI/AppKit va nei package, non in `App/`.
@@ -336,7 +338,7 @@ struct ChangesListTests {
         let model = RightPanelModel(
             loaders: makeLoaders(
                 status: { _ in GitStatusSnapshot(entries: [entry]) },
-                stats: { _, _ in throw TestFailure.boom }),
+                stats: { _, _ in throw ChangesListTestFailure.boom }),
             monitoringEnabled: false)
 
         await model.activate(worktree: makeWorktree(), isGitRepository: true)
@@ -347,7 +349,7 @@ struct ChangesListTests {
     }
 }
 
-enum TestFailure: Error { case boom }
+enum ChangesListTestFailure: Error { case boom }
 
 @MainActor
 func makeLoaders(
@@ -463,7 +465,7 @@ E aggiungi il metodo nell'`extension RightPanelModel` che contiene `loadDiff` (d
 
 ```bash
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: PASS, 2 test. Se la run riporta 0 test eseguiti, il selector sta puntando al `@Suite` invece che alla struct: usa il nome della struct (`ChangesListTests`).
@@ -555,7 +557,7 @@ Aggiungi dentro `struct ChangesListTests` in `AppTests/ChangesListTests.swift`:
         let attempts = LoadCounter()
         let store = DiffLoadStore(loader: { entry, _ in
             let count = await attempts.increment()
-            if count == 1 { throw TestFailure.boom }
+            if count == 1 { throw ChangesListTestFailure.boom }
             return GitFileDiff(path: entry.path, lines: [], additions: 9, deletions: 0,
                                isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
         })
@@ -773,7 +775,7 @@ e in `deactivate()`, accanto a `diffStats = [:]`:
 ```bash
 xcodegen generate
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: PASS, 8 test.
@@ -1108,7 +1110,7 @@ struct FileDiffBody: View {
 ```bash
 xcodegen generate
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: PASS, 9 test.
@@ -1298,7 +1300,7 @@ struct ChangedFileRow: View {
 ```bash
 xcodegen generate
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: PASS, 11 test.
@@ -1340,7 +1342,7 @@ Aggiungi dentro `struct ChangesListTests`:
 
 ```bash
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: FAIL, `allCases.count` è 3 e `"diff"` risolve a `.diff`.
@@ -1388,7 +1390,7 @@ enum RightPanelMode: String, CaseIterable, Identifiable {
 
 ```bash
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: il test `savedDiffModeMigratesToStatus` PASSA; la build dell'app fallisce altrove perché `GitDiffView`/`RightPanelView` citano ancora `.diff`. Si sistema al passo dopo.
@@ -1652,7 +1654,7 @@ con
 ```bash
 xcodegen generate
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: `** BUILD SUCCEEDED **` e PASS, 12 test.
@@ -1746,7 +1748,7 @@ actor SnapshotSequence {
 
 ```bash
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: FAIL — l'espansione resta viva dopo il refresh e nessun diff viene ricaricato.
@@ -1792,7 +1794,7 @@ Atteso: nessun risultato. Se `AppModelControlTests` o altri test citano questi s
 
 ```bash
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation test -only-testing:AppTests/ChangesListTests
+  -skipPackagePluginValidation test -only-testing:TillerTests/ChangesListTests
 ```
 
 Atteso: PASS, 14 test.
