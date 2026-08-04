@@ -10,6 +10,12 @@ import TillerWorkspace
 struct PaneTabStripBar: View {
     @Bindable var model: PaneTabStripModel
 
+    /// The space tab frames are measured in. The drag coordinator offsets them
+    /// into workspace-root space, so they must all share one origin.
+    static let stripSpace = "paneTabStrip"
+
+    @State private var escapeMonitor: Any?
+
     var body: some View {
         HStack(spacing: 4) {
             ScrollView(.horizontal, showsIndicators: false) {
@@ -17,8 +23,10 @@ struct PaneTabStripBar: View {
                     ForEach(model.entries, id: \.tabID) { entry in
                         PaneTabStripItem(
                             entry: entry,
-                            onActivate: { model.onActivate(entry.tabID) },
-                            onClose: { model.onClose(entry.tabID) })
+                            onClose: { model.onClose(entry.tabID) },
+                            onFrameChange: { model.setTabFrame($0, for: entry.tabID) },
+                            onDragChanged: { model.onDragChanged(entry.tabID, $0) },
+                            onDragEnded: { model.onDragEnded(entry.tabID) })
                     }
                 }
                 .padding(.leading, 6)
@@ -35,7 +43,24 @@ struct PaneTabStripBar: View {
             .padding(.trailing, 8)
         }
         .frame(height: 32)
+        .coordinateSpace(name: Self.stripSpace)
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
+        .onChange(of: model.entries.map(\.tabID)) { _, ids in
+            model.removeTabFrames(notIn: Set(ids))
+        }
+        .onAppear {
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                // 53 is Escape. The event is passed through either way: with no
+                // drag in flight the cancel is a no-op, and swallowing the key
+                // would break every other Escape handler in the window.
+                if event.keyCode == 53 { model.onDragCancelled() }
+                return event
+            }
+        }
+        .onDisappear {
+            if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+            escapeMonitor = nil
+        }
     }
 }
 
@@ -44,8 +69,10 @@ struct PaneTabStripBar: View {
 /// (rename, dirty dot, agent status).
 private struct PaneTabStripItem: View {
     let entry: TabMenuEntry
-    let onActivate: () -> Void
     let onClose: () -> Void
+    let onFrameChange: (CGRect) -> Void
+    let onDragChanged: (CGPoint) -> Void
+    let onDragEnded: () -> Void
 
     @State private var hovering = false
 
@@ -89,8 +116,24 @@ private struct PaneTabStripItem: View {
                     }
                 }
         }
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .named(PaneTabStripBar.stripSpace))
+        } action: { frame in
+            onFrameChange(frame)
+        }
         .onHover { hovering = $0 }
-        .onTapGesture(perform: onActivate)
+        // One gesture, not a tap plus a drag: a simultaneous DragGesture eats
+        // the taps, and DragSession already reports a press that never crossed
+        // the threshold as a plain activation.
+        //
+        // NSEvent.mouseLocation, not the gesture's own location: a SwiftUI drag
+        // reports points in this tab's local space, which cannot address the
+        // pane next door.
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in onDragChanged(NSEvent.mouseLocation) }
+                .onEnded { _ in onDragEnded() }
+        )
         .help(entry.title)
     }
 }
