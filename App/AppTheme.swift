@@ -50,6 +50,14 @@ enum AppTheme {
         light: NSColor.white.withAlphaComponent(0.72),
         dark: NSColor.white.withAlphaComponent(0.08))
 
+    /// Bottom edge of a pane tab chip. A chip's fill matches the chrome, so on
+    /// the strip's material it has almost no edge of its own; this underlines
+    /// it. Light against the dark chrome and dark against the light one — the
+    /// point is contrast with the strip, not lightness for its own sake.
+    static let tabChipUnderline = dynamic(
+        light: NSColor(srgbRed: 0.62, green: 0.64, blue: 0.72, alpha: 1),
+        dark: NSColor(srgbRed: 0.52, green: 0.55, blue: 0.64, alpha: 1))
+
     /// Shared border/divider stroke: sidebar dividers, settings field outlines,
     /// the update toast. Dark sits at ~1.9:1 against the chrome — readable as a
     /// boundary without turning every settings field into a hard-edged box.
@@ -133,12 +141,12 @@ enum AppTheme {
         light: NSColor(srgbRed: 0.55, green: 0.57, blue: 0.65, alpha: 1),
         dark: NSColor(srgbRed: 0.40, green: 0.42, blue: 0.50, alpha: 1))
 
-    /// Height of both bottom chrome bars: the sidebar footer and the usage bar.
-    /// They sit in different `HSplitView` columns, so their top dividers line up
-    /// only while the two bars are exactly as tall as each other. Sizing either
-    /// one intrinsically instead lets them drift — the usage bar's 10pt font put
-    /// it 19pt shorter than the sidebar footer, so the chat composer ran past the
-    /// sidebar's divider.
+    /// Height of the usage bar, the app's single bottom chrome bar. It spans the
+    /// full window below the split, so nothing has to line up with it any more —
+    /// the sidebar footer that used to sit beside it in another `HSplitView`
+    /// column is gone, and with it the invariant that the two stay equally tall.
+    /// Still fixed rather than intrinsic: the bar's 10pt font would size it 19pt
+    /// shorter, and its segments truncate on a narrow window instead of wrapping.
     static let bottomBarHeight: CGFloat = 30
 
     /// Resolves at draw time against the view's effective appearance — the

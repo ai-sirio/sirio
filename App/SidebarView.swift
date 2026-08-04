@@ -86,29 +86,6 @@ struct SidebarView: View {
                     .animation(.easeInOut(duration: 0.18), value: model.expandedProjectIds)
                 }
                 .scrollContentBackground(.hidden)
-
-                Divider().overlay(AppTheme.hairline)
-                HStack {
-                    Button {
-                        model.openSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .buttonStyle(HoverIconButtonStyle())
-                    Button {
-                        let readme = URL(fileURLWithPath: "/Users/enzopiopalmisano/orca/projects/orca-mac/README.md")
-                        if FileManager.default.fileExists(atPath: readme.path) {
-                            NSWorkspace.shared.open(readme)
-                        }
-                    } label: {
-                        Image(systemName: "questionmark.circle")
-                    }
-                    .buttonStyle(.plain)
-                    Spacer()
-                }
-                .foregroundStyle(AppTheme.subtitle)
-                .padding(.horizontal, 8)
-                .frame(height: AppTheme.bottomBarHeight)
             }
             .toolbar {
                 Button {

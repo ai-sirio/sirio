@@ -115,6 +115,14 @@ private struct PaneTabStripItem: View {
                         RoundedRectangle(cornerRadius: 7).fill(AppTheme.rowHover)
                     }
                 }
+                // Clipped after the overlay so the straight line is trimmed to
+                // the chip's rounded corners instead of poking out of them.
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(AppTheme.tabChipUnderline)
+                        .frame(height: 1.5)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .onGeometryChange(for: CGRect.self) { proxy in
             proxy.frame(in: .named(PaneTabStripBar.stripSpace))

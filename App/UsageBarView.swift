@@ -2,18 +2,31 @@ import SwiftUI
 import Foundation
 import TillerCore
 
-/// Slim bottom bar showing usage for each enabled provider (Claude, Codex,
-/// OpenCode Go, Ollama Cloud), e.g. `Claude 26% 5h · 53% wk · 66% Fable`.
+/// The app's status bar: settings, then usage for each enabled provider
+/// (Claude, Codex, OpenCode Go, Ollama Cloud), e.g. `Claude 26% 5h · 53% wk`.
+///
+/// It spans the whole window below the split, so it stays visible whatever the
+/// provider toggles say — the settings button lives here, and hiding the bar
+/// with the last provider would take the way back to Settings with it.
 struct UsageBarView: View {
     let store: UsageStore
     let worktree: Worktree?
+    let onOpenSettings: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("usage.claude.showInBar") private var showClaudeInBar = true
     @AppStorage("usage.codex.showInBar") private var showCodexInBar = true
     @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
     @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
 
     var body: some View {
         HStack(spacing: 12) {
+            Button(action: onOpenSettings) {
+                Image(systemName: "gearshape")
+                    .imageScale(.small)
+            }
+            .buttonStyle(HoverIconButtonStyle())
+            .help("Settings (⌘,)")
+            .accessibilityLabel("Settings")
             Button {
                 Task { await store.refreshAll() }
             } label: {
@@ -25,7 +38,9 @@ struct UsageBarView: View {
             }
             .buttonStyle(HoverIconButtonStyle())
             .help("Refresh usage")
-            ClaudeUsageSegment(state: store.claude)
+            if showClaudeInBar {
+                ClaudeUsageSegment(state: store.claude)
+            }
             if showCodexInBar {
                 ProviderUsageSegment(
                     displayName: "Codex", agentId: "codex", state: store.codex,

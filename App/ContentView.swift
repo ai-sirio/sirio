@@ -13,13 +13,15 @@ private struct RightPanelContext: Hashable {
 struct ContentView: View {
     var model: AppModel
     var updater: UpdaterModel
-    @AppStorage("usage.claude.showInBar") private var showClaudeInBar = true
-    @AppStorage("usage.codex.showInBar") private var showCodexInBar = true
-    @AppStorage("usage.opencodeGo.showInBar") private var showOpencodeGoInBar = false
-    @AppStorage("usage.ollamaCloud.showInBar") private var showOllamaCloudInBar = false
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
     @AppStorage("sidebar.visible") private var sidebarVisible = true
     @State private var sidebarWidth: CGFloat = 240
+    /// Titlebar height, reserved inside the centre surface. The surface itself
+    /// runs to the window's top edge, but its content must not: the transparent
+    /// `NSTitlebarContainerView` sits above the content view and keeps taking
+    /// mouse events across the full width, so anything interactive drawn up
+    /// there is visible and dead — pane tabs that neither switch nor close.
+    @State private var titlebarInset: CGFloat = 0
     @AppStorage(AppSettings.rightPanelVisibleKey)
     private var rightPanelVisible = AppSettings.defaultRightPanelVisible
     @AppStorage(AppSettings.rightPanelWidthKey)
@@ -39,10 +41,6 @@ struct ContentView: View {
 
     static func renderPath(gateEnabled: Bool) -> WorkspaceRenderPath {
         gateEnabled ? .workspace : .legacyTerminal
-    }
-
-    private var showUsageBar: Bool {
-        showClaudeInBar || showCodexInBar || showOpencodeGoInBar || showOllamaCloudInBar
     }
 
     private var rightPanelContext: RightPanelContext {
@@ -180,13 +178,71 @@ struct ContentView: View {
         // past that clip to reach under the transparent titlebar/toolbar.
         // Painting the material as the outermost layer, behind the whole
         // split view, lets it extend there unclipped.
-        ZStack {
-            SidebarMaterialContainer().ignoresSafeArea()
-            splitContent
+        // A VStack, not `.safeAreaInset(edge: .bottom)`: that one leaves the
+        // content at full height and only declares an inset, which an
+        // NSSplitView-backed HSplitView never applies to itself — its columns
+        // ran under the bar and the bar painted over them, clipping the
+        // composer. Stacking actually proposes `height - bottomBarHeight`.
+        VStack(spacing: 0) {
+            ZStack {
+                SidebarMaterialContainer().ignoresSafeArea()
+                // Measured from a sibling, never from an ancestor of the split:
+                // a GeometryReader wrapping the split pins it to the safe-area
+                // origin and turns its `ignoresSafeArea` into a silent no-op.
+                Color.clear
+                    .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: {
+                        titlebarInset = $0
+                    }
+                splitContent
+            }
+            UsageBarView(
+                store: model.usage,
+                worktree: model.selectedWorktree,
+                onOpenSettings: { model.openSettings() })
         }
     }
 
     private var splitContent: some View {
+        // Two steps, both needed. This one makes the NSSplitView itself span the
+        // full window instead of starting below the titlebar, which in turn gives
+        // every column a full-height wrapper. Each column is its own NSHostingView
+        // and re-derives the window's safe area on its own, so the sidebar and the
+        // right panel still sit below the titlebar without being padded — only the
+        // centre column opts out, where it's built.
+        splitColumns()
+            .ignoresSafeArea(.container, edges: .top)
+            .overlay(alignment: .leading) {
+                if sidebarVisible {
+                    // HSplitView draws an opaque dark divider with no styling
+                    // API; cover it with the shared material so no seam shows
+                    // between the columns.
+                    SidebarMaterialContainer()
+                        .frame(width: 2)
+                        .offset(x: sidebarWidth)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                    DividerCursorStrip()
+                        .frame(width: DividerCursorStrip.width)
+                        .offset(x: sidebarWidth - DividerCursorStrip.width / 2 + 1)
+                }
+            }
+            .overlay(alignment: .trailing) {
+                if rightPanelVisible {
+                    SidebarMaterialContainer()
+                        .frame(width: 2)
+                        .offset(x: -liveRightPanelWidth)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                    DividerCursorStrip()
+                        .frame(width: DividerCursorStrip.width)
+                        .offset(x: -liveRightPanelWidth + DividerCursorStrip.width / 2 - 1)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
+            .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
+    }
+
+    private func splitColumns() -> some View {
         HSplitView {
             if sidebarVisible {
                 SidebarView(model: model)
@@ -211,16 +267,21 @@ struct ContentView: View {
                         } else {
                             terminalStack
                         }
-                        if showUsageBar {
-                            Divider()
-                            UsageBarView(store: model.usage, worktree: model.selectedWorktree)
-                        }
                     }
+                    // The surface reaches y=0; its content starts below the
+                    // titlebar, which still owns the mouse up there.
+                    .padding(.top, titlebarInset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .padding(.horizontal, AppTheme.mainSurfaceHorizontalInset)
-                .padding(.vertical, AppTheme.mainSurfaceVerticalInset)
+                // No top inset: the surface runs to the window's top edge and the
+                // toolbar controls float over its first ~52pt.
+                .padding(.bottom, AppTheme.mainSurfaceVerticalInset)
             }
+            // Step two: this column's own hosting view still reserves the titlebar,
+            // even though the split around it no longer does. Opting out here is
+            // what actually lifts the surface to y=0.
+            .ignoresSafeArea(.container, edges: .top)
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
@@ -256,34 +317,6 @@ struct ContentView: View {
                 }
             }
         }
-        // HSplitView draws an opaque dark divider with no styling API; cover
-        // it with the shared material so no seam shows between the columns.
-        .overlay(alignment: .leading) {
-            if sidebarVisible {
-                SidebarMaterialContainer()
-                    .frame(width: 2)
-                    .offset(x: sidebarWidth)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-                DividerCursorStrip()
-                    .frame(width: DividerCursorStrip.width)
-                    .offset(x: sidebarWidth - DividerCursorStrip.width / 2 + 1)
-            }
-        }
-        .overlay(alignment: .trailing) {
-            if rightPanelVisible {
-                SidebarMaterialContainer()
-                    .frame(width: 2)
-                    .offset(x: -liveRightPanelWidth)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-                DividerCursorStrip()
-                    .frame(width: DividerCursorStrip.width)
-                    .offset(x: -liveRightPanelWidth + DividerCursorStrip.width / 2 - 1)
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
-        .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
     }
 
     private func splitMenuModel(
