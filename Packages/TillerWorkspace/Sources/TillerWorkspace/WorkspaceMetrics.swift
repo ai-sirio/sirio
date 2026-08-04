@@ -4,6 +4,10 @@ public enum WorkspaceMetrics {
     public static let preferredGroupSize = CGSize(width: 240, height: 160)
     public static let dividerThickness: CGFloat = 6
     public static let dividerHairlineThickness: CGFloat = 1
+    /// How wide the pointer target around a divider is. A 6pt band is easy
+    /// enough to grab once you are aiming at it, but not to *find*: cmux sizes
+    /// the same invisible target at 24px over a 1px line, and that reads right.
+    public static let dividerHoverBand: CGFloat = 24
     public static let tabStripHeight: CGFloat = 32
     public static let edgeBandFraction: CGFloat = 0.22
     public static let dragThreshold: CGFloat = 4
