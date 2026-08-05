@@ -38,40 +38,54 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
-                    ForEach(model.entries, id: \.tabID) { entry in
-                        PaneTabStripItem(
-                            entry: entry,
-                            presentation: resolver.resolve(entry),
-                            isFocusedGroup: model.isFocusedGroup,
-                            onClose: { model.onClose(entry.tabID) },
-                            onFrameChange: { model.setTabFrame($0, for: entry.tabID) },
-                            onDragChanged: { model.onDragChanged(entry.tabID, $0) },
-                            onDragEnded: { model.onDragEnded(entry.tabID) })
+        HStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(model.entries, id: \.tabID) { entry in
+                            let presentation = resolver.resolve(entry)
+                            PaneTabStripItem(
+                                entry: entry,
+                                presentation: presentation,
+                                isFocusedGroup: model.isFocusedGroup,
+                                onClose: { model.onClose(entry.tabID) },
+                                onFrameChange: { model.setTabFrame($0, for: entry.tabID) },
+                                onDragChanged: { model.onDragChanged(entry.tabID, $0) },
+                                onDragEnded: { model.onDragEnded(entry.tabID) })
+                                .frame(
+                                    minWidth: PaneTabStripLayout.minimumWidth(isActive: entry.isActive),
+                                    maxWidth: PaneTabStripLayout.maximumWidth,
+                                    alignment: .leading)
+                                .id(entry.tabID)
+                        }
+                    }
+                    .padding(.leading, 6)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                        model.updateContentWidth($0)
                     }
                 }
-                .padding(.leading, 6)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: {
+                    model.updateViewportWidth($0)
+                }
+                .onChange(of: model.activeTabID) { _, active in
+                    guard let active else { return }
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        proxy.scrollTo(active)
+                    }
+                }
             }
 
-            // A menu, not a button: the legacy tab bar's "+" offered terminal,
-            // agent and chat, and a plain button silently dropped every choice
-            // but "new terminal".
-            Menu {
-                newTabMenu()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 11))
-                    .foregroundStyle(AppTheme.meta)
+            HStack(spacing: 10) {
+                if model.showsOverflowMenu {
+                    overflowMenu
+                }
+                newTabMenuButton
             }
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .help("New tab (⌘T)")
-            .accessibilityLabel("New tab")
-            .padding(.trailing, 8)
+            .padding(.horizontal, 8)
+            .frame(height: WorkspaceMetrics.tabStripHeight)
+            .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
         }
-        .frame(height: 32)
+        .frame(height: WorkspaceMetrics.tabStripHeight)
         .coordinateSpace(name: PaneTabStripSpace.name)
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
         .onChange(of: model.entries.map(\.tabID)) { _, ids in
@@ -90,6 +104,55 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
             if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
             escapeMonitor = nil
         }
+    }
+
+    private var newTabMenuButton: some View {
+        Menu {
+            newTabMenu()
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 11))
+                .foregroundStyle(AppTheme.meta)
+        }
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .help("New tab (⌘T)")
+        .accessibilityLabel("New tab")
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            ForEach(model.entries, id: \.tabID) { entry in
+                let presentation = resolver.resolve(entry)
+                Button {
+                    model.onActivate(entry.tabID)
+                } label: {
+                    if entry.isActive {
+                        Label(menuTitle(entry, presentation), systemImage: "checkmark")
+                    } else {
+                        Text(menuTitle(entry, presentation))
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AppTheme.meta)
+        }
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .help("All tabs")
+        .accessibilityLabel("All tabs")
+    }
+
+    private func menuTitle(
+        _ entry: TabMenuEntry,
+        _ presentation: PaneTabPresentation
+    ) -> String {
+        var parts = ["\(presentation.kindLabel): \(entry.title)"]
+        if presentation.isDirty { parts.append("modified") }
+        if let status = presentation.agentStatus { parts.append(status.humanLabel) }
+        return parts.joined(separator: " — ")
     }
 }
 

@@ -29,6 +29,17 @@ struct PaneTabStripLayoutTests {
         #expect(model.isOverflowing)
     }
 
+    @Test func theOverflowControlAppearsOnlyWhenTheSequenceDoesNotFit() {
+        let model = PaneTabStripModel()
+
+        model.updateContentWidth(180)
+        model.updateViewportWidth(200)
+        #expect(!model.showsOverflowMenu)
+
+        model.updateContentWidth(240)
+        #expect(model.showsOverflowMenu)
+    }
+
     @Test func negativeMeasurementsClampToZero() {
         let model = PaneTabStripModel()
 
