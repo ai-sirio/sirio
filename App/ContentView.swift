@@ -213,14 +213,6 @@ struct ContentView: View {
             .ignoresSafeArea(.container, edges: .top)
             .overlay(alignment: .leading) {
                 if sidebarVisible {
-                    // HSplitView draws an opaque dark divider with no styling
-                    // API; cover it with the shared material so no seam shows
-                    // between the columns.
-                    SidebarMaterialContainer()
-                        .frame(width: 2)
-                        .offset(x: sidebarWidth)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
                     DividerCursorStrip()
                         .frame(width: DividerCursorStrip.width)
                         .offset(x: sidebarWidth - DividerCursorStrip.width / 2 + 1)
