@@ -111,7 +111,11 @@ public final class WorkspaceReconciler {
                 return created
             }()
             if let group = layout.group(id) {
-                controller.update(group: group, hostProvider: hostProvider)
+                controller.update(
+                    group: group,
+                    isFocused: id == layout.activeGroupID,
+                    hostProvider: hostProvider
+                )
             }
             return controller
 

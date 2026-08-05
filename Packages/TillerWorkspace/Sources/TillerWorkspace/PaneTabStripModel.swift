@@ -11,6 +11,7 @@ public typealias PaneTabStripFactory = @MainActor (PaneTabStripModel) -> NSView
 @Observable
 public final class PaneTabStripModel {
     public internal(set) var entries: [TabMenuEntry] = []
+    public internal(set) var isFocusedGroup = false
 
     /// Tab rectangles in the strip view's own coordinate space, top-left origin.
     public private(set) var tabFrames: [WorkspaceTabID: CGRect] = [:]
