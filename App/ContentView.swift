@@ -186,33 +186,51 @@ struct ContentView: View {
 
     private var splitContent: some View {
         splitColumns()
+            .padding(.horizontal, AppTheme.cardGap / 2)
+            .padding(.bottom, AppTheme.cardGap)
             .overlay(alignment: .leading) {
                 if sidebarVisible {
+                    dividerCover
+                        .offset(x: CardLayout.dividerCenterX(
+                            columnWidth: sidebarWidth, gap: AppTheme.cardGap) - 1)
                     DividerCursorStrip()
                         .frame(width: DividerCursorStrip.width)
-                        .offset(x: sidebarWidth - DividerCursorStrip.width / 2 + 1)
+                        .offset(x: CardLayout.dividerCenterX(
+                            columnWidth: sidebarWidth, gap: AppTheme.cardGap)
+                            - DividerCursorStrip.width / 2)
                 }
             }
             .overlay(alignment: .trailing) {
                 if rightPanelVisible {
-                    CanvasBackground()
-                        .frame(width: 2)
-                        .offset(x: -liveRightPanelWidth)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
+                    dividerCover
+                        .offset(x: -CardLayout.dividerCenterX(
+                            columnWidth: liveRightPanelWidth, gap: AppTheme.cardGap) + 1)
                     DividerCursorStrip()
                         .frame(width: DividerCursorStrip.width)
-                        .offset(x: -liveRightPanelWidth + DividerCursorStrip.width / 2 - 1)
+                        .offset(x: -CardLayout.dividerCenterX(
+                            columnWidth: liveRightPanelWidth, gap: AppTheme.cardGap)
+                            + DividerCursorStrip.width / 2)
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: sidebarVisible)
             .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
     }
 
+    /// NSSplitView draws its own hairline between columns. Inside a gap that is
+    /// supposed to read as bare canvas, that line is the one thing giving the
+    /// old flush layout away, so it gets painted over.
+    private var dividerCover: some View {
+        CanvasBackground()
+            .frame(width: 2)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+    }
+
     private func splitColumns() -> some View {
         HSplitView {
             if sidebarVisible {
-                SidebarView(model: model)
+                FloatingCard { SidebarView(model: model) }
+                    .padding(.horizontal, AppTheme.cardGap / 2)
                     .frame(
                         minWidth: CGFloat(AppSettings.sidebarWidthRange.lowerBound),
                         idealWidth: CGFloat(AppSettings.defaultSidebarWidth),
@@ -222,28 +240,24 @@ struct ContentView: View {
                         sidebarWidth = $0
                     }
             }
-            ZStack {
-                AppTheme.background
-                FloatingCard {
-                    VStack(spacing: 0) {
-                        if let worktree = model.selectedWorktree {
-                            if !workspaceEngineEnabled {
-                                TabBarView(model: model, worktree: worktree)
-                                Divider()
-                            }
-                        }
-                        if workspaceEngineEnabled {
-                            workspaceStack
-                                .contextMenu { paneContextMenu }
-                        } else {
-                            terminalStack
+            FloatingCard {
+                VStack(spacing: 0) {
+                    if let worktree = model.selectedWorktree {
+                        if !workspaceEngineEnabled {
+                            TabBarView(model: model, worktree: worktree)
+                            Divider()
                         }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if workspaceEngineEnabled {
+                        workspaceStack
+                            .contextMenu { paneContextMenu }
+                    } else {
+                        terminalStack
+                    }
                 }
-                .padding(.horizontal, AppTheme.cardGap)
-                .padding(.bottom, AppTheme.cardGap)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .padding(.horizontal, AppTheme.cardGap / 2)
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,
@@ -256,12 +270,15 @@ struct ContentView: View {
                 return true
             }
             if rightPanelVisible {
-                RightPanelView(
-                    appModel: model,
-                    panelModel: rightPanelModel,
-                    modeRaw: $rightPanelModeRaw,
-                    isGitRepository: rightPanelContext.gitProject,
-                    onClose: { rightPanelVisible = false })
+                FloatingCard {
+                    RightPanelView(
+                        appModel: model,
+                        panelModel: rightPanelModel,
+                        modeRaw: $rightPanelModeRaw,
+                        isGitRepository: rightPanelContext.gitProject,
+                        onClose: { rightPanelVisible = false })
+                }
+                .padding(.horizontal, AppTheme.cardGap / 2)
                 .frame(
                     minWidth: CGFloat(AppSettings.rightPanelWidthRange.lowerBound),
                     idealWidth: CGFloat(AppSettings.clampRightPanelWidth(rightPanelWidth)),
