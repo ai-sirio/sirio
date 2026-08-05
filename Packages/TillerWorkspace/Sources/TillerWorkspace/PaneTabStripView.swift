@@ -5,11 +5,18 @@ public struct TabMenuEntry: Equatable, Sendable {
     public let tabID: WorkspaceTabID
     public let title: String
     public let isActive: Bool
+    public let content: WorkspaceContentRef?
 
-    public init(tabID: WorkspaceTabID, title: String, isActive: Bool) {
+    public init(
+        tabID: WorkspaceTabID,
+        title: String,
+        isActive: Bool,
+        content: WorkspaceContentRef? = nil
+    ) {
         self.tabID = tabID
         self.title = title
         self.isActive = isActive
+        self.content = content
     }
 }
 
@@ -57,7 +64,10 @@ public final class PaneTabStripView: NSView {
     public static func overflowMenuItems(for group: PaneGroup) -> [TabMenuEntry] {
         group.tabs.map { tab in
             TabMenuEntry(
-                tabID: tab.id, title: tab.title, isActive: tab.id == group.activeTabID
+                tabID: tab.id,
+                title: tab.title,
+                isActive: tab.id == group.activeTabID,
+                content: tab.content
             )
         }
     }
