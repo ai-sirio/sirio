@@ -15,7 +15,7 @@ swift build --package-path Packages/TillerControl --product tillerctl
 # that only carry the Developer ID Application cert used for releases.
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
-  -skipPackagePluginValidation -skipMacroValidation build | tail -5
+  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates build | tail -5
 
 tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
 trap 'rm -rf "$tmpdir"' EXIT
@@ -23,6 +23,8 @@ trap 'rm -rf "$tmpdir"' EXIT
 # App-target tests (TillerTests, sources in AppTests/). Deliberately NOT
 # passing CODE_SIGNING_ALLOWED=NO or -derivedDataPath: with either one the
 # test host hangs in dyld before test discovery on managed Macs.
+# The package checkout is shared with the build above, but derived data remains
+# separate so the test host keeps the managed-Mac workaround.
 #
 # The log lands in gitignored DerivedData rather than a trap-deleted tmpdir:
 # when this step fails, the failure detail is the whole point, and a tail of
@@ -31,7 +33,8 @@ app_test_log=DerivedData/apptests.log
 mkdir -p DerivedData
 set +e
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation -skipMacroValidation > "$app_test_log" 2>&1
+  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates \
+  -clonedSourcePackagesDirPath DerivedData/SourcePackages > "$app_test_log" 2>&1
 app_test_status=$?
 set -e
 if [ "$app_test_status" != 0 ]; then
