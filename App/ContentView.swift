@@ -269,10 +269,10 @@ struct ContentView: View {
                     .padding(.top, titlebarInset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(.horizontal, AppTheme.mainSurfaceHorizontalInset)
+                .padding(.horizontal, AppTheme.cardGap)
                 // No top inset: the surface runs to the window's top edge and the
                 // toolbar controls float over its first ~52pt.
-                .padding(.bottom, AppTheme.mainSurfaceVerticalInset)
+                .padding(.bottom, AppTheme.cardGap)
             }
             // Step two: this column's own hosting view still reserves the titlebar,
             // even though the split around it no longer does. Opting out here is

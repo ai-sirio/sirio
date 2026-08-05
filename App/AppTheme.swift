@@ -15,6 +15,17 @@ enum AppTheme {
                        blue: AppSurfaceColor.lightBlue,
                        alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
+    /// The window canvas: the only surface reaching the window edges, and the
+    /// one every card floats on.
+    static let canvas = dynamic(
+        light: NSColor(srgbRed: AppSurfaceColor.canvasLightRed,
+                       green: AppSurfaceColor.canvasLightGreen,
+                       blue: AppSurfaceColor.canvasLightBlue,
+                       alpha: 1),
+        dark: NSColor(srgbRed: AppSurfaceColor.canvasRed,
+                      green: AppSurfaceColor.canvasGreen,
+                      blue: AppSurfaceColor.canvasBlue,
+                      alpha: 1))
     /// Central surface for the terminal main pane (#28292C dark, #F6F6F8 light).
     /// It matches `chatSurface` so terminal and chat panes share one surface.
     static let terminalSurface = dynamic(
@@ -52,15 +63,22 @@ enum AppTheme {
     /// Sidebar/tab bar/usage bar material tint. It intentionally matches
     /// `background` so both sidebars stay one chrome layer.
     static let chromeTint = background
-    /// Border and inset geometry for the central floating surface.
-    static let mainSurfaceCornerRadius: CGFloat = 18
-    static let mainSurfaceHorizontalInset: CGFloat = 10
-    static let mainSurfaceVerticalInset: CGFloat = 12
-    static let mainSurfaceShadowRadius: CGFloat = 18
-    static let mainSurfaceShadowYOffset: CGFloat = 6
-    static let mainSurfaceBorder = dynamic(
-        light: NSColor.white.withAlphaComponent(0.72),
-        dark: NSColor.white.withAlphaComponent(0.08))
+    /// Geometry for the floating cards. Every panel — sidebar, central pane,
+    /// right panel — is one of these, sitting on the canvas.
+    static let cardCornerRadius: CGFloat = 6
+    /// One value for the space between two cards, for the margin against the
+    /// window's left and right edges, and for the margin below the split. A
+    /// different outer margin would stop the canvas reading as a frame.
+    static let cardGap: CGFloat = 10
+    static let cardShadowRadius: CGFloat = 18
+    static let cardShadowYOffset: CGFloat = 6
+    /// The canvas band above the cards, holding the traffic lights and the
+    /// chrome buttons. 28pt is the standard macOS titlebar height; it is
+    /// deliberately thicker than `cardGap` because the window controls need it.
+    static let titleStripHeight: CGFloat = 28
+    /// Leading space in the title strip reserved for the traffic lights, which
+    /// AppKit keeps drawing itself even under `.hiddenTitleBar`.
+    static let trafficLightInset: CGFloat = 78
 
     /// Bottom edge of a pane tab chip. A chip's fill matches the chrome, so on
     /// the strip's material it has almost no edge of its own; this underlines
