@@ -17,7 +17,10 @@ enum CodeBlockStyle {
 
     static let cardFill = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.black.withAlphaComponent(0.25)
+            ? NSColor(srgbRed: 52.0 / 255.0,
+                      green: 53.0 / 255.0,
+                      blue: 57.0 / 255.0,
+                      alpha: 1)
             : NSColor.black.withAlphaComponent(0.04)
     }
     static let cardBorder = NSColor.separatorColor
