@@ -28,6 +28,7 @@ struct PaneTabChromeTests {
 
         controller.update(
             group: group([first, second], active: second),
+            isFocused: false,
             hostProvider: EmptyHostProvider())
 
         #expect(controller.tabEntries.map(\.title) == ["one", "two"])
@@ -38,7 +39,10 @@ struct PaneTabChromeTests {
         let only = tab("one")
         let sink = RecordingTabIntentSink()
         let controller = PaneGroupController(id: PaneGroupID(), intentSink: sink)
-        controller.update(group: group([only], active: only), hostProvider: EmptyHostProvider())
+        controller.update(
+            group: group([only], active: only),
+            isFocused: false,
+            hostProvider: EmptyHostProvider())
 
         controller.activateTab(only.id)
 
@@ -49,11 +53,49 @@ struct PaneTabChromeTests {
         let only = tab("one")
         let sink = RecordingTabIntentSink()
         let controller = PaneGroupController(id: PaneGroupID(), intentSink: sink)
-        controller.update(group: group([only], active: only), hostProvider: EmptyHostProvider())
+        controller.update(
+            group: group([only], active: only),
+            isFocused: false,
+            hostProvider: EmptyHostProvider())
 
         controller.closeTab(only.id)
 
         #expect(sink.intents == [.requestClose(only.id)])
+    }
+
+    @Test func entriesCarryTheWorkspaceContentReference() throws {
+        let only = tab("one")
+        let controller = PaneGroupController(id: PaneGroupID())
+
+        controller.update(
+            group: group([only], active: only),
+            isFocused: true,
+            hostProvider: EmptyHostProvider())
+
+        let entry = try #require(controller.tabEntries.first)
+        #expect(entry.content == only.content)
+        #expect(controller.strip.isFocusedGroup)
+    }
+
+    @Test func theReconcilerMarksOnlyTheActiveGroupAsFocused() throws {
+        let first = tab("one")
+        let second = tab("two")
+        let firstGroup = group([first], active: first)
+        let secondGroup = group([second], active: second)
+        let split = SplitID()
+        let layout = try #require(try WorkspaceLayout.make(
+            root: .split(
+                id: split, axis: .horizontal, fraction: 0.5,
+                first: .group(firstGroup.id), second: .group(secondGroup.id)),
+            groups: [firstGroup.id: firstGroup, secondGroup.id: secondGroup],
+            activeGroupID: secondGroup.id
+        ).get())
+        let reconciler = WorkspaceReconciler(hostProvider: EmptyHostProvider())
+
+        reconciler.reconcile(to: layout, delta: nil)
+
+        #expect(reconciler.groupController(firstGroup.id)?.strip.isFocusedGroup == false)
+        #expect(reconciler.groupController(secondGroup.id)?.strip.isFocusedGroup == true)
     }
 
     /// The new-tab intent must name *this* group, or a click in one pane opens

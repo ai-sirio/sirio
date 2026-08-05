@@ -152,9 +152,14 @@ public final class PaneGroupController: NSViewController {
         accessibilityPane?.label ?? ""
     }
 
-    func update(group: PaneGroup, hostProvider: WorkspaceHostProvider) {
+    func update(
+        group: PaneGroup,
+        isFocused: Bool,
+        hostProvider: WorkspaceHostProvider
+    ) {
         tabEntries = PaneTabStripView.overflowMenuItems(for: group)
         stripModel.entries = tabEntries
+        stripModel.isFocusedGroup = isFocused
 
         let nextTabID = group.activeTabID
         let nextHost = nextTabID.flatMap { hostProvider.host(for: $0) }
