@@ -190,6 +190,11 @@ struct ContentView: View {
                     worktree: model.selectedWorktree,
                     onOpenSettings: { model.openSettings() })
             }
+            // `.hiddenTitleBar` hides the titlebar but still reserves its height
+            // as top safe area. Without this the strip stacks *below* that
+            // reserved band instead of inside it, and the chrome buttons sit a
+            // full row under the traffic lights they are supposed to sit beside.
+            .ignoresSafeArea(.container, edges: .top)
         }
     }
 
@@ -337,8 +342,16 @@ struct ContentView: View {
             .help("Split Right With…")
             .accessibilityLabel("Split Right With…")
         } else {
-            Button("Split Right With…") {}
-                .disabled(true)
+            // Icon-only like the live menu beside it: a text button here was the
+            // one control in the strip still rendering a word, and it showed
+            // precisely when no worktree was selected — the app's first screen.
+            Button {} label: {
+                Label("Split Right With…", systemImage: "rectangle.split.2x1")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(HoverIconButtonStyle())
+            .font(.system(size: AppTheme.titleStripIconSize))
+            .disabled(true)
         }
     }
 
