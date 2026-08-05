@@ -543,9 +543,22 @@ struct ContentView: View {
                         intentSink: WorkspaceIntentRouter(
                             coordinator: workspaceCoordinator, worktree: worktree),
                         stripFactory: { stripModel in
-                            makePaneTabStrip(stripModel) {
+                            makePaneTabStrip(
+                                stripModel,
+                                appModel: model,
+                                workspaceCoordinator: workspaceCoordinator,
+                                worktree: worktree) {
                                 NewTabMenuItems(
                                     model: model, worktree: worktree,
+                                    onBeforeAction: stripModel.onActivateGroup,
+                                    onNewTerminal: stripModel.onNewTab)
+                            }
+                        },
+                        emptyStateFactory: { stripModel in
+                            makePaneEmptyState(stripModel) {
+                                NewTabMenuItems(
+                                    model: model,
+                                    worktree: worktree,
                                     onBeforeAction: stripModel.onActivateGroup,
                                     onNewTerminal: stripModel.onNewTab)
                             }
