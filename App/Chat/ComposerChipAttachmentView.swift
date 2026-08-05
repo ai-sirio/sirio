@@ -4,6 +4,7 @@ import SwiftUI
 /// The chip's visual: a rounded box with a symbol and a label, sized to fit.
 struct ComposerChipView: View {
     let chip: ComposerChip
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 4) {
@@ -16,7 +17,11 @@ struct ComposerChipView: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(.quaternary.opacity(0.8), in: RoundedRectangle(cornerRadius: 5))
+        .background(
+            colorScheme == .dark
+                ? AnyShapeStyle(AppTheme.cardFill)
+                : AnyShapeStyle(.quaternary.opacity(0.8)),
+            in: RoundedRectangle(cornerRadius: 5))
         .overlay(RoundedRectangle(cornerRadius: 5)
             .strokeBorder(.separator.opacity(0.6), lineWidth: 1))
         .fixedSize()
