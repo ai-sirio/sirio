@@ -149,8 +149,14 @@ acts on the projects, so it belongs under the label that names them.
 ## Translucency
 
 The translucency setting is opt-in and defaults off. When on, the canvas takes
-the `NSVisualEffectView` material and the cards keep their solid tint, so the
-desktop shows through the frame and not through the terminal.
+the `NSVisualEffectView` material — it is the layer that reaches the window
+edges, so the desktop shows through the frame around the cards.
+
+The cards keep the behaviour they have today: `MainSurfaceMaterial` is not
+rewritten, only re-tinted. Redesigning how translucency composes inside a card
+is a separate question from the layout, and the terminal's own Ghostty
+`background-opacity` already participates in it. Whether the result reads muddy
+is a QA judgement, not a decision taken here.
 
 ## Verification
 
