@@ -9,12 +9,28 @@ import Testing
     #expect(AppSurfaceColor.lightHex == "E9EAED")
 }
 
-@Test func chatSurfaceMatchesApprovedDarkAndLightValues() {
-    #expect(AppSurfaceColor.chatRed == 40.0 / 255.0)
-    #expect(AppSurfaceColor.chatGreen == 41.0 / 255.0)
-    #expect(AppSurfaceColor.chatBlue == 44.0 / 255.0)
-    #expect(AppSurfaceColor.chatHex == "28292C")
-    #expect(AppSurfaceColor.chatLightHex == "F6F6F8")
+@Test func chatSurfaceIsTheSameSurfaceAsTheChrome() {
+    #expect(AppSurfaceColor.chatRed == AppSurfaceColor.red)
+    #expect(AppSurfaceColor.chatGreen == AppSurfaceColor.green)
+    #expect(AppSurfaceColor.chatBlue == AppSurfaceColor.blue)
+    #expect(AppSurfaceColor.chatHex == AppSurfaceColor.hex)
+    #expect(AppSurfaceColor.chatLightHex == AppSurfaceColor.lightHex)
+}
+
+@Test func canvasMatchesApprovedDarkAndLightValues() {
+    #expect(AppSurfaceColor.canvasHex == "131417")
+    #expect(AppSurfaceColor.canvasLightHex == "DCDDE2")
+}
+
+/// The relationship, not the values: whatever the palette becomes, a card that
+/// is darker than what it sits on stops reading as resting on it.
+@Test func canvasIsDarkerThanTheCardInBothAppearances() {
+    #expect(AppSurfaceColor.canvasRed < AppSurfaceColor.red)
+    #expect(AppSurfaceColor.canvasGreen < AppSurfaceColor.green)
+    #expect(AppSurfaceColor.canvasBlue < AppSurfaceColor.blue)
+    #expect(AppSurfaceColor.canvasLightRed < AppSurfaceColor.lightRed)
+    #expect(AppSurfaceColor.canvasLightGreen < AppSurfaceColor.lightGreen)
+    #expect(AppSurfaceColor.canvasLightBlue < AppSurfaceColor.lightBlue)
 }
 
 @Test func terminalSurfaceMatchesChatSurfaceInBothAppearances() {

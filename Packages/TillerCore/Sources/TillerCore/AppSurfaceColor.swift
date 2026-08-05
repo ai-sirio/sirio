@@ -24,19 +24,42 @@ public enum AppSurfaceColor {
         hexString(red: lightRed, green: lightGreen, blue: lightBlue)
     }
 
-    /// Central chat surface (#28292C).
-    public static let chatRed: Double = 40.0 / 255.0
-    public static let chatGreen: Double = 41.0 / 255.0
-    public static let chatBlue: Double = 44.0 / 255.0
+    /// Window canvas behind the floating cards (#131417). Every panel is a card
+    /// on top of this; it is the only surface that reaches the window edges.
+    public static let canvasRed: Double = 19.0 / 255.0
+    public static let canvasGreen: Double = 20.0 / 255.0
+    public static let canvasBlue: Double = 23.0 / 255.0
+
+    public static var canvasHex: String {
+        hexString(red: canvasRed, green: canvasGreen, blue: canvasBlue)
+    }
+
+    /// Window canvas in light appearance (#DCDDE2). Darker than the card, not
+    /// lighter: a lighter canvas makes the cards sink instead of rest.
+    public static let canvasLightRed: Double = 220.0 / 255.0
+    public static let canvasLightGreen: Double = 221.0 / 255.0
+    public static let canvasLightBlue: Double = 226.0 / 255.0
+
+    public static var canvasLightHex: String {
+        hexString(red: canvasLightRed, green: canvasLightGreen, blue: canvasLightBlue)
+    }
+
+    /// Central chat surface — the same colour as the sidebar chrome. Every
+    /// floating card shares one surface; the canvas behind them is what
+    /// separates them, not a difference in fill. Kept as its own name because
+    /// `TillerTerminal` and `AppTheme` reach for it under this name.
+    public static let chatRed: Double = red
+    public static let chatGreen: Double = green
+    public static let chatBlue: Double = blue
 
     public static var chatHex: String {
         hexString(red: chatRed, green: chatGreen, blue: chatBlue)
     }
 
-    /// Central chat surface in light appearance (#F6F6F8).
-    public static let chatLightRed: Double = 246.0 / 255.0
-    public static let chatLightGreen: Double = 246.0 / 255.0
-    public static let chatLightBlue: Double = 248.0 / 255.0
+    /// Central chat surface in light appearance — see `chatRed`.
+    public static let chatLightRed: Double = lightRed
+    public static let chatLightGreen: Double = lightGreen
+    public static let chatLightBlue: Double = lightBlue
 
     public static var chatLightHex: String {
         hexString(red: chatLightRed, green: chatLightGreen, blue: chatLightBlue)
