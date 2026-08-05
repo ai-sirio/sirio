@@ -189,9 +189,7 @@ import Testing
         await connection.emit(completed)
         await connection.emit(completed)
 
-        // Give the driver a moment to over-deliver duplicates if it's going to.
-        try await Task.sleep(for: .milliseconds(50))
-        let events = updates(await collector.snapshot())
+        let events = updates(await waitForEvents(collector, count: 2))
         let toolEvents = events.filter {
             if case .toolCall = $0 { return true }
             if case .toolCallUpdate = $0 { return true }
