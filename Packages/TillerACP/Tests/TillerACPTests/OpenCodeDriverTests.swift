@@ -15,6 +15,7 @@ import Testing
         private var requests: [Request] = []
         private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
         private var pendingEvents: [Data] = []
+        private var eventsFinished = false
 
         init(sessionResponse: Data, providersResponse: Data) {
             self.sessionResponse = sessionResponse
@@ -45,6 +46,7 @@ import Testing
             self.continuation = continuation
             for event in pendingEvents { continuation.yield(event) }
             pendingEvents.removeAll()
+            if eventsFinished { continuation.finish() }
         }
 
         func emit(_ event: Data) {
@@ -52,7 +54,10 @@ import Testing
             else { pendingEvents.append(event) }
         }
 
-        func finishEvents() { continuation?.finish() }
+        func finishEvents() {
+            eventsFinished = true
+            continuation?.finish()
+        }
 
         func requestSnapshot() -> [Request] { requests }
 
@@ -188,8 +193,10 @@ import Testing
         let completed = json(#"{"type":"message.part.updated","properties":{"sessionID":"__SESSION__","part":{"type":"tool","id":"part_tool","callID":"call-1","messageID":"msg_assistant","sessionID":"__SESSION__","tool":"bash","state":{"status":"completed","input":{"command":"echo done"},"output":"done\n"}}}}"#.replacingOccurrences(of: "__SESSION__", with: sessionID))
         await connection.emit(completed)
         await connection.emit(completed)
+        await connection.finishEvents()
+        await eventTask.value
 
-        let events = updates(await waitForEvents(collector, count: 2))
+        let events = updates(await collector.snapshot())
         let toolEvents = events.filter {
             if case .toolCall = $0 { return true }
             if case .toolCallUpdate = $0 { return true }
