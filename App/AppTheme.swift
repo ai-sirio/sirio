@@ -79,6 +79,10 @@ enum AppTheme {
     /// Leading space in the title strip reserved for the traffic lights, which
     /// AppKit keeps drawing itself even under `.hiddenTitleBar`.
     static let trafficLightInset: CGFloat = 78
+    /// Glyph size for the title-strip buttons. Matched to the traffic lights
+    /// they sit beside — a default-sized SF Symbol reads noticeably larger
+    /// than the 12pt window controls and breaks the row's rhythm.
+    static let titleStripIconSize: CGFloat = 13
 
     /// Bottom edge of a pane tab chip. A chip's fill matches the chrome, so on
     /// the strip's material it has almost no edge of its own; this underlines
@@ -158,6 +162,12 @@ enum AppTheme {
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
         dark: NSColor(srgbRed: 52.0 / 255.0, green: 53.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
+    /// The composer's text area — a field sunk into the composer chrome rather
+    /// than flush with it. Near-black in dark, so the caret and the typed text
+    /// have the most contrast in the one place the user is actually writing.
+    static let composerFieldFill = dynamic(
+        light: .white,
+        dark: NSColor(srgbRed: 13.0 / 255.0, green: 14.0 / 255.0, blue: 16.0 / 255.0, alpha: 1))
     /// Clickable file paths in the transcript. `.tint` bypasses the tuned
     /// light/dark pairs and reads as a dark blue on the chat surface.
     static let fileLink = gitUntracked

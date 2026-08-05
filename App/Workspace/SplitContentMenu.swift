@@ -207,6 +207,9 @@ struct SplitContentMenu: View {
         } label: {
             Label("Split", systemImage: "rectangle.split.2x1")
         }
+        .labelStyle(.iconOnly)
+        .menuIndicator(.hidden)
+        .font(.system(size: AppTheme.titleStripIconSize))
     }
 }
 

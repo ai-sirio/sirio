@@ -60,6 +60,10 @@ struct ChatComposerView: View {
         let border = ComposerControlBar.borderStyle(isFocused: document.isFocused)
         return VStack(alignment: .leading, spacing: 8) {
             editor
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(AppTheme.composerFieldFill,
+                            in: RoundedRectangle(cornerRadius: 9))
             ComposerControlBar(
                 controller: controller, document: document, onAttach: attachImage,
                 onSend: sendCurrent, canSend: canSend, canInteract: canInteract)
