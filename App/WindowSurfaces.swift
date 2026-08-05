@@ -2,23 +2,24 @@ import SwiftUI
 import AppKit
 import TillerCore
 
-/// One native glass surface for the chrome (sidebar, titlebar, usage bar).
-/// Blends behind the window so the desktop shows through, like native sidebars.
-struct SidebarMaterialContainer: View {
-    /// Chrome translucency: < 1 lets the raw desktop show through the blur.
+/// The window canvas: one surface behind every floating card, reaching all four
+/// window edges. With translucency on it is the only layer the desktop shows
+/// through, so the desktop appears in the frame around the cards and not inside
+/// the terminal.
+struct CanvasBackground: View {
+    /// Canvas translucency: < 1 lets the raw desktop show through the blur.
     /// Requires the non-opaque window set up in `WindowChromeConfigurator`.
     static let backgroundOpacity = AppSurfaceColor.translucentSurfaceOpacity
-    /// Shared chrome tint for the sidebar, tab bar, and usage bar material.
     static let tintOpacity = 0.30
     @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 
     var body: some View {
         if translucencyEnabled {
             SidebarMaterialView()
-                .overlay(AppTheme.chromeTint.opacity(Self.tintOpacity))
+                .overlay(AppTheme.canvas.opacity(Self.tintOpacity))
                 .opacity(Self.backgroundOpacity)
         } else {
-            AppTheme.background
+            AppTheme.canvas
         }
     }
 }
@@ -33,11 +34,6 @@ private struct SidebarMaterialView: NSViewRepresentable {
     }
 
     func updateNSView(_: NSVisualEffectView, context: Context) {}
-}
-
-#Preview {
-    SidebarMaterialContainer()
-        .frame(width: 240, height: 400)
 }
 
 /// Translucent surface for the terminal/chat main pane: the same

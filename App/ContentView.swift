@@ -185,7 +185,7 @@ struct ContentView: View {
         // composer. Stacking actually proposes `height - bottomBarHeight`.
         VStack(spacing: 0) {
             ZStack {
-                SidebarMaterialContainer().ignoresSafeArea()
+                CanvasBackground().ignoresSafeArea()
                 // Measured from a sibling, never from an ancestor of the split:
                 // a GeometryReader wrapping the split pins it to the safe-area
                 // origin and turns its `ignoresSafeArea` into a silent no-op.
@@ -220,7 +220,7 @@ struct ContentView: View {
             }
             .overlay(alignment: .trailing) {
                 if rightPanelVisible {
-                    SidebarMaterialContainer()
+                    CanvasBackground()
                         .frame(width: 2)
                         .offset(x: -liveRightPanelWidth)
                         .ignoresSafeArea()
