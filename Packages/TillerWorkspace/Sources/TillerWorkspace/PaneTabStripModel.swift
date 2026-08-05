@@ -13,6 +13,28 @@ public final class PaneTabStripModel {
     public internal(set) var entries: [TabMenuEntry] = []
     public internal(set) var isFocusedGroup = false
 
+    public private(set) var contentWidth: CGFloat = 0
+    public private(set) var viewportWidth: CGFloat = 0
+
+    public var activeTabID: WorkspaceTabID? {
+        entries.first(where: \.isActive)?.tabID
+    }
+
+    public var isOverflowing: Bool {
+        PaneTabStripLayout.isOverflowing(
+            contentWidth: contentWidth,
+            viewportWidth: viewportWidth
+        )
+    }
+
+    public func updateContentWidth(_ width: CGFloat) {
+        contentWidth = max(0, width)
+    }
+
+    public func updateViewportWidth(_ width: CGFloat) {
+        viewportWidth = max(0, width)
+    }
+
     /// Tab rectangles in the strip view's own coordinate space, top-left origin.
     public private(set) var tabFrames: [WorkspaceTabID: CGRect] = [:]
 
