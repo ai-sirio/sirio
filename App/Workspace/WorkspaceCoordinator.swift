@@ -163,6 +163,11 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         return generation.rawValue
     }
 
+    func isDocumentDirty(tabID: WorkspaceTabID) -> Bool {
+        guard let adapter = adapters[.document] as? DocumentContentAdapter else { return false }
+        return adapter.isDirty(tabID: tabID)
+    }
+
     func handle(_ intent: WorkspaceIntent, in worktree: Worktree) async {
         worktrees[worktree.id] = worktree
         switch intent {
