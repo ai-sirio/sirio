@@ -27,6 +27,8 @@ public final class PaneTabStripModel {
         )
     }
 
+    public var showsOverflowMenu: Bool { isOverflowing }
+
     public func updateContentWidth(_ width: CGFloat) {
         contentWidth = max(0, width)
     }
