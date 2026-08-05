@@ -72,7 +72,6 @@ struct UsageBarView: View {
         .frame(maxWidth: .infinity,
                minHeight: AppTheme.bottomBarHeight,
                maxHeight: AppTheme.bottomBarHeight)
-        .background(SidebarMaterialContainer())
     }
 
     private var isLoading: Bool {
