@@ -3,7 +3,7 @@ import GhosttyTerminal
 import TillerCore
 
 /// Terminal color theme matching the app's unified surface color family:
-/// #101112 for dark mode and #F6F6F8 for light mode. Font size is injected
+/// #28292C for dark mode and #F6F6F8 for light mode. Font size is injected
 /// into both configurations.
 enum TillerTerminalTheme {
     static func theme(fontSize: Float, translucencyEnabled: Bool = true) -> TerminalTheme {

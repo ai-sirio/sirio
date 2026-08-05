@@ -6,10 +6,10 @@ import Foundation
 /// components so the sidebar, chat pane, and terminal surface never drift
 /// out of sync.
 public enum AppSurfaceColor {
-    /// Primary sidebar/chrome surface (#08090A).
-    public static let red: Double = 8.0 / 255.0
-    public static let green: Double = 9.0 / 255.0
-    public static let blue: Double = 10.0 / 255.0
+    /// Primary sidebar/chrome surface (#1B1C1F).
+    public static let red: Double = 27.0 / 255.0
+    public static let green: Double = 28.0 / 255.0
+    public static let blue: Double = 31.0 / 255.0
 
     public static var hex: String {
         hexString(red: red, green: green, blue: blue)
@@ -24,10 +24,10 @@ public enum AppSurfaceColor {
         hexString(red: lightRed, green: lightGreen, blue: lightBlue)
     }
 
-    /// Central chat surface (#101112).
-    public static let chatRed: Double = 16.0 / 255.0
-    public static let chatGreen: Double = 17.0 / 255.0
-    public static let chatBlue: Double = 18.0 / 255.0
+    /// Central chat surface (#28292C).
+    public static let chatRed: Double = 40.0 / 255.0
+    public static let chatGreen: Double = 41.0 / 255.0
+    public static let chatBlue: Double = 44.0 / 255.0
 
     public static var chatHex: String {
         hexString(red: chatRed, green: chatGreen, blue: chatBlue)
@@ -42,7 +42,7 @@ public enum AppSurfaceColor {
         hexString(red: chatLightRed, green: chatLightGreen, blue: chatLightBlue)
     }
 
-    /// Terminal pane surface (#101112) — matches the chat surface above so
+    /// Terminal pane surface (#28292C) — matches the chat surface above so
     /// terminal and chat panes are visually identical. Kept as its own named
     /// token because it's consumed by a different subsystem: Ghostty's theme
     /// config (`TillerTerminal`), not SwiftUI (`AppTheme`, App target).
