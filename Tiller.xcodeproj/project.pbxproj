@@ -18,6 +18,7 @@
 		0BD4B70930C1E4B669B26856 /* EditorTheme+Tiller.swift in Sources */ = {isa = PBXBuildFile; fileRef = F07CEA811BC4635297ACD0DF /* EditorTheme+Tiller.swift */; };
 		0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */; };
 		0C2C39CB89F5865BD49E2AB5 /* AgentsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0121C1EB859A41F27D7CBA35 /* AgentsSectionView.swift */; };
+		101210DBC6268B451C2DC69A /* ComposerFieldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */; };
 		1340DAF556F1DEA17AAD0B08 /* ChangesListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86FC1E8AF12AAF2C88A2D9ED /* ChangesListView.swift */; };
 		142E0076C556DA1AF44A1B24 /* ComposerDocumentObservationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E0B8485FF4CF181492A047 /* ComposerDocumentObservationTests.swift */; };
 		152DA4894A9BF39F083BB014 /* PersistenceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A1E1AA34D8ECCA379739EB1 /* PersistenceCoordinator.swift */; };
@@ -305,6 +306,7 @@
 		4754F38C4D2FACDC47D74C1A /* SplitContentMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitContentMenu.swift; sourceTree = "<group>"; };
 		49151B264C9CB940952FCDAB /* OllamaCloudUsageFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaCloudUsageFetcher.swift; sourceTree = "<group>"; };
 		4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowChromeConfigurator.swift; sourceTree = "<group>"; };
+		4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerFieldTests.swift; sourceTree = "<group>"; };
 		4D0CBADBB33BFC7F4D11E20D /* TillerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TillerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4E862A624DD618CCBD8218B8 /* WorkspaceMenuCommandsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMenuCommandsTests.swift; sourceTree = "<group>"; };
 		4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettingsView.swift; sourceTree = "<group>"; };
@@ -754,6 +756,7 @@
 				65294A0A72CDEE56A073A480 /* ComposerControlBarTests.swift */,
 				77E0B8485FF4CF181492A047 /* ComposerDocumentObservationTests.swift */,
 				81756ED657FF327299FA133E /* ComposerDocumentTests.swift */,
+				4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */,
 				C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */,
 				3DCD6339C795A9A8572D9994 /* ComposerTextKit2Tests.swift */,
 				20192929728F6DE0A6DE5853 /* DividerCursorStripTests.swift */,
@@ -1181,6 +1184,7 @@
 				6F64B525D77FB47E0103E4CA /* ComposerControlBarTests.swift in Sources */,
 				142E0076C556DA1AF44A1B24 /* ComposerDocumentObservationTests.swift in Sources */,
 				EE95BCE4291756DF14F7C993 /* ComposerDocumentTests.swift in Sources */,
+				101210DBC6268B451C2DC69A /* ComposerFieldTests.swift in Sources */,
 				0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */,
 				427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */,
 				19E39343B8CD4EC81B57DB43 /* DividerCursorStripTests.swift in Sources */,

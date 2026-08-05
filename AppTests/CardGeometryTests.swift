@@ -15,3 +15,9 @@ import Testing
     #expect(AppTheme.titleStripHeight == 28)
     #expect(AppTheme.trafficLightInset == 78)
 }
+
+/// The strip's glyphs sit beside the 12pt window controls; a default-sized SF
+/// Symbol reads larger and breaks the row.
+@Test func titleStripGlyphsMatchTheTrafficLightScale() {
+    #expect(AppTheme.titleStripIconSize == 13)
+}

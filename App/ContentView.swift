@@ -116,23 +116,28 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private var titleStripLeadingButtons: some View {
+        Button {
+            sidebarVisible.toggle()
+        } label: {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: AppTheme.titleStripIconSize))
+        }
+        .buttonStyle(HoverIconButtonStyle())
+        .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
+        .accessibilityLabel("Sidebar")
+    }
+
     /// The three chrome buttons that used to live in the window toolbar. They
     /// keep their actions, shortcuts, and help text; only their host changed.
     @ViewBuilder
     private var titleStripButtons: some View {
         Button {
-            sidebarVisible.toggle()
-        } label: {
-            Image(systemName: "sidebar.left")
-        }
-        .buttonStyle(HoverIconButtonStyle())
-        .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
-        .accessibilityLabel("Sidebar")
-
-        Button {
             rightPanelVisible.toggle()
         } label: {
             Image(systemName: "sidebar.right")
+                .font(.system(size: AppTheme.titleStripIconSize))
         }
         .buttonStyle(HoverIconButtonStyle())
         .help(rightPanelVisible ? "Hide right panel (⌃⌘I)" : "Show right panel (⌃⌘I)")
@@ -145,6 +150,7 @@ struct ContentView: View {
                 model.workspaceSplitCurrent(.horizontal)
             } label: {
                 Image(systemName: "square.split.1x2")
+                    .font(.system(size: AppTheme.titleStripIconSize))
             }
             .buttonStyle(HoverIconButtonStyle())
             .help("Split terminal")
@@ -156,6 +162,7 @@ struct ContentView: View {
             model.openSettings()
         } label: {
             Image(systemName: "lock.shield")
+                .font(.system(size: AppTheme.titleStripIconSize))
         }
         .buttonStyle(HoverIconButtonStyle())
         .help("Permissions")
@@ -173,7 +180,9 @@ struct ContentView: View {
             CanvasBackground().ignoresSafeArea()
             VStack(spacing: 0) {
                 if model.route == .workspace {
-                    TitleStrip { titleStripButtons }
+                    TitleStrip(
+                        leading: { titleStripLeadingButtons },
+                        trailing: { titleStripButtons })
                 }
                 splitContent
                 UsageBarView(
