@@ -249,7 +249,7 @@ struct ContentView: View {
             }
             ZStack {
                 AppTheme.background
-                FloatingMainSurface {
+                FloatingCard {
                     VStack(spacing: 0) {
                         if let worktree = model.selectedWorktree {
                             if !workspaceEngineEnabled {

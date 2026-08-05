@@ -162,6 +162,7 @@
 		B381ED15F5C0A1BA138D495C /* ComposerChipViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60A64ED0ED545E2D2D5D2A4C /* ComposerChipViewTests.swift */; };
 		B3B5DDA1F536C9A21519C863 /* CodeBlockStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E0285EBF1B63D3A2E607DE /* CodeBlockStyle.swift */; };
 		B49CC8272880E168790F64F5 /* TillerACP in Frameworks */ = {isa = PBXBuildFile; productRef = 16BBA668B2730B232FAD7DF4 /* TillerACP */; };
+		B580DE3B2EFE80CF8CCC1A64 /* FloatingCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0BFFBC3BF578B02D913D7CB /* FloatingCard.swift */; };
 		B7327A247202A9098E8F2C77 /* spokes-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 64880FCA0680E0D6E7A1DFC4 /* spokes-1024.png */; };
 		B9888CC9AF89737DF3110B17 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C26563F4760C9F22B2AF31 /* TranscriptView.swift */; };
 		BC36BBAC9EFC0EE66783CD9E /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 0A4CA6EAB10E9F2FCB375761 /* Sparkle */; };
@@ -222,7 +223,6 @@
 		FA02E7A2441C7BBCA5152F15 /* background-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 09EE812CA04BE25192955CA0 /* background-1024.png */; };
 		FACE3803227ABE03D36D87B1 /* NewTabMenuItems.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CD02AAA21F7B383108753D2 /* NewTabMenuItems.swift */; };
 		FB1E5C152EE1759663D5077F /* chat-null-session.json in Resources */ = {isa = PBXBuildFile; fileRef = 4749D109F24B9A3C1D17E46C /* chat-null-session.json */; };
-		FB2EDAFC95F3DCC77AAD3EE4 /* FloatingMainSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EC20CA496B584B5B15E299F /* FloatingMainSurface.swift */; };
 		FF9414FF0E5065A840B5EE23 /* DiffLoadStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */; };
 /* End PBXBuildFile section */
 
@@ -334,7 +334,6 @@
 		77E0B8485FF4CF181492A047 /* ComposerDocumentObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDocumentObservationTests.swift; sourceTree = "<group>"; };
 		7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoRenameWiringTests.swift; sourceTree = "<group>"; };
 		7DB1869C83CFBFF1F7AD7355 /* AutoNamerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoNamerTests.swift; sourceTree = "<group>"; };
-		7EC20CA496B584B5B15E299F /* FloatingMainSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingMainSurface.swift; sourceTree = "<group>"; };
 		7F152EDFE5AD82B6A13407D5 /* ChatControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatControllerTests.swift; sourceTree = "<group>"; };
 		7FECC85A6C80C762EA41F963 /* RightPanelFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelFixture.swift; sourceTree = "<group>"; };
 		80A976BDD020658FDB92A95B /* WorkspaceContentRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceContentRegistry.swift; sourceTree = "<group>"; };
@@ -406,6 +405,7 @@
 		CD056107EF0EA40BDCC86276 /* CodeFileTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeFileTabTests.swift; sourceTree = "<group>"; };
 		CF220F5964A9EC73D5E56484 /* ChatStreamFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamFixture.swift; sourceTree = "<group>"; };
 		D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatContentAdapterTests.swift; sourceTree = "<group>"; };
+		D0BFFBC3BF578B02D913D7CB /* FloatingCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingCard.swift; sourceTree = "<group>"; };
 		D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffLoadStore.swift; sourceTree = "<group>"; };
 		D1E0285EBF1B63D3A2E607DE /* CodeBlockStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockStyle.swift; sourceTree = "<group>"; };
 		D1E46DF390E43B7EA1794BB7 /* ChatController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatController.swift; sourceTree = "<group>"; };
@@ -640,7 +640,7 @@
 				362949AA885756BAA5340B1C /* ContentView.swift */,
 				1BE1AC17EADF4CD667F5B721 /* DividerCursorStrip.swift */,
 				DF4B6A5097F21E65740EB222 /* EmptyWorktreeView.swift */,
-				7EC20CA496B584B5B15E299F /* FloatingMainSurface.swift */,
+				D0BFFBC3BF578B02D913D7CB /* FloatingCard.swift */,
 				411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */,
 				252DB14ADB73CFC185CA54D9 /* GeneralSettingsView.swift */,
 				E5CFF13A5A9E0340964D2171 /* GlassStyle.swift */,
@@ -1061,7 +1061,7 @@
 				8A1083A5E14CD5C7AD36AA79 /* FileDiffBody.swift in Sources */,
 				4C26CA87D4A3CCF8C7FDE929 /* FileExplorerView.swift in Sources */,
 				350C9207BDE5E582F869F389 /* FileTypeIcon.swift in Sources */,
-				FB2EDAFC95F3DCC77AAD3EE4 /* FloatingMainSurface.swift in Sources */,
+				B580DE3B2EFE80CF8CCC1A64 /* FloatingCard.swift in Sources */,
 				6C3B119F8CCC258257B30A09 /* ForegroundProcessAgent.swift in Sources */,
 				239F75AA5FFE783526C382CD /* GeneralSettingsView.swift in Sources */,
 				50730C1DE8B61E01FC93C012 /* GitPanelTypes.swift in Sources */,
