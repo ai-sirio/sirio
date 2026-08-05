@@ -18,9 +18,26 @@ struct SidebarView: View {
         defer { SignpostMetrics.endInterval("sidebarBody", state) }
         return Group {
             VStack(spacing: 0) {
+                HStack(spacing: 4) {
+                    Text("Projects")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(AppTheme.meta)
+                    Spacer(minLength: 0)
+                    Button {
+                        showAddProjectSheet = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(HoverIconButtonStyle())
+                    .help("Add Project")
+                    .accessibilityLabel("Add Project")
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+
                 FilterField(text: $filterText)
                     .padding(.horizontal, 8)
-                    .padding(.top, 8)
+                    .padding(.top, 6)
                     .padding(.bottom, 4)
 
                 ScrollView {
@@ -86,13 +103,6 @@ struct SidebarView: View {
                     .animation(.easeInOut(duration: 0.18), value: model.expandedProjectIds)
                 }
                 .scrollContentBackground(.hidden)
-            }
-            .toolbar {
-                Button {
-                    showAddProjectSheet = true
-                } label: {
-                    Label("Add Project", systemImage: "plus")
-                }
             }
             .alert(
                 "New worktree in \(branchPromptProject?.name ?? "")",
