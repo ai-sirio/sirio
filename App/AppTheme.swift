@@ -15,7 +15,7 @@ enum AppTheme {
                        blue: AppSurfaceColor.lightBlue,
                        alpha: 1),
         dark: NSColor(srgbRed: AppSurfaceColor.red, green: AppSurfaceColor.green, blue: AppSurfaceColor.blue, alpha: 1))
-    /// Central surface for the terminal main pane (#101112 dark, #F6F6F8 light).
+    /// Central surface for the terminal main pane (#28292C dark, #F6F6F8 light).
     /// It matches `chatSurface` so terminal and chat panes share one surface.
     static let terminalSurface = dynamic(
         light: NSColor(srgbRed: AppSurfaceColor.chatLightRed,
@@ -26,7 +26,7 @@ enum AppTheme {
                       green: AppSurfaceColor.terminalGreen,
                       blue: AppSurfaceColor.terminalBlue,
                       alpha: 1))
-    /// Central surface for the chat main pane (#101112 dark, #F6F6F8 light).
+    /// Central surface for the chat main pane (#28292C dark, #F6F6F8 light).
     /// It matches `terminalSurface` so terminal and chat panes share one surface.
     static let chatSurface = dynamic(
         light: NSColor(srgbRed: AppSurfaceColor.chatLightRed,
@@ -75,24 +75,24 @@ enum AppTheme {
         dark: NSColor(srgbRed: 0.227, green: 0.251, blue: 0.314, alpha: 1))
     static let title = dynamic(
         light: NSColor(srgbRed: 0.15, green: 0.16, blue: 0.20, alpha: 1),
-        dark: NSColor(srgbRed: 0.85, green: 0.86, blue: 0.89, alpha: 1))
+        dark: NSColor(srgbRed: 242.0 / 255.0, green: 243.0 / 255.0, blue: 245.0 / 255.0, alpha: 1))
     static let titleSelected = dynamic(
         light: NSColor(srgbRed: 0.05, green: 0.05, blue: 0.08, alpha: 1),
-        dark: .white)
+        dark: NSColor(srgbRed: 242.0 / 255.0, green: 243.0 / 255.0, blue: 245.0 / 255.0, alpha: 1))
     static let subtitle = dynamic(
         light: NSColor(srgbRed: 0.35, green: 0.37, blue: 0.45, alpha: 1),
-        dark: NSColor(srgbRed: 0.72, green: 0.74, blue: 0.82, alpha: 1))
+        dark: NSColor(srgbRed: 168.0 / 255.0, green: 171.0 / 255.0, blue: 178.0 / 255.0, alpha: 1))
     /// Light value is darker than a naive mirror of the dark one: `meta` is
     /// caption-sized, and the previous #6B7085 cleared WCAG AA by 0.04.
     static let meta = dynamic(
         light: NSColor(srgbRed: 0.38, green: 0.40, blue: 0.48, alpha: 1),
-        dark: NSColor(srgbRed: 0.66, green: 0.68, blue: 0.77, alpha: 1))
+        dark: NSColor(srgbRed: 168.0 / 255.0, green: 171.0 / 255.0, blue: 178.0 / 255.0, alpha: 1))
     static let primaryPillBg = dynamic(
         light: NSColor(srgbRed: 0.88, green: 0.885, blue: 0.92, alpha: 1),
-        dark: NSColor(srgbRed: 0.200, green: 0.204, blue: 0.239, alpha: 1))
+        dark: NSColor(srgbRed: 52.0 / 255.0, green: 53.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
     static let filterFieldBg = dynamic(
         light: .white,
-        dark: NSColor(srgbRed: 0.078, green: 0.082, blue: 0.106, alpha: 1))
+        dark: NSColor(srgbRed: 52.0 / 255.0, green: 53.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
     /// Guide dell'albero in sidebar: abbastanza chiare da leggersi sul
     /// materiale traslucido, abbastanza tenui da non competere col testo.
     static let treeGuide = dynamic(
@@ -127,7 +127,7 @@ enum AppTheme {
     /// bypasses the tuned light/dark pairs above.
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
-        dark: NSColor(srgbRed: 0.157, green: 0.165, blue: 0.208, alpha: 1))
+        dark: NSColor(srgbRed: 52.0 / 255.0, green: 53.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
     /// Clickable file paths in the transcript. `.tint` bypasses the tuned
     /// light/dark pairs and reads as a dark blue on the chat surface.
     static let fileLink = gitUntracked
