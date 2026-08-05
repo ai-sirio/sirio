@@ -63,8 +63,10 @@ for pkg in Packages/*/; do
     {
         cd "$pkg"
         set +e
+        start=$SECONDS
         swift test > "$tmpdir/$name.log" 2>&1
-        echo $? > "$tmpdir/$name.status"
+        status=$?
+        printf '%s %s\n' "$status" "$((SECONDS - start))" > "$tmpdir/$name.status"
     } &
     echo "$!:$name" >> "$tmpdir/jobs"
 done
@@ -72,8 +74,11 @@ done
 failed_names=""
 while IFS=: read -r pid name; do
     wait "$pid" 2>/dev/null || true
-    status=$(cat "$tmpdir/$name.status" 2>/dev/null || echo 1)
-    echo "==> swift test: Packages/$name/"
+    read -r status elapsed < "$tmpdir/$name.status" || {
+        status=1
+        elapsed='?'
+    }
+    echo "==> swift test: Packages/$name/ (${elapsed}s)"
     cat "$tmpdir/$name.log"
     if [ "$status" != "0" ]; then
         failed_names="$failed_names $name"
@@ -82,7 +87,13 @@ done < "$tmpdir/jobs"
 
 if [ -d "Packages/$serial_pkg" ]; then
     echo "==> swift test: Packages/$serial_pkg/ (serial — timing-sensitive PTY tests)"
-    ( cd "Packages/$serial_pkg" && swift test ) || failed_names="$failed_names $serial_pkg"
+    serial_start=$SECONDS
+    set +e
+    ( cd "Packages/$serial_pkg" && swift test )
+    serial_status=$?
+    set -e
+    echo "==> swift test: Packages/$serial_pkg/ completed in $((SECONDS - serial_start))s"
+    [ "$serial_status" = 0 ] || failed_names="$failed_names $serial_pkg"
 fi
 
 if [ -n "$failed_names" ]; then
