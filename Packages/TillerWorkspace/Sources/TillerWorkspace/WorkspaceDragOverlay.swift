@@ -41,7 +41,7 @@ public final class WorkspaceDragOverlay: NSView {
     /// that is still empty at that point loses the pointer to whatever is
     /// underneath.
     override public func hitTest(_ point: NSPoint) -> NSView? {
-        guard DividerCursorHitPolicy.acceptsHit(eventType: NSApp.currentEvent?.type) else {
+        guard DividerCursorHitPolicy.acceptsHit(eventType: NSApp?.currentEvent?.type) else {
             return nil
         }
         let local = convert(point, from: superview)
