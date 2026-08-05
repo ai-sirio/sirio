@@ -3,6 +3,7 @@ import TillerCore
 
 /// Supplied by the app target, which owns the theme the strip is drawn in.
 public typealias PaneTabStripFactory = @MainActor (PaneTabStripModel) -> NSView
+public typealias PaneEmptyStateFactory = @MainActor (PaneTabStripModel) -> NSView
 
 /// What a pane group's tab strip shows and what it can ask for. The strip's
 /// appearance lives in the app target, which owns the theme; the package holds

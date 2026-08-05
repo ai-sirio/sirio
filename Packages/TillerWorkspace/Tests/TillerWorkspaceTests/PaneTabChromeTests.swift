@@ -145,6 +145,25 @@ struct PaneTabChromeTests {
 
         #expect(sink.intents == [.activateTab(only.id)])
     }
+
+    @Test func anEmptyGroupShowsTheInjectedEmptyStateUntilAHostMounts() {
+        let groupID = PaneGroupID()
+        let empty = PaneGroup(id: groupID, tabs: [], activeTabID: nil)
+        let tab = self.tab("terminal")
+        let populated = PaneGroup(id: groupID, tabs: [tab], activeTabID: tab.id)
+        let provider = MutableHostProvider()
+        let controller = PaneGroupController(
+            id: groupID,
+            emptyStateFactory: { _ in NSView() })
+        _ = controller.view
+
+        controller.update(group: empty, isFocused: true, hostProvider: provider)
+        #expect(controller.isShowingEmptyState)
+
+        provider.hosts[tab.id] = FakeContentHost(tabID: tab.id)
+        controller.update(group: populated, isFocused: true, hostProvider: provider)
+        #expect(!controller.isShowingEmptyState)
+    }
 }
 
 @MainActor
@@ -156,4 +175,13 @@ private final class RecordingTabIntentSink: WorkspaceIntentSink {
 @MainActor
 private final class EmptyHostProvider: WorkspaceHostProvider {
     func host(for tabID: WorkspaceTabID) -> WorkspaceContentHost? { nil }
+}
+
+@MainActor
+private final class MutableHostProvider: WorkspaceHostProvider {
+    var hosts: [WorkspaceTabID: WorkspaceContentHost] = [:]
+
+    func host(for tabID: WorkspaceTabID) -> WorkspaceContentHost? {
+        hosts[tabID]
+    }
 }
