@@ -8,6 +8,7 @@ public final class WorkspaceReconciler {
     private let hostProvider: WorkspaceHostProvider
     private weak var intentSink: WorkspaceIntentSink?
     private let stripFactory: PaneTabStripFactory?
+    private let emptyStateFactory: PaneEmptyStateFactory?
     public let focusCoordinator = WorkspaceFocusCoordinator()
     private var groupControllers: [PaneGroupID: PaneGroupController] = [:]
     private var splitControllers: [SplitID: WorkspaceSplitController] = [:]
@@ -38,12 +39,14 @@ public final class WorkspaceReconciler {
     public init(
         hostProvider: WorkspaceHostProvider,
         intentSink: WorkspaceIntentSink? = nil,
-        stripFactory: PaneTabStripFactory? = nil
+        stripFactory: PaneTabStripFactory? = nil,
+        emptyStateFactory: PaneEmptyStateFactory? = nil
     ) {
         let overlay = WorkspaceDragOverlay(frame: .zero)
         self.hostProvider = hostProvider
         self.intentSink = intentSink
         self.stripFactory = stripFactory
+        self.emptyStateFactory = emptyStateFactory
         self.overlayView = overlay
         self.rootViewController = WorkspaceRootController(overlay: overlay)
     }
@@ -104,7 +107,10 @@ public final class WorkspaceReconciler {
         case .group(let id):
             let controller = groupControllers[id] ?? {
                 let created = PaneGroupController(
-                    id: id, intentSink: intentSink, stripFactory: stripFactory)
+                    id: id,
+                    intentSink: intentSink,
+                    stripFactory: stripFactory,
+                    emptyStateFactory: emptyStateFactory)
                 created.connectDrag(to: dragCoordinator)
                 groupControllerCreationCount += 1
                 groupControllers[id] = created

@@ -553,6 +553,15 @@ struct ContentView: View {
                                     onBeforeAction: stripModel.onActivateGroup,
                                     onNewTerminal: stripModel.onNewTab)
                             }
+                        },
+                        emptyStateFactory: { stripModel in
+                            makePaneEmptyState(stripModel) {
+                                NewTabMenuItems(
+                                    model: model,
+                                    worktree: worktree,
+                                    onBeforeAction: stripModel.onActivateGroup,
+                                    onNewTerminal: stripModel.onNewTab)
+                            }
                         })
                         .focusedSceneValue(
                             \.workspaceMenuTarget,

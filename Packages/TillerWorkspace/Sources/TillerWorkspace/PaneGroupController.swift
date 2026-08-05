@@ -16,16 +16,20 @@ public final class PaneGroupController: NSViewController {
     private weak var intentSink: WorkspaceIntentSink?
     private let stripModel = PaneTabStripModel()
     private let stripFactory: PaneTabStripFactory?
+    private let emptyStateFactory: PaneEmptyStateFactory?
     private let contentContainer = NSView()
+    private var emptyStateView: NSView?
 
     public init(
         id: PaneGroupID,
         intentSink: WorkspaceIntentSink? = nil,
-        stripFactory: PaneTabStripFactory? = nil
+        stripFactory: PaneTabStripFactory? = nil,
+        emptyStateFactory: PaneEmptyStateFactory? = nil
     ) {
         self.id = id
         self.intentSink = intentSink
         self.stripFactory = stripFactory
+        self.emptyStateFactory = emptyStateFactory
         super.init(nibName: nil, bundle: nil)
         stripModel.onActivate = { [weak self] in self?.activateTab($0) }
         stripModel.onClose = { [weak self] in self?.closeTab($0) }
@@ -36,6 +40,10 @@ public final class PaneGroupController: NSViewController {
     /// The strip's model. Exposed so the collector and the drag wiring can read
     /// the tab rectangles the app-side view measured.
     public var strip: PaneTabStripModel { stripModel }
+
+    public var isShowingEmptyState: Bool {
+        emptyStateView?.isHidden == false
+    }
 
     /// This group's geometry in `space`'s coordinates with a top-left origin.
     /// AppKit's default is bottom-left; the flip happens here, once, so nothing
@@ -105,6 +113,19 @@ public final class PaneGroupController: NSViewController {
 
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(contentContainer)
+
+        if let empty = emptyStateFactory?(stripModel) {
+            empty.translatesAutoresizingMaskIntoConstraints = false
+            empty.isHidden = true
+            contentContainer.addSubview(empty)
+            NSLayoutConstraint.activate([
+                empty.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+                empty.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+                empty.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+                empty.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor)
+            ])
+            emptyStateView = empty
+        }
 
         guard let strip = stripFactory?(stripModel) else {
             NSLayoutConstraint.activate([
@@ -179,7 +200,9 @@ public final class PaneGroupController: NSViewController {
         }
         detachMountedHost()
 
+        emptyStateView?.isHidden = nextTabID != nil
         guard let nextHost, let nextTabID else { return }
+        emptyStateView?.isHidden = true
         attach(nextHost)
         mountedTabID = nextTabID
         mountedHost = nextHost
@@ -192,7 +215,12 @@ public final class PaneGroupController: NSViewController {
             controller.removeFromParent()
             self.mountedHost = nil
         }
-        contentContainer.subviews.forEach { $0.removeFromSuperview() }
+        contentContainer.subviews
+            .filter { subview in
+                guard let emptyStateView else { return true }
+                return subview !== emptyStateView
+            }
+            .forEach { $0.removeFromSuperview() }
         mountedTabID = nil
     }
 
