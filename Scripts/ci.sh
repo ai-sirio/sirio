@@ -15,7 +15,7 @@ swift build --package-path Packages/TillerControl --product tillerctl
 # that only carry the Developer ID Application cert used for releases.
 xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
-  -skipPackagePluginValidation -skipMacroValidation build | tail -5
+  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates build | tail -5
 
 tmpdir=$(mktemp -d /tmp/tiller-test-XXXXXX) || exit 1
 trap 'rm -rf "$tmpdir"' EXIT
@@ -23,6 +23,8 @@ trap 'rm -rf "$tmpdir"' EXIT
 # App-target tests (TillerTests, sources in AppTests/). Deliberately NOT
 # passing CODE_SIGNING_ALLOWED=NO or -derivedDataPath: with either one the
 # test host hangs in dyld before test discovery on managed Macs.
+# The package checkout is shared with the build above, but derived data remains
+# separate so the test host keeps the managed-Mac workaround.
 #
 # The log lands in gitignored DerivedData rather than a trap-deleted tmpdir:
 # when this step fails, the failure detail is the whole point, and a tail of
@@ -31,7 +33,8 @@ app_test_log=DerivedData/apptests.log
 mkdir -p DerivedData
 set +e
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
-  -skipPackagePluginValidation -skipMacroValidation > "$app_test_log" 2>&1
+  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates \
+  -clonedSourcePackagesDirPath DerivedData/SourcePackages > "$app_test_log" 2>&1
 app_test_status=$?
 set -e
 if [ "$app_test_status" != 0 ]; then
@@ -60,8 +63,10 @@ for pkg in Packages/*/; do
     {
         cd "$pkg"
         set +e
+        start=$SECONDS
         swift test > "$tmpdir/$name.log" 2>&1
-        echo $? > "$tmpdir/$name.status"
+        status=$?
+        printf '%s %s\n' "$status" "$((SECONDS - start))" > "$tmpdir/$name.status"
     } &
     echo "$!:$name" >> "$tmpdir/jobs"
 done
@@ -69,8 +74,11 @@ done
 failed_names=""
 while IFS=: read -r pid name; do
     wait "$pid" 2>/dev/null || true
-    status=$(cat "$tmpdir/$name.status" 2>/dev/null || echo 1)
-    echo "==> swift test: Packages/$name/"
+    read -r status elapsed < "$tmpdir/$name.status" || {
+        status=1
+        elapsed='?'
+    }
+    echo "==> swift test: Packages/$name/ (${elapsed}s)"
     cat "$tmpdir/$name.log"
     if [ "$status" != "0" ]; then
         failed_names="$failed_names $name"
@@ -79,7 +87,13 @@ done < "$tmpdir/jobs"
 
 if [ -d "Packages/$serial_pkg" ]; then
     echo "==> swift test: Packages/$serial_pkg/ (serial — timing-sensitive PTY tests)"
-    ( cd "Packages/$serial_pkg" && swift test ) || failed_names="$failed_names $serial_pkg"
+    serial_start=$SECONDS
+    set +e
+    ( cd "Packages/$serial_pkg" && swift test )
+    serial_status=$?
+    set -e
+    echo "==> swift test: Packages/$serial_pkg/ completed in $((SECONDS - serial_start))s"
+    [ "$serial_status" = 0 ] || failed_names="$failed_names $serial_pkg"
 fi
 
 if [ -n "$failed_names" ]; then

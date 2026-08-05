@@ -55,25 +55,25 @@ import Testing
 
 @Test func rightPanelDefaultsAreStable() {
     #expect(AppSettings.defaultRightPanelVisible == false)
-    #expect(AppSettings.defaultRightPanelWidth == 180)
-    #expect(AppSettings.rightPanelWidthRange == 160...320)
+    #expect(AppSettings.defaultRightPanelWidth == 320)
+    #expect(AppSettings.rightPanelWidthRange == 240...400)
 }
 
 @Test func rightPanelWidthClampsToSupportedRange() {
-    #expect(AppSettings.clampRightPanelWidth(60) == 160)
-    #expect(AppSettings.clampRightPanelWidth(210) == 210)
-    #expect(AppSettings.clampRightPanelWidth(900) == 320)
+    #expect(AppSettings.clampRightPanelWidth(60) == 240)
+    #expect(AppSettings.clampRightPanelWidth(210) == 240)
+    #expect(AppSettings.clampRightPanelWidth(900) == 400)
 }
 
 @Test func sidebarWidthRangeIsStable() {
-    #expect(AppSettings.sidebarWidthRange == 160...240)
-    #expect(AppSettings.defaultSidebarWidth == 200)
+    #expect(AppSettings.sidebarWidthRange == 240...320)
+    #expect(AppSettings.defaultSidebarWidth == 260)
 }
 
 @Test func sidebarWidthClampsToSupportedRange() {
-    #expect(AppSettings.clampSidebarWidth(60) == 160)
-    #expect(AppSettings.clampSidebarWidth(200) == 200)
-    #expect(AppSettings.clampSidebarWidth(900) == 240)
+    #expect(AppSettings.clampSidebarWidth(60) == 240)
+    #expect(AppSettings.clampSidebarWidth(200) == 240)
+    #expect(AppSettings.clampSidebarWidth(900) == 320)
 }
 
 @Test func signpostMetricsKeyIsCorrect() {

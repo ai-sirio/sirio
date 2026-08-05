@@ -12,6 +12,7 @@ struct TranscriptView: View {
     let worktree: Worktree
     let appModel: AppModel
     @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @Environment(\.colorScheme) private var colorScheme
 
     // Stopgap: timeline-row rendering (work groups, turn folds, 700pt column)
     // is disabled — three main-thread layout storms were sampled with it
@@ -213,7 +214,11 @@ struct TranscriptView: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Color.primary)
-        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+        .background(
+            colorScheme == .dark
+                ? AnyShapeStyle(AppTheme.cardFill)
+                : AnyShapeStyle(.quaternary.opacity(0.7)),
+            in: RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder

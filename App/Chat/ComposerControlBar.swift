@@ -16,6 +16,7 @@ struct ComposerControlBar: View {
 
     @State private var modelPickerShown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     /// The composer card's border: accent while the text view holds focus,
     /// separator otherwise.
@@ -238,8 +239,12 @@ struct ComposerControlBar: View {
                 .foregroundStyle(canSend ? Color.white : Color.secondary)
                 .padding(.horizontal, 10)
                 .frame(height: 24)
-                .background(canSend ? AnyShapeStyle(Color.accentColor)
-                                    : AnyShapeStyle(.quaternary),
+                .background(
+                    canSend
+                        ? AnyShapeStyle(Color.accentColor)
+                        : colorScheme == .dark
+                            ? AnyShapeStyle(AppTheme.cardFill)
+                            : AnyShapeStyle(.quaternary),
                             in: RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
@@ -254,7 +259,11 @@ struct ComposerControlBar: View {
             .controlSize(.small)
             .padding(.horizontal, 10)
             .frame(height: 24)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            .background(
+                colorScheme == .dark
+                    ? AnyShapeStyle(AppTheme.cardFill)
+                    : AnyShapeStyle(.quaternary),
+                in: RoundedRectangle(cornerRadius: 6))
             .help("Starting the agent…")
     }
 
@@ -277,9 +286,15 @@ struct ComposerControlBar: View {
 
 /// Capsule chrome shared by the composer's mode/agent pills.
 private struct PillBackground: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(.quaternary.opacity(0.6), in: Capsule())
+            .background(
+                colorScheme == .dark
+                    ? AnyShapeStyle(AppTheme.cardFill)
+                    : AnyShapeStyle(.quaternary.opacity(0.6)),
+                in: Capsule())
     }
 }

@@ -17,6 +17,19 @@ struct ChatComposerView: View {
     @State private var slashSelectionIndex = 0
     @State private var slashPopupDismissed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var cardBackgroundStyle: AnyShapeStyle {
+        colorScheme == .dark
+            ? AnyShapeStyle(AppTheme.cardFill)
+            : AnyShapeStyle(.quaternary.opacity(0.4))
+    }
+
+    private var loadingBackgroundStyle: AnyShapeStyle {
+        colorScheme == .dark
+            ? AnyShapeStyle(AppTheme.cardFill)
+            : AnyShapeStyle(.quaternary)
+    }
 
     private var isPrompting: Bool { controller.state == .prompting }
     private var isConnecting: Bool { controller.state == .connecting }
@@ -52,7 +65,7 @@ struct ChatComposerView: View {
                 onSend: sendCurrent, canSend: canSend, canInteract: canInteract)
         }
         .padding(12)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 14))
+        .background(cardBackgroundStyle, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14)
             .strokeBorder(border.color, lineWidth: border.width))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
@@ -91,7 +104,7 @@ struct ChatComposerView: View {
         ProgressView()
             .controlSize(.small)
             .frame(width: 26, height: 26)
-            .background(.quaternary, in: Circle())
+            .background(loadingBackgroundStyle, in: Circle())
             .help("Starting the agent…")
     }
 
