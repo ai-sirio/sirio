@@ -69,8 +69,7 @@ final class DiffLoadStore {
 
     func reloadExpanded(entries: [GitStatusEntry], repoPath: String) async {
         for entry in entries where expanded.contains(entry.path) {
-            states[entry.path] = .idle
-            await load(entry, repoPath: repoPath)
+            await load(entry, repoPath: repoPath, preservingLoaded: true)
         }
     }
 
@@ -80,17 +79,33 @@ final class DiffLoadStore {
         inFlight = []
     }
 
-    private func load(_ entry: GitStatusEntry, repoPath: String) async {
+    private func load(
+        _ entry: GitStatusEntry,
+        repoPath: String,
+        preservingLoaded: Bool = false
+    ) async {
         guard inFlight.insert(entry.path).inserted else { return }
         defer { inFlight.remove(entry.path) }
-        states[entry.path] = .loading
+
+        let expectedState: DiffLoadState
+        if preservingLoaded, case let .loaded(previousDiff) = states[entry.path] {
+            expectedState = .loaded(previousDiff)
+        } else {
+            states[entry.path] = .loading
+            expectedState = .loading
+        }
+
         do {
             let diff = try await loader(entry, repoPath)
-            guard states[entry.path] == .loading else { return }
+            guard states[entry.path] == expectedState else { return }
             states[entry.path] = .loaded(diff)
         } catch {
-            guard states[entry.path] == .loading else { return }
-            states[entry.path] = .failed(error.localizedDescription)
+            guard states[entry.path] == expectedState else { return }
+            if case .loaded = expectedState {
+                states[entry.path] = expectedState
+            } else {
+                states[entry.path] = .failed(error.localizedDescription)
+            }
         }
     }
 }
