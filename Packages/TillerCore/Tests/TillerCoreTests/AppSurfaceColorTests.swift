@@ -2,18 +2,18 @@ import Testing
 @testable import TillerCore
 
 @Test func chromeMatchesApprovedDarkAndLightValues() {
-    #expect(AppSurfaceColor.red == 8.0 / 255.0)
-    #expect(AppSurfaceColor.green == 9.0 / 255.0)
-    #expect(AppSurfaceColor.blue == 10.0 / 255.0)
-    #expect(AppSurfaceColor.hex == "08090A")
+    #expect(AppSurfaceColor.red == 27.0 / 255.0)
+    #expect(AppSurfaceColor.green == 28.0 / 255.0)
+    #expect(AppSurfaceColor.blue == 31.0 / 255.0)
+    #expect(AppSurfaceColor.hex == "1B1C1F")
     #expect(AppSurfaceColor.lightHex == "E9EAED")
 }
 
 @Test func chatSurfaceMatchesApprovedDarkAndLightValues() {
-    #expect(AppSurfaceColor.chatRed == 16.0 / 255.0)
-    #expect(AppSurfaceColor.chatGreen == 17.0 / 255.0)
-    #expect(AppSurfaceColor.chatBlue == 18.0 / 255.0)
-    #expect(AppSurfaceColor.chatHex == "101112")
+    #expect(AppSurfaceColor.chatRed == 40.0 / 255.0)
+    #expect(AppSurfaceColor.chatGreen == 41.0 / 255.0)
+    #expect(AppSurfaceColor.chatBlue == 44.0 / 255.0)
+    #expect(AppSurfaceColor.chatHex == "28292C")
     #expect(AppSurfaceColor.chatLightHex == "F6F6F8")
 }
 
