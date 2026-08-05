@@ -53,6 +53,7 @@ struct TillerApp: App {
                 }
                 .onChange(of: appearanceRaw) { _, _ in applyAppearance() }
         }
+        .windowStyle(.hiddenTitleBar)
         .commands {
             WorkspaceMenuCommands()
             // Nel menu File PRIMA di Close: performKeyEquivalent trova

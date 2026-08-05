@@ -16,12 +16,6 @@ struct ContentView: View {
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
     @AppStorage("sidebar.visible") private var sidebarVisible = true
     @State private var sidebarWidth = CGFloat(AppSettings.defaultSidebarWidth)
-    /// Titlebar height, reserved inside the centre surface. The surface itself
-    /// runs to the window's top edge, but its content must not: the transparent
-    /// `NSTitlebarContainerView` sits above the content view and keeps taking
-    /// mouse events across the full width, so anything interactive drawn up
-    /// there is visible and dead — pane tabs that neither switch nor close.
-    @State private var titlebarInset: CGFloat = 0
     @AppStorage(AppSettings.rightPanelVisibleKey)
     private var rightPanelVisible = AppSettings.defaultRightPanelVisible
     @AppStorage(AppSettings.rightPanelWidthKey)
@@ -98,53 +92,6 @@ struct ContentView: View {
         }
         .onDisappear { rightPanelModel.deactivate() }
         .configuresWindowChrome()
-        .toolbar {
-            if model.route == .workspace {
-                ToolbarItem(placement: .navigation) {
-                    Button {
-                        sidebarVisible.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                    }
-                    .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
-                    .accessibilityLabel("Sidebar")
-                }
-
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        rightPanelVisible.toggle()
-                    } label: {
-                        Image(systemName: "sidebar.right")
-                    }
-                    .help(rightPanelVisible
-                          ? "Hide right panel (⌃⌘I)"
-                          : "Show right panel (⌃⌘I)")
-                    .accessibilityLabel("Right panel")
-
-                    if workspaceEngineEnabled {
-                        universalSplitMenu
-                    } else {
-                        Button {
-                            model.workspaceSplitCurrent(.horizontal)
-                        } label: {
-                            Image(systemName: "square.split.1x2")
-                        }
-                        .help("Split terminal")
-                        .accessibilityLabel("Split terminal")
-                    }
-
-                    Button {
-                        model.settingsCategory = .permissions
-                        model.openSettings()
-                    } label: {
-                        Image(systemName: "lock.shield")
-                    }
-                    .help("Permissions")
-                    .accessibilityLabel("Permissions")
-                }
-            }
-        }
-        .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .task { await model.bootstrap() }
         .alert(
             "Error",
@@ -169,48 +116,76 @@ struct ContentView: View {
         }
     }
 
+    /// The three chrome buttons that used to live in the window toolbar. They
+    /// keep their actions, shortcuts, and help text; only their host changed.
+    @ViewBuilder
+    private var titleStripButtons: some View {
+        Button {
+            sidebarVisible.toggle()
+        } label: {
+            Image(systemName: "sidebar.left")
+        }
+        .buttonStyle(HoverIconButtonStyle())
+        .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
+        .accessibilityLabel("Sidebar")
+
+        Button {
+            rightPanelVisible.toggle()
+        } label: {
+            Image(systemName: "sidebar.right")
+        }
+        .buttonStyle(HoverIconButtonStyle())
+        .help(rightPanelVisible ? "Hide right panel (⌃⌘I)" : "Show right panel (⌃⌘I)")
+        .accessibilityLabel("Right panel")
+
+        if workspaceEngineEnabled {
+            universalSplitMenu
+        } else {
+            Button {
+                model.workspaceSplitCurrent(.horizontal)
+            } label: {
+                Image(systemName: "square.split.1x2")
+            }
+            .buttonStyle(HoverIconButtonStyle())
+            .help("Split terminal")
+            .accessibilityLabel("Split terminal")
+        }
+
+        Button {
+            model.settingsCategory = .permissions
+            model.openSettings()
+        } label: {
+            Image(systemName: "lock.shield")
+        }
+        .buttonStyle(HoverIconButtonStyle())
+        .help("Permissions")
+        .accessibilityLabel("Permissions")
+    }
+
     // HSplitView instead of NavigationSplitView: on macOS 26 the system sidebar
     // renders as an inset floating glass card with no opt-out; owning the split
-    // lets the sidebar run edge-to-edge for the full window height.
+    // is what lets every column be one of our own cards instead.
     private var workspaceView: some View {
+        // The canvas is painted as the outermost layer, behind the whole split:
         // HSplitView (NSSplitView) clips each pane to its own bounds, so a
-        // material background nested inside a pane can't ignoresSafeArea()
-        // past that clip to reach under the transparent titlebar/toolbar.
-        // Painting the material as the outermost layer, behind the whole
-        // split view, lets it extend there unclipped.
-        // A VStack, not `.safeAreaInset(edge: .bottom)`: that one leaves the
-        // content at full height and only declares an inset, which an
-        // NSSplitView-backed HSplitView never applies to itself — its columns
-        // ran under the bar and the bar painted over them, clipping the
-        // composer. Stacking actually proposes `height - bottomBarHeight`.
-        VStack(spacing: 0) {
-            ZStack {
-                CanvasBackground().ignoresSafeArea()
-                // Measured from a sibling, never from an ancestor of the split:
-                // a GeometryReader wrapping the split pins it to the safe-area
-                // origin and turns its `ignoresSafeArea` into a silent no-op.
-                Color.clear
-                    .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: {
-                        titlebarInset = $0
-                    }
+        // background nested inside a column could never reach the window edges.
+        ZStack {
+            CanvasBackground().ignoresSafeArea()
+            VStack(spacing: 0) {
+                if model.route == .workspace {
+                    TitleStrip { titleStripButtons }
+                }
                 splitContent
+                UsageBarView(
+                    store: model.usage,
+                    worktree: model.selectedWorktree,
+                    onOpenSettings: { model.openSettings() })
             }
-            UsageBarView(
-                store: model.usage,
-                worktree: model.selectedWorktree,
-                onOpenSettings: { model.openSettings() })
         }
     }
 
     private var splitContent: some View {
-        // Two steps, both needed. This one makes the NSSplitView itself span the
-        // full window instead of starting below the titlebar, which in turn gives
-        // every column a full-height wrapper. Each column is its own NSHostingView
-        // and re-derives the window's safe area on its own, so the sidebar and the
-        // right panel still sit below the titlebar without being padded — only the
-        // centre column opts out, where it's built.
         splitColumns()
-            .ignoresSafeArea(.container, edges: .top)
             .overlay(alignment: .leading) {
                 if sidebarVisible {
                     DividerCursorStrip()
@@ -264,20 +239,11 @@ struct ContentView: View {
                             terminalStack
                         }
                     }
-                    // The surface reaches y=0; its content starts below the
-                    // titlebar, which still owns the mouse up there.
-                    .padding(.top, titlebarInset)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .padding(.horizontal, AppTheme.cardGap)
-                // No top inset: the surface runs to the window's top edge and the
-                // toolbar controls float over its first ~52pt.
                 .padding(.bottom, AppTheme.cardGap)
             }
-            // Step two: this column's own hosting view still reserves the titlebar,
-            // even though the split around it no longer does. Opting out here is
-            // what actually lifts the surface to y=0.
-            .ignoresSafeArea(.container, edges: .top)
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
             .dropDestination(for: URL.self) { urls, _ in
                 guard let worktree = model.selectedWorktree,

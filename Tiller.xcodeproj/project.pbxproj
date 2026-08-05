@@ -60,6 +60,7 @@
 		3DB91E8DFDE4337823E0E3D0 /* PaneTabStripBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B6E2FBE0F45D5C64AD76289 /* PaneTabStripBar.swift */; };
 		3DBB4D532180921DDC4A5088 /* AppModel+Control.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7F2ED339842DA8F4A8AA1AA /* AppModel+Control.swift */; };
 		3E0C7F3C743B17D97F55B798 /* AcpAgentCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE4EAE5FC325A0ED79995A1 /* AcpAgentCenter.swift */; };
+		3EEEF72A706FEB9BDB8381FB /* TitleStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF1C695CF73DD7C0ED738DB1 /* TitleStrip.swift */; };
 		3FAAE9B86EB4A5E9070737C2 /* AutoRenameWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */; };
 		3FCBCCC78EECEFD8DB8379D9 /* RowReorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC09CBEB3675C8DB62CD694B /* RowReorder.swift */; };
 		402D8BD4EEF63D052F385475 /* ChangedFileRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ADF81B45EE2D658E0500C1C /* ChangedFileRow.swift */; };
@@ -442,6 +443,7 @@
 		ED802856C38F484D5CC6D6C6 /* SKILL.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = SKILL.md; sourceTree = "<group>"; };
 		EDAB7CF9FAEF5FF2AE2B49D5 /* ChatTranscriptSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatTranscriptSource.swift; sourceTree = "<group>"; };
 		EDDBFD25A620DA385B2D0EC9 /* WorkspaceCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceCoordinator.swift; sourceTree = "<group>"; };
+		EF1C695CF73DD7C0ED738DB1 /* TitleStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TitleStrip.swift; sourceTree = "<group>"; };
 		EFDADB4FD77F95DC2D1F77ED /* AppAppearance+NSAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppAppearance+NSAppearance.swift"; sourceTree = "<group>"; };
 		F07CEA811BC4635297ACD0DF /* EditorTheme+Tiller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EditorTheme+Tiller.swift"; sourceTree = "<group>"; };
 		F199DFC3D8468A90A3A0B49D /* WorkspaceMigrationV15Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMigrationV15Tests.swift; sourceTree = "<group>"; };
@@ -664,6 +666,7 @@
 				B2D0E40DB15B01BECE29240E /* TerminalContextMenuProvider.swift */,
 				9B5A41F673927F0554385559 /* TillerApp.swift */,
 				D3CB01E518F8CD7DC085D5C0 /* TillerSkillResource.swift */,
+				EF1C695CF73DD7C0ED738DB1 /* TitleStrip.swift */,
 				2D0C9843AF412998E675F96E /* UsageBarView.swift */,
 				02D06C430BAE462C3046E741 /* UsageStore.swift */,
 				4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */,
@@ -1113,6 +1116,7 @@
 				9A421353A3548A7F73376DF0 /* TillerMarkdownTheme.swift in Sources */,
 				250881E7C94F2893D17090F5 /* TillerSkillResource.swift in Sources */,
 				8311E035D440CD440001F2F9 /* TimelineRowViews.swift in Sources */,
+				3EEEF72A706FEB9BDB8381FB /* TitleStrip.swift in Sources */,
 				DFADDA7E1C311808EC99C68D /* ToolCallCardView.swift in Sources */,
 				B9888CC9AF89737DF3110B17 /* TranscriptView.swift in Sources */,
 				E8EC832481BE1F2530BCE3D1 /* UpdateToastView.swift in Sources */,
