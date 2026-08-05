@@ -26,6 +26,18 @@ enum AppTheme {
                       green: AppSurfaceColor.terminalGreen,
                       blue: AppSurfaceColor.terminalBlue,
                       alpha: 1))
+    static let tabFocusAccent = dynamic(
+        light: NSColor(srgbRed: 0.24, green: 0.38, blue: 0.78, alpha: 1),
+        dark: NSColor(srgbRed: 0.55, green: 0.64, blue: 1.00, alpha: 1))
+    static let tabNeedsInput = dynamic(
+        light: NSColor(srgbRed: 0.67, green: 0.42, blue: 0.02, alpha: 1),
+        dark: NSColor(srgbRed: 0.95, green: 0.72, blue: 0.28, alpha: 1))
+    static let tabDone = dynamic(
+        light: NSColor(srgbRed: 0.10, green: 0.45, blue: 0.22, alpha: 1),
+        dark: NSColor(srgbRed: 0.48, green: 0.78, blue: 0.57, alpha: 1))
+    static let tabError = dynamic(
+        light: NSColor(srgbRed: 0.68, green: 0.12, blue: 0.17, alpha: 1),
+        dark: NSColor(srgbRed: 0.94, green: 0.43, blue: 0.47, alpha: 1))
     /// Central surface for the chat main pane (#28292C dark, #F6F6F8 light).
     /// It matches `terminalSurface` so terminal and chat panes share one surface.
     static let chatSurface = dynamic(

@@ -17,11 +17,25 @@ enum PaneTabStripSpace {
 /// model and calls back for the view.
 struct PaneTabStripBar<NewTabMenu: View>: View {
     @Bindable var model: PaneTabStripModel
+    @Bindable var appModel: AppModel
+    let workspaceCoordinator: WorkspaceCoordinator
+    let worktree: Worktree
     /// The "+" menu's items. Supplied by the caller, which owns AppModel and
     /// knows the worktree this strip belongs to.
     @ViewBuilder var newTabMenu: () -> NewTabMenu
 
     @State private var escapeMonitor: Any?
+
+    private var resolver: PaneTabPresentationResolver {
+        PaneTabPresentationResolver(
+            isDirty: workspaceCoordinator.isDocumentDirty,
+            liveTerminalPane: {
+                workspaceCoordinator.liveControlPaneId(
+                    contentID: $0, in: worktree.id)
+            },
+            status: { appModel.agentActivity.statusForWorktree(paneIds: $0) },
+            agentID: { appModel.agentActivity.agentIdForWorktree(paneIds: $0) })
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -30,6 +44,8 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
                     ForEach(model.entries, id: \.tabID) { entry in
                         PaneTabStripItem(
                             entry: entry,
+                            presentation: resolver.resolve(entry),
+                            isFocusedGroup: model.isFocusedGroup,
                             onClose: { model.onClose(entry.tabID) },
                             onFrameChange: { model.setTabFrame($0, for: entry.tabID) },
                             onDragChanged: { model.onDragChanged(entry.tabID, $0) },
@@ -77,11 +93,10 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
     }
 }
 
-/// Mirrors TabBarItem's shape so a pane's tabs read as the same control the
-/// legacy bar used, minus the pieces the universal engine does not carry yet
-/// (rename, dirty dot, agent status).
 private struct PaneTabStripItem: View {
     let entry: TabMenuEntry
+    let presentation: PaneTabPresentation
+    let isFocusedGroup: Bool
     let onClose: () -> Void
     let onFrameChange: (CGRect) -> Void
     let onDragChanged: (CGPoint) -> Void
@@ -91,11 +106,22 @@ private struct PaneTabStripItem: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            PaneTabIcon(presentation: presentation)
+                .frame(width: 14, height: 14)
+
             Text(entry.title)
                 .font(.system(size: 12))
                 .foregroundStyle(entry.isActive ? AppTheme.titleSelected : AppTheme.subtitle)
                 .lineLimit(1)
                 .truncationMode(.tail)
+
+            if presentation.isDirty {
+                Circle().fill(AppTheme.meta).frame(width: 5, height: 5)
+            }
+
+            PaneTabStatusGlyph(
+                status: presentation.agentStatus,
+                agentID: presentation.icon.agentID)
 
             if hovering {
                 Button(action: onClose) {
@@ -104,39 +130,46 @@ private struct PaneTabStripItem: View {
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())
+                .frame(
+                    width: PaneTabStripLayout.closeControlWidth,
+                    height: PaneTabStripLayout.closeControlWidth)
                 .help("Close tab (⌘W)")
             } else {
-                // Placeholder for the ×, so the tab does not resize on hover.
-                Color.clear.frame(width: 16, height: 16)
+                Color.clear.frame(
+                    width: PaneTabStripLayout.closeControlWidth,
+                    height: PaneTabStripLayout.closeControlWidth)
             }
         }
         .padding(.horizontal, 9)
-        .padding(.vertical, 5)
+        .frame(height: 25)
         .contentShape(Rectangle())
         .background {
-            RoundedRectangle(cornerRadius: 7)
-                .fill(AppTheme.background)
+            ConnectedPaneTabShape(cornerRadius: 7)
+                .fill(entry.isActive ? AppTheme.terminalSurface : (hovering ? AppTheme.rowHover : .clear))
                 .overlay {
                     if entry.isActive {
-                        RoundedRectangle(cornerRadius: 7)
-                            .fill(AppTheme.selectionFill)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7)
-                                    .stroke(AppTheme.selectionRing, lineWidth: 1)
-                            )
-                    } else if hovering {
-                        RoundedRectangle(cornerRadius: 7).fill(AppTheme.rowHover)
+                        ConnectedPaneTabShape(cornerRadius: 7)
+                            .stroke(AppTheme.hairline, lineWidth: 1)
                     }
                 }
-                // Clipped after the overlay so the straight line is trimmed to
-                // the chip's rounded corners instead of poking out of them.
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(AppTheme.tabChipUnderline)
-                        .frame(height: 1.5)
+                .overlay(alignment: .top) {
+                    if entry.isActive && isFocusedGroup {
+                        Capsule()
+                            .fill(AppTheme.tabFocusAccent)
+                            .frame(height: 2)
+                            .padding(.horizontal, 5)
+                    }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay(alignment: .bottom) {
+                    if entry.isActive {
+                        Rectangle()
+                            .fill(AppTheme.terminalSurface)
+                            .frame(height: 1)
+                    }
+                }
         }
+        .accessibilityLabel(presentation.accessibilityLabel(for: entry))
+        .accessibilityAddTraits(entry.isActive ? .isSelected : [])
         .onGeometryChange(for: CGRect.self) { proxy in
             proxy.frame(in: .named(PaneTabStripSpace.name))
         } action: { frame in
@@ -159,10 +192,73 @@ private struct PaneTabStripItem: View {
     }
 }
 
+private struct PaneTabIcon: View {
+    let presentation: PaneTabPresentation
+
+    @ViewBuilder
+    var body: some View {
+        switch presentation.icon {
+        case .terminal(let agentID):
+            if let agentID {
+                AgentIcon(agentId: agentID, size: 12)
+            } else {
+                Image(systemName: "terminal")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.meta)
+            }
+        case .chat(let agentID):
+            if let agentID {
+                AgentIcon(agentId: agentID, size: 12)
+            } else {
+                Image(systemName: "bubble.left")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.meta)
+            }
+        case .document(.markdown):
+            Image(systemName: "doc.text")
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.meta)
+        case .document(.code):
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 10))
+                .foregroundStyle(AppTheme.meta)
+        }
+    }
+}
+
+private struct ConnectedPaneTabShape: Shape {
+    let cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(cornerRadius, rect.width / 2, rect.height)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + radius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY + radius),
+            control: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
 @MainActor
 func makePaneTabStrip<NewTabMenu: View>(
     _ model: PaneTabStripModel,
+    appModel: AppModel,
+    workspaceCoordinator: WorkspaceCoordinator,
+    worktree: Worktree,
     @ViewBuilder newTabMenu: @escaping () -> NewTabMenu
 ) -> NSView {
-    NSHostingView(rootView: PaneTabStripBar(model: model, newTabMenu: newTabMenu))
+    NSHostingView(rootView: PaneTabStripBar(
+        model: model,
+        appModel: appModel,
+        workspaceCoordinator: workspaceCoordinator,
+        worktree: worktree,
+        newTabMenu: newTabMenu))
 }

@@ -6,6 +6,14 @@ import TillerWorkspace
 
 @Suite @MainActor
 struct PaneTabPresentationTests {
+    @Test func everyAgentStatusHasADistinctSemanticGlyph() {
+        #expect(PaneTabStatusGlyphKind.forStatus(nil) == .none)
+        #expect(PaneTabStatusGlyphKind.forStatus(.running) == .running)
+        #expect(PaneTabStatusGlyphKind.forStatus(.needsInput) == .needsInput)
+        #expect(PaneTabStatusGlyphKind.forStatus(.done) == .done)
+        #expect(PaneTabStatusGlyphKind.forStatus(.error) == .error)
+    }
+
     @Test func terminalPresentationUsesTheLivePaneForAgentState() {
         let tabID = WorkspaceTabID()
         let contentID = TerminalContentID()
