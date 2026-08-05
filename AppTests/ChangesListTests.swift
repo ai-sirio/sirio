@@ -160,6 +160,62 @@ struct ChangesListTests {
         #expect(await loadedPaths.values == ["open.swift"])
     }
 
+    @Test func successfulReloadReplacesLoadedDiffAtomically() async throws {
+        let entry = try makeEntry("a.swift")
+        let oldDiff = GitFileDiff(
+            path: entry.path, lines: [], additions: 1, deletions: 0,
+            isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        let newDiff = GitFileDiff(
+            path: entry.path, lines: [], additions: 7, deletions: 2,
+            isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        let scripted = ControlledDiffLoader(results: [.success(oldDiff), .success(newDiff)])
+        let store = DiffLoadStore(loader: { entry, repoPath in
+            try await scripted.load(entry, repoPath: repoPath)
+        })
+
+        await store.expand(entry, repoPath: "/tmp")
+        #expect(store.state(for: entry.path) == .loaded(oldDiff))
+
+        let refresh = Task { @MainActor in
+            await store.reloadExpanded(entries: [entry], repoPath: "/tmp")
+        }
+        await scripted.waitUntilBlocked(2)
+
+        #expect(store.state(for: entry.path) == .loaded(oldDiff))
+
+        await scripted.release(2)
+        await refresh.value
+
+        #expect(store.state(for: entry.path) == .loaded(newDiff))
+    }
+
+    @Test func failedReloadPreservesPreviouslyLoadedDiff() async throws {
+        let entry = try makeEntry("a.swift")
+        let oldDiff = GitFileDiff(
+            path: entry.path, lines: [], additions: 1, deletions: 0,
+            isBinary: false, isSubmodule: false, oldText: nil, newText: nil)
+        let scripted = ControlledDiffLoader(
+            results: [.success(oldDiff), .failure(.boom)])
+        let store = DiffLoadStore(loader: { entry, repoPath in
+            try await scripted.load(entry, repoPath: repoPath)
+        })
+
+        await store.expand(entry, repoPath: "/tmp")
+        #expect(store.state(for: entry.path) == .loaded(oldDiff))
+
+        let refresh = Task { @MainActor in
+            await store.reloadExpanded(entries: [entry], repoPath: "/tmp")
+        }
+        await scripted.waitUntilBlocked(2)
+
+        #expect(store.state(for: entry.path) == .loaded(oldDiff))
+
+        await scripted.release(2)
+        await refresh.value
+
+        #expect(store.state(for: entry.path) == .loaded(oldDiff))
+    }
+
     @Test func refreshDropsExpansionForFilesThatLeftTheStatus() async throws {
         let gone = try makeEntry("gone.swift")
         let snapshots = SnapshotSequence(values: [
@@ -236,7 +292,7 @@ struct ChangesListTests {
     }
 }
 
-enum ChangesListTestFailure: Error { case boom }
+enum ChangesListTestFailure: Error, Sendable { case boom }
 
 actor LoadCounter {
     private(set) var value = 0
@@ -253,6 +309,53 @@ actor LoadedPaths {
 
     func record(_ path: String) { values.append(path) }
     func clear() { values.removeAll() }
+}
+
+actor ControlledDiffLoader {
+    private let results: [Result<GitFileDiff, ChangesListTestFailure>]
+    private var callCount = 0
+    private var blockedCalls: Set<Int> = []
+    private var releasedCalls: Set<Int> = []
+    private var blockedWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var releaseWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    init(results: [Result<GitFileDiff, ChangesListTestFailure>]) {
+        self.results = results
+    }
+
+    func load(_ entry: GitStatusEntry, repoPath: String) async throws -> GitFileDiff {
+        callCount += 1
+        let call = callCount
+        let result = results[call - 1]
+
+        guard call == 2 else { return try result.get() }
+
+        blockedCalls.insert(call)
+        let waiters = blockedWaiters.removeValue(forKey: call) ?? []
+        waiters.forEach { $0.resume() }
+
+        if !releasedCalls.contains(call) {
+            await withCheckedContinuation { continuation in
+                releaseWaiters[call, default: []].append(continuation)
+            }
+        }
+
+        blockedCalls.remove(call)
+        return try result.get()
+    }
+
+    func waitUntilBlocked(_ call: Int) async {
+        guard !blockedCalls.contains(call) else { return }
+        await withCheckedContinuation { continuation in
+            blockedWaiters[call, default: []].append(continuation)
+        }
+    }
+
+    func release(_ call: Int) {
+        releasedCalls.insert(call)
+        let waiters = releaseWaiters.removeValue(forKey: call) ?? []
+        waiters.forEach { $0.resume() }
+    }
 }
 
 actor SnapshotSequence {
