@@ -48,13 +48,16 @@ struct TranscriptView: View {
                 guard !scrollPosition.isPositionedByUser else { return }
                 scrollPosition.scrollTo(edge: .bottom)
             }
-            // A new item re-pins only when the user just sent something — an
-            // agent's tool call must not yank the view while they are reading.
+            // A new item re-pins whenever the user is still pinned at the
+            // bottom — a freshly created message, question card, or finished
+            // turn scrolls into view. The user's own send re-pins even after
+            // scrolling up; agent-created content never yanks a reader.
             .onChange(of: snapshot.items.count) {
-                guard let last = snapshot.items.last,
-                      case .userMessage = last else { return }
-                withAnimation(.easeOut(duration: 0.15)) {
-                    scrollPosition.scrollTo(edge: .bottom)
+                guard let last = snapshot.items.last else { return }
+                if case .userMessage = last {
+                    pinToBottom()
+                } else if !scrollPosition.isPositionedByUser {
+                    pinToBottom()
                 }
             }
             .onChange(of: controller.scrollTarget) {
@@ -64,6 +67,14 @@ struct TranscriptView: View {
                 }
                 controller.scrollTarget = nil
             }
+        }
+    }
+
+    /// Re-pins the transcript to the bottom with the same short ease used
+    /// for user-sent re-pins.
+    private func pinToBottom() {
+        withAnimation(.easeOut(duration: 0.15)) {
+            scrollPosition.scrollTo(edge: .bottom)
         }
     }
 

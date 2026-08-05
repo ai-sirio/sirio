@@ -667,6 +667,10 @@ final class ChatController {
             flushPendingEvents(rebuildSnapshot: false)
             handle(event)
             rebuildPresentationSnapshot()
+            // Non-update events (permission requests, turn end) also publish
+            // new transcript content — bump the tick so a transcript pinned
+            // to the bottom follows the new item.
+            streamTick &+= 1
             return
         }
         pendingEvents.append(event)
