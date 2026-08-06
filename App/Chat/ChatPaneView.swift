@@ -1,7 +1,9 @@
 import SwiftUI
+import AppKit
 import TillerACP
 import TillerAgents
 import TillerCore
+import UniformTypeIdentifiers
 import Inject
 
 enum ChatPaneLayoutRole: Hashable {
@@ -40,6 +42,7 @@ struct ChatPaneView: View {
     /// Owned here rather than inside the composer because the whole pane is
     /// the drop target, and a drop has to reach the draft.
     @State private var document = ComposerDocument()
+    @State private var isDropTargeted = false
     @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     var body: some View {
@@ -101,6 +104,25 @@ struct ChatPaneView: View {
             }
         }
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+        }
+        .overlay {
+            if isDropTargeted && canAcceptDrop {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor,
+                                  style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    .background(Color.accentColor.opacity(0.06),
+                                in: RoundedRectangle(cornerRadius: 12))
+                    .overlay {
+                        Text("Drop files to attach")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(AppTheme.title)
+                    }
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
         .coordinateSpace(name: "chat-pane")
         .task {
             controller.onFollowLocation = { [weak appModel] path in
@@ -109,6 +131,33 @@ struct ChatPaneView: View {
             await controller.activate()
         }
     .enableInjection()
+    }
+
+    /// Drops follow the same rule as typing: a composer that cannot accept
+    /// input must not quietly accumulate chips while a permission prompt is
+    /// waiting.
+    private var canAcceptDrop: Bool {
+        (controller.state == .ready || controller.state == .prompting
+            || controller.state == .detached)
+            && !controller.presentationSnapshot.hasPendingPermission
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard canAcceptDrop else { return false }
+        let worktreePath = worktree.path
+        // NSItemProvider supports asynchronous loading but is not Sendable.
+        // This local binding is only read by the loader task below.
+        nonisolated(unsafe) let providers = providers
+        Task { @MainActor in
+            let urls = await DroppedFileLoader.urls(from: providers)
+            guard !urls.isEmpty else { return }
+            let inputs = urls.map { (url: $0, byteCount: DroppedFileLoader.byteCount(of: $0)) }
+            let items = FileDrop.classify(inputs, worktreePath: worktreePath)
+            for message in ComposerDropApplier.apply(items, to: document) {
+                appModel.showTransientMessage(message)
+            }
+        }
+        return true
     }
 
     @ViewBuilder
