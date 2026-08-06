@@ -60,7 +60,7 @@ final class AppModel {
                 self?.worktree(byId: id).flatMap { self?.statusForWorktree($0) } ?? nil
             },
             hasUnsavedWork: { [weak self] id in
-                self?.workspaceCoordinator.legacyTabs(for: id).contains {
+                self?.workspaceTabs(for: id).contains {
                     self?.isDocumentDirty(tabId: $0.id) == true
                 } == true
             }
@@ -138,7 +138,7 @@ final class AppModel {
     /// Highest-priority agent status among all panes in a worktree's tree.
     /// Priority: error > needs-input > running > done. Returns nil if no agent panes.
     func statusForWorktree(_ worktree: Worktree) -> AgentStatus? {
-        let paneIds = workspaceCoordinator.legacyTabs(for: worktree.id)
+        let paneIds = workspaceTabs(for: worktree.id)
             .flatMap { $0.activityPaneIds }
         return agentActivity.statusForWorktree(paneIds: paneIds)
     }
@@ -159,7 +159,7 @@ final class AppModel {
     /// Tab whose panes report the worst status within `worktree` — the tab
     /// the menu-bar roster switches to when jumping back into a worktree.
     func worstStatusTab(in worktree: Worktree) -> LegacyWorkspaceTab? {
-        AttentionSort.sorted(workspaceCoordinator.legacyTabs(for: worktree.id)) { tab in
+        AttentionSort.sorted(workspaceTabs(for: worktree.id)) { tab in
             agentActivity.statusForWorktree(paneIds: tab.leafIds)
         }.first
     }
@@ -179,7 +179,7 @@ final class AppModel {
     /// Adapter id of the most relevant agent pane in a worktree (same
     /// priority order as statusForWorktree), nil if no agent panes.
     func agentIdForWorktree(_ worktree: Worktree) -> String? {
-        let paneIds = workspaceCoordinator.legacyTabs(for: worktree.id).flatMap { $0.leafIds }
+        let paneIds = workspaceTabs(for: worktree.id).flatMap { $0.leafIds }
         return agentActivity.agentIdForWorktree(paneIds: paneIds)
     }
 
@@ -187,7 +187,7 @@ final class AppModel {
     /// AgentCatalog.all for stable left-to-right icon order in the
     /// worktree row's trailing running-agents badge.
     func runningAgentIds(for worktree: Worktree) -> [String] {
-        let paneIds = workspaceCoordinator.legacyTabs(for: worktree.id)
+        let paneIds = workspaceTabs(for: worktree.id)
             .flatMap { $0.activityPaneIds }
         return agentActivity.runningAgentIds(paneIds: paneIds, catalogIds: AgentCatalog.all.map(\.id))
     }
@@ -2749,12 +2749,7 @@ final class AppModel {
                 forKey: AppSettings.autoNamingEnabledKey
             ) as? Bool
         ) else { return }
-        guard let worktree = worktreeContaining(paneId: paneId),
-              let idx = workspaceCoordinator.legacyTabs(for: worktree.id).firstIndex(where: {
-                  $0.activityPaneIds.contains(paneId)
-              })
-        else { return }
-        let tab = workspaceCoordinator.legacyTabs(for: worktree.id)[idx]
+        guard let (worktree, tab) = activityOwner(of: paneId) else { return }
         guard tab.titleIsAutoNamed,
               let tabAgentId = agentActivity.paneAgents[paneId]
         else { return }
@@ -2839,15 +2834,26 @@ final class AppModel {
 
     private func isSelectedWorktreeContaining(paneId: UUID) -> Bool {
         guard let sel = selectedWorktree else { return false }
-        return workspaceCoordinator.legacyTabs(for: sel.id)
+        return workspaceTabs(for: sel.id)
             .contains { $0.leafIds.contains(paneId) }
     }
 
-    private func worktreeContaining(paneId: UUID) -> Worktree? {
-        worktrees.values.flatMap { $0 }.first { wt in
-            workspaceCoordinator.legacyTabs(for: wt.id)
-                .contains { $0.activityPaneIds.contains(paneId) }
+    /// Worktree and tab that own `paneId`, resolved through the tab list of
+    /// whichever engine is active. Reading the legacy store directly is not
+    /// equivalent: once the universal engine owns the layout that store stays
+    /// empty, and every activity lookup built on it silently resolves nothing.
+    func activityOwner(of paneId: UUID) -> (worktree: Worktree, tab: LegacyWorkspaceTab)? {
+        for worktree in worktrees.values.flatMap({ $0 }) {
+            guard let tab = workspaceTabs(for: worktree.id).first(where: {
+                $0.activityPaneIds.contains(paneId)
+            }) else { continue }
+            return (worktree, tab)
         }
+        return nil
+    }
+
+    private func worktreeContaining(paneId: UUID) -> Worktree? {
+        activityOwner(of: paneId)?.worktree
     }
 
     private func buildPayload(paneId: UUID, status: AgentStatus) -> NotificationPayload? {
