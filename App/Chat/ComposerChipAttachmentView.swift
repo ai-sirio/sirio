@@ -1,8 +1,11 @@
 import AppKit
 import SwiftUI
+import Inject
 
 /// The chip's visual: a rounded box with a symbol and a label, sized to fit.
 struct ComposerChipView: View {
+    @ObserveInjection private var inject
+
     let chip: ComposerChip
     @Environment(\.colorScheme) private var colorScheme
 
@@ -25,6 +28,7 @@ struct ComposerChipView: View {
         .overlay(RoundedRectangle(cornerRadius: 5)
             .strokeBorder(.separator.opacity(0.6), lineWidth: 1))
         .fixedSize()
+    .enableInjection()
     }
 }
 

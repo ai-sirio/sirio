@@ -821,11 +821,14 @@ At `Packages/TillerCore/Tests/TillerCoreTests/AgentActivityModelTests.swift:88-9
 
 - [ ] **Step 5: Delete the four dead files**
 
+`AgentsSectionView.swift` already has uncommitted modifications, so it needs
+`-f`:
+
 ```bash
-git rm App/RightPanel/AgentsSectionView.swift \
-       App/RightPanel/AgentsPanelModel.swift \
-       Packages/TillerCore/Sources/TillerCore/AgentTree.swift \
-       Packages/TillerCore/Tests/TillerCoreTests/AgentTreeBuilderTests.swift
+git rm -f App/RightPanel/AgentsSectionView.swift \
+          App/RightPanel/AgentsPanelModel.swift \
+          Packages/TillerCore/Sources/TillerCore/AgentTree.swift \
+          Packages/TillerCore/Tests/TillerCoreTests/AgentTreeBuilderTests.swift
 ```
 
 This removes `AgentNode`, `AgentTreeBuilder`, and `ChatSubagentInput`, whose only consumer was `AgentsPanelModel`. `ProcessNode` survives in the file created in Step 1.
@@ -848,10 +851,21 @@ Expected: PASS, with `AgentTreeBuilderTests` gone from the run.
 
 - [ ] **Step 8: Commit**
 
+The working tree carries ~70 unrelated modified files (an in-progress hot-reload
+instrumentation pass). Stage by name, never `git add -A` or `git add .`, or that
+work gets swept into this commit:
+
 ```bash
-git add -A App/RightPanel Packages/TillerCore
+git add App/RightPanel/ActivitySectionView.swift \
+        App/RightPanel/RightPanelView.swift \
+        Packages/TillerCore/Sources/TillerCore/ProcessNode.swift \
+        Packages/TillerCore/Tests/TillerCoreTests/AgentActivityModelTests.swift
 git commit -m "feat: replace agents panel with activity list"
 ```
+
+The four deletions from Step 5 are already staged by `git rm`. Note that
+`AgentsSectionView.swift` and `RightPanelView.swift` were already modified before
+this work started, so `git rm` on the former needs `-f`.
 
 ---
 

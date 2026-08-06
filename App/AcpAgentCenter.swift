@@ -108,8 +108,17 @@ final class AcpAgentCenter {
         lastFetchedAt = await registryClient.lastFetchedAt()
 
         var nativeAvailability: [String: Bool] = [:]
-        for id in Self.nativeAgentIDs {
-            nativeAvailability[id] = pathProbe(AgentDriverFactory.nativeBinary(for: id))
+        // The probes shell out synchronously; run them off the main actor so a
+        // stuck child process cannot freeze the UI. `pathProbe` is @Sendable.
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for id in Self.nativeAgentIDs {
+                let binary = AgentDriverFactory.nativeBinary(for: id)
+                let probe = pathProbe
+                group.addTask { (id, probe(binary)) }
+            }
+            for await (id, available) in group {
+                nativeAvailability[id] = available
+            }
         }
 
         var newRows: [AgentRow] = [
@@ -203,8 +212,14 @@ final class AcpAgentCenter {
         process.arguments = ["-lc", "command -v \(binary)"]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
+        // Never inherit the app's stdin: it is a TTY (e.g. under Xcode), and a
+        // login shell that sees a tty on fd 0 can block in init_io waiting on
+        // it — a path probe that never exits, and a startup beach ball.
+        let input = Pipe()
+        process.standardInput = input
         do {
             try process.run()
+            input.fileHandleForWriting.closeFile()
             process.waitUntilExit()
             return process.terminationStatus == 0
         } catch {

@@ -1,7 +1,10 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 struct RightPanelView: View {
+    @ObserveInjection private var inject
+
     @Bindable var appModel: AppModel
     @Bindable var panelModel: RightPanelModel
     @Binding var modeRaw: String
@@ -53,6 +56,7 @@ struct RightPanelView: View {
                 },
                 secondaryButton: .cancel(Text("Cancel")))
         }
+    .enableInjection()
     }
 
     /// Existing panel content (header picker + Files/Changes), unchanged.

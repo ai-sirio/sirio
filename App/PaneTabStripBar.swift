@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import TillerCore
 import TillerWorkspace
+import Inject
 
 /// The space tab frames are measured in. The drag coordinator offsets them
 /// into workspace-root space, so they must all share one origin. A free-standing
@@ -16,6 +17,8 @@ enum PaneTabStripSpace {
 /// MainSurfaceMaterial belong to the app target; the package supplies only the
 /// model and calls back for the view.
 struct PaneTabStripBar<NewTabMenu: View>: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: PaneTabStripModel
     @Bindable var appModel: AppModel
     let workspaceCoordinator: WorkspaceCoordinator
@@ -104,6 +107,7 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
             if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
             escapeMonitor = nil
         }
+    .enableInjection()
     }
 
     private var newTabMenuButton: some View {
@@ -157,6 +161,8 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
 }
 
 private struct PaneTabStripItem: View {
+    @ObserveInjection private var inject
+
     let entry: TabMenuEntry
     let presentation: PaneTabPresentation
     let isFocusedGroup: Bool
@@ -252,40 +258,46 @@ private struct PaneTabStripItem: View {
                 .onEnded { _ in onDragEnded() }
         )
         .help(entry.title)
+    .enableInjection()
     }
 }
 
 private struct PaneTabIcon: View {
+    @ObserveInjection private var inject
+
     let presentation: PaneTabPresentation
 
     @ViewBuilder
     var body: some View {
-        switch presentation.icon {
-        case .terminal(let agentID):
-            if let agentID {
-                AgentIcon(agentId: agentID, size: 12)
-            } else {
-                Image(systemName: "terminal")
+        Group {
+            switch presentation.icon {
+            case .terminal(let agentID):
+                if let agentID {
+                    AgentIcon(agentId: agentID, size: 12)
+                } else {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 10))
+                        .foregroundStyle(AppTheme.meta)
+                }
+            case .chat(let agentID):
+                if let agentID {
+                    AgentIcon(agentId: agentID, size: 12)
+                } else {
+                    Image(systemName: "bubble.left")
+                        .font(.system(size: 10))
+                        .foregroundStyle(AppTheme.meta)
+                }
+            case .document(.markdown):
+                Image(systemName: "doc.text")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.meta)
+            case .document(.code):
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             }
-        case .chat(let agentID):
-            if let agentID {
-                AgentIcon(agentId: agentID, size: 12)
-            } else {
-                Image(systemName: "bubble.left")
-                    .font(.system(size: 10))
-                    .foregroundStyle(AppTheme.meta)
-            }
-        case .document(.markdown):
-            Image(systemName: "doc.text")
-                .font(.system(size: 10))
-                .foregroundStyle(AppTheme.meta)
-        case .document(.code):
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 10))
-                .foregroundStyle(AppTheme.meta)
         }
+    .enableInjection()
     }
 }
 

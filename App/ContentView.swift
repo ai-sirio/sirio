@@ -3,6 +3,7 @@ import TillerCore
 import TillerTerminal
 import TillerControl
 import TillerWorkspace
+import Inject
 
 private struct RightPanelContext: Hashable {
     let worktreeId: UUID?
@@ -11,6 +12,8 @@ private struct RightPanelContext: Hashable {
 }
 
 struct ContentView: View {
+    @ObserveInjection private var inject
+
     var model: AppModel
     var updater: UpdaterModel
     @AppStorage("hasSeenPermissionsOnboarding") private var hasSeenPermissionsOnboarding = false
@@ -61,7 +64,7 @@ struct ContentView: View {
     private var titlebarAccessories: (leading: AnyView, trailing: AnyView) {
         (
             leading: AnyView(TitleStripGroup { titleStripLeadingButtons }),
-            trailing: AnyView(TitleStripGroup { titleStripButtons })
+            trailing: AnyView(TitleStripGroup { titleStripButtons }.padding(.trailing, TitlebarGeometry.trailingGroupInset))
         )
     }
 
@@ -126,6 +129,7 @@ struct ContentView: View {
             UpdateToastView(updater: updater)
                 .padding(16)
         }
+    .enableInjection()
     }
 
     @ViewBuilder
@@ -214,7 +218,11 @@ struct ContentView: View {
         // HSplitView (NSSplitView) clips each pane to its own bounds, so a
         // background nested inside a column could never reach the window edges.
         ZStack {
-            CanvasBackground().ignoresSafeArea()
+            CanvasBackground()
+                .ignoresSafeArea()
+                .onTapGesture(count: 1) {
+                    NSLog("TILLER-DEBUG: single tap fired")
+                }
             VStack(spacing: 0) {
                 splitContent
                 UsageBarView(

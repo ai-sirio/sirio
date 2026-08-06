@@ -3,6 +3,7 @@ import SwiftUI
 import TillerACP
 import TillerCode
 import TillerCore
+import Inject
 
 struct ChatDiffPreviewRow: Identifiable, Equatable {
     enum Side: Equatable { case old, new }
@@ -34,6 +35,8 @@ enum ChatDiffPreviewModel {
 }
 
 struct ChatDiffPreviewView: View {
+    @ObserveInjection private var inject
+
     let path: String
     let oldText: String?
     let newText: String
@@ -78,6 +81,7 @@ struct ChatDiffPreviewView: View {
             highlights = await DiffHighlightCache.shared.highlights(
                 path: fileURL, oldText: oldText, newText: newText)
         }
+    .enableInjection()
     }
 
     private func row(_ row: ChatDiffPreviewRow) -> some View {

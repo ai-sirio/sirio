@@ -39,6 +39,9 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.8.0
+  Inject:
+    url: https://github.com/krzysztofzablocki/Inject.git
+    from: 1.5.2
 targets:
   Tiller:
     type: application
@@ -54,6 +57,20 @@ targets:
           # explicitly signs Tiller.debug.dylib before re-signing the bundle,
           # so the bundle seal stays valid.
           ENABLE_DEBUG_DYLIB: YES
+          # InjectionNext hot-reload PoC: -interposable lets Injection swap
+          # function implementations at runtime; EMIT_FRONTEND_COMMAND_LINES
+          # is required by InjectionNext on Xcode 16.3+/26.x to locate the
+          # per-file compile command it needs to recompile+inject a save.
+          OTHER_LDFLAGS: -Xlinker -interposable
+          EMIT_FRONTEND_COMMAND_LINES: YES
+          # Project never defined DEBUG previously; Inject's client-side
+          # connection code is gated behind #if DEBUG, so without this it
+          # silently never dials InjectionNext's socket.
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          # ENABLE_HARDENED_RUNTIME blocks dlopen of InjectionNext's
+          # macOSInjection.bundle (not Apple-signed) without this exception.
+          CODE_SIGN_ENTITLEMENTS: App/InjectDebug.entitlements
+          EMIT_FRONTEND_COMMAND_LINES: YES
     dependencies:
       - package: TillerCore
       - package: TillerWorkspace
@@ -67,6 +84,7 @@ targets:
       - package: MarkdownUI
       - package: TillerGit
       - package: Sparkle
+      - package: Inject
     info:
       path: App/Info.plist
       properties:

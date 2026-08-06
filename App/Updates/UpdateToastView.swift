@@ -1,9 +1,12 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Toast in basso a destra per il ciclo di update. Visibile solo negli stati
 /// che chiedono un'azione; .checking e .upToDate vivono in Settings.
 struct UpdateToastView: View {
+    @ObserveInjection private var inject
+
     var updater: UpdaterModel
 
     var body: some View {
@@ -35,6 +38,7 @@ struct UpdateToastView: View {
                 EmptyView()
             }
         }
+    .enableInjection()
     }
 
     private func toast(icon: String, @ViewBuilder content: () -> some View) -> some View {

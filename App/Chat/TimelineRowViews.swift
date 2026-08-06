@@ -1,10 +1,13 @@
 import SwiftUI
 import TillerACP
 import TillerCore
+import Inject
 
 /// Grouped tool work: "▸ N steps" toggle plus either the latest entry
 /// (collapsed) or every entry as a full card (expanded).
 struct WorkGroupView: View {
+    @ObserveInjection private var inject
+
     let groupId: String
     let entries: [TimelineRow.WorkEntry]
     let isExpanded: Bool
@@ -45,6 +48,7 @@ struct WorkGroupView: View {
                 }
             }
         }
+    .enableInjection()
     }
 
     private func compactRow(_ entry: TimelineRow.WorkEntry) -> some View {
@@ -78,6 +82,8 @@ struct WorkGroupView: View {
 
 /// A collapsed older turn: tapping re-opens it in place.
 struct TurnFoldRow: View {
+    @ObserveInjection private var inject
+
     let turnId: String
     let label: String
     let at: Date
@@ -107,5 +113,6 @@ struct TurnFoldRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    .enableInjection()
     }
 }

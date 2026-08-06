@@ -1,9 +1,12 @@
 import SwiftUI
+import Inject
 
 /// Sheet mostrato una sola volta al primo avvio: stessa lista permessi della
 /// pagina Settings più un bottone Continue. Il chiamante persiste il flag
 /// `hasSeenPermissionsOnboarding`; qui nessuno stato.
 struct PermissionsOnboardingSheet: View {
+    @ObserveInjection private var inject
+
     var onContinue: () -> Void
 
     var body: some View {
@@ -21,5 +24,6 @@ struct PermissionsOnboardingSheet: View {
             }
             .padding(12)
         }
+    .enableInjection()
     }
 }

@@ -1,10 +1,13 @@
 import SwiftUI
 import TillerACP
+import Inject
 
 /// A question the agent put to the user, answered in place. Unlike the old
 /// composer panel this stays in the transcript, so a reopened chat still shows
 /// what was asked and what was answered.
 struct QuestionCardView: View {
+    @ObserveInjection private var inject
+
     let question: ChatQuestion
     let controller: ChatController
     @State private var textAnswer: String
@@ -37,6 +40,7 @@ struct QuestionCardView: View {
                 }
             }
         }
+    .enableInjection()
     }
 
     @ViewBuilder

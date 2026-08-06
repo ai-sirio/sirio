@@ -1,11 +1,14 @@
 import SwiftUI
 import TillerCore
 import TillerAgents
+import Inject
 
 /// Contenuto del menu "+" (nuova shell, spawn agenti terminale, chat ACP),
 /// condiviso tra il "+" della sidebar e quello della tab bar. Il chiamante
 /// fornisce il Menu wrapper.
 struct NewTabMenuItems: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     /// Run before every entry's action. The pane strip uses it to make its own
@@ -42,6 +45,7 @@ struct NewTabMenuItems: View {
         }
         Divider()
         NewChatMenuItems(model: model, worktree: worktree, onBeforeAction: onBeforeAction)
+    .enableInjection()
     }
 }
 
@@ -49,6 +53,8 @@ struct NewTabMenuItems: View {
 /// menu and the sidebar worktree context menu. Empty install list falls back
 /// to a single item that opens the Agents settings.
 struct NewChatMenuItems: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     var onBeforeAction: () -> Void = {}
@@ -75,5 +81,6 @@ struct NewChatMenuItems: View {
                 Button("Other agents…") { model.openAgentsSettings() }
             }
         }
+    .enableInjection()
     }
 }

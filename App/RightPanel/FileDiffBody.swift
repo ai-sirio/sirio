@@ -2,11 +2,14 @@ import AppKit
 import SwiftUI
 import TillerCode
 import TillerGit
+import Inject
 
 /// Rendered body of one expanded file: hunk headers plus numbered, syntax
 /// highlighted lines. Scrolls with its parent — the changes list owns the
 /// ScrollView so that expanding a file does not create a nested scroll area.
 struct FileDiffBody: View {
+    @ObserveInjection private var inject
+
     let diff: GitFileDiff
     let fileURL: URL?
 
@@ -56,6 +59,7 @@ struct FileDiffBody: View {
                 oldText: diff.oldText,
                 newText: diff.newText)
         }
+    .enableInjection()
     }
 
     private func lineRow(_ line: GitDiffLine) -> some View {

@@ -1,9 +1,12 @@
 import SwiftUI
+import Inject
 
 /// One panel resting on the window canvas. All three columns — sidebar,
 /// central pane, right panel — are these; the canvas showing through the gaps
 /// between them is what separates them, so the card draws no border of its own.
 struct FloatingCard<Content: View>: View {
+    @ObserveInjection private var inject
+
     @Environment(\.colorScheme) private var colorScheme
     private let tint: Color
     private let content: () -> Content
@@ -23,5 +26,6 @@ struct FloatingCard<Content: View>: View {
                 color: .black.opacity(colorScheme == .dark ? 0.36 : 0.14),
                 radius: AppTheme.cardShadowRadius,
                 y: AppTheme.cardShadowYOffset)
+    .enableInjection()
     }
 }

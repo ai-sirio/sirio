@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Inject
 
 /// The non-selectable header bar hosted above each code-block card:
 /// language label on the left, copy button on the right. Overlaid as an
@@ -7,6 +8,8 @@ import SwiftUI
 /// text, so drag-selection flows straight through the code block (same as
 /// T3 web).
 struct CodeBlockHeaderView: View {
+    @ObserveInjection private var inject
+
     let language: String
     let code: String
     @State private var copied = false
@@ -32,5 +35,6 @@ struct CodeBlockHeaderView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: CodeBlockStyle.headerHeight)
+    .enableInjection()
     }
 }

@@ -2,8 +2,11 @@ import AppKit
 import SwiftUI
 import TillerCore
 import TillerGit
+import Inject
 
 struct FileExplorerView: View {
+    @ObserveInjection private var inject
+
     @Bindable var appModel: AppModel
     @Bindable var panelModel: RightPanelModel
     let worktree: Worktree
@@ -63,6 +66,7 @@ struct FileExplorerView: View {
                 .onKeyPress(.return) { openSelected(); return .handled }
             }
         }
+    .enableInjection()
     }
 
     private func fileRow(_ row: FileExplorerRow) -> some View {
@@ -77,15 +81,16 @@ struct FileExplorerView: View {
             } else {
                 Color.clear.frame(width: 10, height: 1)
             }
-            iconView(for: node)
-                .frame(width: 14)
             if node.kind.isDirectory {
+                Color.clear.frame(width: 14, height: 1)
                 Text(node.name)
                     .font(.system(size: 12))
                     .foregroundStyle(nameColor(for: node))
                     .lineLimit(1)
                     .truncationMode(.middle)
             } else {
+                iconView(for: node)
+                    .frame(width: 14)
                 Text(node.name)
                     .font(.system(size: 12))
                     .foregroundStyle(nameColor(for: node))

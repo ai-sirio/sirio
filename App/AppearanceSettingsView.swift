@@ -1,10 +1,13 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Appearance settings: app theme (system/light/dark) and terminal font
 /// size. Writes preferences only — TillerApp applies the theme, terminal
 /// panes pick up the font size live.
 struct AppearanceSettingsView: View {
+    @ObserveInjection private var inject
+
     @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
     @AppStorage(AppSettings.terminalFontSizeKey) private var terminalFontSize = AppSettings.defaultTerminalFontSize
     @AppStorage(AppSettings.fileIconThemeKey) private var fileIconThemeRaw = FileIconTheme.sfSymbols.rawValue
@@ -38,5 +41,6 @@ struct AppearanceSettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    .enableInjection()
     }
 }

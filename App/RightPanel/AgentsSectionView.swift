@@ -1,9 +1,12 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Bottom section of the right panel: agents of the selected worktree with
 /// their subagent tree. Click focuses the owning tab.
 struct AgentsSectionView: View {
+    @ObserveInjection private var inject
+
     @Bindable var appModel: AppModel
     let worktree: Worktree
     @State private var collapsedIds: Set<String> = []
@@ -53,6 +56,7 @@ struct AgentsSectionView: View {
                 }
             }
         }
+    .enableInjection()
     }
 
     @ViewBuilder

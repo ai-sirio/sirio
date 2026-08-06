@@ -1,11 +1,14 @@
 import SwiftUI
 import AppKit
 import TillerCore
+import Inject
 
 /// Pagina permessi macOS in stile Orca: banner informativo + una riga per
 /// permesso con badge di stato e azione singola. Riusata sia come sezione
 /// Settings sia dentro lo sheet di onboarding al primo avvio.
 struct PermissionsSettingsView: View {
+    @ObserveInjection private var inject
+
     @State private var model = PermissionsModel(probe: SystemPermissionProbe())
 
     var body: some View {
@@ -35,6 +38,7 @@ struct PermissionsSettingsView: View {
             for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refresh() }
         }
+    .enableInjection()
     }
 
     private func row(for kind: PermissionKind) -> some View {

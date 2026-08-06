@@ -1,8 +1,11 @@
 import SwiftUI
 import TillerACP
+import Inject
 
 /// Settings → Agents: install/update ACP agents from the official registry.
 struct AgentsSettingsView: View {
+    @ObserveInjection private var inject
+
     let center: AcpAgentCenter
     @State private var search = ""
 
@@ -47,6 +50,7 @@ struct AgentsSettingsView: View {
         }
         .padding(16)
         .task { await center.refresh() }
+    .enableInjection()
     }
 
     @ViewBuilder

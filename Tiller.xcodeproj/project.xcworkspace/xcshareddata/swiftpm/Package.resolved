@@ -1,5 +1,5 @@
 {
-  "originHash" : "e55cb07e5737509c62e6007d263291efdebaf3e22c571e216c331434b4afb95e",
+  "originHash" : "420cf4e48ad7fd30576fb5eaaff95540d62bd537d21f47d16cb8649f7f220cc5",
   "pins" : [
     {
       "identity" : "codeeditlanguages",
@@ -44,6 +44,15 @@
       "state" : {
         "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
         "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "inject",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/krzysztofzablocki/Inject.git",
+      "state" : {
+        "revision" : "f53380e986a8b056e37d7ce9ca68de610b8415ef",
+        "version" : "1.6.0"
       }
     },
     {

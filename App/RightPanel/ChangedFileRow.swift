@@ -1,6 +1,7 @@
 import SwiftUI
 import TillerCore
 import TillerGit
+import Inject
 
 enum ChangedFileCounts {
     /// Nil when there is nothing worth showing, so the row can fall back to
@@ -16,6 +17,8 @@ enum ChangedFileCounts {
 }
 
 struct ChangedFileRow: View {
+    @ObserveInjection private var inject
+
     let entry: GitStatusEntry
     let stat: GitDiffStat?
     let isExpanded: Bool
@@ -91,6 +94,7 @@ struct ChangedFileRow: View {
         .accessibilityLabel(
             "\(GitStatusStyle.symbol(entry)) \(entry.path.value)")
         .accessibilityHint(isExpanded ? "Collapse diff" : "Expand diff")
+    .enableInjection()
     }
 
     private var actions: some View {

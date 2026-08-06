@@ -140,4 +140,111 @@ struct WindowChromeConfiguratorTests {
         host.remove(from: ownerWindow)
         #expect(ownerWindow.titlebarAccessoryViewControllers.isEmpty)
     }
+
+    @Test func titlebarDoubleClickBandUsesTheFixedChromeHeight() {
+        let band = titlebarDoubleClickBand(
+            in: NSRect(x: 12, y: 20, width: 900, height: 560),
+            height: TitlebarGeometry.accessoryHeight)
+
+        #expect(band == NSRect(x: 12, y: 552, width: 900, height: 28))
+    }
+
+    @Test func titlebarDoubleClickActionRespectsSystemPreferences() {
+        #expect(resolvedStandardTitlebarDoubleClickAction(globalDefaults: [
+            "AppleActionOnDoubleClick": "Fill",
+        ]) == .zoom)
+        #expect(resolvedStandardTitlebarDoubleClickAction(globalDefaults: [
+            "AppleActionOnDoubleClick": "Minimize",
+        ]) == .miniaturize)
+        #expect(resolvedStandardTitlebarDoubleClickAction(globalDefaults: [
+            "AppleActionOnDoubleClick": "No Action",
+        ]) == .none)
+        #expect(resolvedStandardTitlebarDoubleClickAction(globalDefaults: [
+            "AppleMiniaturizeOnDoubleClick": true,
+        ]) == .miniaturize)
+        #expect(resolvedStandardTitlebarDoubleClickAction(globalDefaults: [:]) == .zoom)
+    }
+
+    @Test func hiddenTitlebarDoubleClickUsesConfiguredSystemAction() throws {
+        let window = TitlebarActionProbeWindow(
+            contentRect: NSRect(x: 120, y: 160, width: 900, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false)
+        let contentView = TitlebarMouseEventProbeView(frame: window.contentView?.bounds ?? .zero)
+        let host = TitlebarAccessoryHost()
+
+        window.contentView = contentView
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        host.install(on: window)
+        window.makeKeyAndOrderFront(nil)
+        window.layoutIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        defer {
+            host.remove(from: window)
+            window.orderOut(nil)
+            window.close()
+        }
+
+        let contentBoundsInWindow = contentView.convert(contentView.bounds, to: nil)
+        let titlebarBand = titlebarDoubleClickBand(
+            in: contentBoundsInWindow,
+            height: TitlebarGeometry.accessoryHeight)
+        let clickLocation = NSPoint(x: titlebarBand.midX, y: titlebarBand.midY)
+        let mouseDown = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: clickLocation,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 7_000,
+            clickCount: 2,
+            pressure: 1))
+
+        NSApp.sendEvent(mouseDown)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        #expect(contentView.mouseDownCount == 0)
+
+        let globalDefaults = UserDefaults.standard.persistentDomain(
+            forName: UserDefaults.globalDomain) ?? [:]
+        switch resolvedStandardTitlebarDoubleClickAction(globalDefaults: globalDefaults) {
+        case .miniaturize:
+            #expect(window.miniaturizeCallCount == 1)
+            #expect(window.zoomCallCount == 0)
+        case .zoom:
+            #expect(window.miniaturizeCallCount == 0)
+            #expect(window.zoomCallCount == 1)
+        case .none:
+            #expect(window.miniaturizeCallCount == 0)
+            #expect(window.zoomCallCount == 0)
+        }
+    }
+}
+
+private final class TitlebarMouseEventProbeView: NSView {
+    private(set) var mouseDownCount = 0
+
+    override var isOpaque: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownCount += 1
+    }
+}
+
+private final class TitlebarActionProbeWindow: NSWindow {
+    private(set) var miniaturizeCallCount = 0
+    private(set) var zoomCallCount = 0
+
+    override func miniaturize(_ sender: Any?) {
+        miniaturizeCallCount += 1
+    }
+
+    override func zoom(_ sender: Any?) {
+        zoomCallCount += 1
+    }
 }

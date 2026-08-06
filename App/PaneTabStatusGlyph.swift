@@ -1,5 +1,6 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 enum PaneTabStatusGlyphKind: Equatable {
     case none, running, needsInput, done, error
@@ -16,6 +17,8 @@ enum PaneTabStatusGlyphKind: Equatable {
 }
 
 struct PaneTabStatusGlyph: View {
+    @ObserveInjection private var inject
+
     let status: AgentStatus?
     let agentID: String?
 
@@ -44,5 +47,6 @@ struct PaneTabStatusGlyph: View {
         .help(status?.humanLabel ?? "")
         .accessibilityLabel(status?.humanLabel ?? "No agent activity")
         .accessibilityHidden(status == nil)
+    .enableInjection()
     }
 }

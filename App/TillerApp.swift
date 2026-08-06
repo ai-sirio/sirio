@@ -50,6 +50,7 @@ struct TillerApp: App {
                 workspaceCoordinator: workspaceCoordinator,
                 titlebarAccessoryHost: titlebarAccessoryHost)
                 .onAppear {
+                    NSLog("TILLER-DEBUG: onAppear fired")
                     appDelegate.model = model
                     updater.start()
                     applyAppearance()

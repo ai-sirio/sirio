@@ -2,11 +2,14 @@ import SwiftUI
 import TillerACP
 import TillerCore
 import TillerGit
+import Inject
 
 /// End-of-turn "N files changed" card: each row opens the file in the editor,
 /// "Revert" discards that file's changes via git (with a confirmation).
 /// Post-hoc visibility + undo — the permission gate stays the preventive defence.
 struct EditSummaryCardView: View {
+    @ObserveInjection private var inject
+
     let paths: [String]
     let worktree: Worktree
     let appModel: AppModel
@@ -51,6 +54,7 @@ struct EditSummaryCardView: View {
         } message: {
             Text("The file's changes will be lost (git restore / clean).")
         }
+    .enableInjection()
     }
 
     private func row(_ path: String) -> some View {

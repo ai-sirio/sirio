@@ -1,11 +1,14 @@
 import SwiftUI
 import TillerCore
 import TillerPersistence
+import Inject
 
 /// AI provider accounts: status, bar visibility, and refresh for all four
 /// tracked providers (Claude, Codex: zero-config; OpenCode Go, Ollama
 /// Cloud: cookie configured via Keychain).
 struct AIProvidersSettingsView: View {
+    @ObserveInjection private var inject
+
     let store: UsageStore
     let accounts: AgentAccountStore?
 
@@ -232,6 +235,7 @@ struct AIProvidersSettingsView: View {
         .onChange(of: workspaceIdOverride) { _, _ in
             Task { await store.refreshOpencodeGo() }
         }
+    .enableInjection()
     }
 
     private var statusText: String {
@@ -320,6 +324,8 @@ struct AIProvidersSettingsView: View {
 /// the Claude Code and Codex sections above — same shape, different
 /// callbacks per provider.
 private struct AgentAccountsBlock: View {
+    @ObserveInjection private var inject
+
     let title: String
     let accounts: [AgentAccountRecord]
     let activeId: String?
@@ -372,6 +378,7 @@ private struct AgentAccountsBlock: View {
             }
         }
         .padding(.vertical, 4)
+    .enableInjection()
     }
 
     @ViewBuilder

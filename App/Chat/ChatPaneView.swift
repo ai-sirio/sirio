@@ -2,6 +2,7 @@ import SwiftUI
 import TillerACP
 import TillerAgents
 import TillerCore
+import Inject
 
 enum ChatPaneLayoutRole: Hashable {
     case approvalPanel
@@ -31,6 +32,8 @@ extension EnvironmentValues {
 /// A whole chat tab: transcript + composer. Agent identity/state live in
 /// the window toolbar; state banners cover auth/disconnect/npx failures.
 struct ChatPaneView: View {
+    @ObserveInjection private var inject
+
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
@@ -101,6 +104,7 @@ struct ChatPaneView: View {
             }
             await controller.activate()
         }
+    .enableInjection()
     }
 
     @ViewBuilder

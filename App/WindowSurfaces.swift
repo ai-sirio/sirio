@@ -1,12 +1,15 @@
 import SwiftUI
 import AppKit
 import TillerCore
+import Inject
 
 /// The window canvas: one surface behind every floating card, reaching all four
 /// window edges. With translucency on it is the only layer the desktop shows
 /// through, so the desktop appears in the frame around the cards and not inside
 /// the terminal.
 struct CanvasBackground: View {
+    @ObserveInjection private var inject
+
     /// Canvas translucency: < 1 lets the raw desktop show through the blur.
     /// Requires the non-opaque window set up in `WindowChromeConfigurator`.
     static let backgroundOpacity = AppSurfaceColor.translucentSurfaceOpacity
@@ -14,13 +17,16 @@ struct CanvasBackground: View {
     @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 
     var body: some View {
-        if translucencyEnabled {
-            SidebarMaterialView()
-                .overlay(AppTheme.canvas.opacity(Self.tintOpacity))
-                .opacity(Self.backgroundOpacity)
-        } else {
-            AppTheme.canvas
+        Group {
+            if translucencyEnabled {
+                SidebarMaterialView()
+                    .overlay(AppTheme.canvas.opacity(Self.tintOpacity))
+                    .opacity(Self.backgroundOpacity)
+            } else {
+                AppTheme.canvas
+            }
         }
+    .enableInjection()
     }
 }
 
@@ -42,15 +48,20 @@ private struct SidebarMaterialView: NSViewRepresentable {
 /// `background-opacity`. Defaults to the terminal's charcoal surface;
 /// `ChatPaneView` passes `AppTheme.chatSurface` instead.
 struct MainSurfaceMaterial: View {
+    @ObserveInjection private var inject
+
     var tint: Color = AppTheme.terminalSurface
     @AppStorage(AppSettings.translucencyEnabledKey) private var translucencyEnabled = false
 
     var body: some View {
-        if translucencyEnabled {
-            SidebarMaterialView()
-                .overlay(tint.opacity(AppSurfaceColor.translucentSurfaceOpacity))
-        } else {
-            tint
+        Group {
+            if translucencyEnabled {
+                SidebarMaterialView()
+                    .overlay(tint.opacity(AppSurfaceColor.translucentSurfaceOpacity))
+            } else {
+                tint
+            }
         }
+    .enableInjection()
     }
 }

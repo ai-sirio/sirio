@@ -1,6 +1,7 @@
 // Tiller/App/WorktreeStatusGlyph.swift
 import SwiftUI
 import TillerCore
+import Inject
 
 /// SwiftUI color + glow for each semantic lifecycle-dot color. Kept in the App
 /// layer so TillerCore stays SwiftUI-free.
@@ -20,6 +21,8 @@ extension SidebarDotColor {
 /// running, a static lifecycle dot otherwise, or empty space (fixed width so
 /// rows stay aligned).
 struct WorktreeStatusGlyph: View {
+    @ObserveInjection private var inject
+
     let status: AgentStatus?
     let agentId: String?
 
@@ -42,6 +45,7 @@ struct WorktreeStatusGlyph: View {
         }
         .frame(width: 18, height: 18)
         .help(status?.humanLabel ?? "")
+    .enableInjection()
     }
 }
 

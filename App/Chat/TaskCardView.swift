@@ -1,11 +1,14 @@
 import SwiftUI
 import TillerACP
 import TillerCore
+import Inject
 
 /// A subagent spawn and the work it did. Children are collapsed by default:
 /// a running task shows only its current action, so a forty-call subagent
 /// stays one card tall while it streams.
 struct TaskCardView: View {
+    @ObserveInjection private var inject
+
     let info: SubagentTaskInfo
     let item: ToolCallItem
     let children: [ToolCallItem]
@@ -47,6 +50,7 @@ struct TaskCardView: View {
                 }
             }
         }
+    .enableInjection()
     }
 
     private var header: some View {

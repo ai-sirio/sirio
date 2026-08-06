@@ -1,8 +1,11 @@
 import SwiftUI
+import Inject
 
 /// Shown when a worktree has zero tabs — no terminals, no PTYs.
 /// The user can create a new terminal tab via the button or ⌘T.
 struct EmptyWorktreeView: View {
+    @ObserveInjection private var inject
+
     let onNewTerminal: () -> Void
 
     var body: some View {
@@ -28,6 +31,7 @@ struct EmptyWorktreeView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .enableInjection()
     }
 }
 

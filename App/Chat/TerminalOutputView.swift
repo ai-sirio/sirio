@@ -1,11 +1,14 @@
 import SwiftUI
 import TillerACP
+import Inject
 
 /// Live output of an agent-side terminal command inside a tool call card:
 /// monospace tail of the accumulated output plus a running/exit-code chip.
 /// The process runs inside the agent — cancelling the turn is the only
 /// interruption, so no kill button here.
 struct TerminalOutputView: View {
+    @ObserveInjection private var inject
+
     let output: String
     let exit: TerminalExitStatus?
     let isRunning: Bool
@@ -38,6 +41,7 @@ struct TerminalOutputView: View {
                 .foregroundStyle(Color.white.opacity(0.92))
             }
         }
+    .enableInjection()
     }
 
     @ViewBuilder
