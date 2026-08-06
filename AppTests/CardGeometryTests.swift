@@ -68,9 +68,9 @@ import SwiftUI
 @MainActor @Test func threeTrailingControlsRenderAsIndependentSlots() {
     let host = NSHostingView(
         rootView: TitleStripGroup {
-            TitlebarControlSlot { Color.clear }
-            TitlebarControlSlot { Color.clear }
-            TitlebarControlSlot { Color.clear }
+            TitlebarControlFrame { Color.clear }
+            TitlebarControlFrame { Color.clear }
+            TitlebarControlFrame { Color.clear }
         })
 
     host.layoutSubtreeIfNeeded()

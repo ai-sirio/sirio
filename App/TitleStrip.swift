@@ -11,7 +11,7 @@ struct TitleStripGroup<Content: View>: View {
     }
 }
 
-struct TitlebarControlSlot<Content: View>: View {
+struct TitlebarControlFrame<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
