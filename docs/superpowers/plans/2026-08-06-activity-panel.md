@@ -18,7 +18,7 @@
 - `TillerCore` must not import SwiftUI, AppKit, `TillerTerminal`, `TillerControl` or `TillerAgents`. `Scripts/check-module-boundaries.sh` enforces this.
 - Commit messages: Conventional Commits, lower-case imperative subject.
 - File renames do not need `project.yml` edits — xcodegen globs directories — but `xcodegen generate` must be re-run after any add/delete.
-- `Scripts/ci.sh` must print `CI OK` before the work is done. Do not add `CODE_SIGNING_ALLOWED=NO` or `-derivedDataPath` to the App test invocation; both make the test host hang before test discovery.
+- `Scripts/ci.sh` is run by the repository owner, manually, at the end. Do not run it from a task. For reference: do not add `CODE_SIGNING_ALLOWED=NO` or `-derivedDataPath` to its App test invocation; both make the test host hang before test discovery.
 - Per-package iteration during a task: `cd Packages/TillerCore && swift test --filter <TestName>`.
 
 ---
@@ -960,12 +960,11 @@ Expected: FAIL initially only if the wiring is wrong. If Tasks 4 and 5 were done
 
 Likely culprits, in order: `openWorktreeIds` not being read (rows empty), the label falling back to the bare branch because `model.projects` was not populated, or a chat tab arriving with no `agentActivity` entry (expected — it should surface as `.idle`, not vanish).
 
-- [ ] **Step 4: Run the full gate**
+- [ ] **Step 4: Hand the gate over**
 
-Run: `Scripts/ci.sh`
-Expected: `CI OK` on the last line.
+`Scripts/ci.sh` is **not** run by the implementer or by Claude — the repository owner runs it manually. Stop here and report that the work is ready for the gate.
 
-If `TillerTerminal`'s `PtyProcessTests` or `DividerCursorStripTests` fail, they are known flaky under load. Before blaming this work, run `Scripts/ci.sh` twice on the same tree — comparing against `HEAD` instead of the current tree is what makes that diagnosis wrong.
+For reference when they do run it: if `TillerTerminal`'s `PtyProcessTests` or `DividerCursorStripTests` fail, they are known flaky under load. Diagnosing that needs two runs on the *same* tree; comparing against `HEAD` instead is what makes the diagnosis wrong.
 
 - [ ] **Step 5: Commit**
 
