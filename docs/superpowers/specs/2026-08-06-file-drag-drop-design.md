@@ -117,11 +117,19 @@ sempre assoluti, nessun `\n`.
 
 ### Modifiche a codice esistente
 
-- `Packages/TillerAgents/Sources/TillerAgents/ShellQuote.swift`: `shellQuote` si
-  sposta in `TillerCore` come `public`. `TillerCore` non può importare
-  `TillerAgents` (la dipendenza va nel verso opposto), e duplicare la quotatura
-  POSIX in due punti è peggio dello spostamento. `TillerAgents` già dipende da
-  `TillerCore`: i suoi call site non cambiano.
+- `Packages/TillerAgents/Sources/TillerAgents/ShellQuote.swift`: l'implementazione
+  canonica di `shellQuote` si sposta in `TillerCore` come `public`. `TillerCore`
+  non può importare `TillerAgents` (la dipendenza va nel verso opposto), e
+  duplicare la quotatura POSIX è peggio dello spostamento.
+
+  I sei call site in `TillerAgents` (`ClaudeCodeAdapter`, `ClaudeHookMigrator`,
+  `CodexAdapter`, `OhMyPiAdapter`, `OpenCodeAdapter`, `PiAdapter`) non importano
+  `TillerCore`: per non toccare sei file estranei alla feature, `ShellQuote.swift`
+  di `TillerAgents` mantiene una funzione interna con lo stesso nome che inoltra
+  a `TillerCore.shellQuote`. Un solo file modificato.
+
+  Nota fuori scope: esiste una terza copia privata in `App/AppModel.swift:2445`
+  (`private static func shellQuote`). Pre-esistente, non toccata qui.
 - `Packages/TillerACP/Sources/TillerACP/ChatPromptBuilder.swift:22`: guardia sul
   path assoluto, altrimenti un file droppato dal Finder produrrebbe
   `file:///worktree/Users/…/foo.png` — un resourceLink morto, in silenzio.
