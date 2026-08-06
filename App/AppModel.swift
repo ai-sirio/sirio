@@ -2017,6 +2017,20 @@ final class AppModel {
         workspacePersistTabs(for: worktree.id)
     }
 
+    /// Focuses a tab from the Activity panel, handling both the workspace-engine
+    /// and legacy paths. Selecting `selectedWorktree` also mounts the worktree
+    /// and expands it in the sidebar.
+    func focusActivityRow(tabId: UUID, worktreeId: UUID) {
+        guard let worktree = worktree(byId: worktreeId) else { return }
+        selectedWorktree = worktree
+        if WorkspaceEngineGate.isEnabled {
+            workspaceCoordinator.activateTabDirectly(WorkspaceTabID(tabId), in: worktreeId)
+        } else {
+            workspaceCoordinator.setLegacyActiveTabID(tabId, for: worktreeId)
+            workspacePersistTabs(for: worktreeId)
+        }
+    }
+
     /// History rows for the worktree's chat menu, newest first.
     func chatHistory(for worktree: Worktree) -> [ChatHistoryRow] {
         guard let chatStore else { return [] }
