@@ -19,7 +19,12 @@ public enum ChatPromptBuilder {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { blocks.append(.text(trimmed)) }
         for path in mentionPaths {
-            let url = URL(fileURLWithPath: worktreePath).appendingPathComponent(path)
+            // A dropped file can live anywhere on disk, so an absolute path is
+            // used as-is; appending it to the worktree would build a URI that
+            // resolves to nothing and fail silently at the agent.
+            let url = path.hasPrefix("/")
+                ? URL(fileURLWithPath: path)
+                : URL(fileURLWithPath: worktreePath).appendingPathComponent(path)
             blocks.append(.resourceLink(uri: url.absoluteString,
                                         name: url.lastPathComponent))
         }

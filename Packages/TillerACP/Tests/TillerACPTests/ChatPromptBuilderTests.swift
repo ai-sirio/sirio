@@ -20,4 +20,12 @@ import Testing
             text: "  \n", mentionPaths: ["a.txt"], images: [], worktreePath: "/w")
         #expect(blocks == [.resourceLink(uri: "file:///w/a.txt", name: "a.txt")])
     }
+
+    @Test func usesAbsoluteMentionPathsAsTheyAre() {
+        let blocks = ChatPromptBuilder.build(
+            text: "", mentionPaths: ["/Users/me/Downloads/notes.txt"],
+            images: [], worktreePath: "/w")
+        #expect(blocks == [.resourceLink(uri: "file:///Users/me/Downloads/notes.txt",
+                                         name: "notes.txt")])
+    }
 }
