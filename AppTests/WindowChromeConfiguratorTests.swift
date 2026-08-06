@@ -70,6 +70,46 @@ struct WindowChromeConfiguratorTests {
         #expect(host.trailingHostingView?.frame.size == CGSize(width: 3 * 24 + 2 * 2, height: 28))
     }
 
+    @Test func installingOnReplacementWindowMovesAccessoriesAndResetsEvidence() {
+        let firstWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
+                                   styleMask: [.titled, .closable, .resizable],
+                                   backing: .buffered,
+                                   defer: false)
+        let replacementWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
+                                         styleMask: [.titled, .closable, .resizable],
+                                         backing: .buffered,
+                                         defer: false)
+        let host = TitlebarAccessoryHost()
+
+        host.install(on: firstWindow)
+        host.update(leading: AnyView(EmptyView()), trailing: AnyView(EmptyView()))
+        host.recordRenderedControl(slot: .split, accessibilityIdentifier: "legacy")
+
+        host.install(on: replacementWindow)
+
+        #expect(firstWindow.titlebarAccessoryViewControllers.isEmpty)
+        #expect(replacementWindow.titlebarAccessoryViewControllers.count == 2)
+        #expect(host.updateCount == 0)
+        #expect(host.renderedControlProbes.isEmpty)
+
+        host.remove(from: firstWindow)
+        #expect(replacementWindow.titlebarAccessoryViewControllers.count == 2)
+
+        host.remove(from: replacementWindow)
+        #expect(replacementWindow.titlebarAccessoryViewControllers.isEmpty)
+    }
+
+    @Test func repeatedProbeUpdatesRemainBounded() {
+        let host = TitlebarAccessoryHost()
+
+        for _ in 0..<100 {
+            host.recordRenderedControl(slot: .split, accessibilityIdentifier: "legacy")
+            host.recordRenderedControl(slot: .split, accessibilityIdentifier: "workspace")
+        }
+
+        #expect(host.renderedControlProbes.count == 2)
+    }
+
     @Test func removingFromWrongWindowLeavesOwnedAccessoriesInstalled() throws {
         let ownerWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
                                    styleMask: [.titled, .closable, .resizable],
