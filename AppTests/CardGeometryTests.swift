@@ -1,4 +1,5 @@
 import Testing
+import SwiftUI
 @testable import Tiller
 
 @Test func cardsUseApprovedFloatingGeometry() {
@@ -20,4 +21,17 @@ import Testing
 /// Symbol reads larger and breaks the row.
 @Test func titleStripGlyphsMatchTheTrafficLightScale() {
     #expect(AppTheme.titleStripIconSize == 13)
+}
+
+@Test func titlebarControlsShareOneFrameAndCenterline() {
+    #expect(TitlebarGeometry.accessoryHeight == AppTheme.titleStripHeight)
+    #expect(TitlebarGeometry.iconSize == AppTheme.titleStripIconSize)
+    #expect(TitlebarGeometry.controlFrame == CGSize(width: 24, height: 24))
+    #expect(TitlebarGeometry.verticalCenter(in: TitlebarGeometry.accessoryHeight) == 14)
+}
+
+@Test func titlebarUsesOneSharedSpacingAndNoPerIconCorrection() {
+    #expect(TitlebarGeometry.controlSpacing == 2)
+    #expect(TitlebarGeometry.sidebarVerticalCorrection == 0)
+    #expect(TitlebarGeometry.trafficLightInset == AppTheme.trafficLightInset)
 }
