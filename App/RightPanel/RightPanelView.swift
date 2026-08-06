@@ -14,6 +14,10 @@ struct RightPanelView: View {
     @AppStorage(AppSettings.activitySectionExpandedKey)
     private var activityExpanded = AppSettings.defaultActivitySectionExpanded
 
+    /// Share of the panel left to Files/Changes while Activity is expanded.
+    /// Activity gets the remainder — enough for a few rows, since it scrolls.
+    private static let toolsHeightFraction = 0.82
+
     private var effectiveMode: RightPanelMode {
         .effective(rawValue: modeRaw, isGitRepository: isGitRepository)
     }
@@ -27,10 +31,11 @@ struct RightPanelView: View {
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
-                // Capped at 75% while Activity is open; uncapped when it
-                // collapses, which is what gives Files/Changes the full height.
+                // Capped while Activity is open; uncapped when it collapses,
+                // which is what gives Files/Changes the full height.
                 toolsRegion
-                    .frame(maxHeight: activityExpanded ? geo.size.height * 0.75 : .infinity)
+                    .frame(maxHeight: activityExpanded
+                           ? geo.size.height * Self.toolsHeightFraction : .infinity)
                 Divider()
                 ActivitySectionView(appModel: appModel, isExpanded: $activityExpanded)
                     .frame(maxHeight: activityExpanded ? .infinity : nil)
