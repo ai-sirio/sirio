@@ -84,8 +84,8 @@ public final class AgentActivityModel {
     /// Registers a restored pane's agent identity without claiming a status.
     /// Unlike `agentSpawned`, does NOT set `.running` — a restored chat tab
     /// may be idle, and the real status arrives later via `notify`. Without
-    /// this, restored chat tabs never satisfy `AgentTreeBuilder`'s
-    /// `paneAgents` guard and silently drop out of the Agents panel.
+    /// this, a restored chat tab shows in Activity with no agent icon until it
+    /// is used again.
     public func registerAgentId(paneId: UUID, agentId: String) {
         paneAgents[paneId] = agentId
     }
