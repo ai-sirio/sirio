@@ -85,6 +85,19 @@ struct AutoRenameWiringTests {
         #expect(fixture.model.chatSession(id: contentID.rawValue)?.title == "Fix login bug")
     }
 
+    /// Regression: with the universal engine owning the layout the legacy
+    /// store stays empty, so resolving the tab through it silently disabled
+    /// auto-naming for every tab kind — titles just stayed on their default.
+    @Test func activityOwnerResolvesTabUnderUniversalEngine() async throws {
+        let (fixture, tab, _) = try await makeChatTab()
+        defer { fixture.cleanUp() }
+
+        let owner = fixture.model.activityOwner(of: tab.id.rawValue)
+
+        #expect(owner?.worktree.id == fixture.worktree.id)
+        #expect(owner?.tab.id == tab.id.rawValue)
+    }
+
     /// Uses an ephemeral UserDefaults suite: tests must never touch
     /// UserDefaults.standard — the test bundle is hosted inside Tiller.app,
     /// so .standard is the user's real dev.tiller.Tiller domain.
