@@ -15,6 +15,9 @@ struct WorkspaceMountTests {
         let legacyWindow = renderContentView(
             workspaceEngineEnabled: false,
             titlebarAccessoryHost: legacyHost)
+        defer {
+            closeHeadlessWindow(legacyWindow, host: legacyHost)
+        }
 
         #expect(legacyHost.updateCount > 0)
         #expect(legacyHost.renderedControlProbes.contains {
@@ -28,6 +31,9 @@ struct WorkspaceMountTests {
         let workspaceWindow = renderContentView(
             workspaceEngineEnabled: true,
             titlebarAccessoryHost: workspaceHost)
+        defer {
+            closeHeadlessWindow(workspaceWindow, host: workspaceHost)
+        }
 
         #expect(workspaceHost.updateCount > 0)
         #expect(workspaceHost.renderedControlProbes.contains {
@@ -40,9 +46,6 @@ struct WorkspaceMountTests {
         let expectedSlots: Set<TitlebarControlSlot> = [.sidebar, .rightPanel, .split, .permissions]
         #expect(Set(legacyHost.renderedControlProbes.map(\.slot)).isSuperset(of: expectedSlots))
         #expect(Set(workspaceHost.renderedControlProbes.map(\.slot)).isSuperset(of: expectedSlots))
-
-        legacyWindow.orderOut(nil)
-        workspaceWindow.orderOut(nil)
     }
 
     @Test func withTheGateOnTheWorkspaceRendererIsMountedInsteadOfTheTabStack() {
@@ -86,6 +89,14 @@ struct WorkspaceMountTests {
 }
 
 @MainActor
+private func closeHeadlessWindow(_ window: NSWindow, host: TitlebarAccessoryHost) {
+    host.removeFromOwnerWindow()
+    window.contentView = NSHostingView(rootView: EmptyView())
+    window.delegate = nil
+    window.close()
+}
+
+@MainActor
 private func renderContentView(
     workspaceEngineEnabled: Bool,
     titlebarAccessoryHost: TitlebarAccessoryHost
@@ -103,7 +114,9 @@ private func renderContentView(
                           backing: .buffered,
                           defer: false)
     window.contentView = hostingView
-    window.makeKeyAndOrderFront(nil)
+    window.setIsVisible(true)
+    window.setIsVisible(false)
+    window.displayIfNeeded()
     window.layoutIfNeeded()
     for _ in 0..<20 where titlebarAccessoryHost.updateCount == 0 {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))

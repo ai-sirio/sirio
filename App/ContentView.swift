@@ -32,7 +32,7 @@ struct ContentView: View {
     private let menuProvider: TerminalContextMenuProvider
     private let workspaceCoordinator: WorkspaceCoordinator
     private let workspaceEngineEnabled: Bool
-    private let titlebarAccessoryHost: TitlebarAccessoryHost
+    @State private var titlebarAccessoryHost: TitlebarAccessoryHost
 
     static func renderPath(gateEnabled: Bool) -> WorkspaceRenderPath {
         gateEnabled ? .workspace : .legacyTerminal
@@ -55,7 +55,7 @@ struct ContentView: View {
         self.menuProvider = TerminalContextMenuProvider(model: model)
         self.workspaceCoordinator = workspaceCoordinator ?? model.workspaceCoordinator
         self.workspaceEngineEnabled = workspaceEngineEnabled
-        self.titlebarAccessoryHost = titlebarAccessoryHost
+        _titlebarAccessoryHost = State(initialValue: titlebarAccessoryHost)
     }
 
     private var titlebarAccessories: (leading: AnyView, trailing: AnyView) {
