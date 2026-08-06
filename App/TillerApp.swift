@@ -6,6 +6,7 @@ struct TillerApp: App {
     @State private var model: AppModel
     @State private var workspaceCoordinator: WorkspaceCoordinator
     @State private var updater = UpdaterModel()
+    @State private var titlebarAccessoryHost: TitlebarAccessoryHost
     @AppStorage("sidebar.visible") private var sidebarVisible = true
     @AppStorage(AppSettings.rightPanelVisibleKey)
     private var rightPanelVisible = AppSettings.defaultRightPanelVisible
@@ -31,6 +32,7 @@ struct TillerApp: App {
         _model = State(initialValue: AppModel(
             workspaceCoordinator: coordinator,
             workspacePersistenceBridge: bridge))
+        _titlebarAccessoryHost = State(initialValue: TitlebarAccessoryHost())
         UserDefaults.standard.register(defaults: [
             "usage.claude.showInBar": true,
             "usage.codex.showInBar": true,
@@ -45,7 +47,8 @@ struct TillerApp: App {
             ContentView(
                 model: model,
                 updater: updater,
-                workspaceCoordinator: workspaceCoordinator)
+                workspaceCoordinator: workspaceCoordinator,
+                titlebarAccessoryHost: titlebarAccessoryHost)
                 .onAppear {
                     appDelegate.model = model
                     updater.start()
