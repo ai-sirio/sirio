@@ -15,7 +15,7 @@ struct ChatComposerView: View {
     let controller: ChatController
     let worktreePath: String
 
-    @State private var document = ComposerDocument()
+    let document: ComposerDocument
     @State private var mentionCandidates: [String] = []
     @State private var slashSelectionIndex = 0
     @State private var slashPopupDismissed = false
