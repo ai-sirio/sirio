@@ -59,6 +59,13 @@ import Testing
     #expect(AppSettings.rightPanelWidthRange == 240...400)
 }
 
+/// The Activity section starts open: a user who has never toggled it should
+/// see what is running, not an empty strip.
+@Test func activitySectionDefaultsToExpanded() {
+    #expect(AppSettings.activitySectionExpandedKey == "activity.sectionExpanded")
+    #expect(AppSettings.defaultActivitySectionExpanded == true)
+}
+
 @Test func rightPanelWidthClampsToSupportedRange() {
     #expect(AppSettings.clampRightPanelWidth(60) == 240)
     #expect(AppSettings.clampRightPanelWidth(210) == 240)

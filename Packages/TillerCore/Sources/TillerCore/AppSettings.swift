@@ -109,6 +109,11 @@ public enum AppSettings {
     public static let rightPanelWidthKey = "rightPanel.width"
     public static let rightPanelModeKey = "rightPanel.mode"
 
+    /// Whether the Activity section at the bottom of the right panel is
+    /// expanded. Collapsed, Files/Changes takes the full panel height.
+    public static let activitySectionExpandedKey = "activity.sectionExpanded"
+    public static let defaultActivitySectionExpanded = true
+
     public static let defaultRightPanelVisible = false
     public static let defaultRightPanelWidth = 320.0
     public static let rightPanelWidthRange: ClosedRange<Double> = 240...400
