@@ -8,7 +8,7 @@ enum TitlebarControlSlot: Hashable {
     case permissions
 }
 
-struct TitlebarControlProbeRecord: Equatable {
+struct TitlebarControlProbeRecord: Hashable {
     let slot: TitlebarControlSlot
     let accessibilityIdentifier: String?
 }
@@ -19,12 +19,17 @@ final class TitlebarAccessoryHost {
     private(set) var trailingController: NSTitlebarAccessoryViewController?
     private(set) var leadingHostingView: NSHostingView<AnyView>?
     private(set) var trailingHostingView: NSHostingView<AnyView>?
-    private(set) var renderedControlProbes: [TitlebarControlProbeRecord] = []
+    private(set) var renderedControlProbes: Set<TitlebarControlProbeRecord> = []
     private(set) var updateCount = 0
     private weak var ownerWindow: NSWindow?
 
     func install(on window: NSWindow) {
+        if let ownerWindow, ownerWindow !== window {
+            remove(from: ownerWindow)
+        }
         guard leadingController == nil, trailingController == nil else { return }
+        renderedControlProbes.removeAll(keepingCapacity: true)
+        updateCount = 0
         ownerWindow = window
 
         let leading = NSTitlebarAccessoryViewController()
@@ -58,7 +63,7 @@ final class TitlebarAccessoryHost {
     }
 
     func update(leading: AnyView, trailing: AnyView) {
-        updateCount += 1
+        updateCount = min(updateCount + 1, 1)
         leadingHostingView?.rootView = leading
         trailingHostingView?.rootView = trailing
 
@@ -71,7 +76,7 @@ final class TitlebarAccessoryHost {
     }
 
     func recordRenderedControl(slot: TitlebarControlSlot, accessibilityIdentifier: String?) {
-        renderedControlProbes.append(
+        renderedControlProbes.insert(
             TitlebarControlProbeRecord(
                 slot: slot,
                 accessibilityIdentifier: accessibilityIdentifier))
@@ -91,6 +96,8 @@ final class TitlebarAccessoryHost {
         trailingController = nil
         leadingHostingView = nil
         trailingHostingView = nil
+        renderedControlProbes.removeAll(keepingCapacity: false)
+        updateCount = 0
         ownerWindow = nil
     }
 }
