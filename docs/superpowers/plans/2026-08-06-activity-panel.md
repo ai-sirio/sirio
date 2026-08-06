@@ -821,9 +821,6 @@ At `Packages/TillerCore/Tests/TillerCoreTests/AgentActivityModelTests.swift:88-9
 
 - [ ] **Step 5: Delete the four dead files**
 
-`AgentsSectionView.swift` already has uncommitted modifications, so it needs
-`-f`:
-
 ```bash
 git rm -f App/RightPanel/AgentsSectionView.swift \
           App/RightPanel/AgentsPanelModel.swift \
@@ -851,21 +848,20 @@ Expected: PASS, with `AgentTreeBuilderTests` gone from the run.
 
 - [ ] **Step 8: Commit**
 
-The working tree carries ~70 unrelated modified files (an in-progress hot-reload
-instrumentation pass). Stage by name, never `git add -A` or `git add .`, or that
-work gets swept into this commit:
+Stage by name, never `git add -A` or `git add .`:
 
 ```bash
 git add App/RightPanel/ActivitySectionView.swift \
         App/RightPanel/RightPanelView.swift \
         Packages/TillerCore/Sources/TillerCore/ProcessNode.swift \
-        Packages/TillerCore/Tests/TillerCoreTests/AgentActivityModelTests.swift
+        Packages/TillerCore/Tests/TillerCoreTests/AgentActivityModelTests.swift \
+        Tiller.xcodeproj/project.pbxproj
 git commit -m "feat: replace agents panel with activity list"
 ```
 
-The four deletions from Step 5 are already staged by `git rm`. Note that
-`AgentsSectionView.swift` and `RightPanelView.swift` were already modified before
-this work started, so `git rm` on the former needs `-f`.
+The four deletions from Step 5 are already staged by `git rm`. `project.pbxproj`
+is tracked in this repository despite what CLAUDE.md says, and this task adds and
+removes files, so the regenerated project belongs in the same commit.
 
 ---
 
