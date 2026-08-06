@@ -83,6 +83,8 @@ enum AppTheme {
     /// they sit beside — a default-sized SF Symbol reads noticeably larger
     /// than the 12pt window controls and breaks the row's rhythm.
     static let titleStripIconSize: CGFloat = 13
+    static let titlebarControlFrame = CGSize(width: 24, height: 24)
+    static let titlebarControlSpacing: CGFloat = 2
 
     /// Bottom edge of a pane tab chip. A chip's fill matches the chrome, so on
     /// the strip's material it has almost no edge of its own; this underlines
