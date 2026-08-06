@@ -120,6 +120,9 @@ struct FileExplorerView: View {
         .padding(.trailing, 8)
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        // `URL` is already Transferable and vends `.fileURL`, so a row drag
+        // is indistinguishable from a Finder drag at every drop target.
+        .draggable(dragURL(for: node) ?? URL(fileURLWithPath: "/"))
         .background(selected ? AppTheme.selectionFill : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .onTapGesture {
@@ -143,6 +146,10 @@ struct FileExplorerView: View {
                     .padding(.leading, CGFloat(row.depth) * 14 + 38)
             }
         }
+    }
+
+    private func dragURL(for node: FileTreeNode) -> URL? {
+        panelModel.rootURL.map { node.url(relativeTo: $0) }
     }
 
     private func moveSelection(_ delta: Int) {
