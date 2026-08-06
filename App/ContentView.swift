@@ -32,6 +32,7 @@ struct ContentView: View {
     private let menuProvider: TerminalContextMenuProvider
     private let workspaceCoordinator: WorkspaceCoordinator
     private let workspaceEngineEnabled: Bool
+    private let titlebarAccessoryHost: TitlebarAccessoryHost
 
     static func renderPath(gateEnabled: Bool) -> WorkspaceRenderPath {
         gateEnabled ? .workspace : .legacyTerminal
@@ -47,12 +48,21 @@ struct ContentView: View {
 
     init(model: AppModel, updater: UpdaterModel,
          workspaceCoordinator: WorkspaceCoordinator? = nil,
-         workspaceEngineEnabled: Bool = WorkspaceEngineGate.isEnabled) {
+         workspaceEngineEnabled: Bool = WorkspaceEngineGate.isEnabled,
+         titlebarAccessoryHost: TitlebarAccessoryHost = TitlebarAccessoryHost()) {
         self.model = model
         self.updater = updater
         self.menuProvider = TerminalContextMenuProvider(model: model)
         self.workspaceCoordinator = workspaceCoordinator ?? model.workspaceCoordinator
         self.workspaceEngineEnabled = workspaceEngineEnabled
+        self.titlebarAccessoryHost = titlebarAccessoryHost
+    }
+
+    private var titlebarAccessories: (leading: AnyView, trailing: AnyView) {
+        (
+            leading: AnyView(TitleStripGroup { titleStripLeadingButtons }),
+            trailing: AnyView(TitleStripGroup { titleStripButtons })
+        )
     }
 
     var body: some View {
@@ -91,7 +101,9 @@ struct ContentView: View {
             Task { await rightPanelModel.diffStore.expand(entry, repoPath: worktree.path) }
         }
         .onDisappear { rightPanelModel.deactivate() }
-        .configuresWindowChrome()
+        .configuresWindowChrome(
+            configuration: { titlebarAccessories },
+            host: titlebarAccessoryHost)
         .task { await model.bootstrap() }
         .alert(
             "Error",
@@ -118,7 +130,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var titleStripLeadingButtons: some View {
-        TitlebarControlSlot {
+        TitlebarControlFrame {
             Button {
                 sidebarVisible.toggle()
             } label: {
@@ -128,6 +140,10 @@ struct ContentView: View {
             .buttonStyle(HoverIconButtonStyle())
             .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
             .accessibilityLabel("Sidebar")
+            .background(TitlebarControlProbe(
+                slot: .sidebar,
+                accessibilityIdentifier: nil,
+                host: titlebarAccessoryHost))
         }
     }
 
@@ -135,7 +151,7 @@ struct ContentView: View {
     /// keep their actions, shortcuts, and help text; only their host changed.
     @ViewBuilder
     private var titleStripButtons: some View {
-        TitlebarControlSlot {
+        TitlebarControlFrame {
             Button {
                 rightPanelVisible.toggle()
             } label: {
@@ -145,9 +161,13 @@ struct ContentView: View {
             .buttonStyle(HoverIconButtonStyle())
             .help(rightPanelVisible ? "Hide right panel (⌃⌘I)" : "Show right panel (⌃⌘I)")
             .accessibilityLabel("Right panel")
+            .background(TitlebarControlProbe(
+                slot: .rightPanel,
+                accessibilityIdentifier: nil,
+                host: titlebarAccessoryHost))
         }
 
-        TitlebarControlSlot {
+        TitlebarControlFrame {
             if workspaceEngineEnabled {
                 universalSplitMenu
             } else {
@@ -160,10 +180,15 @@ struct ContentView: View {
                 .buttonStyle(HoverIconButtonStyle())
                 .help("Split terminal")
                 .accessibilityLabel("Split terminal")
+                .accessibilityIdentifier("tiller.titlebar.split.legacy")
+                .background(TitlebarControlProbe(
+                    slot: .split,
+                    accessibilityIdentifier: "tiller.titlebar.split.legacy",
+                    host: titlebarAccessoryHost))
             }
         }
 
-        TitlebarControlSlot {
+        TitlebarControlFrame {
             Button {
                 model.settingsCategory = .permissions
                 model.openSettings()
@@ -174,6 +199,10 @@ struct ContentView: View {
             .buttonStyle(HoverIconButtonStyle())
             .help("Permissions")
             .accessibilityLabel("Permissions")
+            .background(TitlebarControlProbe(
+                slot: .permissions,
+                accessibilityIdentifier: nil,
+                host: titlebarAccessoryHost))
         }
     }
 
@@ -187,25 +216,12 @@ struct ContentView: View {
         ZStack {
             CanvasBackground().ignoresSafeArea()
             VStack(spacing: 0) {
-                if model.route == .workspace {
-                    HStack(spacing: 0) {
-                        TitleStripGroup { titleStripLeadingButtons }
-                        Spacer(minLength: 0)
-                        TitleStripGroup { titleStripButtons }
-                    }
-                    .frame(height: TitlebarGeometry.accessoryHeight)
-                }
                 splitContent
                 UsageBarView(
                     store: model.usage,
                     worktree: model.selectedWorktree,
                     onOpenSettings: { model.openSettings() })
             }
-            // `.hiddenTitleBar` hides the titlebar but still reserves its height
-            // as top safe area. Without this the strip stacks *below* that
-            // reserved band instead of inside it, and the chrome buttons sit a
-            // full row under the traffic lights they are supposed to sit beside.
-            .ignoresSafeArea(.container, edges: .top)
         }
     }
 
@@ -352,6 +368,11 @@ struct ContentView: View {
                 })
             .help("Split Right With…")
             .accessibilityLabel("Split Right With…")
+            .accessibilityIdentifier("tiller.titlebar.split.workspace")
+            .background(TitlebarControlProbe(
+                slot: .split,
+                accessibilityIdentifier: "tiller.titlebar.split.workspace",
+                host: titlebarAccessoryHost))
         } else {
             // Icon-only like the live menu beside it: a text button here was the
             // one control in the strip still rendering a word, and it showed
@@ -363,6 +384,11 @@ struct ContentView: View {
             .buttonStyle(HoverIconButtonStyle())
             .font(.system(size: AppTheme.titleStripIconSize))
             .disabled(true)
+            .accessibilityIdentifier("tiller.titlebar.split.workspace")
+            .background(TitlebarControlProbe(
+                slot: .split,
+                accessibilityIdentifier: "tiller.titlebar.split.workspace",
+                host: titlebarAccessoryHost))
         }
     }
 
