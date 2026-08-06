@@ -118,55 +118,63 @@ struct ContentView: View {
 
     @ViewBuilder
     private var titleStripLeadingButtons: some View {
-        Button {
-            sidebarVisible.toggle()
-        } label: {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: AppTheme.titleStripIconSize))
+        TitlebarControlSlot {
+            Button {
+                sidebarVisible.toggle()
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: AppTheme.titleStripIconSize))
+            }
+            .buttonStyle(HoverIconButtonStyle())
+            .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
+            .accessibilityLabel("Sidebar")
         }
-        .buttonStyle(HoverIconButtonStyle())
-        .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
-        .accessibilityLabel("Sidebar")
     }
 
     /// The three chrome buttons that used to live in the window toolbar. They
     /// keep their actions, shortcuts, and help text; only their host changed.
     @ViewBuilder
     private var titleStripButtons: some View {
-        Button {
-            rightPanelVisible.toggle()
-        } label: {
-            Image(systemName: "sidebar.right")
-                .font(.system(size: AppTheme.titleStripIconSize))
-        }
-        .buttonStyle(HoverIconButtonStyle())
-        .help(rightPanelVisible ? "Hide right panel (⌃⌘I)" : "Show right panel (⌃⌘I)")
-        .accessibilityLabel("Right panel")
-
-        if workspaceEngineEnabled {
-            universalSplitMenu
-        } else {
+        TitlebarControlSlot {
             Button {
-                model.workspaceSplitCurrent(.horizontal)
+                rightPanelVisible.toggle()
             } label: {
-                Image(systemName: "square.split.1x2")
+                Image(systemName: "sidebar.right")
                     .font(.system(size: AppTheme.titleStripIconSize))
             }
             .buttonStyle(HoverIconButtonStyle())
-            .help("Split terminal")
-            .accessibilityLabel("Split terminal")
+            .help(rightPanelVisible ? "Hide right panel (⌃⌘I)" : "Show right panel (⌃⌘I)")
+            .accessibilityLabel("Right panel")
         }
 
-        Button {
-            model.settingsCategory = .permissions
-            model.openSettings()
-        } label: {
-            Image(systemName: "lock.shield")
-                .font(.system(size: AppTheme.titleStripIconSize))
+        TitlebarControlSlot {
+            if workspaceEngineEnabled {
+                universalSplitMenu
+            } else {
+                Button {
+                    model.workspaceSplitCurrent(.horizontal)
+                } label: {
+                    Image(systemName: "square.split.1x2")
+                        .font(.system(size: AppTheme.titleStripIconSize))
+                }
+                .buttonStyle(HoverIconButtonStyle())
+                .help("Split terminal")
+                .accessibilityLabel("Split terminal")
+            }
         }
-        .buttonStyle(HoverIconButtonStyle())
-        .help("Permissions")
-        .accessibilityLabel("Permissions")
+
+        TitlebarControlSlot {
+            Button {
+                model.settingsCategory = .permissions
+                model.openSettings()
+            } label: {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: AppTheme.titleStripIconSize))
+            }
+            .buttonStyle(HoverIconButtonStyle())
+            .help("Permissions")
+            .accessibilityLabel("Permissions")
+        }
     }
 
     // HSplitView instead of NavigationSplitView: on macOS 26 the system sidebar

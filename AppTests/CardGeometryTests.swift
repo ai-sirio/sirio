@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Testing
 import SwiftUI
@@ -48,4 +49,31 @@ import SwiftUI
     #expect(frames.dropFirst().enumerated().allSatisfy { index, frame in
         frame.minX == frames[index].maxX + 2
     })
+}
+
+@Test func threeTrailingControlsUseIndependentBoundedSlots() {
+    let bounds = CGRect(x: 0, y: 0, width: 3 * 24 + 2 * 2, height: 28)
+    let frames = TitlebarGeometry.controlFrames(count: 3, in: bounds)
+
+    #expect(frames.count == 3)
+    #expect(frames.allSatisfy { $0.size == CGSize(width: 24, height: 24) })
+    #expect(frames.allSatisfy { bounds.contains($0) })
+    #expect(frames.allSatisfy { $0.midY == bounds.midY })
+    #expect(frames.last?.maxX == bounds.maxX)
+    #expect(frames.dropFirst().enumerated().allSatisfy { index, frame in
+        frame.minX == frames[index].maxX + 2
+    })
+}
+
+@MainActor @Test func threeTrailingControlsRenderAsIndependentSlots() {
+    let host = NSHostingView(
+        rootView: TitleStripGroup {
+            TitlebarControlSlot { Color.clear }
+            TitlebarControlSlot { Color.clear }
+            TitlebarControlSlot { Color.clear }
+        })
+
+    host.layoutSubtreeIfNeeded()
+
+    #expect(host.fittingSize == CGSize(width: 3 * 24 + 2 * 2, height: 28))
 }
