@@ -536,7 +536,7 @@ struct ChatTextEditorDropTests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/ChatTextEditorDropTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/ChatTextEditorDropTests 2>&1 | tail -20`
 Expected: FAIL — `registeredDraggedTypes` is non-empty (it contains the string, URL, and file promise types AppKit installs).
 
 - [ ] **Step 3: Write minimal implementation**
@@ -553,7 +553,7 @@ In `App/Chat/ChatTextEditor.swift`, inside `makeTextView`, right after `textView
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/ChatTextEditorDropTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/ChatTextEditorDropTests 2>&1 | tail -20`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -614,7 +614,7 @@ struct TransientMessageTests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/TransientMessageTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/TransientMessageTests 2>&1 | tail -20`
 Expected: FAIL — `value of type 'AppModel' has no member 'transientMessage'`.
 
 - [ ] **Step 3: Add the model state**
@@ -643,7 +643,7 @@ In `App/AppModel.swift`, next to the existing `lastError` property:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/TransientMessageTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/TransientMessageTests 2>&1 | tail -20`
 Expected: PASS, 2 tests.
 
 - [ ] **Step 5: Add the toast view**
@@ -695,7 +695,7 @@ In `App/ContentView.swift`, replace the existing bottom-trailing overlay:
 
 - [ ] **Step 7: Regenerate the project and build**
 
-Run: `xcodegen generate && xcodebuild build -project Tiller.xcodeproj -scheme Tiller 2>&1 | tail -5`
+Run: `xcodegen generate && xcodebuild build -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates 2>&1 | tail -5`
 Expected: `BUILD SUCCEEDED`.
 
 - [ ] **Step 8: Commit**
@@ -805,7 +805,7 @@ struct ComposerDropApplierTests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/ComposerDropApplierTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/ComposerDropApplierTests 2>&1 | tail -20`
 Expected: FAIL — `cannot find 'ComposerDropApplier' in scope`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -861,7 +861,7 @@ enum ComposerDropApplier {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/ComposerDropApplierTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/ComposerDropApplierTests 2>&1 | tail -20`
 Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Hoist the document out of the composer**
@@ -889,7 +889,7 @@ and pass it at line 96:
 
 - [ ] **Step 6: Build and run the existing composer tests to catch the hoist breaking anything**
 
-Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:AppTests/ComposerChipTests -only-testing:AppTests/ComposerDocumentTests -only-testing:AppTests/ComposerSendTests 2>&1 | tail -20`
+Run: `xcodebuild test -project Tiller.xcodeproj -scheme Tiller -only-testing:TillerTests/ComposerChipTests -only-testing:TillerTests/ComposerDocumentTests -only-testing:TillerTests/ComposerSendTests 2>&1 | tail -20`
 Expected: PASS, all pre-existing composer tests green.
 
 - [ ] **Step 7: Commit**
@@ -977,7 +977,7 @@ On the outer `VStack` in `body`, after `.background { MainSurfaceMaterial(...) }
 
 - [ ] **Step 3: Build**
 
-Run: `xcodebuild build -project Tiller.xcodeproj -scheme Tiller 2>&1 | tail -5`
+Run: `xcodebuild build -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates 2>&1 | tail -5`
 Expected: `BUILD SUCCEEDED`.
 
 - [ ] **Step 4: Verify by hand, with screenshots**
@@ -1157,7 +1157,7 @@ and add the helper method:
 
 - [ ] **Step 2: Build**
 
-Run: `xcodebuild build -project Tiller.xcodeproj -scheme Tiller 2>&1 | tail -5`
+Run: `xcodebuild build -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates 2>&1 | tail -5`
 Expected: `BUILD SUCCEEDED`.
 
 - [ ] **Step 3: Verify by hand, with screenshots — including the gesture regression**
