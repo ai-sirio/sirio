@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import os
 import TillerCore
+import UniformTypeIdentifiers
 import GhosttyTerminal
 
 /// Proxy for operations on the terminal surface from the context menu.
@@ -48,6 +49,14 @@ public final class TerminalSurfaceProxy: @unchecked Sendable {
         return view.performBindingAction("clear_screen")
     }
 
+    /// Makes the terminal view first responder. Used after a drop, so the
+    /// path lands in a pane the user can immediately type into.
+    @discardableResult
+    public func focus() -> Bool {
+        guard let view, let window = view.window else { return false }
+        return window.makeFirstResponder(view)
+    }
+
     public func copyContextToPasteboard() {
         guard let text = session.readViewportText(), !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -75,6 +84,7 @@ public struct PtyTerminalPane: View {
     private let onOpenURL: ((UUID, String) -> Void)?
     private let onContextMenu: ((UUID, TerminalSurfaceProxy) -> [TerminalContextMenuItem])?
     @State private var runtime: PtyRuntime?
+    @State private var isDropTargeted = false
 
     public init(
         workingDirectory: String? = nil,
@@ -137,6 +147,34 @@ public struct PtyTerminalPane: View {
             .onAppear { applyTheme() }
             .onChange(of: terminalFontSize) { _, _ in applyTheme() }
             .onChange(of: translucencyEnabled) { _, _ in applyTheme() }
+            .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+                handleDrop(providers)
+            }
+            .overlay {
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.accentColor,
+                                      style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+
+    /// Inserts the dropped paths at the shell's cursor. Never appends a
+    /// newline: Terminal.app, iTerm2, and Ghostty all leave the return key
+    /// to the user, and a drop that ran a command would be unrecoverable.
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        // NSItemProvider supports asynchronous loading but is not Sendable.
+        // This local binding is only read by the loader task below.
+        nonisolated(unsafe) let providers = providers
+        Task { @MainActor in
+            let urls = await DroppedFileLoader.urls(from: providers)
+            guard !urls.isEmpty else { return }
+            let payload = FileDrop.terminalInsertion(urls)
+            _ = await PaneRegistry.shared.write(paneId: paneId, data: Data(payload.utf8))
+            runtime?.proxy.focus()
+        }
+        return true
     }
 
     private func applyTheme() {
