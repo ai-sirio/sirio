@@ -224,7 +224,7 @@ git commit -m "refactor: bound titlebar control groups"
 - Its initializer is `init(@ViewBuilder leadingAccessory: () -> LeadingAccessory, @ViewBuilder trailingAccessory: () -> TrailingAccessory)`.
 - Keep `func makeNSView(context: Context) -> NSView` and `func updateNSView(_ nsView: NSView, context: Context)`; both update a single internal host object rather than creating duplicate window coordinators.
 - Add internal `@MainActor final class TitlebarAccessoryHost` as the deterministic AppKit seam. It owns exactly two `NSTitlebarAccessoryViewController` instances, one `.left` and one `.right`, each with an `NSHostingView<AnyView>` root and bounded `view.frame`.
-- Expose the actual owned `NSHostingView<AnyView>` instances as `private(set)` `leadingHostingView` and `trailingHostingView` references so tests can inspect the hosted frames and accessibility hierarchy without depending on SwiftUI's private view tree. Do not add synthetic mode metadata to the host.
+- Expose the actual owned `NSHostingView<AnyView>` instances as `private(set)` `leadingHostingView` and `trailingHostingView` references so tests can inspect hosted frames and lifecycle evidence without depending on SwiftUI's private view tree. Do not add synthetic mode metadata to the host.
 - `TitlebarAccessoryHost.install(on window: NSWindow)`, `update(leading: AnyView, trailing: AnyView)`, and `remove(from window: NSWindow)` must be idempotent. The host must not install a double-click recognizer or a full-width event-catching view.
 
 - [ ] **Step 1: Write the failing AppKit seam tests**
@@ -389,41 +389,92 @@ git commit -m "feat: host controls in native titlebar accessories"
 
 **Interfaces:**
 - Let `ContentView` accept an injectable `TitlebarAccessoryHost`, and make the actual `ContentView.body` apply `.configuresWindowChrome(configuration: { titlebarAccessories }, host: titlebarAccessoryHost)`.
-- Keep `TitlebarAccessoryHost` limited to its actual `leadingHostingView` and `trailingHostingView` references; do not add `TitlebarSplitControl`, `lastAppliedConfiguration`, or any other synthetic mode metadata.
-- Add accessibility identifiers to the real split controls: `tiller.titlebar.split.legacy` on the legacy split button and `tiller.titlebar.split.workspace` on the workspace split control, including its fallback control.
+- Keep `TitlebarAccessoryHost` centered on its actual `leadingHostingView` and `trailingHostingView` references plus rendered-control lifecycle evidence; do not add `TitlebarSplitControl`, `lastAppliedConfiguration`, or any other synthetic mode metadata.
+- Add a lifecycle probe to each real per-control slot: sidebar, right panel, split, and permissions. The probe is embedded in the actual legacy and workspace split control branches, not in test-only metadata.
 - Keep `ContentView.renderPath(gateEnabled:)`, `workspaceEngineEnabled`, `universalSplitMenu`, the legacy `Button` action `model.workspaceSplitCurrent(.horizontal)`, and the existing `splitContent` branches unchanged.
 - Remove only the `TitleStrip(...)` canvas row and the now-invalid top-safe-area explanation that says the strip is inside the reserved band; preserve the canvas, split, usage bar, and unrelated layout.
 
 - [ ] **Step 1: Write the failing wiring/parity tests**
 
-Replace the marker-only assertions in `AppTests/Workspace/WorkspaceMountTests.swift` with a test that renders the actual `ContentView` twice. Do not call a configuration factory directly: the test must wait for SwiftUI to evaluate `ContentView.body`, create the real `WindowChromeConfigurator`, and install it into the injected `TitlebarAccessoryHost` attached to an `NSWindow`.
+Replace the marker-only assertions in `AppTests/Workspace/WorkspaceMountTests.swift` with an integration test that renders the actual `ContentView` twice. Do not call a configuration factory directly: the test must wait for SwiftUI to evaluate `ContentView.body`, create the real `WindowChromeConfigurator`, and install it into the injected `TitlebarAccessoryHost` attached to an `NSWindow`.
 
-Add `import Foundation` and `import SwiftUI` to the test file so the fixture can create an `NSHostingView`, `NSWindow`, and bounded main-run-loop drain.
+The supported macOS 15/Xcode 16 combination does not expose a stable public API for enumerating descendants or AX identifiers below these `NSHostingView<AnyView>` roots. Recursive AX inspection timed out and is not deterministic, so the test must not inspect the accessibility hierarchy. Add `import Foundation` and `import SwiftUI` for the `NSHostingView`, `NSWindow`, and bounded main-run-loop drain.
+
+Use these exact probe and host seams in `App/WindowChromeConfigurator.swift`:
 
 ```swift
-@Test @MainActor func renderedContentViewUsesRenderedTitlebarSplitIdentifier() throws {
+enum TitlebarControlSlot: Hashable {
+    case sidebar
+    case rightPanel
+    case split
+    case permissions
+}
+
+struct TitlebarControlProbeRecord: Equatable {
+    let slot: TitlebarControlSlot
+    let accessibilityIdentifier: String?
+}
+
+struct TitlebarControlProbe: NSViewRepresentable {
+    let slot: TitlebarControlSlot
+    let accessibilityIdentifier: String?
+    let host: TitlebarAccessoryHost
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        host.recordRenderedControl(slot: slot, accessibilityIdentifier: accessibilityIdentifier)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        host.recordRenderedControl(slot: slot, accessibilityIdentifier: accessibilityIdentifier)
+    }
+}
+```
+
+`TitlebarAccessoryHost` records `renderedControlProbes: [TitlebarControlProbeRecord]` and `updateCount: Int`, and exposes these exact operations alongside the Task 3 APIs:
+
+```swift
+private(set) var renderedControlProbes: [TitlebarControlProbeRecord] = []
+private(set) var updateCount = 0
+
+func recordRenderedControl(slot: TitlebarControlSlot, accessibilityIdentifier: String?)
+func update(leading: AnyView, trailing: AnyView)
+```
+
+`recordRenderedControl` is called only by the probe’s `makeNSView`/`updateNSView`, and `update` increments `updateCount`. The probe is placed inside the actual four control slots, including the real legacy split `Button` branch and the real workspace split control branch (and its fallback `Button`, when present). It must not be rendered by a fixture or injected as a mode marker.
+
+Add this exact integration-test shape to `AppTests/Workspace/WorkspaceMountTests.swift`:
+
+```swift
+@Test @MainActor func renderedContentViewReportsOnlyTheMountedSplitBranch() throws {
     let legacyHost = TitlebarAccessoryHost()
     let legacyWindow = renderContentView(
         workspaceEngineEnabled: false,
         titlebarAccessoryHost: legacyHost)
-
-    let legacyTrailing = try #require(legacyHost.trailingHostingView)
-    legacyTrailing.layoutSubtreeIfNeeded()
-    let legacyIdentifiers = accessibilityIdentifiers(in: legacyTrailing)
-    #expect(legacyIdentifiers.contains("tiller.titlebar.split.legacy"))
-    #expect(!legacyIdentifiers.contains("tiller.titlebar.split.workspace"))
+    #expect(legacyHost.updateCount > 0)
+    #expect(legacyHost.renderedControlProbes.contains {
+        $0.slot == .split && $0.accessibilityIdentifier == "tiller.titlebar.split.legacy"
+    })
+    #expect(!legacyHost.renderedControlProbes.contains {
+        $0.slot == .split && $0.accessibilityIdentifier == "tiller.titlebar.split.workspace"
+    })
 
     let workspaceHost = TitlebarAccessoryHost()
     let workspaceWindow = renderContentView(
         workspaceEngineEnabled: true,
         titlebarAccessoryHost: workspaceHost)
+    #expect(workspaceHost.updateCount > 0)
+    #expect(workspaceHost.renderedControlProbes.contains {
+        $0.slot == .split && $0.accessibilityIdentifier == "tiller.titlebar.split.workspace"
+    })
+    #expect(!workspaceHost.renderedControlProbes.contains {
+        $0.slot == .split && $0.accessibilityIdentifier == "tiller.titlebar.split.legacy"
+    })
 
-    let workspaceTrailing = try #require(workspaceHost.trailingHostingView)
-    workspaceTrailing.layoutSubtreeIfNeeded()
-    let workspaceIdentifiers = accessibilityIdentifiers(in: workspaceTrailing)
-    #expect(workspaceIdentifiers.contains("tiller.titlebar.split.workspace"))
-    #expect(!workspaceIdentifiers.contains("tiller.titlebar.split.legacy"))
-
+    let expectedSlots: Set<TitlebarControlSlot> = [.sidebar, .rightPanel, .split, .permissions]
+    #expect(Set(legacyHost.renderedControlProbes.map(\.slot)).isSuperset(of: expectedSlots))
+    #expect(Set(workspaceHost.renderedControlProbes.map(\.slot)).isSuperset(of: expectedSlots))
     legacyWindow.orderOut(nil)
     workspaceWindow.orderOut(nil)
 }
@@ -448,25 +499,15 @@ private func renderContentView(
     window.contentView = hostingView
     window.makeKeyAndOrderFront(nil)
     window.layoutIfNeeded()
-    for _ in 0..<20 where titlebarAccessoryHost.trailingHostingView == nil {
+    for _ in 0..<20 where titlebarAccessoryHost.updateCount == 0 {
         RunLoop.main.run(until: Date().addingTimeInterval(0.01))
     }
     window.layoutIfNeeded()
     return window
 }
-
-@MainActor
-private func accessibilityIdentifiers(in view: NSView) -> Set<String> {
-    var identifiers = Set<String>()
-    if let identifier = view.accessibilityIdentifier() {
-        identifiers.insert(identifier)
-    }
-    for child in view.subviews {
-        identifiers.formUnion(accessibilityIdentifiers(in: child))
-    }
-    return identifiers
-}
 ```
+
+The exact collection assertions use `Set` conversion because `TitlebarControlSlot` is `Hashable`; they must verify all four per-control slots were reported and that the split slot reports exactly the active branch. Do not use synthetic mode metadata, direct factory-only tests, source markers, accessibility-tree recursion, or any unstable AX query.
 
 - [ ] **Step 2: Run the focused tests and verify they fail**
 
@@ -476,11 +517,11 @@ Run:
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -destination 'platform=macOS' -only-testing:TillerTests/WorkspaceMountTests -only-testing:TillerTests/CardGeometryTests
 ```
 
-Expected: FAIL because `ContentView` does not yet accept the injected host, its body does not yet pass `configuration: { titlebarAccessories }` to `.configuresWindowChrome`, and the real controls do not yet expose the required identifiers. The test must fail if `.configuresWindowChrome` is removed from `ContentView.body`, if the host is not updated, or if both modes render the same split control.
+Expected: FAIL because `ContentView` does not yet accept the injected host, its body does not yet pass `configuration: { titlebarAccessories }` to `.configuresWindowChrome`, and the real branches do not yet mount the required lifecycle probes. The test must fail if `.configuresWindowChrome` is removed from `ContentView.body`, if the host is not updated/injected, or if both modes render the same split branch.
 
 - [ ] **Step 3: Move hosting responsibility without changing callbacks**
 
-Route the actual body through the injected host. `TitlebarAccessoryHost` must expose only the actual `leadingHostingView` and `trailingHostingView` references; production code still owns installation and updates through the same host instance.
+Route the actual body through the injected host. `TitlebarAccessoryHost` must expose the actual `leadingHostingView` and `trailingHostingView` references plus the rendered-control lifecycle evidence; production code still owns installation and updates through the same host instance.
 
 Add the host injection to `ContentView.init`, add the computed titlebar accessory content using the existing builders, and make the actual body pass that content to `configuresWindowChrome(configuration:host:)`. The modifier must invoke the real host's `install(on:)` and `update(leading:trailing:)` from the `NSViewRepresentable` lifecycle:
 
@@ -542,7 +583,7 @@ extension View {
 
 Delete only the `TitleStrip` construction from `workspaceView` and remove `.ignoresSafeArea(.container, edges: .top)` from the canvas stack if it exists solely to place the old full-width row in the titlebar band. Retain any safe-area behavior needed by the canvas itself, and do not touch `splitContent`, `UsageBarView`, sidebar/right-panel state, or split actions.
 
-Apply identifiers to the actual controls, not to a wrapper or a test-only marker:
+Apply identifiers to the actual controls, not to a wrapper or a test-only marker; the probe records the same identifier while that real control branch is hosted:
 
 ```swift
 Button("Split terminal") {
@@ -554,11 +595,11 @@ universalSplitMenu
     .accessibilityIdentifier("tiller.titlebar.split.workspace")
 ```
 
-If the workspace menu has a fallback `Button` for environments where the menu cannot be presented, apply `tiller.titlebar.split.workspace` to that fallback control as well. The test's only allowed fallback is a host seam that recursively queries the actual hosted `NSView` accessibility tree; it must never inspect synthetic mode metadata. The accessibility hierarchy may omit or flatten some SwiftUI wrappers, so traversal must recurse through every actual `subviews` branch and assert the mutually exclusive identifiers at the hosted trailing-view boundary.
+If the workspace menu has a fallback `Button` for environments where the menu cannot be presented, apply `tiller.titlebar.split.workspace` to that fallback control as well and embed its workspace split probe in that actual branch. The test must rely only on the probe records and `updateCount` emitted by the real hosted branch; it must never inspect synthetic mode metadata, source markers, or the accessibility hierarchy.
 
 - [ ] **Step 4: Verify both split implementations remain represented**
 
-Confirm the trailing accessory still selects `universalSplitMenu` when `workspaceEngineEnabled == true` and the legacy `Button` with accessibility label `Split terminal` otherwise. Confirm the rendered trailing hosting view contains exactly one of `tiller.titlebar.split.legacy` or `tiller.titlebar.split.workspace`; no path-specific AppKit host or synthetic mode marker is introduced.
+Confirm the trailing accessory still selects `universalSplitMenu` when `workspaceEngineEnabled == true` and the legacy `Button` with accessibility label `Split terminal` otherwise. Confirm the actual lifecycle probes report exactly one of `tiller.titlebar.split.legacy` or `tiller.titlebar.split.workspace` for the split slot, all four per-control slots are reported, and `updateCount > 0`; no path-specific AppKit host or synthetic mode marker is introduced.
 
 - [ ] **Step 5: Run the focused tests and verify they pass**
 
@@ -642,7 +683,7 @@ Do not stage or commit `docs/superpowers/plans/2026-08-06-titlebar-interaction-a
 
 ## Self-review
 
-- **Spec coverage:** Tasks 1–2 cover the shared frame, 28pt/13pt baseline, concrete four-control bounds, common centerline, spacing, traffic-light relationship, and prohibition on per-icon offsets. Task 3 covers native AppKit accessories, direct controller and hosting-container frame inspection, bounded ownership, idempotent lifecycle, native dragging, native double-click behavior, and native traffic lights. Task 4 renders the actual `ContentView` into an `NSWindow`, observes the actual trailing hosting view installed by its real `WindowChromeConfigurator` through an injected `TitlebarAccessoryHost`, and proves that legacy and workspace modes expose mutually exclusive accessibility identifiers while sharing the same host path. Task 5 covers hover, pressed state, click actions, accessibility, VoiceOver, light/dark appearance, drag, preference-respecting double-click, and `Scripts/ci.sh` printing `CI OK`.
+- **Spec coverage:** Tasks 1–2 cover the shared frame, 28pt/13pt baseline, concrete four-control bounds, common centerline, spacing, traffic-light relationship, and prohibition on per-icon offsets. Task 3 covers native AppKit accessories, direct controller and hosting-container frame inspection, bounded ownership, idempotent lifecycle, native dragging, native double-click behavior, and native traffic lights. Task 4 renders the actual `ContentView` into an `NSWindow`, observes the actual trailing hosting view installed by its real `WindowChromeConfigurator` through an injected `TitlebarAccessoryHost`, and proves through lifecycle probes and host updates that legacy and workspace modes mount mutually exclusive split branches while sharing the same host path. It explicitly avoids unstable AX recursion and synthetic mode metadata. Task 5 keeps hover, pressed state, click actions, accessibility, VoiceOver, light/dark appearance, drag, preference-respecting double-click, and `Scripts/ci.sh` printing `CI OK` as manual or final-gate verification.
 - **Placeholder scan:** No `TODO`, `TBD`, `FIXME`, “implement later”, “add appropriate handling”, or “write tests for the above” placeholders remain. Every test step contains concrete Swift code, an exact command, and an expected failure or pass result.
-- **Type consistency:** `TitlebarGeometry` is defined before use; `controlFrames(count:in:)` returns `CGRect` values consumed by the bounded group contract; `TitleStripGroup<Content: View>` consumes its `CGSize` and `CGFloat` values; `TitlebarAccessoryHost` consumes `AnyView`, owns `NSTitlebarAccessoryViewController` and `NSHostingView<AnyView>` instances, and exposes the actual leading/trailing hosting views for frame and accessibility inspection; `ContentView` supplies the existing leading/trailing builders and keeps their callbacks intact while its rendered body reaches the injected host through `configuresWindowChrome(configuration:host:)`.
+- **Type consistency:** `TitlebarGeometry` is defined before use; `controlFrames(count:in:)` returns `CGRect` values consumed by the bounded group contract; `TitleStripGroup<Content: View>` consumes its `CGSize` and `CGFloat` values; `TitlebarAccessoryHost` consumes `AnyView`, owns `NSTitlebarAccessoryViewController` and `NSHostingView<AnyView>` instances, exposes the actual leading/trailing hosting views, records `TitlebarControlProbeRecord` values, and counts real host updates; `TitlebarControlProbe` is an `NSViewRepresentable` that reports only from `makeNSView` and `updateNSView`; `ContentView` supplies the existing leading/trailing builders and keeps their callbacks intact while its rendered body reaches the injected host through `configuresWindowChrome(configuration:host:)`.
 - **Scope protection:** The plan explicitly leaves the two current modified files untouched, does not alter `project.yml`, does not add a custom event-forwarding layer, and does not change unrelated model, split, card, or command behavior.
