@@ -7,11 +7,11 @@ final class TitlebarAccessoryHost {
     private(set) var trailingController: NSTitlebarAccessoryViewController?
     private(set) var leadingHostingView: NSHostingView<AnyView>?
     private(set) var trailingHostingView: NSHostingView<AnyView>?
-    private weak var window: NSWindow?
+    private weak var ownerWindow: NSWindow?
 
     func install(on window: NSWindow) {
         guard leadingController == nil, trailingController == nil else { return }
-        self.window = window
+        ownerWindow = window
 
         let leading = NSTitlebarAccessoryViewController()
         leading.layoutAttribute = .left
@@ -25,8 +25,7 @@ final class TitlebarAccessoryHost {
             width: TitlebarGeometry.controlFrame.width,
             height: TitlebarGeometry.accessoryHeight)
         trailingHostingView.frame = CGRect(
-            x: (window.contentView?.bounds.maxX ?? 0)
-                - (3 * TitlebarGeometry.controlFrame.width + 2 * TitlebarGeometry.controlSpacing),
+            x: 0,
             y: 0,
             width: 3 * TitlebarGeometry.controlFrame.width + 2 * TitlebarGeometry.controlSpacing,
             height: TitlebarGeometry.accessoryHeight)
@@ -57,6 +56,8 @@ final class TitlebarAccessoryHost {
     }
 
     func remove(from window: NSWindow) {
+        guard ownerWindow === window else { return }
+
         for controller in [leadingController, trailingController].compactMap({ $0 }) {
             guard let index = window.titlebarAccessoryViewControllers.firstIndex(of: controller) else {
                 continue
@@ -68,7 +69,7 @@ final class TitlebarAccessoryHost {
         trailingController = nil
         leadingHostingView = nil
         trailingHostingView = nil
-        self.window = nil
+        ownerWindow = nil
     }
 }
 
