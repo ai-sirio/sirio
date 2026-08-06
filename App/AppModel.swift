@@ -340,6 +340,23 @@ final class AppModel {
         )
     }
     var lastError: String?
+    /// Short-lived bottom-right message (drop rejections today). A newer
+    /// message replaces the older one and restarts the timer; the token is
+    /// what stops a stale timer from clearing a fresh message.
+    var transientMessage: String?
+    private var transientMessageToken = 0
+    static let transientMessageSeconds = 4
+
+    func showTransientMessage(_ text: String) {
+        transientMessage = text
+        transientMessageToken += 1
+        let token = transientMessageToken
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(AppModel.transientMessageSeconds))
+            guard let self, self.transientMessageToken == token else { return }
+            self.transientMessage = nil
+        }
+    }
     /// State as loaded at launch — the target of the manual
     /// "Restore Previous Launch" action. In-memory only.
     struct LaunchSnapshot {
