@@ -126,8 +126,13 @@ struct ContentView: View {
             PermissionsOnboardingSheet { hasSeenPermissionsOnboarding = true }
         }
         .overlay(alignment: .bottomTrailing) {
-            UpdateToastView(updater: updater)
-                .padding(16)
+            VStack(alignment: .trailing, spacing: 8) {
+                if let message = model.transientMessage {
+                    TransientMessageToast(message: message)
+                }
+                UpdateToastView(updater: updater)
+            }
+            .padding(16)
         }
     .enableInjection()
     }
