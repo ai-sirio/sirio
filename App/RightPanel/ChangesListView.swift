@@ -1,8 +1,11 @@
 import SwiftUI
 import TillerCore
 import TillerGit
+import Inject
 
 struct ChangesListView: View {
+    @ObserveInjection private var inject
+
     private enum SectionKind: Equatable { case staged, changes, untracked }
 
     @Bindable var panelModel: RightPanelModel
@@ -70,6 +73,7 @@ struct ChangesListView: View {
             }
         }
         .disabled(panelModel.mutationInProgress)
+    .enableInjection()
     }
 
     @ViewBuilder

@@ -3,10 +3,13 @@ import AppKit
 import TillerCore
 import TillerAgents
 import TillerControl
+import Inject
 
 /// General settings: app info plus the tillerctl wiring an agent needs to talk
 /// back to Tiller from a pane's shell. Moved from the former SettingsView.
 struct GeneralSettingsView: View {
+    @ObserveInjection private var inject
+
     var updater: UpdaterModel
     var model: AppModel
     @State private var copied = false
@@ -116,6 +119,7 @@ struct GeneralSettingsView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    .enableInjection()
     }
 
     private var tillerctlBundledPath: String {

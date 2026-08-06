@@ -13,6 +13,45 @@ struct TitlebarControlProbeRecord: Hashable {
     let accessibilityIdentifier: String?
 }
 
+enum StandardTitlebarDoubleClickAction: Equatable {
+    case miniaturize
+    case zoom
+    case none
+}
+
+func titlebarDoubleClickBand(in windowBounds: NSRect, height: CGFloat) -> NSRect {
+    let clampedHeight = min(max(0, height), windowBounds.height)
+    return NSRect(
+        x: windowBounds.minX,
+        y: windowBounds.maxY - clampedHeight,
+        width: windowBounds.width,
+        height: clampedHeight)
+}
+
+func resolvedStandardTitlebarDoubleClickAction(
+    globalDefaults: [String: Any]
+) -> StandardTitlebarDoubleClickAction {
+    if let action = (globalDefaults["AppleActionOnDoubleClick"] as? String)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() {
+        switch action {
+        case "minimize", "miniaturize":
+            return .miniaturize
+        case "maximize", "zoom", "fill":
+            return .zoom
+        case "none", "no action":
+            return .none
+        default:
+            break
+        }
+    }
+
+    if globalDefaults["AppleMiniaturizeOnDoubleClick"] as? Bool == true {
+        return .miniaturize
+    }
+    return .zoom
+}
+
 @MainActor
 final class TitlebarAccessoryOwnershipToken {}
 
@@ -26,6 +65,7 @@ final class TitlebarAccessoryHost {
     private(set) var updateCount = 0
     private weak var ownerWindow: NSWindow?
     private var ownerToken: ObjectIdentifier?
+    private var titlebarDoubleClickMonitor: Any?
 
     func install(on window: NSWindow, token: TitlebarAccessoryOwnershipToken? = nil) {
         if let ownerWindow, ownerWindow !== window {
@@ -53,11 +93,12 @@ final class TitlebarAccessoryHost {
         if trailingController == nil {
             let trailing = makeController(
                 layoutAttribute: .right,
-                width: 3 * TitlebarGeometry.controlFrame.width + 2 * TitlebarGeometry.controlSpacing)
+                width: 3 * TitlebarGeometry.controlFrame.width + 2 * TitlebarGeometry.controlSpacing + TitlebarGeometry.trailingGroupInset)
             window.addTitlebarAccessoryViewController(trailing.controller)
             trailingController = trailing.controller
             trailingHostingView = trailing.hostingView
         }
+        installTitlebarDoubleClickMonitor(on: window)
     }
 
     func update(leading: AnyView, trailing: AnyView) {
@@ -69,7 +110,7 @@ final class TitlebarAccessoryHost {
             width: TitlebarGeometry.controlFrame.width,
             height: TitlebarGeometry.accessoryHeight))
         trailingHostingView?.setFrameSize(CGSize(
-            width: 3 * TitlebarGeometry.controlFrame.width + 2 * TitlebarGeometry.controlSpacing,
+            width: 3 * TitlebarGeometry.controlFrame.width + 2 * TitlebarGeometry.controlSpacing + TitlebarGeometry.trailingGroupInset,
             height: TitlebarGeometry.accessoryHeight))
     }
 
@@ -84,6 +125,7 @@ final class TitlebarAccessoryHost {
         guard ownerWindow === window else { return }
         if let token, ownerToken != ObjectIdentifier(token) { return }
 
+        removeTitlebarDoubleClickMonitor()
         for controller in [leadingController, trailingController].compactMap({ $0 }) {
             guard let index = window.titlebarAccessoryViewControllers.firstIndex(of: controller) else {
                 continue
@@ -104,6 +146,53 @@ final class TitlebarAccessoryHost {
     func removeFromOwnerWindow(token: TitlebarAccessoryOwnershipToken? = nil) {
         guard let ownerWindow else { return }
         remove(from: ownerWindow, token: token)
+    }
+
+    private func installTitlebarDoubleClickMonitor(on window: NSWindow) {
+        guard titlebarDoubleClickMonitor == nil else { return }
+        titlebarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .leftMouseDown
+        ) { [weak self, weak window] event in
+            guard let self, let window else { return event }
+            return self.handleTitlebarDoubleClick(event, in: window) ? nil : event
+        }
+    }
+
+    private func removeTitlebarDoubleClickMonitor() {
+        guard let titlebarDoubleClickMonitor else { return }
+        NSEvent.removeMonitor(titlebarDoubleClickMonitor)
+        self.titlebarDoubleClickMonitor = nil
+    }
+
+    private func handleTitlebarDoubleClick(_ event: NSEvent, in window: NSWindow) -> Bool {
+        guard event.type == .leftMouseDown, event.clickCount >= 2, event.window === window,
+              let contentView = window.contentView else { return false }
+
+        let contentBoundsInWindow = contentView.convert(contentView.bounds, to: nil)
+        let titlebarRect = titlebarDoubleClickBand(
+            in: contentBoundsInWindow,
+            height: TitlebarGeometry.accessoryHeight)
+        guard titlebarRect.contains(event.locationInWindow) else { return false }
+
+        let windowButtons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+            .compactMap { window.standardWindowButton($0) }
+        let accessoryViews = window.titlebarAccessoryViewControllers.map(\.view)
+        guard !(windowButtons + accessoryViews).contains(where: {
+            guard !$0.isHidden, $0.window === window else { return false }
+            return $0.bounds.contains($0.convert(event.locationInWindow, from: nil))
+        }) else { return false }
+
+        let globalDefaults = UserDefaults.standard.persistentDomain(
+            forName: UserDefaults.globalDomain) ?? [:]
+        switch resolvedStandardTitlebarDoubleClickAction(globalDefaults: globalDefaults) {
+        case .miniaturize:
+            window.miniaturize(nil)
+        case .zoom:
+            window.zoom(nil)
+        case .none:
+            break
+        }
+        return true
     }
 
     private func makeController(
@@ -166,6 +255,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
             window.titlebarAppearsTransparent = true
             window.isOpaque = false
             window.backgroundColor = .clear
+            window.isMovableByWindowBackground = true
             window.installHideOnClose()
             host.install(on: window, token: token)
             let content = configuration()

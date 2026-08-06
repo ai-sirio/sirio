@@ -1,9 +1,12 @@
 import SwiftUI
+import Inject
 
 /// One `★ Insight ───` callout, extracted by `AgentMessageSegmenter` and
 /// rendered as its own card — same visual language as `ToolCallCardView` —
 /// instead of inline in the surrounding prose's `NSTextView`.
 struct InsightCardView: View {
+    @ObserveInjection private var inject
+
     let text: String
 
     var body: some View {
@@ -19,5 +22,6 @@ struct InsightCardView: View {
         .overlay(RoundedRectangle(cornerRadius: 8)
             .strokeBorder(Color.yellow.opacity(0.35)))
         .padding(.vertical, 6)
+    .enableInjection()
     }
 }

@@ -1,11 +1,14 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Tab bar orizzontale sopra l'area contenuto: le tab del worktree
 /// selezionato, sempre in sync con la sidebar (stessa source of truth:
 /// AppModel.tabs / activeTabId). Sempre visibile quando un worktree è
 /// selezionato; con zero tab mostra solo il "+".
 struct TabBarView: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     @State private var contentWidth: CGFloat = 0
@@ -92,12 +95,15 @@ struct TabBarView: View {
         }
         .frame(height: 32)
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
+    .enableInjection()
     }
 }
 
 /// Una tab nella bar: icona tipo, titolo, dirty dot markdown, indicatore
 /// attività agente, × on-hover. Click = attiva.
 struct TabBarItem: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     let tab: LegacyWorkspaceTab
@@ -213,5 +219,6 @@ struct TabBarItem: View {
                 .disabled(model.workspaceTabs(for: worktree.id).last?.id == tab.id)
     }
         .reorderable(model: model, id: tab.id, scope: .tabs(worktreeId: worktree.id))
-}
+    .enableInjection()
+    }
 }

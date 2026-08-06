@@ -1,9 +1,12 @@
 import SwiftUI
 import TillerACP
+import Inject
 
 /// Model + effort picker: search field, driver-supplied model list with the
 /// driver's first entry badged as recommended, effort chips at the bottom.
 struct ModelPickerPopover: View {
+    @ObserveInjection private var inject
+
     let controller: ChatController
     @Binding var isPresented: Bool
     @State private var query = ""
@@ -39,6 +42,7 @@ struct ModelPickerPopover: View {
         }
         .padding(10)
         .frame(width: 300)
+    .enableInjection()
     }
 
     private func modelRow(_ model: ModelInfo) -> some View {

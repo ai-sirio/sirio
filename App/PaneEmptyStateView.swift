@@ -1,8 +1,11 @@
 import AppKit
 import SwiftUI
 import TillerWorkspace
+import Inject
 
 struct PaneEmptyStateView<NewTabMenu: View>: View {
+    @ObserveInjection private var inject
+
     @Bindable var stripModel: PaneTabStripModel
     @ViewBuilder var newTabMenu: () -> NewTabMenu
 
@@ -28,6 +31,7 @@ struct PaneEmptyStateView<NewTabMenu: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.terminalSurface)
         .accessibilityElement(children: .contain)
+    .enableInjection()
     }
 }
 

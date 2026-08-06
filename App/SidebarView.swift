@@ -3,8 +3,11 @@ import TillerCore
 import TillerAgents
 import TillerTerminal
 import AppKit
+import Inject
 
 struct SidebarView: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     @State private var newBranchName = ""
     @State private var branchPromptProject: Project?
@@ -128,6 +131,7 @@ struct SidebarView: View {
                 AddProjectSheet(model: model)
             }
         }
+    .enableInjection()
     }
 
     private var filteredProjects: [Project] {
@@ -144,6 +148,8 @@ struct SidebarView: View {
 /// Flat filter box matching the mockup — replaces `.searchable`, whose native
 /// rounded pill and blue focus ring clash with the sidebar's flat chrome.
 private struct FilterField: View {
+    @ObserveInjection private var inject
+
     @Binding var text: String
 
     var body: some View {
@@ -167,6 +173,7 @@ private struct FilterField: View {
                         .stroke(AppTheme.hairline, lineWidth: 1)
                 )
         )
+    .enableInjection()
     }
 }
 
@@ -175,6 +182,8 @@ private struct FilterField: View {
 /// livello. Disegnate nel gutter, prima del background delle righe, così non
 /// attraversano mai la pill di selezione/hover.
 private struct TreeGuideLines: View {
+    @ObserveInjection private var inject
+
     /// x delle verticali che attraversano l'intera riga (livelli antenati).
     var throughLines: [CGFloat] = []
     /// x del connettore del proprio livello (├ / └); nil = nessun connettore.
@@ -210,6 +219,7 @@ private struct TreeGuideLines: View {
             .stroke(AppTheme.treeGuide, style: StrokeStyle(lineWidth: 1, lineCap: .round))
         }
         .allowsHitTesting(false)
+    .enableInjection()
     }
 }
 
@@ -226,6 +236,8 @@ private func projectColor(_ project: Project) -> Color {
 /// Header di progetto in sidebar: toggle espansione, selezione, icona colorata
 /// e badge aggregato dello stato agenti quando il progetto è collassato.
 private struct ProjectRow: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let project: Project
     let onSettings: (Project) -> Void
@@ -285,6 +297,7 @@ private struct ProjectRow: View {
                 Task { await model.removeProject(project) }
             }
         }
+    .enableInjection()
     }
 }
 
@@ -326,6 +339,8 @@ private func projectIcon(_ project: Project) -> some View {
 /// optional secondary line (agent + comment), and a trailing relative age.
 /// Draws its own selection/hover background — no `List` underneath.
 private struct WorktreeRow: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     @State private var hovering = false
@@ -408,6 +423,7 @@ private struct WorktreeRow: View {
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture { model.selectedWorktree = worktree }
+    .enableInjection()
     }
 
     @ViewBuilder private var rowBackground: some View {
@@ -446,6 +462,8 @@ private struct WorktreeRow: View {
 
 /// Indented "New Worktree…" affordance shown under an expanded project.
 private struct NewWorktreeButton: View {
+    @ObserveInjection private var inject
+
     let action: () -> Void
     @State private var hovering = false
 
@@ -472,6 +490,7 @@ private struct NewWorktreeButton: View {
         .focusEffectDisabled()
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
+    .enableInjection()
     }
 }
 
@@ -479,6 +498,8 @@ private struct NewWorktreeButton: View {
 /// titolo, dirty dot per markdown, × in hover, rename inline su doppio click.
 /// Indentato sotto la WorktreeRow del proprio worktree.
 private struct TabRow: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     let tab: LegacyWorkspaceTab
@@ -582,6 +603,7 @@ private struct TabRow: View {
         } message: {
             Text("The running process will be terminated.")
         }
+    .enableInjection()
     }
 
 
@@ -604,6 +626,8 @@ private struct TabRow: View {
 /// Nodo pane (4° livello): mostrato solo quando il tab terminale ha più di
 /// un pane. Etichetta = ultimo titolo PTY, fallback posizionale "Pane N".
 private struct PaneRow: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     let tab: LegacyWorkspaceTab
@@ -656,6 +680,7 @@ private struct PaneRow: View {
         } message: {
             Text("The running process will be terminated.")
         }
+    .enableInjection()
     }
 
     @ViewBuilder private var icon: some View {
@@ -673,6 +698,8 @@ private struct PaneRow: View {
 /// split mirato, affianca (solo stesso worktree e fuori dal tab attivo),
 /// chiusura con conferma (il chiamante mostra l'alert).
 private struct TerminalPaneMenu: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let paneId: UUID
     @Binding var confirmingClose: Bool
@@ -691,6 +718,7 @@ private struct TerminalPaneMenu: View {
             Divider()
             Button("Close Terminal…", role: .destructive) { confirmingClose = true }
         }
+    .enableInjection()
     }
 }
 
@@ -722,6 +750,8 @@ extension Color {
 /// tinto per stato. Nessun Liquid Glass — la sidebar è renderizzata piatta
 /// per combaciare col mockup.
 private struct StatusBadge: View {
+    @ObserveInjection private var inject
+
     let status: AgentStatus
 
     var body: some View {
@@ -729,5 +759,6 @@ private struct StatusBadge: View {
             .fill(status.badgeColor)
             .frame(width: 7, height: 7)
             .help(status.rawValue)
+    .enableInjection()
     }
 }

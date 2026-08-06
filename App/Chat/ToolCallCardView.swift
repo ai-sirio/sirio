@@ -1,10 +1,13 @@
 import SwiftUI
 import TillerACP
 import TillerCore
+import Inject
 
 /// One tool call as a card: kind icon, title, status; expandable content
 /// (diff/output); pending permission requests remain highlighted.
 struct ToolCallCardView: View {
+    @ObserveInjection private var inject
+
     let item: ToolCallItem
     let controller: ChatController
     let worktree: Worktree
@@ -24,6 +27,7 @@ struct ToolCallCardView: View {
                 dismissControl
             }
         }
+    .enableInjection()
     }
 
     private var header: some View {

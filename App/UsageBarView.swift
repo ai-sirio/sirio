@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import TillerCore
+import Inject
 
 /// The app's status bar: settings, then usage for each enabled provider
 /// (Claude, Codex, OpenCode Go, Ollama Cloud), e.g. `Claude 26% 5h · 53% wk`.
@@ -9,6 +10,8 @@ import TillerCore
 /// provider toggles say — the settings button lives here, and hiding the bar
 /// with the last provider would take the way back to Settings with it.
 struct UsageBarView: View {
+    @ObserveInjection private var inject
+
     let store: UsageStore
     let worktree: Worktree?
     let onOpenSettings: () -> Void
@@ -72,6 +75,7 @@ struct UsageBarView: View {
         .frame(maxWidth: .infinity,
                minHeight: AppTheme.bottomBarHeight,
                maxHeight: AppTheme.bottomBarHeight)
+    .enableInjection()
     }
 
     private var isLoading: Bool {
@@ -111,6 +115,8 @@ struct UsageBarView: View {
 }
 
 private struct ClaudeUsageSegment: View {
+    @ObserveInjection private var inject
+
     let state: ProviderUsageState
 
     var body: some View {
@@ -120,6 +126,7 @@ private struct ClaudeUsageSegment: View {
         }
         .foregroundStyle(isDimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
         .help(tooltip)
+    .enableInjection()
     }
 
     private var text: String {
@@ -161,6 +168,8 @@ private struct ClaudeUsageSegment: View {
 /// session/weekly/monthly (no Fable-style extra window — that stays
 /// Claude-specific in `ClaudeUsageSegment`).
 private struct ProviderUsageSegment: View {
+    @ObserveInjection private var inject
+
     let displayName: String
     let agentId: String
     let state: ProviderUsageState
@@ -174,6 +183,7 @@ private struct ProviderUsageSegment: View {
         }
         .foregroundStyle(isDimmed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
         .help(tooltip)
+    .enableInjection()
     }
 
     private var text: String {
@@ -216,11 +226,14 @@ private struct ProviderUsageSegment: View {
 /// worktree is selected, so the bar degrades to just provider usage
 /// otherwise (same as today when `openWorktreeIds` is empty).
 private struct WorktreeContextSegment: View {
+    @ObserveInjection private var inject
+
     let worktree: Worktree
 
     var body: some View {
         Text("\(worktree.branch) · \(abbreviatedPath)")
             .foregroundStyle(AppTheme.meta)
+    .enableInjection()
     }
 
     private var abbreviatedPath: String {

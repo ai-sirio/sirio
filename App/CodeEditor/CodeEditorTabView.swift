@@ -1,8 +1,11 @@
 import CodeEditSourceEditor
 import SwiftUI
 import TillerCode
+import Inject
 
 struct CodeEditorTabView: View {
+    @ObserveInjection private var inject
+
     @Bindable var document: CodeDocument
     @Environment(\.colorScheme) private var colorScheme
     @State private var editorState = SourceEditorState()
@@ -47,6 +50,7 @@ struct CodeEditorTabView: View {
             .pointerStyle(.horizontalText)
         }
         .background(AppTheme.background)
+    .enableInjection()
     }
 
     private var header: some View {

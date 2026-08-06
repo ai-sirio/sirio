@@ -1,9 +1,12 @@
 import SwiftUI
 import TillerACP
+import Inject
 
 /// The agent's proposed plan. Shows progress at a glance and collapses once
 /// every entry is done, so a finished plan stops competing with live output.
 struct PlanCardView: View {
+    @ObserveInjection private var inject
+
     let entries: [PlanEntry]
     let approval: PermissionState?
     let controller: ChatController
@@ -73,6 +76,7 @@ struct PlanCardView: View {
                 }
             }
         }
+    .enableInjection()
     }
 
     private func symbol(for status: String) -> String {

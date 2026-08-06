@@ -1,10 +1,13 @@
 import SwiftUI
+import Inject
 
 /// Icon for an agent, visually matching Orca's marks: Claude and Codex are
 /// template assets tinted with Orca's colors; OpenCode, Pi and omp are drawn
 /// natively from the same vector coordinates Orca uses. Unknown agents fall
 /// back to a colored monogram circle.
 struct AgentIcon: View {
+    @ObserveInjection private var inject
+
     let agentId: String
     var size: CGFloat = 14
 
@@ -58,6 +61,7 @@ struct AgentIcon: View {
             }
         }
         .frame(width: size, height: size)
+    .enableInjection()
     }
 
     /// Orca's Claude brand fill (#D97757).

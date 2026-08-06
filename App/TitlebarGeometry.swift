@@ -6,7 +6,9 @@ enum TitlebarGeometry {
     static let controlSpacing = AppTheme.titlebarControlSpacing
     static let iconSize = AppTheme.titleStripIconSize
     static let trafficLightInset = AppTheme.trafficLightInset
-    static let sidebarVerticalCorrection: CGFloat = 0
+    static let sidebarVerticalCorrection: CGFloat = 2
+    static let trailingGroupInset: CGFloat = 16
+
 
     static func verticalCenter(in accessoryHeight: CGFloat) -> CGFloat {
         accessoryHeight / 2

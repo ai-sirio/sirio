@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import TillerACP
 import TillerAgents
+import Inject
 
 /// Message input styled as a floating rounded card: text on top, control row
 /// below (mode pill with status dot, agent pill, follow, new conversation,
@@ -9,6 +10,8 @@ import TillerAgents
 /// "/" opens a slash-command popup fed by the agent's advertised commands;
 /// "@" keeps the file-mention autocomplete. ⏎ send, ⇧⏎ newline.
 struct ChatComposerView: View {
+    @ObserveInjection private var inject
+
     let controller: ChatController
     let worktreePath: String
 
@@ -52,13 +55,13 @@ struct ChatComposerView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    .enableInjection()
     }
 
     // MARK: - Card
 
     private var card: some View {
-        let border = ComposerControlBar.borderStyle(isFocused: document.isFocused)
-        return VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             editor
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
@@ -70,8 +73,12 @@ struct ChatComposerView: View {
         }
         .padding(12)
         .background(cardBackgroundStyle, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14)
-            .strokeBorder(border.color, lineWidth: border.width))
+        .overlay {
+            ComposerBorderView(
+                isAnimating: isPrompting,
+                isFocused: document.isFocused,
+                reduceMotion: reduceMotion)
+        }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
     }
 
@@ -257,5 +264,50 @@ struct ChatComposerView: View {
                                          base64Data: data.base64EncodedString())
         document.insert(.image(attachment),
                         replacing: NSRange(location: document.storage.length, length: 0))
+    }
+}
+
+/// Accent border for the composer card: static when idle/focused, spinning
+/// conic gradient while the agent is processing a turn.
+private struct ComposerBorderView: View {
+    let isAnimating: Bool
+    let isFocused: Bool
+    let reduceMotion: Bool
+
+    @State private var phase: Double = 0
+
+    private let cornerRadius: CGFloat = 14
+    private let lineWidth: CGFloat = 1.5
+
+    var body: some View {
+        if isAnimating && !reduceMotion {
+            AngularGradient(
+                colors: [
+                    .accentColor,
+                    .accentColor.opacity(0.15),
+                    .accentColor.opacity(0),
+                    .accentColor.opacity(0.15),
+                    .accentColor
+                ],
+                center: .center
+            )
+            .rotationEffect(.degrees(phase))
+            .mask {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .strokeBorder(lineWidth: lineWidth)
+            }
+            .onAppear {
+                withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                    phase = 360
+                }
+            }
+        } else {
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .strokeBorder(
+                    Color.accentColor.opacity(isFocused ? 1.0 : 0.4),
+                    lineWidth: isFocused ? lineWidth : 1
+                )
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isFocused)
+        }
     }
 }

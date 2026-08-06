@@ -209,7 +209,6 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         worktrees[worktree.id] = worktree
 
         // Step 1: capture stable IDs and preconditions from the current revision.
-        let capturedRevision = revisions[worktree.id] ?? 0
         guard let layout = layouts[worktree.id] else {
             lastRecoverableError = "missing layout"
             return
@@ -234,10 +233,15 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
             return
         }
 
+        // The revision is captured under the gate inside commitPreparedContent:
+        // `prepare` can take hundreds of milliseconds (a PTY spawn), and an
+        // unrelated commit in that window — e.g. the `.activateGroup` the
+        // empty-pane New Terminal button fires right before its
+        // `.requestNewTab` — used to invalidate a revision captured up front
+        // and silently drop the freshly prepared tab.
         await commitPreparedContent(
             preparedContent: preparedContent,
-            in: worktree,
-            expectedRevision: capturedRevision
+            in: worktree
         ) { currentLayout, prepared in
             guard currentLayout.group(anchor) != nil else { return nil }
             if let sourceTabID, currentLayout.tab(sourceTabID) == nil { return nil }
@@ -283,7 +287,6 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
     func requestNewTab(into groupID: PaneGroupID, choice: ContentChoice,
                        in worktree: Worktree) async {
         worktrees[worktree.id] = worktree
-        let capturedRevision = revisions[worktree.id] ?? 0
         guard let layout = layouts[worktree.id], layout.group(groupID) != nil else {
             lastRecoverableError = "missing group"
             return
@@ -292,10 +295,15 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
             return
         }
 
+        // The revision is captured under the gate inside commitPreparedContent:
+        // the empty-pane "New Terminal" fires `.activateGroup` immediately
+        // before `.requestNewTab`, and an activate commit landing while the
+        // PTY prepares used to bump the revision past the one captured up
+        // front — the revision guard then disposed the prepared tab and the
+        // click looked dead.
         await commitPreparedContent(
             preparedContent: preparedContent,
-            in: worktree,
-            expectedRevision: capturedRevision
+            in: worktree
         ) { currentLayout, prepared in
             guard currentLayout.group(groupID) != nil, let prepared else { return nil }
             return PreparedCommand(
@@ -378,15 +386,17 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
     private func commitPreparedContent(
         preparedContent: PreparedContentBundle?,
         in worktree: Worktree,
-        expectedRevision: Int,
         makeCommand: (WorkspaceLayout, PreparedContent?) -> PreparedCommand?
     ) async {
         let gate = gate(for: worktree.id)
         await gate.acquire()
         defer { Task { await gate.release() } }
 
-        guard revisions[worktree.id] == expectedRevision,
-              let currentLayout = layouts[worktree.id] else {
+        // The revision is read under the gate, so the layout this command is
+        // validated against and applied to is exactly the current one — no
+        // stale-revision drop for commands whose preparation outlived an
+        // unrelated commit (activate, focus, …).
+        guard let currentLayout = layouts[worktree.id] else {
             if let preparedContent {
                 await preparedContent.adapter.dispose(prepared: preparedContent.prepared)
             }

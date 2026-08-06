@@ -1,5 +1,6 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Menu-bar glyph reflecting the aggregate agent status across all
 /// active-agent worktrees. Spins while any worktree is `.running`.
@@ -9,6 +10,8 @@ import TillerCore
 /// menu bar scura spariva in un disco invisibile. Il template è la
 /// convenzione macOS: il sistema lo colora da solo su barra chiara/scura.
 struct MenuBarStatusIcon: View {
+    @ObserveInjection private var inject
+
     let status: AgentStatus?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -28,5 +31,6 @@ struct MenuBarStatusIcon: View {
             )
             .onAppear { isSpinning = status == .running }
             .onChange(of: status) { _, newStatus in isSpinning = newStatus == .running }
+    .enableInjection()
     }
 }

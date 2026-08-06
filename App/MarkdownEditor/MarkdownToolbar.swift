@@ -1,9 +1,12 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Toolbar essenziale della modalità codice: ogni bottone applica una
 /// trasformazione pura (MarkdownSyntax) sulla selezione corrente.
 struct MarkdownToolbar: View {
+    @ObserveInjection private var inject
+
     @Bindable var document: MarkdownDocument
     @Binding var selection: TextSelection?
 
@@ -22,6 +25,7 @@ struct MarkdownToolbar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+    .enableInjection()
     }
 
     private func button(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {

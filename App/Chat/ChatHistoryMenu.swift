@@ -1,10 +1,13 @@
 import SwiftUI
 import TillerCore
+import Inject
 
 /// Chat history for the current worktree, opened from the icon beside the tab
 /// bar "+". Delete lives in a submenu because NSMenu items take no context
 /// menu on macOS — this keeps opening a chat at a single click.
 struct ChatHistoryMenu: View {
+    @ObserveInjection private var inject
+
     @Bindable var model: AppModel
     let worktree: Worktree
     @State private var pendingDeletion: ChatHistoryRow?
@@ -54,5 +57,6 @@ struct ChatHistoryMenu: View {
         } message: {
             Text(pendingDeletion.map { "\"\($0.title)\" and its transcript will be removed." } ?? "")
         }
+    .enableInjection()
     }
 }

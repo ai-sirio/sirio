@@ -3,11 +3,14 @@ import SwiftUI
 import MarkdownUI
 import TillerACP
 import TillerCore
+import Inject
 
 /// Scrolling transcript styled like a minimal chat log: tinted user bubbles on
 /// the right with an avatar dot, full-width agent markdown, collapsed
 /// "> Thought" rows, timestamped turn dividers. Autoscrolls while streaming.
 struct TranscriptView: View {
+    @ObserveInjection private var inject
+
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
@@ -69,6 +72,7 @@ struct TranscriptView: View {
                 controller.scrollTarget = nil
             }
         }
+    .enableInjection()
     }
 
     /// Re-pins the transcript to the bottom with the same short ease used
@@ -282,6 +286,8 @@ struct TranscriptView: View {
 
 /// Collapsed-by-default "> Thought" row; the chevron rotates when expanded.
 private struct ThoughtRow: View {
+    @ObserveInjection private var inject
+
     let text: String
     @State private var isExpanded = false
 
@@ -308,5 +314,6 @@ private struct ThoughtRow: View {
                     .padding(.leading, 14)
             }
         }
+    .enableInjection()
     }
 }

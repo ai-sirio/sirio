@@ -1,4 +1,5 @@
 import SwiftUI
+import Inject
 
 /// What a chat card represents. Drives the accent rail only — every card
 /// shares one fill, one radius, one padding.
@@ -19,6 +20,8 @@ enum ChatCardKind {
 /// same background modifier was copied into five views and had already drifted
 /// to two different corner radii.
 struct ChatCard<Content: View>: View {
+    @ObserveInjection private var inject
+
     let kind: ChatCardKind
     var isHighlighted = false
     @ViewBuilder let content: Content
@@ -40,5 +43,6 @@ struct ChatCard<Content: View>: View {
                 RoundedRectangle(cornerRadius: Self.radius)
                     .strokeBorder(isHighlighted ? kind.railColor : .clear)
             }
+    .enableInjection()
     }
 }

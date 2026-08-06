@@ -2,6 +2,7 @@
 import SwiftUI
 import AppKit
 import TillerCore
+import Inject
 
 /// Shared color tokens for Tiller's chrome, adaptive to the effective
 /// appearance. `background` is the sidebar/chrome surface; `chatSurface` and
@@ -210,6 +211,8 @@ struct HoverIconButtonStyle: ButtonStyle {
     }
 
     private struct HoverIconLabel: View {
+        @ObserveInjection private var inject
+
         let configuration: ButtonStyle.Configuration
         @State private var hovering = false
 
@@ -222,6 +225,7 @@ struct HoverIconButtonStyle: ButtonStyle {
                 )
                 .scaleEffect(configuration.isPressed ? 0.92 : 1)
                 .onHover { hovering = $0 }
+        .enableInjection()
         }
     }
 }

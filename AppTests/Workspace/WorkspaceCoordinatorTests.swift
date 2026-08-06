@@ -127,6 +127,33 @@ struct WorkspaceCoordinatorTests {
         #expect(await persistence.commitCount == 1)
     }
 
+    @Test func emptyPaneActivateThenNewTerminalDoesNotLoseTheTabToARevisionRace() async {
+        let preparation = PreparationGate(blocked: true)
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let adapter = CoordinatorAdapter(preparation: preparation)
+        let coordinator = makeCoordinator(persistence: persistence, adapter: adapter)
+        let worktree = fixtureWorktree(number: 8)
+
+        await coordinator.restore(worktree: worktree)
+        let groupID = coordinator.layouts[worktree.id]!.activeGroupID
+        let router = WorkspaceIntentRouter(coordinator: coordinator, worktree: worktree)
+        let controller = PaneGroupController(id: groupID, intentSink: router)
+
+        controller.activateGroup()
+        controller.requestNewTab()
+        await preparation.waitUntilStarted()
+        await Task.yield()
+
+        #expect(coordinator.revisions[worktree.id] == 1)
+
+        await preparation.release()
+        for _ in 0..<100 where coordinator.layouts[worktree.id]?.allTabs.isEmpty == true {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+
+        #expect(coordinator.layouts[worktree.id]?.group(groupID)?.tabs.count == 1)
+    }
+
     @Test func requestNewTabAppendsASiblingTabIntoAnExistingNonEmptyGroup() async {
         let persistence = CoordinatorPersistence()
         let adapter = CoordinatorAdapter()

@@ -2,11 +2,14 @@ import SwiftUI
 import AppKit
 import TillerACP
 import TillerAgents
+import Inject
 
 /// The composer's bottom row, in the AIR arrangement: attach on the left with
 /// the model picker, and the secondary controls collapsed into an overflow
 /// menu on the right so the row carries 5 elements instead of 8.
 struct ComposerControlBar: View {
+    @ObserveInjection private var inject
+
     let controller: ChatController
     let document: ComposerDocument
     let onAttach: () -> Void
@@ -58,6 +61,7 @@ struct ComposerControlBar: View {
             case .send: sendButton
             }
         }
+    .enableInjection()
     }
 
     private var overflowMenu: some View {

@@ -3,6 +3,7 @@ import SwiftUI
 import TillerAgents
 import TillerCore
 import TillerWorkspace
+import Inject
 
 struct SplitMenuAgent: Equatable, Identifiable {
     let id: String
@@ -198,24 +199,38 @@ final class SplitContentMenuSession {
 }
 
 struct SplitContentMenu: View {
+    @ObserveInjection private var inject
+
     let model: SplitContentMenuModel
     let onAction: (SplitContentMenuAction) -> Void
+
+    @State private var hovering = false
 
     var body: some View {
         Menu {
             SplitContentMenuItems(model: model, onAction: onAction)
         } label: {
             Label("Split", systemImage: "rectangle.split.2x1")
+                .labelStyle(.iconOnly)
+                .font(.system(size: AppTheme.titleStripIconSize))
+                .padding(3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.primary.opacity(hovering ? 0.1 : 0))
+                )
         }
-        .labelStyle(.iconOnly)
         .menuIndicator(.hidden)
-        .font(.system(size: AppTheme.titleStripIconSize))
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    .enableInjection()
     }
 }
 
 /// The menu body on its own, so the toolbar's Split button and the pane's
 /// right-click menu stay one definition rather than two that drift apart.
 struct SplitContentMenuItems: View {
+    @ObserveInjection private var inject
+
     let model: SplitContentMenuModel
     let onAction: (SplitContentMenuAction) -> Void
 
@@ -286,6 +301,7 @@ struct SplitContentMenuItems: View {
                     .disabled(!close.isEnabled)
             }
         }
+    .enableInjection()
     }
 }
 
