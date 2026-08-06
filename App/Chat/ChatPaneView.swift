@@ -37,6 +37,9 @@ struct ChatPaneView: View {
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
+    /// Owned here rather than inside the composer because the whole pane is
+    /// the drop target, and a drop has to reach the draft.
+    @State private var document = ComposerDocument()
     @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     var body: some View {
@@ -93,7 +96,8 @@ struct ChatPaneView: View {
             }
             Divider()
             captureLayout(.composer) {
-                ChatComposerView(controller: controller, worktreePath: worktree.path)
+                ChatComposerView(controller: controller, worktreePath: worktree.path,
+                                 document: document)
             }
         }
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
