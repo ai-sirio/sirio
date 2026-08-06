@@ -1,10 +1,10 @@
 import Foundation
+import TillerCore
 
-/// POSIX single-quote escaping: wraps in ' and replaces every embedded
-/// ' with '\'' so the result is one shell word under sh/zsh/bash.
-func shellQuote(_ s: String) -> String {
-    "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
-}
+/// Forwards to the canonical implementation in TillerCore. Kept as an
+/// internal function with the same name so the six adapters that call
+/// `shellQuote` need no import and no edit.
+func shellQuote(_ s: String) -> String { TillerCore.shellQuote(s) }
 
 /// JSON string literal (also a valid TOML basic string literal) for
 /// embedding arbitrary text in generated code/config. `\/` is not a TOML
