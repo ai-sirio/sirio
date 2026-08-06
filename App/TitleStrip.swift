@@ -1,20 +1,14 @@
 import SwiftUI
 
-/// The canvas band at the top of the window. AppKit still draws the traffic
-/// lights over its leading edge under `.hiddenTitleBar`, so the strip reserves
-/// room for them and places chrome buttons on either side of the strip.
-struct TitleStrip<Leading: View, Trailing: View>: View {
-    @ViewBuilder var leading: Leading
-    @ViewBuilder var trailing: Trailing
+struct TitleStripGroup<Content: View>: View {
+    @ViewBuilder var content: Content
 
     var body: some View {
-        HStack(spacing: 2) {
-            Color.clear.frame(width: AppTheme.trafficLightInset, height: 1)
-            leading
-            Spacer(minLength: 0)
-            trailing
+        HStack(spacing: TitlebarGeometry.controlSpacing) {
+            content
+                .frame(width: TitlebarGeometry.controlFrame.width,
+                       height: TitlebarGeometry.controlFrame.height)
         }
-        .padding(.trailing, AppTheme.cardGap)
-        .frame(height: AppTheme.titleStripHeight)
+        .frame(height: TitlebarGeometry.accessoryHeight, alignment: .center)
     }
 }

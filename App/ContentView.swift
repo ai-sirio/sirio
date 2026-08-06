@@ -180,9 +180,12 @@ struct ContentView: View {
             CanvasBackground().ignoresSafeArea()
             VStack(spacing: 0) {
                 if model.route == .workspace {
-                    TitleStrip(
-                        leading: { titleStripLeadingButtons },
-                        trailing: { titleStripButtons })
+                    HStack(spacing: 0) {
+                        TitleStripGroup { titleStripLeadingButtons }
+                        Spacer(minLength: 0)
+                        TitleStripGroup { titleStripButtons }
+                    }
+                    .frame(height: TitlebarGeometry.accessoryHeight)
                 }
                 splitContent
                 UsageBarView(
