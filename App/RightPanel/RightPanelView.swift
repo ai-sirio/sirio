@@ -11,6 +11,8 @@ struct RightPanelView: View {
     let isGitRepository: Bool
     let onClose: () -> Void
     @State private var pendingDiscard: PendingGitDiscard?
+    @AppStorage(AppSettings.activitySectionExpandedKey)
+    private var activityExpanded = AppSettings.defaultActivitySectionExpanded
 
     private var effectiveMode: RightPanelMode {
         .effective(rawValue: modeRaw, isGitRepository: isGitRepository)
@@ -25,20 +27,15 @@ struct RightPanelView: View {
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
+                // Capped at 75% while Activity is open; uncapped when it
+                // collapses, which is what gives Files/Changes the full height.
                 toolsRegion
-                    .frame(height: geo.size.height * 0.75)
+                    .frame(maxHeight: activityExpanded ? geo.size.height * 0.75 : .infinity)
                 Divider()
-                Group {
-                    if let worktree = panelModel.worktree {
-                        AgentsSectionView(appModel: appModel, worktree: worktree)
-                    } else {
-                        ContentUnavailableView(
-                            "No agents running",
-                            systemImage: "person.2.slash")
-                    }
-                }
-                .frame(maxHeight: .infinity)
+                ActivitySectionView(appModel: appModel, isExpanded: $activityExpanded)
+                    .frame(maxHeight: activityExpanded ? .infinity : nil)
             }
+            .animation(.easeInOut(duration: 0.2), value: activityExpanded)
         }
         .alert(item: $pendingDiscard) { pending in
             Alert(
@@ -76,8 +73,8 @@ struct RightPanelView: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.plain)
-                .help("Nascondi pannello destro (⌃⌘I)")
-                .accessibilityLabel("Nascondi pannello destro")
+                .help("Hide right panel (⌃⌘I)")
+                .accessibilityLabel("Hide right panel")
             }
             .padding(8)
             Divider()
