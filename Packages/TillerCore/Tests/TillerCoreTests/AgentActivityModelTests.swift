@@ -85,9 +85,9 @@ import Foundation
 }
 
 @Test func registerAgentIdThenNotifyMakesPaneFullyResolved() {
-    // Mirrors AgentTreeBuilder's guard: a restored chat tab that later
-    // receives a real notify() must have both paneAgents and agentStatus
-    // set, or it silently drops out of the Agents panel tree.
+    // A restored chat tab that later receives a real notify() must end up with
+    // both paneAgents and agentStatus set, or its Activity row shows as idle
+    // while an agent is actually working in it.
     let model = AgentActivityModel()
     let paneId = UUID()
 
