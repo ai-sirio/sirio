@@ -534,6 +534,17 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         return gate
     }
 
+    /// Synchronous, gate-free tab activation for use-cases that do not need
+    /// the async commit pipeline (e.g., Activity panel navigation). Safe on
+    /// @MainActor since there are no concurrent writes on this actor.
+    func activateTabDirectly(_ tabID: WorkspaceTabID, in worktreeID: UUID) {
+        guard let layout = layouts[worktreeID],
+              case .success(let transition) = WorkspaceLayoutEngine.apply(
+                  .activateTab(tabID), to: layout)
+        else { return }
+        publish(transition, worktreeID: worktreeID)
+    }
+
     private func materialize(_ restored: RestoredWorkspace) -> WorkspaceLayout {
         let groups = restored.layout.groups.mapValues { group in
             PaneGroup(
