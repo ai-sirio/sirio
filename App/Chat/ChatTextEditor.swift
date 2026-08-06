@@ -46,6 +46,11 @@ struct ChatTextEditor: NSViewRepresentable {
         }
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
         textView.isRichText = false
+        // Drops are handled by ChatPaneView, which routes them through
+        // FileDrop. An editable NSTextView otherwise claims the file types
+        // first — it is lower in the responder chain than the SwiftUI drop
+        // area — and inserts the file on its own terms.
+        textView.unregisterDraggedTypes()
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 0, height: 4)
         textView.textContainer?.lineFragmentPadding = 0
