@@ -50,8 +50,13 @@ evidence in hand.
 Replaces `AgentTree.swift`. `AgentTreeBuilder` has exactly one consumer
 (`AgentsPanelModel.swift:32`) plus its own tests, so it is rewritten rather than
 kept alongside. The subagent machinery (`subagentNodes`, `firstMatch`,
-`collectMatches`) is deleted with it. `ProcessNode` and `ChatSubagentInput` lose
-their only consumer and go too.
+`collectMatches`) is deleted with it, as is `ChatSubagentInput`, whose only
+consumer is that same file.
+
+`ProcessNode` stays. It is shared with the Layer-D process detection
+(`ForegroundProcessAgent`, `ProcessScanCoordinator`, `AppModel.paneProcessTrees`)
+and merely happens to live in `AgentTree.swift`; it moves to its own
+`ProcessNode.swift` rather than being deleted with its former neighbours.
 
 ```swift
 public enum ActivityStatus: Sendable {
