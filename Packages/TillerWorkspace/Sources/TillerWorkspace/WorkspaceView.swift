@@ -5,6 +5,7 @@ import TillerCore
 public struct WorkspaceView: NSViewControllerRepresentable {
     private let layout: WorkspaceLayout
     private let delta: WorkspaceLayoutDelta?
+    private let isVisible: Bool
     private let hostProvider: WorkspaceHostProvider
     private let intentSink: WorkspaceIntentSink
     private let stripFactory: PaneTabStripFactory?
@@ -13,6 +14,7 @@ public struct WorkspaceView: NSViewControllerRepresentable {
     public init(
         layout: WorkspaceLayout,
         delta: WorkspaceLayoutDelta?,
+        isVisible: Bool = true,
         hostProvider: WorkspaceHostProvider,
         intentSink: WorkspaceIntentSink,
         stripFactory: PaneTabStripFactory? = nil,
@@ -20,6 +22,7 @@ public struct WorkspaceView: NSViewControllerRepresentable {
     ) {
         self.layout = layout
         self.delta = delta
+        self.isVisible = isVisible
         self.hostProvider = hostProvider
         self.intentSink = intentSink
         self.stripFactory = stripFactory
@@ -33,11 +36,11 @@ public struct WorkspaceView: NSViewControllerRepresentable {
             stripFactory: stripFactory,
             emptyStateFactory: emptyStateFactory
         )
-        controller.update(layout: layout, delta: delta)
+        controller.update(layout: layout, delta: delta, isVisible: isVisible)
         return controller
     }
 
     public func updateNSViewController(_ controller: WorkspaceViewController, context: Context) {
-        controller.update(layout: layout, delta: delta)
+        controller.update(layout: layout, delta: delta, isVisible: isVisible)
     }
 }

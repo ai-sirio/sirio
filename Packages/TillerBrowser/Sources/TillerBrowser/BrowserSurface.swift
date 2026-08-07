@@ -196,7 +196,16 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     }
 
     private func load(_ start: () -> WKNavigation?) async throws -> BrowserPage {
-        try await withCheckedThrowingContinuation { continuation in
+        // A navigation started while another is pending used to overwrite the
+        // stored continuation, so the first caller was never resumed and waited
+        // forever. For an agent driving the surface over the socket that is the
+        // worst failure available: the request never answers at all.
+        if let superseded = navigationContinuation {
+            navigationContinuation = nil
+            superseded.resume(throwing: BrowserError.navigationFailed(
+                hint: "Superseded by a later navigation on the same surface"))
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             navigationContinuation = continuation
             onLoadingChange?(true)
             guard start() != nil else {

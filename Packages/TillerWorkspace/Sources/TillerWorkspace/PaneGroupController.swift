@@ -19,6 +19,7 @@ public final class PaneGroupController: NSViewController {
     private let emptyStateFactory: PaneEmptyStateFactory?
     private let contentContainer = NSView()
     private var emptyStateView: NSView?
+    private var workspaceIsVisible = true
 
     public init(
         id: PaneGroupID,
@@ -173,6 +174,11 @@ public final class PaneGroupController: NSViewController {
         accessibilityPane?.label ?? ""
     }
 
+    public func setWorkspaceVisible(_ isVisible: Bool) {
+        workspaceIsVisible = isVisible
+        mountedHost?.setVisible(isVisible)
+    }
+
     func update(
         group: PaneGroup,
         isFocused: Bool,
@@ -206,7 +212,7 @@ public final class PaneGroupController: NSViewController {
         attach(nextHost)
         mountedTabID = nextTabID
         mountedHost = nextHost
-        nextHost.setVisible(true)
+        nextHost.setVisible(workspaceIsVisible)
     }
 
     private func detachMountedHost() {
