@@ -25,7 +25,8 @@ struct TillerApp: App {
         let adapters: [WorkspaceContentKind: any WorkspaceContentAdapter] = [
             .terminal: TerminalContentAdapter(),
             .chat: ChatContentAdapter(),
-            .document: DocumentContentAdapter()
+            .document: DocumentContentAdapter(),
+            .browser: BrowserContentAdapter()
         ]
         let coordinator = WorkspaceCoordinator(
             persistence: bridge, registry: registry, adapters: adapters)
@@ -67,6 +68,12 @@ struct TillerApp: App {
             CommandGroup(after: .newItem) {
                 Button("New Tab") { model.newShellTabInSelected() }
                     .keyboardShortcut("t", modifiers: .command)
+                if WorkspaceEngineGate.isEnabled {
+                    Button("New Browser") { model.newBrowserTabInSelected() }
+                        .keyboardShortcut("l", modifiers: [.command, .shift])
+                    Button("Focus Address Bar") { model.focusBrowserAddressBar() }
+                        .keyboardShortcut("l", modifiers: .command)
+                }
                 if !WorkspaceEngineGate.isEnabled {
                     Button("Close Tab") { model.closeActiveTab() }
                         .keyboardShortcut("w", modifiers: .command)

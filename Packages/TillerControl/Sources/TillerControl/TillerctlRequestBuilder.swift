@@ -119,4 +119,36 @@ public enum TillerctlRequestBuilder {
         request("system.identify", ["worktree": worktree, "pane": pane])
     }
     public static func sessionRestore() -> ControlRequest { request("session.restore") }
+
+    public static func browserOpen(
+        url: String, workspace: String?, window: String?, idFormat: String? = nil
+    ) -> ControlRequest {
+        request("browser.open", [
+            "url": url, "workspace": workspace, "window": window, "id-format": idFormat
+        ])
+    }
+
+    public static func browserNavigate(
+        surface: String, action: String, workspace: String? = nil
+    ) -> ControlRequest {
+        request("browser.navigate", [
+            "surface": surface, "action": action, "workspace": workspace
+        ])
+    }
+
+    public static func browserGet(
+        surface: String, what: String, selector: String?, workspace: String? = nil
+    ) -> ControlRequest {
+        request("browser.get", [
+            "surface": surface, "what": what, "selector": selector, "workspace": workspace
+        ])
+    }
+
+    public static func browserScreenshot(
+        surface: String, path: String?, workspace: String? = nil
+    ) -> ControlRequest {
+        request("browser.screenshot", [
+            "surface": surface, "path": path, "workspace": workspace
+        ])
+    }
 }

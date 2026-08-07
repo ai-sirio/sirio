@@ -18,6 +18,7 @@ struct Tillerctl: ParsableCommand {
             CurrentWorkspace.self, CloseWorkspace.self,
             ListNotifications.self, ClearNotifications.self,
             RestoreSession.self,
+            Browser.self,
         ]
     )
 }

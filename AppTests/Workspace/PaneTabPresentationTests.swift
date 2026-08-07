@@ -73,7 +73,7 @@ struct PaneTabPresentationTests {
 
         let result = resolver.resolve(entry)
 
-        #expect(result.icon == .browser)
+        #expect(result.icon == .browser(faviconURL: nil))
         #expect(!result.isDirty)
         #expect(result.agentStatus == nil)
     }
@@ -99,6 +99,7 @@ struct PaneTabPresentationTests {
         PaneTabPresentationResolver(
             isDirty: { dirtyTabs.contains($0) },
             liveTerminalPane: { _ in terminalPane },
+            browserFaviconURL: { _ in nil },
             status: { ids in AgentStatus.highestPriority(in: ids.compactMap { statuses[$0] }) },
             agentID: { ids in ids.compactMap { agents[$0] }.first })
     }

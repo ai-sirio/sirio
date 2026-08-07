@@ -6,6 +6,7 @@ import TillerWorkspace
 
 enum ContentChoice: Sendable {
     case newTerminal(command: String?)
+    case newBrowser(url: String?)
     case agentTerminal(agentID: String)
     case newChat(agentID: String)
     case resumeChat(ChatContentID)
@@ -90,6 +91,14 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         dirtyWorktreeIDs.remove(worktree.id)
         SignpostMetrics.endInterval("workspaceRestore", restoreSignpost)
 
+        if let browserAdapter = adapters[.browser] as? BrowserContentAdapter {
+            for tab in layout.allTabs {
+                guard case .browser(let contentID) = tab.content,
+                      let record = restored.browserContents[contentID] else { continue }
+                browserAdapter.setRestoredRecord(record, for: contentID)
+            }
+        }
+
         // Terminal RESOURCES hydrate eagerly here (LC-3: a background shell
         // keeps running once its worktree is mounted, even while its tab is
         // inactive) — but that is the PTY, not the view. HOSTS are never
@@ -99,7 +108,8 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         // instantiate a host — terminal, chat, or document — for every one
         // of them; that regresses exactly the restore/reconciliation
         // performance budgets Phase 13 measures (PF-5, PF-6).
-        for tab in layout.allTabs where tab.content.kind == .terminal {
+        for tab in layout.allTabs where tab.content.kind == .terminal
+            || tab.content.kind == .browser {
             guard let adapter = adapters[tab.content.kind] else { continue }
             await adapter.hydrate(tab: tab, worktree: worktree)
         }
@@ -534,12 +544,58 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
     private func browserRecords(in layout: WorkspaceLayout, worktreeID: UUID)
         -> [BrowserContentRecordValue] {
         let restoredRecords = browserContents[worktreeID] ?? [:]
+        let browserAdapter = adapters[.browser] as? BrowserContentAdapter
         return layout.allTabs.compactMap { tab in
-            guard case .browser(let id) = tab.content,
-                  let restored = restoredRecords[id] else { return nil }
+            guard case .browser(let id) = tab.content else { return nil }
+            let live = browserAdapter?.record(for: id, worktreeID: worktreeID)
+            guard let record = live ?? restoredRecords[id] else { return nil }
             return BrowserContentRecordValue(
-                id: id, worktreeID: worktreeID, url: restored.url, title: tab.title)
+                id: id, worktreeID: worktreeID, url: record.url,
+                title: record.title ?? tab.title)
         }
+    }
+
+    func updateBrowserPage(tabID: WorkspaceTabID, url: String, title: String,
+                           in worktree: Worktree) async {
+        worktrees[worktree.id] = worktree
+        guard let tab = layouts[worktree.id]?.tab(tabID),
+              case .browser(let contentID) = tab.content else { return }
+        let browserAdapter = adapters[.browser] as? BrowserContentAdapter
+        browserAdapter?.setLiveRecord(
+            BrowserContentRecordValue(
+                id: contentID, worktreeID: worktree.id, url: url,
+                title: title.isEmpty ? "Browser" : title),
+            for: contentID)
+        guard let layout = layouts[worktree.id] else { return }
+        let renamed = WorkspaceLayoutEngine.apply(
+            .renameTab(tabID, title: title.isEmpty ? "Browser" : title, isAutoNamed: false),
+            to: layout)
+        guard case .success(let transition) = renamed else { return }
+
+        let gate = gate(for: worktree.id)
+        await gate.acquire()
+        defer { Task { await gate.release() } }
+        let revision = (revisions[worktree.id] ?? 0) + 1
+        do {
+            try await persistence.commitStructural(
+                worktreeID: worktree.id, revision: revision,
+                snapshot: WorkspaceSnapshot(layout: transition.layout),
+                tabs: transition.layout.allTabs,
+                terminalContents: terminalRecords(
+                    in: transition.layout, worktreeID: worktree.id),
+                browserContents: browserRecords(
+                    in: transition.layout, worktreeID: worktree.id))
+            publish(transition, worktreeID: worktree.id)
+        } catch {
+            lastRecoverableError = String(describing: error)
+        }
+    }
+
+    func browserRecord(for contentID: BrowserContentID, in worktreeID: UUID)
+        -> BrowserContentRecordValue? {
+        let live = (adapters[.browser] as? BrowserContentAdapter)?.record(
+            for: contentID, worktreeID: worktreeID)
+        return live ?? browserContents[worktreeID]?[contentID]
     }
 
     private func gate(for worktreeID: UUID) -> WorktreeCommitGate {
@@ -578,6 +634,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
     private func contentRequest(for choice: ContentChoice) -> ContentRequest? {
         switch choice {
         case .newTerminal(let command): .newTerminal(command: command)
+        case .newBrowser(let url): .newBrowser(url: url)
         case .agentTerminal(let agentID): .agentTerminal(agentID: agentID)
         case .newChat(let agentID): .newChat(agentID: agentID)
         case .resumeChat(let id): .resumeChat(id)
@@ -624,6 +681,7 @@ private extension ContentRequest {
     var kind: WorkspaceContentKind {
         switch self {
         case .newTerminal, .agentTerminal: .terminal
+        case .newBrowser: .browser
         case .newChat, .resumeChat: .chat
         case .openFile: .document
         }

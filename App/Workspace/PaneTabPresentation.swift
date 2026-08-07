@@ -6,7 +6,7 @@ enum PaneTabIconKind: Equatable {
     case terminal(agentID: String?)
     case chat(agentID: String?)
     case document(DocumentEditorKind)
-    case browser
+    case browser(faviconURL: URL?)
 
     var agentID: String? {
         switch self {
@@ -46,6 +46,7 @@ struct PaneTabPresentation: Equatable {
 struct PaneTabPresentationResolver {
     let isDirty: (WorkspaceTabID) -> Bool
     let liveTerminalPane: (TerminalContentID) -> UUID?
+    let browserFaviconURL: (BrowserContentID) -> URL?
     let status: ([UUID]) -> AgentStatus?
     let agentID: ([UUID]) -> String?
 
@@ -70,9 +71,9 @@ struct PaneTabPresentationResolver {
                 icon: .document(editor),
                 isDirty: isDirty(entry.tabID),
                 agentStatus: nil)
-        case .browser:
+        case .browser(let contentID):
             return PaneTabPresentation(
-                icon: .browser,
+                icon: .browser(faviconURL: browserFaviconURL(contentID)),
                 isDirty: false,
                 agentStatus: nil)
         case nil:

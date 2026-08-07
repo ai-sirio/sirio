@@ -26,6 +26,59 @@ struct AppModelControlTests {
         #expect(updated.titleIsAutoNamed == false)
     }
 
+    @Test func browserControlVerbsOpenReadAndNavigateAFileSurface() async throws {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let worktree = makeWorktree(path: "/tmp/browser-control")
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-browser-control-\(UUID().uuidString).html")
+        try "<html><head><title>Control fixture</title></head><body>Control text</body></html>"
+            .write(to: fixture, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let coordinator = WorkspaceCoordinator(
+            persistence: ControlWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [.browser: BrowserContentAdapter()])
+        let model = AppModel(
+            paneRegistry: PaneRegistry(), registrationTimeoutMs: 100,
+            workspaceCoordinator: coordinator)
+        model.worktrees = [worktree.projectId: [worktree]]
+        model.selectedWorktree = worktree
+        await coordinator.restore(worktree: worktree)
+
+        let opened = await model.handleControl(request(
+            "browser.open", ["url": fixture.absoluteString]))
+        #expect(opened.ok)
+        let surface = try #require(opened.result?["surface"])
+        #expect(UUID(uuidString: surface) != nil)
+
+        let url = await model.handleControl(request(
+            "browser.get", ["surface": surface, "what": "url"]))
+        #expect(url.result?["value"] == fixture.absoluteString)
+
+        let text = await model.handleControl(request(
+            "browser.get", ["surface": "surface:1", "what": "text"]))
+        #expect(text.result?["value"]?.contains("Control text") == true)
+
+        let navigated = await model.handleControl(request(
+            "browser.navigate", ["surface": surface, "action": "reload"]))
+        #expect(navigated.result?["url"] == fixture.absoluteString)
+
+        let invalidAction = await model.handleControl(request(
+            "browser.navigate", ["surface": surface, "action": "forwards"]))
+        #expect(invalidAction.error
+            == "invalid_argument: action must be one of back, forward, reload")
+
+        let invalidWhat = await model.handleControl(request(
+            "browser.get", ["surface": surface, "what": "contents"]))
+        #expect(invalidWhat.error
+            == "invalid_argument: what must be one of url, text, html")
+
+        let unknownSurface = await model.handleControl(request(
+            "browser.navigate", ["surface": UUID().uuidString, "action": "reload"]))
+        #expect(unknownSurface.error == "surface_not_found")
+    }
+
     @Test func applyAutoTitleLeavesProvenanceUntouched() async throws {
         let (model, worktree, tab) = try await makeDocumentTab(named: "apply-auto-title")
 

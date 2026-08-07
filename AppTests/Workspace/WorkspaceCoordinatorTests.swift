@@ -33,6 +33,42 @@ struct WorkspaceCoordinatorTests {
         #expect(await persistence.lastBrowserContents == [browserRecord])
     }
 
+    @Test func browserCreatedAndNavigatedPersistsLiveURLAcrossCoordinatorRestart() async {
+        let worktree = fixtureWorktree(number: 1)
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let browserAdapter = BrowserContentAdapter()
+        let coordinator = WorkspaceCoordinator(
+            persistence: persistence,
+            registry: WorkspaceContentRegistry(),
+            adapters: [.browser: browserAdapter])
+
+        await coordinator.restore(worktree: worktree)
+        let groupID = coordinator.layouts[worktree.id]!.activeGroupID
+        await coordinator.requestNewTab(
+            into: groupID, choice: .newBrowser(url: nil), in: worktree)
+        guard let tab = coordinator.layouts[worktree.id]?.allTabs.first,
+              case .browser(let contentID) = tab.content else {
+            Issue.record("expected a browser tab")
+            return
+        }
+
+        await coordinator.updateBrowserPage(
+            tabID: tab.id,
+            url: "http://127.0.0.1:4173/after-navigation",
+            title: "After navigation",
+            in: worktree)
+
+        let restarted = WorkspaceCoordinator(
+            persistence: persistence,
+            registry: WorkspaceContentRegistry(),
+            adapters: [.browser: BrowserContentAdapter()])
+        await restarted.restore(worktree: worktree)
+
+        #expect(restarted.browserRecord(for: contentID, in: worktree.id)?.url
+            == "http://127.0.0.1:4173/after-navigation")
+        #expect(restarted.layouts[worktree.id]?.tab(tab.id)?.title == "After navigation")
+    }
+
     @Test func preparationRunsOutsideTheWorktreeGate() async {
         let preparation = PreparationGate(blocked: true)
         let persistence = CoordinatorPersistence()
@@ -570,6 +606,13 @@ private actor CoordinatorPersistence: WorkspaceLayoutPersistence {
             }
         }
         if let structuralError { throw structuralError }
+        let layout = try snapshot.materialize().get()
+        restored[worktreeID] = RestoredWorkspace(
+            layout: layout,
+            tabs: Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) }),
+            browserContents: Dictionary(uniqueKeysWithValues: browserContents.map { ($0.id, $0) }),
+            revision: revision,
+            diagnostics: [])
         structuralCommits += 1
         events.append("commit")
     }

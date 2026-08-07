@@ -5,6 +5,8 @@ import Foundation
 public final class BrowserSurface: NSObject, WKNavigationDelegate {
     public let webView: WKWebView
     public let userAgentPolicy: UserAgentPolicy
+    public var onPageChange: ((BrowserPage) -> Void)?
+    public var onLoadingChange: ((Bool) -> Void)?
 
     private var navigationContinuation: CheckedContinuation<BrowserPage, Error>?
 
@@ -61,25 +63,36 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         }
     }
 
+    public func stop() {
+        webView.stopLoading()
+        onLoadingChange?(false)
+    }
+
     public func get(_ value: BrowserCommand.Get) async throws -> String {
+        try await get(value, selector: nil)
+    }
+
+    public func get(_ value: BrowserCommand.Get, selector: String?) async throws -> String {
         switch value {
         case .url:
             guard let url = webView.url else { throw BrowserError.navigationUnavailable }
             return url.absoluteString
         case .text:
-            return try await evaluateString(
-                "document.body ? document.body.innerText : ''")
+            return try await evaluateString(documentValueScript(
+                selector: selector, property: "innerText"))
         case .html:
-            return try await evaluateString(
-                "document.body ? document.body.outerHTML : ''")
+            return try await evaluateString(documentValueScript(
+                selector: selector, property: "outerHTML"))
         }
     }
 
     private func load(_ start: () -> WKNavigation?) async throws -> BrowserPage {
         try await withCheckedThrowingContinuation { continuation in
             navigationContinuation = continuation
+            onLoadingChange?(true)
             guard start() != nil else {
                 navigationContinuation = nil
+                onLoadingChange?(false)
                 continuation.resume(throwing: BrowserError.navigationFailed(
                     hint: "WebKit did not start the navigation"))
                 return
@@ -104,7 +117,22 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
     private func page() async throws -> BrowserPage {
         guard let url = webView.url else { throw BrowserError.navigationUnavailable }
         let title = (try? await evaluateString("document.title")) ?? webView.title ?? ""
-        return BrowserPage(url: url, title: title)
+        let faviconString = (try? await evaluateString(
+            "document.querySelector(\"link[rel~=icon]\")?.href || \"\"")) ?? ""
+        return BrowserPage(
+            url: url, title: title,
+            faviconURL: faviconString.isEmpty ? nil : URL(string: faviconString))
+    }
+
+    private func documentValueScript(selector: String?, property: String) -> String {
+        let encodedSelector = selector.flatMap { try? JSONEncoder().encode($0) }
+            .map { String(decoding: $0, as: UTF8.self) }
+        let target = if let encodedSelector {
+            "document.querySelector(\(encodedSelector))"
+        } else {
+            "document.body"
+        }
+        return "\(target) ? \(target).\(property) : ''"
     }
 
     private static func validURL(_ string: String) -> URL? {
@@ -114,7 +142,9 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
 
     private static func validURL(_ url: URL) -> URL? {
         guard let scheme = url.scheme, !scheme.isEmpty else { return nil }
-        guard url.isFileURL || url.host != nil else { return nil }
+        guard url.isFileURL || url.host != nil || url.absoluteString == "about:blank" else {
+            return nil
+        }
         return url
     }
 
@@ -123,8 +153,12 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         navigationContinuation = nil
         Task { @MainActor in
             do {
-                continuation.resume(returning: try await page())
+                let page = try await page()
+                onLoadingChange?(false)
+                onPageChange?(page)
+                continuation.resume(returning: page)
             } catch {
+                onLoadingChange?(false)
                 continuation.resume(throwing: error)
             }
         }
@@ -135,6 +169,7 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         didFail _: WKNavigation!,
         withError error: Error
     ) {
+        onLoadingChange?(false)
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(
             hint: error.localizedDescription))
         navigationContinuation = nil
@@ -145,6 +180,7 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         didFailProvisionalNavigation _: WKNavigation!,
         withError error: Error
     ) {
+        onLoadingChange?(false)
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(
             hint: error.localizedDescription))
         navigationContinuation = nil

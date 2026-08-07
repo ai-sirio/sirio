@@ -69,3 +69,13 @@ import Testing
     #expect(panelWaitTimeoutSeconds(timeoutMs: 1_001) == 32)
     #expect(panelWaitTimeoutSeconds(timeoutMs: 5_000) == 35)
 }
+
+@Test func rootExposesTheBrowserCommandWithTheFourReadVerbs() {
+    let names = Set(
+        Tillerctl.configuration.subcommands.compactMap { $0.configuration.commandName })
+    #expect(names.contains("browser"))
+    let browserHelp = Browser.helpMessage()
+    for command in ["open", "navigate", "get", "screenshot"] {
+        #expect(browserHelp.contains(command))
+    }
+}
