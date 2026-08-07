@@ -24,13 +24,13 @@ struct AcpAgentCenterTests {
 
         await center.refresh(force: true)
 
-        for id in ["claude-acp", "codex-acp", "opencode", "pi"] {
+        for id in ["claude", "codex", "opencode", "pi"] {
             #expect(center.statuses[id] == .builtin(available: true))
         }
         #expect(Set(center.rows.map(\.id)).isSuperset(
-            of: ["claude-acp", "codex-acp", "opencode", "pi"]))
+            of: ["claude", "codex", "opencode", "pi"]))
         #expect(Set(center.installedAgents.map(\.id)).isSuperset(
-            of: ["claude-acp", "codex-acp", "opencode", "pi"]))
+            of: ["claude", "codex", "opencode", "pi"]))
         #expect(center.displayName(for: "pi") == "Pi")
     }
 
@@ -54,10 +54,10 @@ struct AcpAgentCenterTests {
 
         await center.refresh(force: true)
 
-        #expect(center.statuses["codex-acp"] == .builtin(available: false))
-        #expect(center.rows.first(where: { $0.id == "codex-acp" })?.description
+        #expect(center.statuses["codex"] == .builtin(available: false))
+        #expect(center.rows.first(where: { $0.id == "codex" })?.description
                 == "Requires codex on PATH")
-        #expect(!center.installedAgents.contains { $0.id == "codex-acp" })
+        #expect(!center.installedAgents.contains { $0.id == "codex" })
     }
 
     @Test func missingPiBinaryShowsRequiresPathHintAndSkipsInstallState() async throws {
@@ -99,8 +99,8 @@ struct AcpAgentCenterTests {
 
         await center.refresh(force: true)
 
-        #expect(center.statuses["claude-acp"] == .builtin(available: true))
-        #expect(center.installedAgents.contains { $0.id == "claude-acp" })
+        #expect(center.statuses["claude"] == .builtin(available: true))
+        #expect(center.installedAgents.contains { $0.id == "claude" })
     }
 
     private func tempStore() throws -> AgentInstallStore {

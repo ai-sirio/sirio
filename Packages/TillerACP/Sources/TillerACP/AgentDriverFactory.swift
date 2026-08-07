@@ -10,7 +10,7 @@ public enum AgentTransportKind: String, Sendable, Codable {
 public enum AgentDriverFactory {
     public static func transportKind(for agentId: String) -> AgentTransportKind {
         switch AgentIdMigration.canonical(agentId) {
-        case "claude-acp", "codex-acp", "opencode", "pi": .native
+        case "claude", "codex", "opencode", "pi": .native
         default: .acp
         }
     }
@@ -20,8 +20,8 @@ public enum AgentDriverFactory {
     /// hints without consulting Tiller's install manifests.
     public static func nativeBinary(for agentId: String) -> String {
         switch AgentIdMigration.canonical(agentId) {
-        case "claude-acp": "claude"
-        case "codex-acp": "codex"
+        case "claude": "claude"
+        case "codex": "codex"
         case "opencode": "opencode"
         case "pi": "pi"
         default: ""
@@ -73,7 +73,7 @@ public enum AgentDriverFactory {
         let onStderrLine = stderrLogger(agentId: agentId)
 
         switch agentId {
-        case "claude-acp":
+        case "claude":
             let launch = ClaudeStreamJSONDriver.launchTransport(
                 worktreePath: worktreePath, permissionMode: permissionMode,
                 model: model, resumeSessionId: resumeSessionId,
@@ -84,7 +84,7 @@ public enum AgentDriverFactory {
                 pinnedSessionId: launch.sessionId)
             return driver
 
-        case "codex-acp":
+        case "codex":
             let transport = CodexAppServerDriver.launchTransport(
                 worktreePath: worktreePath, onStderrLine: onStderrLine)
             return CodexAppServerDriver(

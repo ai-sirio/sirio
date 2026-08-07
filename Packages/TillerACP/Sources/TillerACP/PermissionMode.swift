@@ -50,8 +50,8 @@ public enum PermissionMode: String, CaseIterable, Sendable, Codable {
 
     public static func supported(byDriverFor agentId: String) -> [PermissionMode] {
         switch AgentIdMigration.canonical(agentId) {
-        case "claude-acp": [.ask, .acceptEdits, .plan, .fullAuto]
-        case "codex-acp", "opencode": [.ask, .acceptEdits, .fullAuto]
+        case "claude": [.ask, .acceptEdits, .plan, .fullAuto]
+        case "codex", "opencode": [.ask, .acceptEdits, .fullAuto]
         // Pi is native but has neither a mode call on its RPC nor a mode flag
         // on its CLI, so it belongs here with the ACP agents.
         default: [] // ACP agents keep their agent-provided modes

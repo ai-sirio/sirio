@@ -58,7 +58,7 @@ struct UniversalChatParityTests {
         #expect(UniversalChatFixture.tabs(handle).contains { $0.id == tab.id })
         // Identity is registered — proving the restore path ran in full — but
         // no controller exists, so no agent can have been launched.
-        #expect(handle.model.agentActivity.agentId(paneId: tab.id.rawValue) == "claude-acp")
+        #expect(handle.model.agentActivity.agentId(paneId: tab.id.rawValue) == "claude")
         #expect(handle.model.chatControllers.isEmpty)
     }
 
@@ -149,7 +149,7 @@ struct UniversalChatParityTests {
 
         _ = try #require(handle.model.chatController(for: tab, in: handle.worktree))
 
-        #expect(handle.model.agentActivity.agentId(paneId: tab.id.rawValue) == "codex-acp")
+        #expect(handle.model.agentActivity.agentId(paneId: tab.id.rawValue) == "codex")
     }
 
     /// The adapter mints one session per fresh chat: two new chats must not

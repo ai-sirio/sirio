@@ -440,7 +440,7 @@ public actor CodexAppServerDriver: AgentDriver {
         }
         let modes = SessionModeState(
             currentModeId: mode.rawValue,
-            availableModes: PermissionMode.supported(byDriverFor: "codex-acp").map(\.sessionMode))
+            availableModes: PermissionMode.supported(byDriverFor: "codex").map(\.sessionMode))
         return SessionHandle(sessionId: threadId, agentCapabilities: AgentCapabilities(),
                              modes: modes, models: models, configOptions: [], didResume: didResume)
     }
