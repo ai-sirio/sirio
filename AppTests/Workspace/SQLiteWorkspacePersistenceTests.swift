@@ -7,6 +7,44 @@ import TillerPersistence
 
 @Suite(.serialized)
 struct SQLiteWorkspacePersistenceTests {
+    /// Reproduces the real app-startup sequence on a database that is already
+    /// past v17. `AppDatabase(path:upTo:)` skips migrating once the pinned
+    /// version is applied, and `migrateV15IfNeeded` returns early once the
+    /// legacy `terminalTab` table is gone — so before `migrateToLatest` existed,
+    /// every migration after v17 was silently skipped on existing installs and
+    /// the first structural commit rolled back against a missing table.
+    /// Tests never caught it because they open databases that migrate fully.
+    @Test func startupMigratesPastV17OnADatabaseThatAlreadyPassedIt() throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-v18-gap-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let backups = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-v18-gap-backups-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: backups) }
+
+        // Arrange: build a database in the state the old binary left behind —
+        // v17 recorded, legacy terminalTab renamed away, no v18.
+        let seeded = try AppDatabase(path: databaseURL.path, upTo: "v16")
+        try SQLiteWorkspacePersistence.migrateV15IfNeeded(
+            database: seeded, backupDirectory: backups)
+        try seeded.write { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS browserContent")
+            try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = 'v18'")
+        }
+        #expect(try seeded.read { try $0.tableExists("browserContent") } == false)
+        #expect(try seeded.read { try $0.tableExists("terminalTab") } == false)
+
+        // Act: the App's startup sequence, in order. The legacy step must come
+        // first, or v17 would be recorded without its data callback.
+        let database = try AppDatabase(path: databaseURL.path, upTo: "v16")
+        try SQLiteWorkspacePersistence.migrateV15IfNeeded(
+            database: database, backupDirectory: backups)
+        try database.migrateToLatest()
+
+        // Assert: the browser surface has a table to commit into.
+        #expect(try database.read { try $0.tableExists("browserContent") })
+    }
+
     @Test func browserTabRoundTripsURLAndTitleThroughFlushAndRestore() async throws {
         let databaseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("tiller-browser-round-trip-\(UUID().uuidString).sqlite")

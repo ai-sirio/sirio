@@ -42,6 +42,18 @@ public final class AppDatabase: Sendable {
         try Self.migrator(v17Migration: migration).migrate(dbQueue)
     }
 
+    /// Applies every migration past the opt-in v17 boundary. Must run **after**
+    /// the v17 legacy path has had its chance: migrating to latest first would
+    /// record v17 without the App-layer data callback and drop legacy tabs.
+    ///
+    /// This exists because `init(path:upTo:)` skips migrating entirely once the
+    /// pinned version is applied, and the only unpinned `migrate` call used to
+    /// sit behind the legacy `terminalTab` guard — so a database already past
+    /// v17 (every existing install) never received a later migration.
+    public func migrateToLatest() throws {
+        try Self.migrator.migrate(dbQueue)
+    }
+
     public func read<T>(_ block: (Database) throws -> T) throws -> T {
         try dbQueue.read(block)
     }
