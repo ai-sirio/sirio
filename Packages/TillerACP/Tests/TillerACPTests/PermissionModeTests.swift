@@ -18,9 +18,9 @@ struct PermissionModeTests {
     }
 
     @Test func supportedModesPerDriver() {
-        #expect(PermissionMode.supported(byDriverFor: "claude-acp")
+        #expect(PermissionMode.supported(byDriverFor: "claude")
             == [.ask, .acceptEdits, .plan, .fullAuto])
-        #expect(PermissionMode.supported(byDriverFor: "codex-acp")
+        #expect(PermissionMode.supported(byDriverFor: "codex")
             == [.ask, .acceptEdits, .fullAuto])
         #expect(PermissionMode.supported(byDriverFor: "opencode")
             == [.ask, .acceptEdits, .fullAuto])
@@ -32,10 +32,10 @@ struct PermissionModeTests {
     @Test func thePillIsHiddenForDriversWithoutModes() {
         #expect(PermissionMode.pillSelection(forAgent: "pi", requested: .ask) == nil)
         #expect(PermissionMode.pillSelection(forAgent: "omp", requested: .ask) == nil)
-        #expect(PermissionMode.pillSelection(forAgent: "claude-acp", requested: .plan)
+        #expect(PermissionMode.pillSelection(forAgent: "claude", requested: .plan)
             == .plan)
         // A persisted mode the driver dropped falls back instead of vanishing.
-        #expect(PermissionMode.pillSelection(forAgent: "codex-acp", requested: .plan)
+        #expect(PermissionMode.pillSelection(forAgent: "codex", requested: .plan)
             == .ask)
     }
 

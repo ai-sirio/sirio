@@ -387,7 +387,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
 
     private func makeHandle(from response: JSONValue?, sessionId: String,
                             didResume: Bool) -> SessionHandle {
-        let supported = PermissionMode.supported(byDriverFor: "claude-acp")
+        let supported = PermissionMode.supported(byDriverFor: "claude")
         let modes = SessionModeState(
             currentModeId: permissionMode.rawValue,
             availableModes: supported.map(\.sessionMode))

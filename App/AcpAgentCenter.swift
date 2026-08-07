@@ -7,7 +7,7 @@ import TillerACP
 /// isolated installer and report back here.
 @MainActor @Observable
 final class AcpAgentCenter {
-    private static let nativeAgentIDs = ["claude-acp", "codex-acp", "opencode", "pi"]
+    private static let nativeAgentIDs = ["claude", "codex", "opencode", "pi"]
 
     struct InstalledAgentSummary: Identifiable, Equatable {
         let id: String
@@ -89,8 +89,8 @@ final class AcpAgentCenter {
             return name
         }
         switch canonical {
-        case "claude-acp": return "Claude Code"
-        case "codex-acp": return "Codex"
+        case "claude": return "Claude Code"
+        case "codex": return "Codex"
         case "opencode": return "OpenCode"
         case "pi": return "Pi"
         default: return id

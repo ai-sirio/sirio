@@ -36,12 +36,13 @@ import Testing
     }
 
     @Test func legacyIdsCanonicalize() {
-        #expect(AgentIdMigration.canonical("claude") == "claude-acp")
-        #expect(AgentIdMigration.canonical("codex") == "codex-acp")
+        #expect(AgentIdMigration.canonical("claude") == "claude")
+        #expect(AgentIdMigration.canonical("codex") == "codex")
         #expect(AgentIdMigration.canonical("pi") == "pi")
         #expect(AgentIdMigration.canonical("pi-acp") == "pi")
         #expect(AgentIdMigration.canonical("opencode") == "opencode")
-        #expect(AgentIdMigration.canonical("claude-acp") == "claude-acp")
+        #expect(AgentIdMigration.canonical("claude-acp") == "claude")
+        #expect(AgentIdMigration.canonical("codex-acp") == "codex")
         #expect(AgentIdMigration.canonical("omp") == "omp")
     }
 
