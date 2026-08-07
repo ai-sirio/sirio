@@ -16,4 +16,5 @@ public struct BrowserPage: Equatable, Sendable {
 public enum BrowserResult: Equatable, Sendable {
     case page(BrowserPage)
     case value(String)
+    case snapshot(BrowserSnapshot)
 }

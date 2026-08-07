@@ -9,6 +9,7 @@ struct BrowserPaneView: View {
     let tabID: WorkspaceTabID
     let surface: BrowserSurface
     let initialURL: String?
+    let drivingState: BrowserDrivingState
     let onPageChange: ((BrowserPage) -> Void)?
 
     @State private var address: String = ""
@@ -43,7 +44,12 @@ struct BrowserPaneView: View {
             }
         .task(id: initialURL) {
             if let initialURL, surface.webView.url == nil {
-                _ = try? await surface.open(initialURL)
+                do {
+                    _ = try await surface.open(initialURL)
+                } catch {
+                    errorMessage = (error as? BrowserError)?.userMessage
+                        ?? error.localizedDescription
+                }
             }
             updateNavigationState()
         }
@@ -90,6 +96,12 @@ struct BrowserPaneView: View {
                 ProgressView()
                     .controlSize(.small)
                     .accessibilityLabel("Loading")
+            }
+            if drivingState.isAgentDriving {
+                Label("Agent driving", systemImage: "bolt.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Agent driving")
             }
         }
         .padding(.horizontal, 8)

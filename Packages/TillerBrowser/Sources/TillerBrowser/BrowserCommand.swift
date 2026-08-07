@@ -11,6 +11,9 @@ public enum BrowserCommand: Equatable, Sendable {
         case html
     }
 
+    case snapshot
+    case eval(String)
+
     case open(url: String)
     case navigate(Navigation)
     case get(Get)

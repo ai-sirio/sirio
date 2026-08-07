@@ -5,6 +5,7 @@ import TillerControl
 import TillerCore
 import TillerTerminal
 import TillerWorkspace
+import TillerBrowser
 @testable import Tiller
 
 @Suite(.serialized)
@@ -147,6 +148,51 @@ struct AppModelControlTests {
         let unknownSurface = await model.handleControl(request(
             "browser.navigate", ["surface": UUID().uuidString, "action": "reload"]))
         #expect(unknownSurface.error == "surface_not_found")
+    }
+
+    @Test func everyUnsupportedBrowserVerbReturnsNotSupported() async {
+        let model = AppModel(paneRegistry: PaneRegistry(), registrationTimeoutMs: 100)
+
+        for verb in BrowserUnsupportedVerb.allCases {
+            let response = await model.handleControl(request(
+                "browser.\(verb.rawValue)", ["surface": "missing"]))
+            #expect(response.ok == false)
+            #expect(response.error == "not_supported")
+        }
+    }
+
+    @Test func agentBrowserNavigationNeverReachesTheSystemOpener() async throws {
+        var openedURLs: [URL] = []
+        let adapter = BrowserContentAdapter()
+        let coordinator = WorkspaceCoordinator(
+            persistence: ControlWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [.browser: adapter])
+        let model = AppModel(
+            paneRegistry: PaneRegistry(), registrationTimeoutMs: 100,
+            openSystemURL: { openedURLs.append($0) },
+            workspaceCoordinator: coordinator)
+        adapter.originAuthorization = { _, _ in true }
+        let worktree = makeWorktree(path: "/tmp/browser-agent-navigation")
+        model.worktrees = [worktree.projectId: [worktree]]
+        model.selectedWorktree = worktree
+        await coordinator.restore(worktree: worktree)
+
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-browser-agent-\(UUID().uuidString).html")
+        try "<html><body>agent navigation</body></html>"
+            .write(to: fixture, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let opened = await model.handleControl(request(
+            "browser.open", ["url": fixture.absoluteString]))
+        let surface = try #require(opened.result?["surface"])
+        _ = await model.handleControl(request(
+            "browser.eval", ["surface": surface, "script": "location.href = 'mailto:agent@example.test'"]))
+        _ = await model.handleControl(request(
+            "browser.eval", ["surface": surface, "script": "location.href = 'tiller-custom://launch'"]))
+
+        #expect(openedURLs.isEmpty)
     }
 
     @Test func applyAutoTitleLeavesProvenanceUntouched() async throws {

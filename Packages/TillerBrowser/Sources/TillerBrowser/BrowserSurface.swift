@@ -8,17 +8,31 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     public let userAgentPolicy: UserAgentPolicy
     public var onPageChange: ((BrowserPage) -> Void)?
     public var onLoadingChange: ((Bool) -> Void)?
-    public var onExternalURL: ((URL) -> Void)?
+    public var onExternalURL: ((URL, BrowserNavigationOrigin) -> Void)?
+    public var onNavigationType: ((WKNavigationType) -> Void)?
 
     private var navigationContinuation: CheckedContinuation<BrowserPage, Error>?
+    private let worktreeID: UUID?
+    private let originAuthorization: OriginAuthorization?
+    private var generation = 0
+    private var latestSnapshot: BrowserSnapshot?
+    private var agentNavigationPending = false
+
+    public typealias OriginAuthorization = @MainActor (UUID, URL) async -> Bool
 
     public init(
         dataStore: WKWebsiteDataStore = .default(),
-        userAgentPolicy: UserAgentPolicy = UserAgentPolicy()
+        userAgentPolicy: UserAgentPolicy = UserAgentPolicy(),
+        worktreeID: UUID? = nil,
+        originAuthorization: OriginAuthorization? = nil
     ) {
         self.userAgentPolicy = userAgentPolicy
+        self.worktreeID = worktreeID
+        self.originAuthorization = originAuthorization
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
+        configuration.userContentController.addUserScript(SnapshotBuilder.userScript)
+        configuration.userContentController.addUserScript(BrowserUserScripts.console)
         let webView = WKWebView(frame: .zero, configuration: configuration)
         self.webView = webView
         super.init()
@@ -35,6 +49,10 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
             return .page(try await navigate(navigation))
         case .get(let value):
             return .value(try await get(value))
+        case .snapshot:
+            return .snapshot(try await snapshot())
+        case .eval(let script):
+            return .value(try await eval(script))
         }
     }
 
@@ -85,11 +103,95 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
             guard let url = webView.url else { throw BrowserError.navigationUnavailable }
             return url.absoluteString
         case .text:
-            return try await evaluateString(documentValueScript(
+            try await authorizePageAccess()
+            return try await evaluateString(try documentValueScript(
                 selector: selector, property: "innerText"))
         case .html:
-            return try await evaluateString(documentValueScript(
+            try await authorizePageAccess()
+            return try await evaluateString(try documentValueScript(
                 selector: selector, property: "outerHTML"))
+        }
+    }
+
+    public func snapshot() async throws -> BrowserSnapshot {
+        try await authorizePageAccess()
+        generation += 1
+        let script = "window.__tillerSnapshot(\(generation))"
+        let result = try await webView.evaluateJavaScript(script)
+        let snapshot = try SnapshotBuilder.decode(result, generation: generation)
+        latestSnapshot = snapshot
+        return snapshot
+    }
+
+    public func act(_ action: BrowserAct, generation: Int? = nil) async throws -> BrowserActResult {
+        try await authorizePageAccess()
+        guard actionReferenceIsCurrent(action, generation: generation) else {
+            throw BrowserError.staleRef
+        }
+        agentNavigationPending = true
+        let script = try SnapshotBuilder.actionScript(action)
+        do {
+            _ = try await webView.evaluateJavaScript(script)
+            return BrowserActResult()
+        } catch let error as BrowserError {
+            throw error
+        } catch {
+            throw BrowserError.jsError(hint: error.localizedDescription)
+        }
+    }
+
+    public func wait(_ condition: BrowserWaitCondition, timeoutMs: Int) async throws -> Int {
+        guard timeoutMs > 0 else {
+            throw BrowserError.invalidArgument(hint: "timeoutMs must be a positive integer")
+        }
+        let started = Date()
+        while true {
+            if try await waitConditionMatches(condition) {
+                return Int(Date().timeIntervalSince(started) * 1_000)
+            }
+            if Date().timeIntervalSince(started) * 1_000 >= Double(timeoutMs) {
+                throw BrowserError.timeout
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    public func eval(_ script: String) async throws -> String {
+        try await authorizePageAccess()
+        agentNavigationPending = true
+        do {
+            let result = try await webView.evaluateJavaScript(script)
+            return try SnapshotBuilder.jsonString(from: result)
+        } catch let error as BrowserError {
+            throw error
+        } catch {
+            throw BrowserError.jsError(hint: error.localizedDescription)
+        }
+    }
+
+    public func console(since: Double? = nil) async throws -> [BrowserConsoleEntry] {
+        try await authorizePageAccess()
+        let result = try await webView.evaluateJavaScript(
+            "window.__tillerConsoleBuffer || []")
+        let entries = try SnapshotBuilder.decodeConsole(result)
+        guard let since else { return entries }
+        return entries.filter { $0.at >= since }
+    }
+
+    /// Pixels are page content. An authenticated page leaks at least as much
+    /// through an image as through its text, so capturing lives here behind the
+    /// same gate rather than in a caller reaching into `webView` directly.
+    public func screenshot() async throws -> NSImage {
+        try await authorizePageAccess()
+        return try await withCheckedThrowingContinuation { continuation in
+            webView.takeSnapshot(with: nil) { image, error in
+                if let image {
+                    continuation.resume(returning: image)
+                } else {
+                    continuation.resume(throwing: error ?? BrowserError.navigationFailed(
+                        hint: "WebKit snapshot failed"))
+                }
+            }
         }
     }
 
@@ -123,17 +225,22 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
 
     private func page() async throws -> BrowserPage {
         guard let url = webView.url else { throw BrowserError.navigationUnavailable }
-        let title = (try? await evaluateString("document.title")) ?? webView.title ?? ""
-        let faviconString = (try? await evaluateString(
-            "document.querySelector(\"link[rel~=icon]\")?.href || \"\"")) ?? ""
+        // WebKit does not reliably populate `title` for file and freshly
+        // committed documents, so the chrome reads it with JavaScript. This runs
+        // after every navigation, including a human typing in the address bar.
+        try await authorizePageAccess(for: .chromeMetadata)
+        let title = try await evaluateString("document.title")
+        let faviconString = try await evaluateString(
+            "document.querySelector(\"link[rel~=icon]\")?.href || \"\"")
         return BrowserPage(
             url: url, title: title,
             faviconURL: faviconString.isEmpty ? nil : URL(string: faviconString))
     }
 
-    private func documentValueScript(selector: String?, property: String) -> String {
-        let encodedSelector = selector.flatMap { try? JSONEncoder().encode($0) }
-            .map { String(decoding: $0, as: UTF8.self) }
+    private func documentValueScript(selector: String?, property: String) throws -> String {
+        let encodedSelector = try selector.map {
+            String(decoding: try JSONEncoder().encode($0), as: UTF8.self)
+        }
         let target = if let encodedSelector {
             "document.querySelector(\(encodedSelector))"
         } else {
@@ -161,6 +268,7 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
     }
 
     public func webView(_ webView: WKWebView, didFinish _: WKNavigation!) {
+        agentNavigationPending = false
         let continuation = navigationContinuation
         navigationContinuation = nil
         Task { @MainActor in
@@ -176,11 +284,17 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
         }
     }
 
+    public func webView(_: WKWebView, didCommit _: WKNavigation!) {
+        generation += 1
+        latestSnapshot = nil
+    }
+
     public func webView(
         _: WKWebView,
         didFail _: WKNavigation!,
         withError error: Error
     ) {
+        agentNavigationPending = false
         onLoadingChange?(false)
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(
             hint: error.localizedDescription))
@@ -192,6 +306,7 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
         didFailProvisionalNavigation _: WKNavigation!,
         withError error: Error
     ) {
+        agentNavigationPending = false
         onLoadingChange?(false)
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(
             hint: error.localizedDescription))
@@ -219,19 +334,97 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate 
             decisionHandler(.cancel)
             return
         }
+        onNavigationType?(navigationAction.navigationType)
         if ["http", "https", "file", "about"].contains(scheme) {
             decisionHandler(.allow)
         } else {
-            if navigationAction.navigationType == .linkActivated {
-                if let onExternalURL {
-                    onExternalURL(url)
-                } else {
-                    NSWorkspace.shared.open(url)
-                }
+            let origin: BrowserNavigationOrigin
+            if agentNavigationPending {
+                origin = .agentAction
+                agentNavigationPending = false
+            } else if navigationAction.navigationType == .linkActivated {
+                origin = .humanGesture
             } else {
                 NSLog("Tiller ignored non-human browser navigation URL: %@", url.absoluteString)
+                decisionHandler(.cancel)
+                return
             }
+            onExternalURL?(url, origin)
             decisionHandler(.cancel)
         }
+    }
+
+    /// Why a script is about to run. The origin gate exists to make agent access
+    /// to a page deliberate; it is not a gate on Tiller drawing its own window.
+    private enum PageAccessPurpose {
+        /// A fixed script Tiller runs to fill in its own chrome (title, favicon).
+        /// Never carries agent input and never reaches the page's data.
+        case chromeMetadata
+        /// Anything an agent asked for.
+        case agentRequest
+    }
+
+    private func authorizePageAccess(
+        for purpose: PageAccessPurpose = .agentRequest
+    ) async throws {
+        guard let url = webView.url else { throw BrowserError.navigationUnavailable }
+        guard purpose == .agentRequest else { return }
+        guard let worktreeID else {
+            if OriginPolicy.isLocal(url) { return }
+            throw BrowserError.originDenied
+        }
+        // The grant set lives in the App-side store, which `originAuthorization`
+        // consults before it prompts — so the local check is the only decision
+        // this layer can honestly make on its own.
+        if OriginPolicy.isLocal(url) { return }
+        guard let originAuthorization,
+              await originAuthorization(worktreeID, url) else {
+            throw BrowserError.originDenied
+        }
+    }
+
+    private func actionReferenceIsCurrent(_ action: BrowserAct, generation: Int?) -> Bool {
+        let ref: String?
+        switch action {
+        case .click(let value, _), .fill(let value, _, _), .type(let value, _, _),
+             .press(let value, _, _), .scroll(let value, _, _, _):
+            ref = value
+        }
+        guard let ref else { return true }
+        guard let latestSnapshot,
+              generation == latestSnapshot.generation else { return false }
+        return latestSnapshot.nodes.contains { $0.ref == ref }
+    }
+
+    private func waitConditionMatches(_ condition: BrowserWaitCondition) async throws -> Bool {
+        switch condition {
+        case .urlContains(let value):
+            return webView.url?.absoluteString.contains(value) == true
+        case .loadState(let state):
+            guard state == "complete" || state == "loaded" else {
+                throw BrowserError.invalidArgument(
+                    hint: "loadState must be complete or loaded")
+            }
+            return !webView.isLoading
+        case .selector, .text, .function:
+            try await authorizePageAccess()
+            let script: String
+            switch condition {
+            case .selector(let value):
+                script = "Boolean(document.querySelector(\(try jsonLiteral(value))))"
+            case .text(let value):
+                script = "(document.body?.innerText || '').includes(\(try jsonLiteral(value)))"
+            case .function(let value):
+                script = "Boolean((\(value))())"
+            case .urlContains, .loadState:
+                throw BrowserError.invalidArgument(hint: "Unsupported wait condition")
+            }
+            do { return (try await webView.evaluateJavaScript(script) as? Bool) == true }
+            catch { throw BrowserError.jsError(hint: error.localizedDescription) }
+        }
+    }
+
+    private func jsonLiteral(_ value: String) throws -> String {
+        String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
     }
 }

@@ -71,7 +71,7 @@ struct SettingsSurface: View {
         case .agents: AgentsSettingsView(center: model.agentCenter)
         case .general: GeneralSettingsView(updater: updater, model: model)
         case .appearance: AppearanceSettingsView()
-        case .permissions: PermissionsSettingsView()
+        case .permissions: PermissionsSettingsView(appModel: model)
         }
     }
 }

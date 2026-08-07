@@ -21,6 +21,7 @@ extension AppModel {
         "notification.create", "notification.list", "notification.clear",
         "session.restore",
         "browser.open", "browser.navigate", "browser.get", "browser.screenshot",
+        "browser.snapshot", "browser.act", "browser.wait", "browser.eval", "browser.console",
     ]
 
     /// Re-apply the launch snapshot: remount worktree hosts and add back
@@ -179,6 +180,10 @@ extension AppModel {
         guard WorkspaceEngineGate.isEnabled else {
             return .failure(id: request.id, error: "browser requires the universal workspace")
         }
+        if let verb = request.method.split(separator: ".").last,
+           BrowserUnsupportedVerb(rawValue: String(verb)) != nil {
+            return .failure(id: request.id, error: "not_supported")
+        }
         guard let adapter = workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter else {
             return .failure(id: request.id, error: "browser adapter unavailable")
         }
@@ -207,25 +212,29 @@ extension AppModel {
             }
             _ = workspaceCoordinator.host(for: tab.id)
             do {
-                let page = try await adapter.open(contentID: contentID, url: url)
-                await workspaceCoordinator.updateBrowserPage(
-                    tabID: tab.id, url: page.url.absoluteString, title: page.title, in: worktree)
-                guard let surface = browserSurfaceIdentifier(
-                    contentID: contentID, in: worktree.id, format: request.params["id-format"])
-                else {
-                    return .failure(id: request.id, error: "invalid id-format")
-                }
-                var result = [
-                    "surface": surface,
-                    "url": page.url.absoluteString,
-                    "title": page.title,
-                ]
-                if request.params["id-format"] == "both" {
-                    guard let surfaceRef = shortBrowserSurfaceIdentifier(
-                        contentID: contentID, in: worktree.id) else {
-                        return .failure(id: request.id, error: "surface ref unavailable")
+                let result = try await adapter.withAgentCommand(contentID: contentID) {
+                    let page = try await adapter.open(contentID: contentID, url: url)
+                    await workspaceCoordinator.updateBrowserPage(
+                        tabID: tab.id, url: page.url.absoluteString,
+                        title: page.title, in: worktree)
+                    guard let surface = browserSurfaceIdentifier(
+                        contentID: contentID, in: worktree.id, format: request.params["id-format"])
+                    else {
+                        throw BrowserError.invalidArgument(hint: "invalid id-format")
                     }
-                    result["surfaceRef"] = surfaceRef
+                    var result = [
+                        "surface": surface,
+                        "url": page.url.absoluteString,
+                        "title": page.title,
+                    ]
+                    if request.params["id-format"] == "both" {
+                        guard let surfaceRef = shortBrowserSurfaceIdentifier(
+                            contentID: contentID, in: worktree.id) else {
+                            throw BrowserError.surfaceNotFound
+                        }
+                        result["surfaceRef"] = surfaceRef
+                    }
+                    return result
                 }
                 return .success(id: request.id, result: result)
             } catch {
@@ -248,11 +257,14 @@ extension AppModel {
             }
             _ = workspaceCoordinator.host(for: target.tab.id)
             do {
-                let page = try await adapter.navigate(
-                    contentID: target.contentID, action: navigation)
-                await workspaceCoordinator.updateBrowserPage(
-                    tabID: target.tab.id, url: page.url.absoluteString,
-                    title: page.title, in: target.worktree)
+                let page = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    let page = try await adapter.navigate(
+                        contentID: target.contentID, action: navigation)
+                    await workspaceCoordinator.updateBrowserPage(
+                        tabID: target.tab.id, url: page.url.absoluteString,
+                        title: page.title, in: target.worktree)
+                    return page
+                }
                 return .success(id: request.id, result: [
                     "url": page.url.absoluteString, "title": page.title,
                 ])
@@ -275,9 +287,11 @@ extension AppModel {
             }
             _ = workspaceCoordinator.host(for: target.tab.id)
             do {
-                let value = try await adapter.get(
-                    contentID: target.contentID, value: value,
-                    selector: request.params["selector"])
+                let value = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.get(
+                        contentID: target.contentID, value: value,
+                        selector: request.params["selector"])
+                }
                 return .success(id: request.id, result: ["value": value])
             } catch {
                 return browserErrorResponse(id: request.id, error: error)
@@ -290,24 +304,152 @@ extension AppModel {
             }
             _ = workspaceCoordinator.host(for: target.tab.id)
             do {
-                let path = try await adapter.screenshot(
-                    contentID: target.contentID, path: request.params["path"])
+                let path = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.screenshot(
+                        contentID: target.contentID, path: request.params["path"])
+                }
                 return .success(id: request.id, result: ["path": path])
             } catch {
                 return browserErrorResponse(id: request.id, error: error)
             }
 
+        case .snapshot:
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            _ = workspaceCoordinator.host(for: target.tab.id)
+            do {
+                let snapshot = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.snapshot(contentID: target.contentID)
+                }
+                return .success(id: request.id, result: snapshotResult(snapshot))
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .act:
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            do {
+                let action = try browserAct(from: request.params)
+                let generation = try browserGeneration(from: request.params, action: action)
+                let values = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.act(
+                        contentID: target.contentID, action: action, generation: generation)
+                    var values = ["ok": "true"]
+                    if request.params["snapshotAfter"] == "true" {
+                        let snapshot = try await adapter.snapshot(contentID: target.contentID)
+                        values.merge(snapshotResult(snapshot)) { _, new in new }
+                    }
+                    return values
+                }
+                return .success(id: request.id, result: values)
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .wait:
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            do {
+                guard let timeoutRaw = request.params["timeoutMs"] else {
+                    return .failure(id: request.id,
+                                    error: "invalid_argument: timeoutMs is required")
+                }
+                guard let timeoutMs = Int(timeoutRaw) else {
+                    return .failure(id: request.id,
+                                    error: "invalid_argument: timeoutMs must be an integer")
+                }
+                guard timeoutMs > 0 else {
+                    return .failure(id: request.id,
+                                    error: "invalid_argument: timeoutMs must be a positive integer")
+                }
+                let condition = try browserWaitCondition(from: request.params)
+                let elapsed = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.wait(
+                        contentID: target.contentID, condition: condition, timeoutMs: timeoutMs)
+                }
+                return .success(id: request.id, result: [
+                    "ok": "true", "elapsedMs": String(elapsed),
+                ])
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .eval:
+            guard let script = request.params["script"], !script.isEmpty else {
+                return .failure(id: request.id, error: "missing script")
+            }
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            do {
+                let value = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.eval(contentID: target.contentID, script: script)
+                }
+                return .success(id: request.id, result: ["value": value])
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .console:
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            do {
+                let since = try request.params["since"].map {
+                    guard let value = Double($0) else {
+                        throw BrowserError.invalidArgument(hint: "since must be a number")
+                    }
+                    return value
+                }
+                let entries = try await adapter.withAgentCommand(contentID: target.contentID) {
+                    try await adapter.console(contentID: target.contentID, since: since)
+                }
+                return .success(id: request.id, result: [
+                    "entries": ControlRows.encode(entries.map {
+                        ["level": $0.level, "text": $0.text, "at": String($0.at)]
+                    })
+                ])
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .errors:
+            return .failure(id: request.id, error: BrowserError.notSupported.errorDescription ?? "not_supported")
+
         }
     }
 
     private enum BrowserControlMethod {
-        case open, navigate, get, screenshot
+        case open, navigate, get, screenshot, snapshot, act, wait, eval, console, errors
 
         init?(rawValue: String) {
             if rawValue == "browser.open" { self = .open }
             else if rawValue == "browser.navigate" { self = .navigate }
             else if rawValue == "browser.get" { self = .get }
             else if rawValue == "browser.screenshot" { self = .screenshot }
+            else if rawValue == "browser.snapshot" { self = .snapshot }
+            else if rawValue == "browser.act" { self = .act }
+            else if rawValue == "browser.wait" { self = .wait }
+            else if rawValue == "browser.eval" { self = .eval }
+            else if rawValue == "browser.console" { self = .console }
+            else if rawValue == "browser.errors" { self = .errors }
+            else if rawValue.hasPrefix("browser.") {
+                let verb = String(rawValue.dropFirst("browser.".count))
+                if let unsupported = BrowserUnsupportedVerb(rawValue: verb) {
+                    _ = unsupported
+                    return nil
+                }
+                return nil
+            }
             else { return nil }
         }
     }
@@ -386,6 +528,86 @@ extension AppModel {
             return .failure(id: id, error: error.errorDescription ?? error.code.rawValue)
         }
         return .failure(id: id, error: String(describing: error))
+    }
+
+    private func snapshotResult(_ snapshot: BrowserSnapshot) -> [String: String] {
+        let nodes = snapshot.nodes.map { node in
+            [
+                "ref": node.ref,
+                "role": node.role,
+                "name": node.name,
+                "value": node.value ?? "",
+                "box": "{\"x\":\(node.box.x),\"y\":\(node.box.y),\"width\":\(node.box.width),\"height\":\(node.box.height)}",
+            ]
+        }
+        return ["generation": String(snapshot.generation), "nodes": ControlRows.encode(nodes)]
+    }
+
+    private func browserAct(from params: [String: String]) throws -> BrowserAct {
+        let verb = try requiredParam("verb", in: params)
+        let ref = params["ref"]
+        let selector = params["selector"]
+        switch verb {
+        case "click": return .click(ref: ref, selector: selector)
+        case "fill": return .fill(ref: ref, selector: selector, value: try requiredParam("value", in: params))
+        case "type": return .type(ref: ref, selector: selector, value: try requiredParam("value", in: params))
+        case "press": return .press(ref: ref, selector: selector, key: try requiredParam("key", in: params))
+        case "scroll":
+            let x = try numberParam("deltaX", in: params, default: 0)
+            let y = try numberParam("deltaY", in: params, default: 0)
+            return .scroll(ref: ref, selector: selector, deltaX: x, deltaY: y)
+        default:
+            throw BrowserError.invalidArgument(
+                hint: "verb must be one of click, fill, type, press, scroll")
+        }
+    }
+
+    private func browserGeneration(from params: [String: String], action: BrowserAct) throws -> Int? {
+        let hasRef: Bool
+        switch action {
+        case .click(let ref, _), .fill(let ref, _, _), .type(let ref, _, _),
+             .press(let ref, _, _), .scroll(let ref, _, _, _): hasRef = ref != nil
+        }
+        guard hasRef else { return nil }
+        guard let raw = params["generation"] else {
+            throw BrowserError.invalidArgument(hint: "missing generation")
+        }
+        guard let generation = Int(raw) else {
+            throw BrowserError.invalidArgument(hint: "generation must be an integer")
+        }
+        return generation
+    }
+
+    private func browserWaitCondition(from params: [String: String]) throws -> BrowserWaitCondition {
+        let candidates: [(String, (String) -> BrowserWaitCondition)] = [
+            ("selector", BrowserWaitCondition.selector),
+            ("text", BrowserWaitCondition.text),
+            ("urlContains", BrowserWaitCondition.urlContains),
+            ("loadState", BrowserWaitCondition.loadState),
+            ("function", BrowserWaitCondition.function),
+        ]
+        let present = candidates.compactMap { key, make in params[key].map(make) }
+        guard present.count == 1 else {
+            throw BrowserError.invalidArgument(
+                hint: "pass exactly one of selector, text, urlContains, loadState, function")
+        }
+        return present[0]
+    }
+
+    private func requiredParam(_ name: String, in params: [String: String]) throws -> String {
+        guard let value = params[name], !value.isEmpty else {
+            throw BrowserError.invalidArgument(hint: "missing \(name)")
+        }
+        return value
+    }
+
+    private func numberParam(_ name: String, in params: [String: String], default value: Double)
+        throws -> Double {
+        guard let raw = params[name] else { return value }
+        guard let parsed = Double(raw) else {
+            throw BrowserError.invalidArgument(hint: "\(name) must be a number")
+        }
+        return parsed
     }
 
     /// Caller context: env-provided worktree/pane ids win (a process inside

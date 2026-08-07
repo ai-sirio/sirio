@@ -21,6 +21,7 @@ enum LinkNavigationOrigin: Equatable {
 @Observable
 final class AppModel {
     let workspaceCoordinator: WorkspaceCoordinator
+    let browserPermissionStore: BrowserPermissionStore
     private let workspacePersistenceBridge: WorkspacePersistenceBridge
     private let openSystemURL: @MainActor (URL) -> Void
     private let currentEventModifiers: @MainActor () -> NSEvent.ModifierFlags
@@ -274,6 +275,7 @@ final class AppModel {
             self.workspaceCoordinator = WorkspaceCoordinator(
                 persistence: bridge, registry: registry, adapters: adapters)
         }
+        self.browserPermissionStore = BrowserPermissionStore(defaults: defaults)
         self.foregroundProcessScanner = foregroundProcessScanner
             ?? Self.makeForegroundProcessScanner(paneRegistry: paneRegistry)
         let installStore = AgentInstallStore(
@@ -325,6 +327,10 @@ final class AppModel {
                 self?.handleTerminalOpenURL(raw, in: worktree, modifiers: modifiers)
             }
         (self.workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter)?
+            .originAuthorization = { [weak browserPermissionStore] worktreeID, url in
+                await browserPermissionStore?.requestAccess(worktreeID: worktreeID, url: url) == true
+            }
+        (self.workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter)?
             .onPageChange = { [weak self] tabID, page in
                 guard let self else { return }
                 guard let worktree = self.worktrees.values.flatMap({ $0 }).first(where: {
@@ -334,6 +340,16 @@ final class AppModel {
                     await self?.workspaceCoordinator.updateBrowserPage(
                         tabID: tabID, url: page.url.absoluteString,
                         title: page.title, in: worktree)
+                }
+            }
+        (self.workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter)?
+            .onExternalURL = { [weak self] _, worktreeID, url, origin in
+                guard let self, let worktree = self.worktree(byId: worktreeID) else { return }
+                switch origin {
+                case .agentAction:
+                    self.handleAgentOpenURL(url.absoluteString, in: worktree)
+                case .humanGesture:
+                    self.routeBrowserHumanURL(url, in: worktree)
                 }
             }
         chatAdapter?.resolveTitle = { [weak self] contentID in
@@ -635,7 +651,11 @@ final class AppModel {
     /// the @Sendable ControlServer.Handler bridge (Task { @MainActor in … }).
     func handleControl(_ request: ControlRequest) async -> ControlResponse {
         switch request.method {
-        case "browser.open", "browser.navigate", "browser.get", "browser.screenshot":
+        case "browser.open", "browser.navigate", "browser.get", "browser.screenshot",
+             "browser.snapshot", "browser.act", "browser.wait", "browser.eval",
+             "browser.console", "browser.errors":
+            return await handleBrowserControl(request)
+        case let method where method.hasPrefix("browser."):
             return await handleBrowserControl(request)
         case "panel.create":
             guard let selector = request.params["worktree"],
@@ -2466,6 +2486,10 @@ final class AppModel {
     /// action. Non-HTTP schemes must never become arbitrary app launchers.
     func handleAgentOpenURL(_ raw: String, in worktree: Worktree) {
         routeLink(raw, in: worktree, origin: .agentAction)
+    }
+
+    func routeBrowserHumanURL(_ url: URL, in worktree: Worktree) {
+        routeLink(url.absoluteString, in: worktree, origin: .humanGesture(modifiers: []))
     }
 
     private func routeLink(_ raw: String, in worktree: Worktree,
