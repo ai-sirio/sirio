@@ -425,6 +425,10 @@ final class AppModel {
                 path: dir.appendingPathComponent("tiller.sqlite").path, upTo: "v16")
             try SQLiteWorkspacePersistence.migrateV15IfNeeded(
                 database: db, backupDirectory: dir.appendingPathComponent("backups", isDirectory: true))
+            // migrateV15IfNeeded returns early once the legacy terminalTab table
+            // is gone, and it owned the only unpinned migrate call — so on any
+            // database already past v17 every later migration was skipped.
+            try db.migrateToLatest()
             let store = ProjectStore(database: db)
             workspacePersistenceBridge.install(SQLiteWorkspacePersistence(
                 database: db,

@@ -49,7 +49,10 @@ SERVER_PID=$!
 
 ready=0
 for _ in $(seq 1 50); do
-    if python3 - "$PORT" <<'PY'
+    # stderr discarded: the first probes race the server's listen() and a
+    # ConnectionRefusedError traceback printed next to "E2E PASS" teaches the
+    # reader to ignore tracebacks.
+    if python3 - "$PORT" 2>/dev/null <<'PY'
 import socket
 import sys
 
