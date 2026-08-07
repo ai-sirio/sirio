@@ -185,7 +185,9 @@ struct TranscriptView: View {
             ForEach(Array(snapshot.segments(for: id).enumerated()), id: \.offset) { _, segment in
                 switch segment {
                 case .prose(let chunk):
-                    AgentMarkdownTextView(markdown: chunk)
+                    AgentMarkdownTextView(markdown: chunk) { url in
+                        appModel.handleTerminalOpenURL(url.absoluteString, in: worktree)
+                    }
                 case .insight(let body):
                     InsightCardView(text: body)
                 }

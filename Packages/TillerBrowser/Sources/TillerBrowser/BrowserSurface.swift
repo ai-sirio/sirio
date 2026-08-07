@@ -1,12 +1,14 @@
+import AppKit
 import Foundation
 @preconcurrency import WebKit
 
 @MainActor
-public final class BrowserSurface: NSObject, WKNavigationDelegate {
+public final class BrowserSurface: NSObject, WKNavigationDelegate, WKUIDelegate {
     public let webView: WKWebView
     public let userAgentPolicy: UserAgentPolicy
     public var onPageChange: ((BrowserPage) -> Void)?
     public var onLoadingChange: ((Bool) -> Void)?
+    public var onExternalURL: ((URL) -> Void)?
 
     private var navigationContinuation: CheckedContinuation<BrowserPage, Error>?
 
@@ -21,6 +23,7 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         self.webView = webView
         super.init()
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.customUserAgent = userAgentPolicy.userAgent
     }
 
@@ -44,6 +47,10 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
 
     public func open(_ url: URL) async throws -> BrowserPage {
         guard Self.validURL(url) != nil else { throw BrowserError.invalidURL }
+        guard Self.isInAppScheme(url) else {
+            NSLog("Tiller ignored agent-originated non-HTTP browser URL: %@", url.absoluteString)
+            throw BrowserError.navigationFailed(hint: "Only http, https, file, and about URLs are supported")
+        }
         return try await load { [webView] in
             webView.load(URLRequest(url: url))
         }
@@ -148,18 +155,23 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         return url
     }
 
+    private static func isInAppScheme(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return ["http", "https", "file", "about"].contains(scheme)
+    }
+
     public func webView(_ webView: WKWebView, didFinish _: WKNavigation!) {
-        guard let continuation = navigationContinuation else { return }
+        let continuation = navigationContinuation
         navigationContinuation = nil
         Task { @MainActor in
             do {
                 let page = try await page()
                 onLoadingChange?(false)
                 onPageChange?(page)
-                continuation.resume(returning: page)
+                continuation?.resume(returning: page)
             } catch {
                 onLoadingChange?(false)
-                continuation.resume(throwing: error)
+                continuation?.resume(throwing: error)
             }
         }
     }
@@ -184,5 +196,42 @@ public final class BrowserSurface: NSObject, WKNavigationDelegate {
         navigationContinuation?.resume(throwing: BrowserError.navigationFailed(
             hint: error.localizedDescription))
         navigationContinuation = nil
+    }
+
+    public func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+        webView.load(navigationAction.request)
+        return nil
+    }
+
+    public func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url,
+              let scheme = url.scheme?.lowercased() else {
+            decisionHandler(.cancel)
+            return
+        }
+        if ["http", "https", "file", "about"].contains(scheme) {
+            decisionHandler(.allow)
+        } else {
+            if navigationAction.navigationType == .linkActivated {
+                if let onExternalURL {
+                    onExternalURL(url)
+                } else {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                NSLog("Tiller ignored non-human browser navigation URL: %@", url.absoluteString)
+            }
+            decisionHandler(.cancel)
+        }
     }
 }

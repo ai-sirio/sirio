@@ -30,6 +30,9 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
     /// which owns the agent catalog.
     var agentDisplayName: ((String) -> String)?
 
+    /// Routes terminal link activations through AppModel's shared policy.
+    var onOpenURL: (@MainActor @Sendable (String, Worktree, NSEvent.ModifierFlags) -> Void)?
+
     init(boundary: AdapterBoundary = AdapterBoundary()) { self.boundary = boundary }
 
     func prepare(request: ContentRequest, worktree: Worktree) async throws -> PreparedContent {
@@ -71,6 +74,7 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
             return WorkspaceContentHostAdapter(tabID: tab.id, viewController: NSViewController())
         }
         let provider = resumeCommandProvider
+        let openURL = onOpenURL
         let surface = TerminalSurfaceHost(
             contentID: contentID,
             configuration: TerminalSurfaceConfiguration(
@@ -81,7 +85,13 @@ final class TerminalContentAdapter: WorkspaceContentAdapter {
                     "TILLER_ENV": "1",
                     "TILLER_SOCKET": ControlSocket.defaultPath(),
                     "TILLER_WORKTREE_ID": worktree.id.uuidString
-                ]))
+                ],
+                onOpenURL: { _, raw in
+                    let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+                    Task { @MainActor in
+                        openURL?(raw, worktree, modifiers)
+                    }
+                }))
         // The PTY registers under TerminalSurfaceHost's generation. Keep the
         // adapter's live lookup aligned with that runtime key; the content id
         // remains stable across relaunches.
