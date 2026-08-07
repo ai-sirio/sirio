@@ -114,7 +114,8 @@ private actor AppModelFacadeWorkspacePersistence: WorkspaceLayoutPersistence {
 
     func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
                           tabs: [WorkspaceTab],
-                          terminalContents: [TerminalContentRecordValue]) async throws {}
+                          terminalContents: [TerminalContentRecordValue],
+                          browserContents: [BrowserContentRecordValue]) async throws {}
 
     func checkpoint(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) async {}
     func flush(worktreeID: UUID) async throws {}

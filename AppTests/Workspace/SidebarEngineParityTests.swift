@@ -57,6 +57,27 @@ struct SidebarEngineParityTests {
         #expect(fixture.model.activeTab(for: fixture.worktree.id)?.id == engineTab.id.rawValue)
     }
 
+    @Test func legacyProjectionDropsBrowserTabs() throws {
+        let terminalTab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "Terminal", titleIsAutoNamed: false,
+            content: .terminal(TerminalContentID()))
+        let browserTab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "Browser", titleIsAutoNamed: false,
+            content: .browser(BrowserContentID()))
+        let group = PaneGroup(
+            id: PaneGroupID(), tabs: [terminalTab, browserTab],
+            activeTabID: terminalTab.id)
+        let layout = try WorkspaceLayout.make(
+            root: .group(group.id), groups: [group.id: group],
+            activeGroupID: group.id).get()
+
+        let rows = SidebarTabProjection.rows(layout: layout)
+
+        #expect(rows.count == 1)
+        #expect(rows.first?.id == terminalTab.id.rawValue)
+        #expect(rows.first?.terminalTree != nil)
+    }
+
     /// Agent panels are spawned from the same context menu. They used to stay
     /// on the legacy path, so the tab existed but the engine renderer — which
     /// draws from the layout — never showed it.

@@ -49,6 +49,8 @@ struct WorkspaceFocusTests {
             == .composer)
         #expect(coordinator.focusPane(PaneGroupID(), contentKind: .document).operational
             == .editor)
+        #expect(coordinator.focusPane(PaneGroupID(), contentKind: .browser).operational
+            == .webView)
     }
 
     @Test

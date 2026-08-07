@@ -70,4 +70,24 @@ import Testing
             return
         }
     }
+
+    @Test func browserTabsMaterializeWithoutDuplicateContentOwnership() throws {
+        let groupID = PaneGroupID()
+        let browserTab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "Browser", titleIsAutoNamed: false,
+            content: .browser(BrowserContentID()))
+        let terminalTab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "Terminal", titleIsAutoNamed: true,
+            content: .terminal(TerminalContentID()))
+        let group = PaneGroup(
+            id: groupID, tabs: [browserTab, terminalTab], activeTabID: browserTab.id)
+        let layout = try #require(try WorkspaceLayout.make(
+            root: .group(groupID), groups: [groupID: group], activeGroupID: groupID).get())
+
+        let snapshot = WorkspaceSnapshot(layout: layout)
+        guard case .success = snapshot.materialize() else {
+            Issue.record("a browser tab must remain structurally materializable")
+            return
+        }
+    }
 }

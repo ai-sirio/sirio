@@ -34,6 +34,16 @@ import GRDB
     #expect(try db.read { try WorktreeRecord.fetchCount($0) } == 0)
 }
 
+@Test func v18CreatesBrowserContentTableWithTheExpectedColumns() throws {
+    let queue = try DatabaseQueue()
+    try AppDatabase.migrator.migrate(queue)
+    let columns = try queue.read { database in
+        try database.columns(in: "browserContent").map(\.name)
+    }
+
+    #expect(columns == ["id", "worktreeId", "url", "title", "createdAt"])
+}
+
 @Test func v3CreatesTerminalTabTableAndRoundTripsRecord() throws {
     let db = try AppDatabase.inMemory()
     try db.write { database in

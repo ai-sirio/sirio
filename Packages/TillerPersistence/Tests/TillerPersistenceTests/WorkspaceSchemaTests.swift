@@ -108,7 +108,7 @@ struct WorkspaceSchemaTests {
         try AppDatabase.migrator.migrate(queue)
 
         try queue.read { db in
-            #expect(try AppDatabase.migrator.appliedMigrations(db).last == "v17")
+            #expect(try AppDatabase.migrator.appliedMigrations(db).last == "v18")
             #expect(!(try db.tableExists("terminalTab")))
             #expect(try db.tableExists("legacyTerminalTab_v15"))
             let value = try String.fetchOne(

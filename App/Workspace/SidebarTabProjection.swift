@@ -18,13 +18,14 @@ enum SidebarTabProjection {
         livePaneID: (TerminalContentID) -> UUID? = { _ in nil },
         chatAgentID: (ChatContentID) -> String? = { _ in nil }
     ) -> [LegacyWorkspaceTab] {
-        layout.allTabs.map { tab in
-            LegacyWorkspaceTab(
+        layout.allTabs.compactMap { tab in
+            content(of: tab.content, livePaneID: livePaneID, chatAgentID: chatAgentID).map {
+                LegacyWorkspaceTab(
                 id: tab.id.rawValue,
                 title: tab.title,
-                content: content(
-                    of: tab.content, livePaneID: livePaneID, chatAgentID: chatAgentID),
+                content: $0,
                 titleIsAutoNamed: tab.titleIsAutoNamed)
+            }
         }
     }
 
@@ -32,7 +33,7 @@ enum SidebarTabProjection {
         of ref: WorkspaceContentRef,
         livePaneID: (TerminalContentID) -> UUID?,
         chatAgentID: (ChatContentID) -> String?
-    ) -> LegacyTabContent {
+    ) -> LegacyTabContent? {
         switch ref {
         case .terminal(let contentID):
             // One engine tab is one terminal: splits are groups in the engine,
@@ -47,6 +48,10 @@ enum SidebarTabProjection {
             case .code: .code(fileURL: URL(fileURLWithPath: documentID.canonicalPath))
             case .markdown: .markdown(fileURL: URL(fileURLWithPath: documentID.canonicalPath))
             }
+        case .browser:
+            // Browser surfaces are universal-engine-only. If the legacy engine
+            // is forced, they are not shown; Phase 3 will also hide New Browser.
+            nil
         }
     }
 }

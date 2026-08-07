@@ -65,6 +65,19 @@ struct PaneTabPresentationTests {
         #expect(result.accessibilityLabel(for: entry).contains("modified"))
     }
 
+    @Test func browserPresentationHasNoDirtyOrAgentState() {
+        let entry = TabMenuEntry(
+            tabID: WorkspaceTabID(), title: "Browser", isActive: false,
+            content: .browser(BrowserContentID()))
+        let resolver = makeResolver()
+
+        let result = resolver.resolve(entry)
+
+        #expect(result.icon == .browser)
+        #expect(!result.isDirty)
+        #expect(result.agentStatus == nil)
+    }
+
     @Test func accessibilityNamesSelectionAndAgentStatus() {
         let tabID = WorkspaceTabID()
         let entry = TabMenuEntry(

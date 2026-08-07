@@ -10,6 +10,29 @@ import TillerWorkspace
 @Suite(.serialized)
 @MainActor
 struct WorkspaceCoordinatorTests {
+    @Test func structuralCommitCarriesBrowserRecordsFromTheLayout() async {
+        let worktree = fixtureWorktree(number: 1)
+        let browserID = BrowserContentID()
+        let browserTab = WorkspaceTab(
+            id: WorkspaceTabID(), title: "Browser fixture", titleIsAutoNamed: false,
+            content: .browser(browserID))
+        let browserRecord = BrowserContentRecordValue(
+            id: browserID, worktreeID: worktree.id,
+            url: "https://example.test/fixture", title: "Browser fixture")
+        let persistence = CoordinatorPersistence(
+            restored: layoutWith(tab: browserTab),
+            browserContents: [browserID: browserRecord])
+        let coordinator = makeCoordinator(
+            persistence: persistence, adapter: CoordinatorAdapter())
+
+        await coordinator.restore(worktree: worktree)
+        await coordinator.requestNewTab(
+            into: coordinator.layouts[worktree.id]!.activeGroupID,
+            choice: .newTerminal(command: nil), in: worktree)
+
+        #expect(await persistence.lastBrowserContents == [browserRecord])
+    }
+
     @Test func preparationRunsOutsideTheWorktreeGate() async {
         let preparation = PreparationGate(blocked: true)
         let persistence = CoordinatorPersistence()
@@ -492,12 +515,14 @@ private actor CoordinatorPersistence: WorkspaceLayoutPersistence {
     private(set) var purgeCount = 0
     private(set) var sourceFileDeletionCount = 0
     private(set) var events: [String] = []
+    private(set) var lastBrowserContents: [BrowserContentRecordValue] = []
 
     private let emptyUntouchedWorktrees: Bool
 
     init(restored: WorkspaceLayout? = nil, structuralError: Error? = nil,
          blockFirstCommit: Bool = false, purgeFailures: Int = 0,
-         emptyUntouchedWorktrees: Bool = false) {
+         emptyUntouchedWorktrees: Bool = false,
+         browserContents: [BrowserContentID: BrowserContentRecordValue] = [:]) {
         self.structuralError = structuralError
         self.blockFirstCommit = blockFirstCommit
         self.purgeFailures = purgeFailures
@@ -506,6 +531,7 @@ private actor CoordinatorPersistence: WorkspaceLayoutPersistence {
             let id = UUID(uuidString: "00000000-0000-4000-8000-000000000101")!
             self.restored[id] = RestoredWorkspace(
                 layout: restored, tabs: Dictionary(uniqueKeysWithValues: restored.allTabs.map { ($0.id, $0) }),
+                browserContents: browserContents,
                 revision: 0, diagnostics: [])
         }
     }
@@ -529,7 +555,9 @@ private actor CoordinatorPersistence: WorkspaceLayoutPersistence {
     }
 
     func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
-                          tabs: [WorkspaceTab], terminalContents: [TerminalContentRecordValue]) async throws {
+                          tabs: [WorkspaceTab], terminalContents: [TerminalContentRecordValue],
+                          browserContents: [BrowserContentRecordValue]) async throws {
+        lastBrowserContents = browserContents
         commitCount += 1
         if blockFirstCommit, !firstCommitStarted {
             firstCommitStarted = true

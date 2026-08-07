@@ -302,6 +302,16 @@ public final class AppDatabase: Sendable {
                 BEGIN SELECT RAISE(ABORT, 'legacyTerminalTab_v15 is read-only'); END
                 """)
         }
+        migrator.registerMigration("v18") { db in
+            try db.create(table: "browserContent") { t in
+                t.primaryKey("id", .text)
+                t.column("worktreeId", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("url", .text).notNull()
+                t.column("title", .text)
+                t.column("createdAt", .datetime).notNull()
+            }
+        }
         return migrator
     }
 }

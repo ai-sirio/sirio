@@ -202,6 +202,23 @@ public struct TerminalContentRecord: Codable, FetchableRecord, PersistableRecord
     }
 }
 
+public struct BrowserContentRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
+    public static let databaseTableName = "browserContent"
+    public var id: String
+    public var worktreeId: String
+    public var url: String
+    public var title: String?
+    public var createdAt: Date
+
+    public init(id: String, worktreeId: String, url: String, title: String?, createdAt: Date) {
+        self.id = id
+        self.worktreeId = worktreeId
+        self.url = url
+        self.title = title
+        self.createdAt = createdAt
+    }
+}
+
 public struct WorkspaceLayoutQuarantineRecord: Codable, FetchableRecord, PersistableRecord, Sendable, Equatable {
     public static let databaseTableName = "workspaceLayoutQuarantine"
     public var id: String

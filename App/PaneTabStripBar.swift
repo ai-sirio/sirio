@@ -295,6 +295,10 @@ private struct PaneTabIcon: View {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
+            case .browser:
+                Image(systemName: "globe")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.meta)
             }
         }
     .enableInjection()

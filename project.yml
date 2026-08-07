@@ -30,6 +30,8 @@ packages:
     path: Packages/TillerACP
   TillerCode:
     path: Packages/TillerCode
+  TillerBrowser:
+    path: Packages/TillerBrowser
   CodeEditSourceEditor:
     url: https://github.com/CodeEditApp/CodeEditSourceEditor.git
     from: 0.15.2
@@ -80,6 +82,7 @@ targets:
       - package: TillerAgents
       - package: TillerACP
       - package: TillerCode
+      - package: TillerBrowser
       - package: CodeEditSourceEditor
       - package: MarkdownUI
       - package: TillerGit

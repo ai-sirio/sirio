@@ -7,6 +7,47 @@ import TillerPersistence
 
 @Suite(.serialized)
 struct SQLiteWorkspacePersistenceTests {
+    @Test func browserTabRoundTripsURLAndTitleThroughFlushAndRestore() async throws {
+        let databaseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-browser-round-trip-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: databaseURL) }
+        let database = try AppDatabase(path: databaseURL.path)
+        let worktreeID = UUID()
+        try database.write { db in
+            try ProjectRecord(id: "browser-project", name: "Browser", rootPath: "/browser", createdAt: Date()).insert(db)
+            try WorktreeRecord(id: worktreeID.uuidString, projectId: "browser-project",
+                               branch: "main", path: "/browser", createdAt: Date()).insert(db)
+        }
+
+        let groupID = PaneGroupID()
+        let tabID = WorkspaceTabID()
+        let contentID = BrowserContentID()
+        let tab = WorkspaceTab(
+            id: tabID, title: "Fixture title", titleIsAutoNamed: false,
+            content: .browser(contentID))
+        let layout = try #require(try WorkspaceLayout.make(
+            root: .group(groupID),
+            groups: [groupID: PaneGroup(id: groupID, tabs: [tab], activeTabID: tabID)],
+            activeGroupID: groupID).get())
+        let content = BrowserContentRecordValue(
+            id: contentID, worktreeID: worktreeID,
+            url: "file:///fixture.html", title: "Fixture title")
+        let persistence = SQLiteWorkspacePersistence(database: database)
+
+        try await persistence.commitStructural(
+            worktreeID: worktreeID, revision: 1, snapshot: WorkspaceSnapshot(layout: layout),
+            tabs: [tab], terminalContents: [], browserContents: [content])
+        try await persistence.flush(worktreeID: worktreeID)
+
+        let restored = await persistence.restore(worktreeID: worktreeID)
+        #expect(restored.tabs[tabID]?.content == .browser(contentID))
+        #expect(restored.browserContents[contentID]?.url == "file:///fixture.html")
+        #expect(restored.browserContents[contentID]?.title == "Fixture title")
+
+        try await persistence.purge(worktreeID: worktreeID)
+        #expect(try database.read { try BrowserContentRecord.fetchCount($0) } == 0)
+    }
+
     @Test func structuralCommitWritesSnapshotAndTabsInOneTransaction() async throws {
         let (database, worktreeID) = try makeDatabase()
         let persistence = SQLiteWorkspacePersistence(database: database)
@@ -14,7 +55,7 @@ struct SQLiteWorkspacePersistenceTests {
 
         try await persistence.commitStructural(
             worktreeID: worktreeID, revision: 7, snapshot: fixture.snapshot,
-            tabs: [fixture.tab], terminalContents: [fixture.content])
+            tabs: [fixture.tab], terminalContents: [fixture.content], browserContents: [])
 
         let restored = await persistence.restore(worktreeID: worktreeID)
         #expect(restored.revision == 7)
@@ -30,12 +71,12 @@ struct SQLiteWorkspacePersistenceTests {
         let fixture = makeWorkspace()
         try await persistence.commitStructural(
             worktreeID: worktreeID, revision: 1, snapshot: fixture.snapshot,
-            tabs: [fixture.tab], terminalContents: [fixture.content])
+            tabs: [fixture.tab], terminalContents: [fixture.content], browserContents: [])
 
         await #expect(throws: (any Error).self) {
             try await persistence.commitStructural(
                 worktreeID: worktreeID, revision: 2, snapshot: fixture.snapshot,
-                tabs: [fixture.tab], terminalContents: [])
+                tabs: [fixture.tab], terminalContents: [], browserContents: [])
         }
 
         let row = try database.read { try WorkspaceLayoutRecord.fetchOne($0, key: worktreeID.uuidString) }
@@ -75,7 +116,7 @@ struct SQLiteWorkspacePersistenceTests {
         let fixture = makeTwoTabWorkspace()
         try await persistence.commitStructural(
             worktreeID: worktreeID, revision: 3, snapshot: fixture.snapshot,
-            tabs: fixture.tabs, terminalContents: fixture.contents)
+            tabs: fixture.tabs, terminalContents: fixture.contents, browserContents: [])
         try database.write { db in
             try db.execute(sql: "DELETE FROM workspaceTab WHERE id = ?", arguments: [fixture.tabs[1].id.rawValue.uuidString])
         }
@@ -115,10 +156,10 @@ struct SQLiteWorkspacePersistenceTests {
         let new = makeWorkspace(title: "new")
         try await persistence.commitStructural(
             worktreeID: worktreeID, revision: 9, snapshot: new.snapshot,
-            tabs: [new.tab], terminalContents: [new.content])
+            tabs: [new.tab], terminalContents: [new.content], browserContents: [])
         try await persistence.commitStructural(
             worktreeID: worktreeID, revision: 8, snapshot: old.snapshot,
-            tabs: [old.tab], terminalContents: [old.content])
+            tabs: [old.tab], terminalContents: [old.content], browserContents: [])
 
         let restored = await persistence.restore(worktreeID: worktreeID)
         #expect(restored.revision == 9)
@@ -132,7 +173,7 @@ struct SQLiteWorkspacePersistenceTests {
         let payload = try fixture.snapshot.canonicalPayload()
         try await persistence.commitStructural(
             worktreeID: worktreeID, revision: 12, snapshot: fixture.snapshot,
-            tabs: [fixture.tab], terminalContents: [fixture.content])
+            tabs: [fixture.tab], terminalContents: [fixture.content], browserContents: [])
 
         let stored = try database.read { try WorkspaceLayoutRecord.fetchOne($0, key: worktreeID.uuidString) }
         #expect(stored?.payload == String(decoding: payload, as: UTF8.self))
