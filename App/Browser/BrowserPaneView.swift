@@ -16,11 +16,22 @@ struct BrowserPaneView: View {
     @State private var canGoBack = false
     @State private var canGoForward = false
     @State private var faviconURL: URL?
+    @State private var errorMessage: String?
     @FocusState private var addressBarFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             chrome
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+                    .background(AppTheme.chatSurface)
+                    .accessibilityLabel("Browser error")
+            }
             BrowserWebView(webView: surface.webView)
         }
         .background(AppTheme.terminalSurface)
@@ -89,7 +100,13 @@ struct BrowserPaneView: View {
     private func openAddress() {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        run { try await surface.open(trimmed) }
+        // The engine stays strict so the agent-facing API can answer
+        // invalid_url; a human typing "www.google.it" gets the scheme filled in.
+        guard let url = UserInputURL.normalize(trimmed) else {
+            errorMessage = "\(trimmed) is not a valid address."
+            return
+        }
+        run { try await surface.open(url) }
     }
 
     private func navigate(_ action: BrowserCommand.Navigation) {
@@ -107,15 +124,23 @@ struct BrowserPaneView: View {
 
     private func run(_ operation: @escaping () async throws -> BrowserPage) {
         isLoading = true
+        errorMessage = nil
         Task { @MainActor in
             defer {
                 isLoading = false
                 updateNavigationState()
             }
-            guard let page = try? await operation() else { return }
-            address = page.url.absoluteString
-            faviconURL = page.faviconURL
-            onPageChange?(page)
+            do {
+                // `try?` here used to discard the reason entirely, so a failed
+                // navigation looked identical to nothing happening at all.
+                let page = try await operation()
+                address = page.url.absoluteString
+                faviconURL = page.faviconURL
+                onPageChange?(page)
+            } catch {
+                errorMessage = (error as? BrowserError)?.userMessage
+                    ?? error.localizedDescription
+            }
         }
     }
 
