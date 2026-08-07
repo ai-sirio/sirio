@@ -30,7 +30,14 @@ cat > "$TMP_DIR/fixture.html" <<'HTML'
 <!doctype html>
 <html>
   <head><title>Tiller Browser E2E Fixture</title></head>
-  <body><p>Known browser e2e body text</p></body>
+  <body>
+    <p>Known browser e2e body text</p>
+    <form onsubmit="event.preventDefault(); document.querySelector('#result').textContent = document.querySelector('#name').value">
+      <label>Name <input id="name" aria-label="Name"></label>
+      <button id="submit" type="submit">Submit</button>
+    </form>
+    <p id="result">Waiting</p>
+  </body>
 </html>
 HTML
 
@@ -95,5 +102,50 @@ RELOAD_URL="$(printf '%s\n' "$RELOAD_OUTPUT" | awk -F '\t' 'NR == 1 { print $1 }
     echo "browser reload changed url: $RELOAD_OUTPUT" >&2
     exit 1
 }
+
+SNAPSHOT_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser snapshot "$SURFACE" --json)"
+read -r GENERATION INPUT_REF BUTTON_REF <<EOF
+$(SNAPSHOT_OUTPUT="$SNAPSHOT_OUTPUT" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["SNAPSHOT_OUTPUT"])[0]
+nodes = json.loads(payload["nodes"])
+input_ref = next(node["ref"] for node in nodes if node["name"] == "Name")
+button_ref = next(node["ref"] for node in nodes if node["name"] == "Submit")
+print(payload["generation"], input_ref, button_ref)
+PY
+)
+EOF
+
+TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser act "$SURFACE" fill \
+    --ref "$INPUT_REF" --value "Ada" --generation "$GENERATION" >/dev/null
+TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser act "$SURFACE" click \
+    --ref "$BUTTON_REF" --generation "$GENERATION" >/dev/null
+TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser wait "$SURFACE" \
+    --text "Ada" --timeout-ms 3000 >/dev/null
+LOOP_TEXT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser get "$SURFACE" text)"
+printf '%s\n' "$LOOP_TEXT" | grep -Fq "Ada"
+
+STALE_OUTPUT="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser snapshot "$SURFACE" --json)"
+read -r STALE_GENERATION STALE_REF <<EOF
+$(STALE_OUTPUT="$STALE_OUTPUT" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["STALE_OUTPUT"])[0]
+nodes = json.loads(payload["nodes"])
+print(payload["generation"], nodes[0]["ref"])
+PY
+)
+EOF
+TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser navigate "$SURFACE" reload >/dev/null
+set +e
+STALE_ERROR="$(TILLER_WORKTREE_ID="$WT" "$TILLERCTL" browser act "$SURFACE" click \
+    --ref "$STALE_REF" --generation "$STALE_GENERATION" 2>&1)"
+STALE_STATUS=$?
+set -e
+[ "$STALE_STATUS" -ne 0 ] || { echo "stale ref unexpectedly succeeded" >&2; exit 1; }
+printf '%s\n' "$STALE_ERROR" | grep -Fq "stale_ref"
 
 echo "E2E PASS"

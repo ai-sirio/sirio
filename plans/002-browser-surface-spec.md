@@ -82,7 +82,7 @@ in-app e non ci riguarda.
 | D12 | Titolo tab | Titolo pagina live + favicon; **auto-rename escluso** per `kind == .browser` | Il titolo pagina è già il nome giusto |
 | D13 | Chrome UI | back/forward/reload/URL/stop + **badge "agent driving"** | Senza badge, click umano e click agente sono indistinguibili |
 | D14 | Ref brevi | Resolver `surface:N ↔ UUID` **solo nel namespace `browser`** | Estenderlo a tutto il protocollo romperebbe gli hook installati |
-| D15 | Gating | `eval`/`cookies`/`storage` liberi su `localhost`/`127.0.0.1`/`::1`/`*.local`; **conferma una volta per origine** altrove | Vedi "Modello di sicurezza" |
+| D15 | Gating | Tutto libero su `localhost`/`127.0.0.1`/`::1`/`*.local`; altrove **conferma una volta per origine** per ogni verbo che legge o esegue il contenuto della pagina, `screenshot` incluso | Vedi "Modello di sicurezza" (emendata 2026-08-07) |
 | D16 | `js_error` | Errore strutturato con `code` + `hint`; **nessun fallback automatico** | Un fallback silenzioso fa credere all'agente di avere un DOM interattivo |
 | D17 | Download/upload | `not_supported` in V1 | Fuori dal caso d'uso; ogni download è scrittura su disco guidata da agente |
 | D18 | Persistenza | Solo **URL + titolo** | `interactionState` è un blob opaco versionato da Apple |
@@ -156,18 +156,35 @@ leggere `document.cookie` o `localStorage` e a fare `fetch` verso l'esterno.
 Prompt injection dentro una pagina ispezionata diventa un percorso verso i
 token dell'utente.
 
-Regola (D15), implementata in `OriginPolicy` (puro, testabile senza WebKit):
+Regola (D15, **emendata il 2026-08-07 — decisione A**), implementata in
+`OriginPolicy` (puro, testabile senza WebKit) e applicata da
+`BrowserSurface.authorizePageAccess`:
 
 1. **Origini locali** — `localhost`, `127.0.0.1`, `::1`, `*.local`, qualsiasi
-   porta: `eval`, `cookies`, `storage` permessi senza conferma.
-2. **Ogni altra origine**: prima invocazione di `eval`/`cookies`/`storage` su
-   quella origine richiede conferma utente; la concessione è ricordata
-   per `(worktree, origine)` e revocabile dalle Settings.
+   porta: tutti i verbi permessi senza conferma.
+2. **Ogni altra origine** — la linea passa fra *leggere o eseguire il contenuto
+   della pagina* e *guidare la finestra*. Richiedono conferma: `eval`, `act`,
+   `get text`, `get html`, `snapshot`, `console`, `wait` (valuta predicati) e
+   **`screenshot`**. Non la richiedono: `open`, `navigate`, `get url`, e la
+   lettura di titolo/favicon con cui Tiller disegna il proprio chrome.
+   La concessione è ricordata per `(worktree, origine)` e revocabile
+   dalle Settings.
 3. **Conferma negata o assente** → `origin_denied`. Mai un fallback silenzioso.
-4. Gli altri verbi (`open`, `get`, `snapshot`, `click`, `fill`, `wait`,
-   `screenshot`) non sono gated: non estraggono credenziali.
-5. Schemi non-http originati da un'azione agente sono **ignorati e loggati**,
+4. Schemi non-http originati da un'azione agente sono **ignorati e loggati**,
    non aperti (D20).
+
+La formulazione precedente escludeva `get`, `snapshot` e `screenshot` dal gate
+perché «non estraggono credenziali». È sbagliata: su una pagina autenticata il
+testo e l'immagine trasportano gli stessi dati derivati dalla sessione a cui il
+cookie dà accesso, e `screenshot` ne trasporta di più. La distinzione utile non
+è *credenziale sì/no*, è *contenuto della pagina sì/no*.
+
+**Eccezione, deliberata e in `PageAccessPurpose.chromeMetadata`:** titolo e
+favicon vengono letti in JavaScript dopo ogni navigazione, inclusa quella di un
+umano che digita nella barra indirizzi. Gatarli chiedeva il permesso per un
+agente inesistente su ogni sito visitato, e insegnava a concedere per riflesso
+esattamente il permesso che serve a `eval`. Un gate che scatta troppo spesso
+vale meno di nessun gate, perché produce consenso automatico.
 
 Non è nell'ambito di questa spec: sandboxing dell'app, isolamento di rete per
 worktree, filtri sui contenuti.

@@ -213,7 +213,8 @@ struct Browser: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "browser",
         abstract: "Open and read browser surfaces.",
-        subcommands: [Open.self, Navigate.self, Get.self, Screenshot.self])
+        subcommands: [Open.self, Navigate.self, Get.self, Screenshot.self,
+                      Snapshot.self, Act.self, Wait.self, Eval.self, Console.self])
 
     struct Open: ParsableCommand {
         @OptionGroup var socketOptions: SocketOptions
@@ -282,6 +283,114 @@ struct Browser: ParsableCommand {
                     surface: surface, path: path, workspace: workspace),
                 socket: socketOptions.socket)
             print(response.result?["path"] ?? "")
+        }
+    }
+
+    struct Snapshot: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @OptionGroup var jsonFlag: JSONFlag
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserSnapshot(surface: surface, workspace: workspace),
+                socket: socketOptions.socket)
+            if jsonFlag.json {
+                printResult(response, columns: ["generation", "nodes"], asJSON: true)
+            } else {
+                print(response.result?["generation"] ?? "")
+                print(response.result?["nodes"] ?? "[]")
+            }
+        }
+    }
+
+    enum ActVerb: String, CaseIterable, ExpressibleByArgument {
+        case click, fill, type, press, scroll
+    }
+
+    struct Act: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Argument var verb: ActVerb
+        @Option(name: .customLong("ref")) var ref: String?
+        @Option var selector: String?
+        @Option var value: String?
+        @Option var key: String?
+        @Option var generation: Int?
+        @Flag(name: .customLong("snapshot-after")) var snapshotAfter = false
+        @Option(name: .customLong("delta-x")) var deltaX: Double?
+        @Option(name: .customLong("delta-y")) var deltaY: Double?
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserAct(
+                    surface: surface, verb: verb.rawValue, ref: ref, selector: selector,
+                    value: value, key: key, generation: generation,
+                    snapshotAfter: snapshotAfter, deltaX: deltaX, deltaY: deltaY,
+                    workspace: workspace), socket: socketOptions.socket)
+            printResult(response, columns: ["ok", "generation", "nodes"], asJSON: true)
+        }
+    }
+
+    struct Wait: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Option var selector: String?
+        @Option var text: String?
+        @Option(name: .customLong("url-contains")) var urlContains: String?
+        @Option(name: .customLong("load-state")) var loadState: String?
+        @Option var function: String?
+        @Option var timeoutMs: Int
+
+        func run() throws {
+            let values: [(String, String?)] = [
+                ("selector", selector), ("text", text), ("urlContains", urlContains),
+                ("loadState", loadState), ("function", function),
+            ]
+            guard let (key, value) = values.first(where: { $0.1 != nil }),
+                  values.filter({ $0.1 != nil }).count == 1,
+                  let value else {
+                throw ValidationError("pass exactly one wait condition")
+            }
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserWait(
+                    surface: surface, conditionKey: key, conditionValue: value,
+                    timeoutMs: timeoutMs, workspace: workspace), socket: socketOptions.socket)
+            printResult(response, columns: ["ok", "elapsedMs"], asJSON: true)
+        }
+    }
+
+    struct Eval: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Argument var script: String
+        @OptionGroup var jsonFlag: JSONFlag
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserEval(
+                    surface: surface, script: script, workspace: workspace),
+                socket: socketOptions.socket)
+            printResult(response, columns: ["value"], asJSON: jsonFlag.json)
+        }
+    }
+
+    struct Console: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Option var since: Double?
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserConsole(
+                    surface: surface, since: since, workspace: workspace),
+                socket: socketOptions.socket)
+            print(response.result?["entries"] ?? "[]")
         }
     }
 }

@@ -9,6 +9,7 @@ public enum BrowserError: Error, Equatable, Sendable, LocalizedError {
         case notSupported = "not_supported"
         case originDenied = "origin_denied"
         case invalidURL = "invalid_url"
+        case invalidArgument = "invalid_argument"
         case navigationUnavailable = "navigation_unavailable"
         case navigationFailed = "navigation_failed"
     }
@@ -19,7 +20,8 @@ public enum BrowserError: Error, Equatable, Sendable, LocalizedError {
     case timeout
     case notSupported
     case originDenied
-    case invalidURL
+        case invalidURL
+    case invalidArgument(hint: String)
     case navigationUnavailable
     case navigationFailed(hint: String)
 
@@ -32,6 +34,7 @@ public enum BrowserError: Error, Equatable, Sendable, LocalizedError {
         case .notSupported: .notSupported
         case .originDenied: .originDenied
         case .invalidURL: .invalidURL
+        case .invalidArgument: .invalidArgument
         case .navigationUnavailable: .navigationUnavailable
         case .navigationFailed: .navigationFailed
         }
@@ -39,7 +42,7 @@ public enum BrowserError: Error, Equatable, Sendable, LocalizedError {
 
     public var hint: String? {
         switch self {
-        case .jsError(let hint), .navigationFailed(let hint): hint
+        case .jsError(let hint), .navigationFailed(let hint), .invalidArgument(let hint): hint
         default: nil
         }
     }
@@ -61,6 +64,7 @@ public enum BrowserError: Error, Equatable, Sendable, LocalizedError {
         case .notSupported: "That action is not supported here."
         case .originDenied: "Permission for this site was denied."
         case .invalidURL: "That address is not valid."
+        case .invalidArgument(let hint): "That argument is not valid. " + hint
         case .navigationUnavailable: "There is nowhere to go in that direction."
         case .navigationFailed(let hint): hint
         }

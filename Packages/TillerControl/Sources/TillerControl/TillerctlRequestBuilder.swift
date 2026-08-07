@@ -151,4 +151,47 @@ public enum TillerctlRequestBuilder {
             "surface": surface, "path": path, "workspace": workspace
         ])
     }
+
+    public static func browserSnapshot(surface: String, workspace: String? = nil)
+        -> ControlRequest {
+        request("browser.snapshot", ["surface": surface, "workspace": workspace])
+    }
+
+    public static func browserAct(
+        surface: String, verb: String, ref: String?, selector: String?, value: String?,
+        key: String?, generation: Int?, snapshotAfter: Bool, deltaX: Double?, deltaY: Double?,
+        workspace: String? = nil
+    ) -> ControlRequest {
+        var params: [String: String?] = [
+            "surface": surface, "verb": verb, "ref": ref, "selector": selector,
+            "value": value, "key": key,
+            "generation": generation.map { String($0) },
+            "snapshotAfter": snapshotAfter ? "true" : nil,
+            "deltaX": deltaX.map { String($0) }, "deltaY": deltaY.map { String($0) },
+            "workspace": workspace,
+        ]
+        return request("browser.act", params)
+    }
+
+    public static func browserWait(
+        surface: String, conditionKey: String, conditionValue: String, timeoutMs: Int,
+        workspace: String? = nil
+    ) -> ControlRequest {
+        request("browser.wait", [
+            "surface": surface, conditionKey: conditionValue,
+            "timeoutMs": String(timeoutMs), "workspace": workspace,
+        ])
+    }
+
+    public static func browserEval(surface: String, script: String, workspace: String? = nil)
+        -> ControlRequest {
+        request("browser.eval", ["surface": surface, "script": script, "workspace": workspace])
+    }
+
+    public static func browserConsole(surface: String, since: Double?, workspace: String? = nil)
+        -> ControlRequest {
+        request("browser.console", [
+            "surface": surface, "since": since.map { String($0) }, "workspace": workspace,
+        ])
+    }
 }

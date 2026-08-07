@@ -9,7 +9,12 @@ import Inject
 struct PermissionsSettingsView: View {
     @ObserveInjection private var inject
 
+    var appModel: AppModel?
     @State private var model = PermissionsModel(probe: SystemPermissionProbe())
+
+    init(appModel: AppModel? = nil) {
+        self.appModel = appModel
+    }
 
     var body: some View {
         Form {
@@ -27,6 +32,26 @@ struct PermissionsSettingsView: View {
             Section("macOS Permissions") {
                 ForEach(PermissionKind.allCases) { kind in
                     row(for: kind)
+                }
+            }
+            if let appModel {
+                Section("Browser origin grants") {
+                    if appModel.browserPermissionStore.grants.isEmpty {
+                        Text("No browser origin grants.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(appModel.browserPermissionStore.grants)
+                            .sorted { $0.origin < $1.origin }, id: \.self) { grant in
+                            LabeledContent {
+                                Button("Revoke") {
+                                    appModel.browserPermissionStore.revoke(grant)
+                                }
+                            } label: {
+                                Text(grant.origin)
+                                Text(grant.worktreeID.uuidString)
+                            }
+                        }
+                    }
                 }
             }
         }
