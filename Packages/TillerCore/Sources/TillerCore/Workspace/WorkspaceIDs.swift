@@ -32,6 +32,14 @@ public struct TerminalContentID: Hashable, Sendable, Codable {
     }
 }
 
+public struct BrowserContentID: Hashable, Sendable, Codable {
+    public let rawValue: UUID
+
+    public init(_ rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+}
+
 public struct ChatContentID: Hashable, Sendable, Codable {
     public let rawValue: String
 

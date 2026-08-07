@@ -32,4 +32,15 @@ import Foundation
         #expect(decoded == ref)
         #expect(decoded.contentIdentifierString == ref.contentIdentifierString)
     }
+
+    @Test func browserContentReferencesUseTheBrowserKindAndUUIDIdentifier() throws {
+        let id = BrowserContentID()
+        let ref = WorkspaceContentRef.browser(id)
+
+        #expect(ref.kind == .browser)
+        #expect(ref.contentIdentifierString == id.rawValue.uuidString)
+        let data = try JSONEncoder().encode(ref)
+        let decoded = try JSONDecoder().decode(WorkspaceContentRef.self, from: data)
+        #expect(decoded == ref)
+    }
 }

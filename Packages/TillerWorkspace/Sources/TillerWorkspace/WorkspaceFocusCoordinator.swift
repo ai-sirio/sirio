@@ -4,6 +4,7 @@ public enum WorkspaceFocusTarget: Equatable, Sendable {
     case terminalFirstResponder
     case composer
     case editor
+    case webView
     case tab(WorkspaceTabID)
 }
 
@@ -150,6 +151,8 @@ public final class WorkspaceFocusCoordinator {
             .composer
         case .document:
             .editor
+        case .browser:
+            .webView
         }
     }
 

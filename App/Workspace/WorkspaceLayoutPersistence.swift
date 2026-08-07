@@ -14,11 +14,29 @@ struct TerminalContentRecordValue: Sendable, Equatable {
     }
 }
 
+struct BrowserContentRecordValue: Sendable, Equatable {
+    let id: BrowserContentID
+    let worktreeID: UUID
+    let url: String
+    let title: String?
+}
+
 struct RestoredWorkspace: Sendable {
     let layout: WorkspaceLayout
     let tabs: [WorkspaceTabID: WorkspaceTab]
+    let browserContents: [BrowserContentID: BrowserContentRecordValue]
     let revision: Int
     let diagnostics: [RestoreDiagnostic]
+
+    init(layout: WorkspaceLayout, tabs: [WorkspaceTabID: WorkspaceTab],
+         browserContents: [BrowserContentID: BrowserContentRecordValue] = [:],
+         revision: Int, diagnostics: [RestoreDiagnostic]) {
+        self.layout = layout
+        self.tabs = tabs
+        self.browserContents = browserContents
+        self.revision = revision
+        self.diagnostics = diagnostics
+    }
 }
 
 enum RestoreDiagnostic: Hashable, Sendable {
@@ -35,7 +53,8 @@ protocol WorkspaceLayoutPersistence: Sendable {
     func commitStructural(worktreeID: UUID, revision: Int,
                           snapshot: WorkspaceSnapshot,
                           tabs: [WorkspaceTab],
-                          terminalContents: [TerminalContentRecordValue]) async throws
+                          terminalContents: [TerminalContentRecordValue],
+                          browserContents: [BrowserContentRecordValue]) async throws
     func checkpoint(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) async
     func flush(worktreeID: UUID) async throws
     func writeRecoverySidecar(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) throws
@@ -47,6 +66,8 @@ enum WorkspacePersistenceError: Error, Equatable, Sendable {
     case missingTab(WorkspaceTabID)
     case missingTerminalContent(TerminalContentID)
     case contentBelongsToAnotherWorktree(TerminalContentID)
+    case missingBrowserContent(BrowserContentID)
+    case browserContentBelongsToAnotherWorktree(BrowserContentID)
     case invalidRecord
 }
 

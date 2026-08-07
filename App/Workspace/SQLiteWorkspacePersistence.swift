@@ -136,7 +136,8 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
     }
 
     func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
-                          tabs: [WorkspaceTab], terminalContents: [TerminalContentRecordValue]) async throws {
+                          tabs: [WorkspaceTab], terminalContents: [TerminalContentRecordValue],
+                          browserContents: [BrowserContentRecordValue]) async throws {
         guard case .success = snapshot.materialize() else {
             throw WorkspacePersistenceError.invalidSnapshot
         }
@@ -158,6 +159,20 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
                 throw WorkspacePersistenceError.contentBelongsToAnotherWorktree(contentID)
             }
         }
+        let suppliedBrowserContents = Dictionary(
+            browserContents.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        guard suppliedBrowserContents.count == browserContents.count else {
+            throw WorkspacePersistenceError.invalidSnapshot
+        }
+        for tab in tabs {
+            guard case .browser(let contentID) = tab.content else { continue }
+            guard let content = suppliedBrowserContents[contentID] else {
+                throw WorkspacePersistenceError.missingBrowserContent(contentID)
+            }
+            guard content.worktreeID == worktreeID else {
+                throw WorkspacePersistenceError.browserContentBelongsToAnotherWorktree(contentID)
+            }
+        }
 
         let payload = try snapshot.canonicalPayload()
         let payloadString = String(decoding: payload, as: UTF8.self)
@@ -175,6 +190,11 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
             try TerminalContentRecord
                 .filter(Column("worktreeId") == worktreeID.uuidString)
                 .deleteAll(db)
+            if try db.tableExists(BrowserContentRecord.databaseTableName) {
+                try BrowserContentRecord
+                    .filter(Column("worktreeId") == worktreeID.uuidString)
+                    .deleteAll(db)
+            }
 
             for tab in tabs {
                 let viewStateJSON = String(decoding: try JSONEncoder().encode(tab.viewState), as: UTF8.self)
@@ -201,6 +221,11 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
                     id: content.id.rawValue.uuidString, worktreeId: worktreeID.uuidString,
                     launchKind: launchKind, agentId: agentID,
                     commandJSON: content.commandJSON, createdAt: timestamp).insert(db)
+            }
+            for content in browserContents {
+                try BrowserContentRecord(
+                    id: content.id.rawValue.uuidString, worktreeId: worktreeID.uuidString,
+                    url: content.url, title: content.title, createdAt: timestamp).insert(db)
             }
             try WorkspaceLayoutRecord(
                 worktreeId: worktreeID.uuidString, schemaVersion: snapshot.schemaVersion,
@@ -284,6 +309,10 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
                 .filter(Column("worktreeId") == worktreeID.uuidString).deleteAll(db)
             try TerminalContentRecord
                 .filter(Column("worktreeId") == worktreeID.uuidString).deleteAll(db)
+            if try db.tableExists(BrowserContentRecord.databaseTableName) {
+                try BrowserContentRecord
+                    .filter(Column("worktreeId") == worktreeID.uuidString).deleteAll(db)
+            }
             try WorkspaceLayoutRecord.deleteOne(db, key: worktreeID.uuidString)
         }
     }
@@ -300,13 +329,21 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
                 .filter(Column("worktreeId") == worktreeID.uuidString)
                 .fetchAll(db)
         }
+        let browserContentRows: [BrowserContentRecord] = try database.read {
+            db -> [BrowserContentRecord] in
+            guard try db.tableExists(BrowserContentRecord.databaseTableName) else { return [] }
+            return try BrowserContentRecord
+                .filter(Column("worktreeId") == worktreeID.uuidString)
+                .fetchAll(db)
+        }
         let rowsByID = Dictionary(uniqueKeysWithValues: rows.compactMap { row -> (WorkspaceTabID, WorkspaceTabRecord)? in
             guard let tabID = UUID(uuidString: row.id) else { return nil }
             return (WorkspaceTabID(tabID), row)
         })
         let tabsByID = Dictionary(uniqueKeysWithValues: rows.compactMap { row -> (WorkspaceTabID, WorkspaceTab)? in
             guard let tabID = UUID(uuidString: row.id),
-                  let tab = makeTab(row: row, worktreeID: worktreeID, contents: contentRows) else { return nil }
+                  let tab = makeTab(row: row, worktreeID: worktreeID,
+                                    contents: contentRows, browserContents: browserContentRows) else { return nil }
             return (WorkspaceTabID(tabID), tab)
         })
         var diagnostics: [RestoreDiagnostic] = []
@@ -334,12 +371,22 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
         }
         let referencedIDs = Set(snapshot.groups.flatMap(\.tabIDs))
         let referencedTabs = tabsByID.filter { referencedIDs.contains($0.key) }
+        let browserContents: [BrowserContentID: BrowserContentRecordValue] = Dictionary(
+            uniqueKeysWithValues: browserContentRows.compactMap {
+            row -> (BrowserContentID, BrowserContentRecordValue)? in
+            guard let id = UUID(uuidString: row.id) else { return nil }
+            return (BrowserContentID(id), BrowserContentRecordValue(
+                id: BrowserContentID(id), worktreeID: worktreeID,
+                url: row.url, title: row.title))
+        })
         return RestoredWorkspace(layout: result.layout, tabs: referencedTabs,
+                                 browserContents: browserContents,
                                  revision: finalRevision, diagnostics: deduplicate(diagnostics))
     }
 
     private func makeTab(row: WorkspaceTabRecord, worktreeID: UUID,
-                         contents: [TerminalContentRecord]) -> WorkspaceTab? {
+                         contents: [TerminalContentRecord],
+                         browserContents: [BrowserContentRecord]) -> WorkspaceTab? {
         let tabID = UUID(uuidString: row.id).map(WorkspaceTabID.init)
         guard let tabID else { return nil }
         let viewState = row.viewStateJSON.flatMap { data in
@@ -359,6 +406,13 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
             content = .document(
                 DocumentID.make(worktreeID: worktreeID, fileURL: URL(fileURLWithPath: row.contentId)),
                 editor: viewState.editorMode ?? .code)
+        case WorkspaceContentKind.browser.rawValue:
+            guard let contentUUID = UUID(uuidString: row.contentId),
+                  browserContents.contains(where: {
+                      UUID(uuidString: $0.id) == contentUUID
+                      && $0.worktreeId == worktreeID.uuidString
+                  }) else { return nil }
+            content = .browser(BrowserContentID(contentUUID))
         default:
             return nil
         }
@@ -460,8 +514,17 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
                     .filter(Column("worktreeId") == worktreeID.uuidString).fetchAll(db)
                 let contents = try TerminalContentRecord
                     .filter(Column("worktreeId") == worktreeID.uuidString).fetchAll(db)
+                let browserContents: [BrowserContentRecord]
+                if try db.tableExists(BrowserContentRecord.databaseTableName) {
+                    browserContents = try BrowserContentRecord
+                        .filter(Column("worktreeId") == worktreeID.uuidString).fetchAll(db)
+                } else {
+                    browserContents = []
+                }
                 let validRows = rows.compactMap { row -> WorkspaceTabID? in
-                    guard let id = UUID(uuidString: row.id), makeTab(row: row, worktreeID: worktreeID, contents: contents) != nil else { return nil }
+                    guard let id = UUID(uuidString: row.id),
+                          makeTab(row: row, worktreeID: worktreeID,
+                                  contents: contents, browserContents: browserContents) != nil else { return nil }
                     return WorkspaceTabID(id)
                 }
                 return Set(validRows) == tabIDs

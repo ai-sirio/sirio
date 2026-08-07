@@ -31,6 +31,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
 
     private var worktrees: [UUID: Worktree] = [:]
     private var gates: [UUID: WorktreeCommitGate] = [:]
+    private var browserContents: [UUID: [BrowserContentID: BrowserContentRecordValue]] = [:]
 
     init(persistence: WorkspaceLayoutPersistence, registry: WorkspaceContentRegistry,
          adapters: [WorkspaceContentKind: WorkspaceContentAdapter],
@@ -82,6 +83,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         }
 
         let restored = await persistence.restore(worktreeID: worktree.id)
+        browserContents[worktree.id] = restored.browserContents
         let layout = materialize(restored)
         layouts[worktree.id] = layout
         revisions[worktree.id] = restored.revision
@@ -358,6 +360,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         worktrees[worktree.id] = worktree
         do {
             try await persistence.purge(worktreeID: worktree.id)
+            browserContents.removeValue(forKey: worktree.id)
             pendingCleanupObligations.remove(worktree.id)
         } catch {
             pendingCleanupObligations.insert(worktree.id)
@@ -491,7 +494,8 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
                 worktreeID: worktree.id, revision: revision,
                 snapshot: WorkspaceSnapshot(layout: transition.layout),
                 tabs: transition.layout.allTabs,
-                terminalContents: terminalRecords(in: transition.layout, worktreeID: worktree.id))
+                terminalContents: terminalRecords(in: transition.layout, worktreeID: worktree.id),
+                browserContents: browserRecords(in: transition.layout, worktreeID: worktree.id))
             SignpostMetrics.endInterval("workspaceStructuralCommit", commitSignpost)
             return true
         } catch {
@@ -524,6 +528,17 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
             guard case .terminal(let id) = tab.content else { return nil }
             return TerminalContentRecordValue(
                 id: id, worktreeID: worktreeID, launchKind: .shell, commandJSON: nil)
+        }
+    }
+
+    private func browserRecords(in layout: WorkspaceLayout, worktreeID: UUID)
+        -> [BrowserContentRecordValue] {
+        let restoredRecords = browserContents[worktreeID] ?? [:]
+        return layout.allTabs.compactMap { tab in
+            guard case .browser(let id) = tab.content,
+                  let restored = restoredRecords[id] else { return nil }
+            return BrowserContentRecordValue(
+                id: id, worktreeID: worktreeID, url: restored.url, title: tab.title)
         }
     }
 

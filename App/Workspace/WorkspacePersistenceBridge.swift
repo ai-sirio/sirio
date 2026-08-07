@@ -19,13 +19,15 @@ final class WorkspacePersistenceBridge: WorkspaceLayoutPersistence, @unchecked S
 
     func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
                           tabs: [WorkspaceTab],
-                          terminalContents: [TerminalContentRecordValue]) async throws {
+                          terminalContents: [TerminalContentRecordValue],
+                          browserContents: [BrowserContentRecordValue]) async throws {
         guard let delegate = currentDelegate() else {
             throw WorkspacePersistenceError.invalidRecord
         }
         try await delegate.commitStructural(
             worktreeID: worktreeID, revision: revision, snapshot: snapshot,
-            tabs: tabs, terminalContents: terminalContents)
+            tabs: tabs, terminalContents: terminalContents,
+            browserContents: browserContents)
     }
 
     func checkpoint(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot) async {

@@ -14,7 +14,8 @@ final class FakeWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked Sen
     }
 
     func commitStructural(worktreeID: UUID, revision: Int, snapshot: WorkspaceSnapshot,
-                          tabs: [WorkspaceTab], terminalContents: [TerminalContentRecordValue]) async throws {
+                          tabs: [WorkspaceTab], terminalContents: [TerminalContentRecordValue],
+                          browserContents: [BrowserContentRecordValue]) async throws {
         if let structuralError { throw structuralError }
         structuralCommits.append((worktreeID, revision, snapshot))
     }
