@@ -32,12 +32,20 @@ public final class WorkspaceViewController: NSViewController {
         view = NSView()
     }
 
-    public func update(layout: WorkspaceLayout, delta: WorkspaceLayoutDelta?) {
+    override public func viewWillDisappear() {
+        super.viewWillDisappear()
+        reconciler.setVisible(false)
+    }
+
+    public func update(
+        layout: WorkspaceLayout, delta: WorkspaceLayoutDelta?, isVisible: Bool = true
+    ) {
         _ = view
         attachRootIfNeeded()
         currentLayout = layout
         let reconcileSignpost = SignpostMetrics.beginInterval("workspaceReconcile")
         reconciler.reconcile(to: layout, delta: delta)
+        reconciler.setVisible(isVisible)
         SignpostMetrics.endInterval("workspaceReconcile", reconcileSignpost)
         view.needsLayout = true
     }

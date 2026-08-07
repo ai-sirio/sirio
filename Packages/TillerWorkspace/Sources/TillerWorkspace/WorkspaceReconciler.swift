@@ -102,6 +102,10 @@ public final class WorkspaceReconciler {
         }
     }
 
+    public func setVisible(_ isVisible: Bool) {
+        groupControllers.values.forEach { $0.setWorkspaceVisible(isVisible) }
+    }
+
     private func build(_ node: LayoutNode, in layout: WorkspaceLayout) -> NSViewController {
         switch node {
         case .group(let id):

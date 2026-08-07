@@ -596,6 +596,7 @@ struct ContentView: View {
                     WorkspaceView(
                         layout: layout,
                         delta: isSelected ? workspaceCoordinator.lastSemanticDelta : nil,
+                        isVisible: isSelected,
                         hostProvider: workspaceCoordinator,
                         intentSink: WorkspaceIntentRouter(
                             coordinator: workspaceCoordinator, worktree: worktree),

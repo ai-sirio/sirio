@@ -19,6 +19,9 @@ final class BrowserContentAdapter: WorkspaceContentAdapter {
     private var initialURLs: [BrowserContentID: String] = [:]
     private var contentWorktreeIDs: [BrowserContentID: UUID] = [:]
     private var drivingStates: [BrowserContentID: BrowserDrivingState] = [:]
+    private let surfaceBudget = BrowserSurfaceBudget()
+    private var surfaceEvictors: [BrowserContentID: () -> Void] = [:]
+    private var surfaceRestorers: [BrowserContentID: (String) -> Void] = [:]
 
     /// The coordinator owns persistence and tab titles. The adapter reports
     /// every committed page change through this callback, including changes
@@ -61,20 +64,25 @@ final class BrowserContentAdapter: WorkspaceContentAdapter {
                 tabID: tab.id, viewController: NSViewController())
         }
         let surface = surface(for: contentID)
-        surface.onPageChange = { [weak self] page in
-            self?.recordPage(page, for: tab.id, contentID: contentID)
+        configurePageChange(for: surface, tabID: tab.id, contentID: contentID)
+        let initialURL = persistedURL(for: contentID) ?? "about:blank"
+        surfaceBudget.register(contentID, persistedURL: initialURL)
+        let viewController = NSHostingController<AnyView>(
+            rootView: AnyView(browserPaneView(
+                tabID: tab.id, contentID: contentID, surface: surface, initialURL: initialURL)))
+        surfaceEvictors[contentID] = { [weak self, weak viewController] in
+            self?.evict(contentID: contentID, viewController: viewController)
         }
-        let initialURL = initialURLs[contentID] ?? restoredRecords[contentID]?.url
-        let viewController = NSHostingController(
-            rootView: BrowserPaneView(
-                tabID: tab.id,
-                surface: surface,
-                initialURL: initialURL,
-                drivingState: drivingState(for: contentID),
-                onPageChange: nil))
+        surfaceRestorers[contentID] = { [weak self, weak viewController] url in
+            self?.restore(contentID: contentID, url: url, viewController: viewController)
+        }
         return WorkspaceContentHostAdapter(
             tabID: tab.id,
             viewController: viewController,
+            visibility: { [weak self, weak viewController] isVisible in
+                self?.setVisible(
+                    contentID: contentID, isVisible: isVisible, viewController: viewController)
+            },
             focus: { _ in
                 surface.webView.window?.makeFirstResponder(surface.webView)
                 return true
@@ -97,6 +105,9 @@ final class BrowserContentAdapter: WorkspaceContentAdapter {
         tabs.removeValue(forKey: tab.id)
         worktreeIDs.removeValue(forKey: tab.id)
         surfaces.removeValue(forKey: contentID)
+        surfaceBudget.remove(contentID)
+        surfaceEvictors.removeValue(forKey: contentID)
+        surfaceRestorers.removeValue(forKey: contentID)
         contentWorktreeIDs.removeValue(forKey: contentID)
         liveRecords.removeValue(forKey: contentID)
         restoredRecords.removeValue(forKey: contentID)
@@ -186,6 +197,7 @@ final class BrowserContentAdapter: WorkspaceContentAdapter {
 
     func withAgentCommand<T>(contentID: BrowserContentID, operation: () async throws -> T)
         async throws -> T {
+        try await attachAgent(to: contentID)
         let state = drivingState(for: contentID)
         state.isAgentDriving = true
         defer { state.isAgentDriving = false }
@@ -243,12 +255,95 @@ final class BrowserContentAdapter: WorkspaceContentAdapter {
             url: page.url.absoluteString,
             title: page.title.isEmpty ? "Browser" : page.title)
         liveRecords[contentID] = record
+        surfaceBudget.updatePersistedURL(record.url, for: contentID)
         if let faviconURL = page.faviconURL {
             faviconURLs[contentID] = faviconURL
         } else {
             faviconURLs.removeValue(forKey: contentID)
         }
         onPageChange?(tabID, page)
+    }
+
+    /// A hidden worktree is where an agent normally works while the human looks
+    /// somewhere else, so the budget must not reclaim a surface underneath a
+    /// running loop. If it was already reclaimed before any agent touched it,
+    /// the page it held is loaded back first: otherwise the agent would get
+    /// `navigation_unavailable` from a blank surface, with no way to learn even
+    /// the URL it lost.
+    private func attachAgent(to contentID: BrowserContentID) async throws {
+        let url = persistedURL(for: contentID) ?? "about:blank"
+        guard case .reload(let reloadURL) =
+                surfaceBudget.attachAgent(contentID, persistedURL: url) else { return }
+        surfaceRestorers[contentID]?(reloadURL)
+        _ = try await surface(for: contentID).open(reloadURL)
+    }
+
+    private func persistedURL(for contentID: BrowserContentID) -> String? {
+        liveRecords[contentID]?.url
+            ?? restoredRecords[contentID]?.url
+            ?? initialURLs[contentID]
+    }
+
+    private func configurePageChange(
+        for surface: BrowserSurface, tabID: WorkspaceTabID, contentID: BrowserContentID
+    ) {
+        surface.onPageChange = { [weak self] page in
+            self?.recordPage(page, for: tabID, contentID: contentID)
+        }
+    }
+
+    private func browserPaneView(
+        tabID: WorkspaceTabID, contentID: BrowserContentID,
+        surface: BrowserSurface, initialURL: String
+    ) -> BrowserPaneView {
+        BrowserPaneView(
+            tabID: tabID,
+            surface: surface,
+            initialURL: initialURL,
+            drivingState: drivingState(for: contentID),
+            onPageChange: nil)
+    }
+
+    private func setVisible(
+        contentID: BrowserContentID, isVisible: Bool,
+        viewController: NSHostingController<AnyView>?
+    ) {
+        if isVisible {
+            guard let activation = surfaceBudget.activate(contentID) else { return }
+            if case .reload(let url) = activation {
+                restore(contentID: contentID, url: url, viewController: viewController)
+            }
+            return
+        }
+
+        for evictedID in surfaceBudget.deactivate(contentID) {
+            surfaceEvictors[evictedID]?()
+        }
+    }
+
+    /// Rebuilds a reclaimed surface and its hosted view. Shared by the human
+    /// path (a pane becoming visible again) and the agent path, so a surface can
+    /// never come back live for one of them and stay blank for the other.
+    private func restore(
+        contentID: BrowserContentID, url: String,
+        viewController: NSHostingController<AnyView>?
+    ) {
+        guard let tabID = tabs.first(where: { $0.value.content == .browser(contentID) })?.key
+        else { return }
+        let surface = surface(for: contentID)
+        configurePageChange(for: surface, tabID: tabID, contentID: contentID)
+        viewController?.rootView = AnyView(browserPaneView(
+            tabID: tabID, contentID: contentID, surface: surface, initialURL: url))
+    }
+
+    private func evict(
+        contentID: BrowserContentID, viewController: NSHostingController<AnyView>?
+    ) {
+        surfaces[contentID]?.stop()
+        surfaces.removeValue(forKey: contentID)
+        // Replacing the hosted root releases the evicted WKWebView even though
+        // the workspace host remains cached for a later visible transition.
+        viewController?.rootView = AnyView(EmptyView())
     }
 
 }
