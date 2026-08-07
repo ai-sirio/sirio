@@ -48,4 +48,21 @@ public enum BrowserError: Error, Equatable, Sendable, LocalizedError {
         if let hint { return code.rawValue + ": " + hint }
         return code.rawValue
     }
+
+    /// Text for the chrome bar. `errorDescription` stays the machine code the
+    /// socket API reports to agents: an agent acts on the code, a human reads
+    /// the sentence, and collapsing the two registers serves neither.
+    public var userMessage: String {
+        switch self {
+        case .surfaceNotFound: "This browser surface is no longer available."
+        case .staleRef: "The page changed. Take a new snapshot before acting."
+        case .jsError(let hint): "The page rejected the script. " + hint
+        case .timeout: "The page took too long to respond."
+        case .notSupported: "That action is not supported here."
+        case .originDenied: "Permission for this site was denied."
+        case .invalidURL: "That address is not valid."
+        case .navigationUnavailable: "There is nowhere to go in that direction."
+        case .navigationFailed(let hint): hint
+        }
+    }
 }
