@@ -25,6 +25,7 @@ enum DocumentDetail: Equatable, Sendable { case available, dirty, conflicted, mi
 
 enum ContentRequest: Sendable, Equatable {
     case newTerminal(command: String?)
+    case newBrowser(url: String?)
     case agentTerminal(agentID: String)
     case newChat(agentID: String)
     case resumeChat(ChatContentID)

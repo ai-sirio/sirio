@@ -4,10 +4,12 @@ import Foundation
 public struct BrowserPage: Equatable, Sendable {
     public let url: URL
     public let title: String
+    public let faviconURL: URL?
 
-    public init(url: URL, title: String) {
+    public init(url: URL, title: String, faviconURL: URL? = nil) {
         self.url = url
         self.title = title
+        self.faviconURL = faviconURL
     }
 }
 

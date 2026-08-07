@@ -196,3 +196,92 @@ struct RestoreSession: ParsableCommand {
         print("restored \(response.result?["restored"] ?? "0") item(s)")
     }
 }
+
+enum BrowserNavigationAction: String, CaseIterable, ExpressibleByArgument {
+    case back, forward, reload
+}
+
+enum BrowserGetValue: String, CaseIterable, ExpressibleByArgument {
+    case url, text, html
+}
+
+enum BrowserIDFormat: String, CaseIterable, ExpressibleByArgument {
+    case uuids, both
+}
+
+struct Browser: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "browser",
+        abstract: "Open and read browser surfaces.",
+        subcommands: [Open.self, Navigate.self, Get.self, Screenshot.self])
+
+    struct Open: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument(help: "URL to open.") var url: String
+        @Option(name: .customLong("workspace")) var workspace: String?
+        @Option(name: .customLong("window")) var window: String?
+        @Option(name: .customLong("id-format")) var idFormat: BrowserIDFormat = .uuids
+        @OptionGroup var jsonFlag: JSONFlag
+
+        func run() throws {
+            let implicitWorkspace = workspace
+                ?? ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserOpen(
+                    url: url, workspace: implicitWorkspace, window: window,
+                    idFormat: idFormat == .uuids ? nil : idFormat.rawValue),
+                socket: socketOptions.socket)
+            printResult(
+                response, columns: ["surface", "surfaceRef", "url", "title"],
+                asJSON: jsonFlag.json)
+        }
+    }
+
+    struct Navigate: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Argument var action: BrowserNavigationAction
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserNavigate(
+                    surface: surface, action: action.rawValue, workspace: workspace),
+                socket: socketOptions.socket)
+            printResult(response, columns: ["url", "title"], asJSON: false)
+        }
+    }
+
+    struct Get: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Argument var what: BrowserGetValue
+        @Option var selector: String?
+        @OptionGroup var jsonFlag: JSONFlag
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserGet(
+                    surface: surface, what: what.rawValue, selector: selector,
+                    workspace: workspace),
+                socket: socketOptions.socket)
+            printResult(response, columns: ["value"], asJSON: jsonFlag.json)
+        }
+    }
+
+    struct Screenshot: ParsableCommand {
+        @OptionGroup var socketOptions: SocketOptions
+        @Argument var surface: String
+        @Option var path: String?
+
+        func run() throws {
+            let workspace = ProcessInfo.processInfo.environment["TILLER_WORKTREE_ID"]
+            let response = try roundTripOrDie(
+                TillerctlRequestBuilder.browserScreenshot(
+                    surface: surface, path: path, workspace: workspace),
+                socket: socketOptions.socket)
+            print(response.result?["path"] ?? "")
+        }
+    }
+}

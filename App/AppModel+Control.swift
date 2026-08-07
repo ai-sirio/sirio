@@ -3,6 +3,7 @@ import AppKit
 import TillerCore
 import TillerControl
 import TillerTerminal
+import TillerBrowser
 
 /// cmux-parity control methods. The core methods (panel.*, notify,
 /// session.ref, worktree.set) stay in AppModel.handleControl; everything
@@ -19,6 +20,7 @@ extension AppModel {
         "workspace.current", "workspace.close",
         "notification.create", "notification.list", "notification.clear",
         "session.restore",
+        "browser.open", "browser.navigate", "browser.get", "browser.screenshot",
     ]
 
     /// Re-apply the launch snapshot: remount worktree hosts and add back
@@ -171,6 +173,219 @@ extension AppModel {
         default:
             return .failure(id: request.id, error: "unknown method \(request.method)")
         }
+    }
+
+    func handleBrowserControl(_ request: ControlRequest) async -> ControlResponse {
+        guard WorkspaceEngineGate.isEnabled else {
+            return .failure(id: request.id, error: "browser requires the universal workspace")
+        }
+        guard let adapter = workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter else {
+            return .failure(id: request.id, error: "browser adapter unavailable")
+        }
+
+        guard let method = BrowserControlMethod(rawValue: request.method) else {
+            return .failure(id: request.id, error: "unknown browser method")
+        }
+        switch method {
+        case .open:
+            guard let url = request.params["url"], !url.isEmpty else {
+                return .failure(id: request.id, error: "missing url")
+            }
+            guard let worktree = browserWorktree(for: request) else {
+                return .failure(id: request.id, error: "no workspace context")
+            }
+            guard let group = await workspaceCoordinator.ensureGroup(for: worktree) else {
+                return .failure(id: request.id, error: "workspace layout unavailable")
+            }
+            let before = Set(workspaceCoordinator.layouts[worktree.id]?.allTabs.map(\.id) ?? [])
+            await workspaceCoordinator.requestNewTab(
+                into: group, choice: .newBrowser(url: nil), in: worktree)
+            guard let tab = workspaceCoordinator.layouts[worktree.id]?.allTabs.first(
+                where: { !before.contains($0.id) }),
+                  case .browser(let contentID) = tab.content else {
+                return .failure(id: request.id, error: "browser surface was not created")
+            }
+            _ = workspaceCoordinator.host(for: tab.id)
+            do {
+                let page = try await adapter.open(contentID: contentID, url: url)
+                await workspaceCoordinator.updateBrowserPage(
+                    tabID: tab.id, url: page.url.absoluteString, title: page.title, in: worktree)
+                guard let surface = browserSurfaceIdentifier(
+                    contentID: contentID, in: worktree.id, format: request.params["id-format"])
+                else {
+                    return .failure(id: request.id, error: "invalid id-format")
+                }
+                var result = [
+                    "surface": surface,
+                    "url": page.url.absoluteString,
+                    "title": page.title,
+                ]
+                if request.params["id-format"] == "both" {
+                    guard let surfaceRef = shortBrowserSurfaceIdentifier(
+                        contentID: contentID, in: worktree.id) else {
+                        return .failure(id: request.id, error: "surface ref unavailable")
+                    }
+                    result["surfaceRef"] = surfaceRef
+                }
+                return .success(id: request.id, result: result)
+            } catch {
+                await workspaceCoordinator.closeTab(tab.id, in: worktree)
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .navigate:
+            guard let action = request.params["action"] else {
+                return .failure(id: request.id, error: "missing action")
+            }
+            guard let navigation = BrowserCommand.Navigation(rawValue: action) else {
+                return .failure(
+                    id: request.id,
+                    error: "invalid_argument: action must be one of back, forward, reload")
+            }
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            _ = workspaceCoordinator.host(for: target.tab.id)
+            do {
+                let page = try await adapter.navigate(
+                    contentID: target.contentID, action: navigation)
+                await workspaceCoordinator.updateBrowserPage(
+                    tabID: target.tab.id, url: page.url.absoluteString,
+                    title: page.title, in: target.worktree)
+                return .success(id: request.id, result: [
+                    "url": page.url.absoluteString, "title": page.title,
+                ])
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .get:
+            guard let what = request.params["what"] else {
+                return .failure(id: request.id, error: "missing what")
+            }
+            guard let value = BrowserCommand.Get(rawValue: what) else {
+                return .failure(
+                    id: request.id,
+                    error: "invalid_argument: what must be one of url, text, html")
+            }
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            _ = workspaceCoordinator.host(for: target.tab.id)
+            do {
+                let value = try await adapter.get(
+                    contentID: target.contentID, value: value,
+                    selector: request.params["selector"])
+                return .success(id: request.id, result: ["value": value])
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        case .screenshot:
+            guard let target = browserTarget(
+                selector: request.params["surface"], request: request) else {
+                return .failure(id: request.id, error: "surface_not_found")
+            }
+            _ = workspaceCoordinator.host(for: target.tab.id)
+            do {
+                let path = try await adapter.screenshot(
+                    contentID: target.contentID, path: request.params["path"])
+                return .success(id: request.id, result: ["path": path])
+            } catch {
+                return browserErrorResponse(id: request.id, error: error)
+            }
+
+        }
+    }
+
+    private enum BrowserControlMethod {
+        case open, navigate, get, screenshot
+
+        init?(rawValue: String) {
+            if rawValue == "browser.open" { self = .open }
+            else if rawValue == "browser.navigate" { self = .navigate }
+            else if rawValue == "browser.get" { self = .get }
+            else if rawValue == "browser.screenshot" { self = .screenshot }
+            else { return nil }
+        }
+    }
+
+    private struct BrowserTarget {
+        let worktree: Worktree
+        let tab: WorkspaceTab
+        let contentID: BrowserContentID
+    }
+
+    private func browserWorktree(for request: ControlRequest) -> Worktree? {
+        if let selector = request.params["workspace"] {
+            return resolveWorktree(selector)
+        }
+        if let paneID = request.params["pane"].flatMap(UUID.init(uuidString:)),
+           let target = universalControlTarget(paneId: paneID) {
+            return target.worktree
+        }
+        return selectedWorktree
+    }
+
+    private func browserTarget(selector: String?, request: ControlRequest) -> BrowserTarget? {
+        guard let selector else { return nil }
+        let worktree = browserWorktree(for: request)
+        if let uuid = UUID(uuidString: selector) {
+            for candidate in worktrees.values.flatMap({ $0 }) {
+                guard let tab = workspaceCoordinator.layouts[candidate.id]?.allTabs.first(
+                    where: {
+                        guard case .browser(let contentID) = $0.content else { return false }
+                        return contentID.rawValue == uuid
+                    }),
+                    case .browser(let contentID) = tab.content else { continue }
+                return BrowserTarget(worktree: candidate, tab: tab, contentID: contentID)
+            }
+            return nil
+        }
+        guard selector.hasPrefix("surface:"),
+              let number = Int(selector.dropFirst("surface:".count)), number > 0,
+              let worktree,
+              let tabs = workspaceCoordinator.layouts[worktree.id]?.allTabs.filter({
+                  if case .browser = $0.content { return true }
+                  return false
+              }),
+              tabs.indices.contains(number - 1),
+              case .browser(let contentID) = tabs[number - 1].content else { return nil }
+        return BrowserTarget(worktree: worktree, tab: tabs[number - 1], contentID: contentID)
+    }
+
+    private func shortBrowserSurfaceIdentifier(contentID: BrowserContentID, in worktreeID: UUID)
+        -> String? {
+        let tabs = workspaceCoordinator.layouts[worktreeID]?.allTabs.filter {
+            if case .browser = $0.content { return true }
+            return false
+        } ?? []
+        guard let index = tabs.firstIndex(where: {
+            if case .browser(let id) = $0.content { return id == contentID }
+            return false
+        }) else { return nil }
+        return "surface:\(index + 1)"
+    }
+
+    private func browserSurfaceIdentifier(
+        contentID: BrowserContentID, in worktreeID: UUID, format: String?
+    ) -> String? {
+        if format == "short" {
+            return shortBrowserSurfaceIdentifier(contentID: contentID, in: worktreeID)
+        }
+        if format == nil || format == "uuids" || format == "both" {
+            return contentID.rawValue.uuidString
+        }
+        return nil
+    }
+
+    private func browserErrorResponse(id: String, error: Error) -> ControlResponse {
+        if let error = error as? BrowserError {
+            return .failure(id: id, error: error.errorDescription ?? error.code.rawValue)
+        }
+        return .failure(id: id, error: String(describing: error))
     }
 
     /// Caller context: env-provided worktree/pane ids win (a process inside

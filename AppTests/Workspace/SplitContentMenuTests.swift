@@ -28,6 +28,16 @@ struct SplitContentMenuTests {
         #expect(menu.defaultItem == .newTerminal)
     }
 
+    @Test func newBrowserIsAvailableOnlyForTheUniversalEngine() {
+        let tabs = [WorkspaceTabID(), WorkspaceTabID()]
+        let universal = makeMenu(tabs: tabs, workspaceEngineEnabled: true)
+        let legacy = makeMenu(tabs: tabs, workspaceEngineEnabled: false)
+
+        #expect(universal.items.first(where: { $0.id == "new-browser" })?.action == .newBrowser)
+        #expect(universal.items.first(where: { $0.id == "new-browser" })?.isEnabled == true)
+        #expect(legacy.items.first(where: { $0.id == "new-browser" })?.isEnabled == false)
+    }
+
     /// Closing is reachable from the pane's own right-click menu, not only from
     /// the tab's × and ⌘W, and it must close the tab the menu was opened on.
     @Test func closeTabIsOfferedForTheTabThatOpenedTheMenu() {
@@ -132,7 +142,8 @@ struct SplitContentMenuTests {
         sourceTabID: WorkspaceTabID = WorkspaceTabID(),
         tabs: [WorkspaceTabID] = [WorkspaceTabID()],
         installedAgents: [SplitMenuAgent] = [SplitMenuAgent(id: "codex", name: "Codex")],
-        resumedChats: [SplitMenuChat] = [SplitMenuChat(id: "session-1", title: "Review")]
+        resumedChats: [SplitMenuChat] = [SplitMenuChat(id: "session-1", title: "Review")],
+        workspaceEngineEnabled: Bool = true
     ) -> SplitContentMenuModel {
         SplitContentMenuModel(
             worktreeID: UUID(),
@@ -142,7 +153,8 @@ struct SplitContentMenuTests {
             groupSize: CGSize(width: 800, height: 600),
             placement: .right,
             installedAgents: installedAgents,
-            resumedChats: resumedChats)
+            resumedChats: resumedChats,
+            workspaceEngineEnabled: workspaceEngineEnabled)
     }
 
     private func layout(

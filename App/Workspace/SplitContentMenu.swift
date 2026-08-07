@@ -22,6 +22,7 @@ enum SplitContentMenuGroup: Equatable {
 
 enum SplitContentMenuAction: Equatable {
     case newTerminal
+    case newBrowser
     case agentTerminal(String)
     case newChat(String)
     case resumeChat(String)
@@ -62,7 +63,8 @@ struct SplitContentMenuModel: Equatable {
         groupSize: CGSize,
         placement: SplitPlacementSide,
         installedAgents: [SplitMenuAgent],
-        resumedChats: [SplitMenuChat]
+        resumedChats: [SplitMenuChat],
+        workspaceEngineEnabled: Bool = WorkspaceEngineGate.isEnabled
     ) {
         let activeGroup = layout.group(layout.activeGroupID)
         let eligibility = SplitEligibility.check(
@@ -129,6 +131,11 @@ struct SplitContentMenuModel: Equatable {
             SplitContentMenuItem(
                 id: "new-terminal", label: "New Terminal", action: .newTerminal,
                 isEnabled: splitEnabled, disabledReason: splitReason),
+            SplitContentMenuItem(
+                id: "new-browser", label: "New Browser", action: .newBrowser,
+                isEnabled: splitEnabled && workspaceEngineEnabled,
+                disabledReason: workspaceEngineEnabled
+                    ? splitReason : "Browser surfaces require the universal workspace."),
             SplitContentMenuItem(
                 id: "agent-terminal", label: "Agent Terminal", action: nil,
                 isEnabled: splitEnabled, disabledReason: splitReason),
@@ -238,12 +245,14 @@ struct SplitContentMenuItems: View {
         Group {
             Button("New Terminal") { onAction(.newTerminal) }
                 .disabled(!model.items[0].isEnabled)
+            Button("New Browser") { onAction(.newBrowser) }
+                .disabled(!model.items[1].isEnabled)
             Menu("Agent Terminal") {
                 ForEach(AgentCatalog.all, id: \.id) { agent in
                     Button(agent.displayName) { onAction(.agentTerminal(agent.id)) }
                 }
             }
-            .disabled(!model.items[1].isEnabled)
+            .disabled(!model.items[2].isEnabled)
             Divider()
             Menu("New Chat") {
                 ForEach(model.submenuItems[.newChat] ?? []) { item in
@@ -255,7 +264,7 @@ struct SplitContentMenuItems: View {
                     }
                 }
             }
-            .disabled(!model.items[3].isEnabled)
+            .disabled(!model.items[4].isEnabled)
             Menu("Resume Chat") {
                 ForEach(model.submenuItems[.resumeChat] ?? []) { item in
                     if let action = item.action {
@@ -266,9 +275,9 @@ struct SplitContentMenuItems: View {
                     }
                 }
             }
-            .disabled(!model.items[4].isEnabled)
+            .disabled(!model.items[5].isEnabled)
             Button("Open File…") { onAction(.openFile) }
-                .disabled(!model.items[5].isEnabled)
+                .disabled(!model.items[6].isEnabled)
             Divider()
             Menu("Move Existing Tab") {
                 let thisPane = model.moveTabIDs(in: .thisPane)
@@ -294,7 +303,7 @@ struct SplitContentMenuItems: View {
                     }
                 }
             }
-            .disabled(!model.items[7].isEnabled)
+            .disabled(!model.items[8].isEnabled)
             if let close = model.closeItem, let action = close.action {
                 Divider()
                 Button(close.label) { onAction(action) }

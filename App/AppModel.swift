@@ -253,7 +253,8 @@ final class AppModel {
             let adapters: [WorkspaceContentKind: any WorkspaceContentAdapter] = [
                 .terminal: TerminalContentAdapter(),
                 .chat: ChatContentAdapter(),
-                .document: DocumentContentAdapter()
+                .document: DocumentContentAdapter(),
+                .browser: BrowserContentAdapter()
             ]
             self.workspaceCoordinator = WorkspaceCoordinator(
                 persistence: bridge, registry: registry, adapters: adapters)
@@ -303,6 +304,18 @@ final class AppModel {
         (self.workspaceCoordinator.adapters[.terminal] as? TerminalContentAdapter)?
             .agentDisplayName = { agentId in
                 AgentCatalog.all.first { $0.id == agentId }?.displayName ?? agentId
+            }
+        (self.workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter)?
+            .onPageChange = { [weak self] tabID, page in
+                guard let self else { return }
+                guard let worktree = self.worktrees.values.flatMap({ $0 }).first(where: {
+                    self.workspaceCoordinator.layouts[$0.id]?.tab(tabID) != nil
+                }) else { return }
+                Task { @MainActor [weak self] in
+                    await self?.workspaceCoordinator.updateBrowserPage(
+                        tabID: tabID, url: page.url.absoluteString,
+                        title: page.title, in: worktree)
+                }
             }
         chatAdapter?.resolveTitle = { [weak self] contentID in
             let stored = self?.chatSession(id: contentID.rawValue)?.title?
@@ -599,6 +612,8 @@ final class AppModel {
     /// the @Sendable ControlServer.Handler bridge (Task { @MainActor in … }).
     func handleControl(_ request: ControlRequest) async -> ControlResponse {
         switch request.method {
+        case "browser.open", "browser.navigate", "browser.get", "browser.screenshot":
+            return await handleBrowserControl(request)
         case "panel.create":
             guard let selector = request.params["worktree"],
                   let worktree = resolveWorktree(selector) else {
@@ -1366,6 +1381,32 @@ final class AppModel {
         newShellTab(in: worktree)
     }
 
+    func newBrowserTab(in worktree: Worktree) {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        selectedWorktree = worktree
+        Task {
+            guard let group = await workspaceCoordinator.ensureGroup(for: worktree) else { return }
+            await workspaceCoordinator.requestNewTab(
+                into: group, choice: .newBrowser(url: nil), in: worktree)
+        }
+    }
+
+    func newBrowserTabInSelected() {
+        guard let worktree = selectedWorktree else { return }
+        newBrowserTab(in: worktree)
+    }
+
+    func focusBrowserAddressBar() {
+        guard WorkspaceEngineGate.isEnabled,
+              let worktree = selectedWorktree,
+              let adapter = workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter
+        else { return }
+        guard let layout = workspaceCoordinator.layouts[worktree.id],
+              let tabID = layout.group(layout.activeGroupID)?.activeTabID,
+              case .browser = layout.tab(tabID)?.content else { return }
+        adapter.focusAddressBar(tabID: tabID)
+    }
+
     /// Rimuove la tab (l'host smonta → onClose salva scrollback e pulisce i
     /// dizionari pane). When the tab list becomes empty the worktree shows
     /// the empty-state view; the user creates a new tab via ⌘T or the
@@ -1633,7 +1674,7 @@ final class AppModel {
         return nil
     }
 
-    private func universalControlTarget(
+    func universalControlTarget(
         paneId: UUID
     ) -> (worktree: Worktree, tab: WorkspaceTab)? {
         for worktree in worktrees.values.flatMap({ $0 }) {
@@ -2864,6 +2905,11 @@ final class AppModel {
             guard let tab = workspaceTabs(for: worktree.id).first(where: {
                 $0.activityPaneIds.contains(paneId)
             }) else { continue }
+            if WorkspaceEngineGate.isEnabled,
+               workspaceCoordinator.layouts[worktree.id]?.tab(WorkspaceTabID(tab.id))?.content.kind
+                    == .browser {
+                continue
+            }
             return (worktree, tab)
         }
         return nil

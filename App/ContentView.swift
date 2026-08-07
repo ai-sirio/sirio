@@ -447,6 +447,8 @@ struct ContentView: View {
             }
         case .newTerminal:
             requestUniversalSplit(.newTerminal(command: nil), anchor: anchor, worktree: worktree)
+        case .newBrowser:
+            requestUniversalSplit(.newBrowser(url: nil), anchor: anchor, worktree: worktree)
         case .agentTerminal(let agentID):
             requestUniversalSplit(.agentTerminal(agentID: agentID), anchor: anchor, worktree: worktree)
         case .newChat(let agentID):

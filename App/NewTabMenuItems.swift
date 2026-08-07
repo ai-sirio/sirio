@@ -44,6 +44,15 @@ struct NewTabMenuItems: View {
             }
         }
         Divider()
+        if WorkspaceEngineGate.isEnabled {
+            Button {
+                onBeforeAction()
+                model.newBrowserTab(in: worktree)
+            } label: {
+                Label("New Browser", systemImage: "globe")
+            }
+            Divider()
+        }
         NewChatMenuItems(model: model, worktree: worktree, onBeforeAction: onBeforeAction)
     .enableInjection()
     }

@@ -36,6 +36,10 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
                 workspaceCoordinator.liveControlPaneId(
                     contentID: $0, in: worktree.id)
             },
+            browserFaviconURL: { contentID in
+                (workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter)?
+                    .faviconURL(for: contentID)
+            },
             status: { appModel.agentActivity.statusForWorktree(paneIds: $0) },
             agentID: { appModel.agentActivity.agentIdForWorktree(paneIds: $0) })
     }
@@ -295,10 +299,16 @@ private struct PaneTabIcon: View {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
-            case .browser:
-                Image(systemName: "globe")
-                    .font(.system(size: 10))
-                    .foregroundStyle(AppTheme.meta)
+            case .browser(let faviconURL):
+                if let faviconURL {
+                    AsyncImage(url: faviconURL) { phase in
+                        if case .success(let image) = phase { image.resizable() }
+                        else { Image(systemName: "globe") }
+                    }
+                } else {
+                    Image(systemName: "globe")
+                        .foregroundStyle(AppTheme.meta)
+                }
             }
         }
     .enableInjection()

@@ -48,6 +48,28 @@ import Testing
     #expect(request.params == ["session": "S-1", "ref": "ses_1"])
 }
 
+@Test func browserRequestBuildersUseTheBrowserNamespaceAndContractKeys() {
+    let open = TillerctlRequestBuilder.browserOpen(
+        url: "http://127.0.0.1:4173", workspace: "worktree", window: nil)
+    #expect(open.method == "browser.open")
+    #expect(open.params == ["url": "http://127.0.0.1:4173", "workspace": "worktree"])
+
+    let navigate = TillerctlRequestBuilder.browserNavigate(
+        surface: "surface:1", action: "reload")
+    #expect(navigate.method == "browser.navigate")
+    #expect(navigate.params == ["surface": "surface:1", "action": "reload"])
+
+    let get = TillerctlRequestBuilder.browserGet(
+        surface: "surface:1", what: "text", selector: "main")
+    #expect(get.method == "browser.get")
+    #expect(get.params == ["surface": "surface:1", "what": "text", "selector": "main"])
+
+    let screenshot = TillerctlRequestBuilder.browserScreenshot(
+        surface: "surface:1", path: "/tmp/page.png")
+    #expect(screenshot.method == "browser.screenshot")
+    #expect(screenshot.params == ["surface": "surface:1", "path": "/tmp/page.png"])
+}
+
 
 @Test func workspaceBuilders() {
     #expect(TillerctlRequestBuilder.workspaceList().method == "workspace.list")

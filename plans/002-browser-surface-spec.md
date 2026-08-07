@@ -120,7 +120,16 @@ problema che la doc cmux descrive come la prima causa di errori degli agenti.
 ### Codici di errore
 
 `surface_not_found`, `stale_ref`, `js_error` (+ `hint`), `timeout`,
-`not_supported`, `origin_denied`, `invalid_url`.
+`not_supported`, `origin_denied`, `invalid_url`, `invalid_argument`.
+
+`invalid_argument` (aggiunto 2026-08-07 durante la Fase 4) è obbligatorio per
+un valore di parametro malformato o non supportato — `action`, `what`, e ogni
+enumerazione futura — e il messaggio deve nominare il parametro e i valori
+accettati. **Non** si collassa con `surface_not_found`: l'API è pilotata da
+agenti, e un agente agisce sul codice che riceve. Detto `surface_not_found`,
+va a cercare una surface che esiste invece di correggere l'argomento. Regola
+generale: un `guard` multi-binding il cui unico `else` unifica cause distinte
+è un difetto, non una scorciatoia di stile.
 
 `not_supported` è la risposta obbligatoria — non un errore generico — per:
 offline emulation, trace/screencast/record, network route/mock/intercept, raw
