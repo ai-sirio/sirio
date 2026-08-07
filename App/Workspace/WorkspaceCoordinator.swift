@@ -598,6 +598,51 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         return live ?? browserContents[worktreeID]?[contentID]
     }
 
+    /// Opens a human link in the worktree's first browser tab, creating the
+    /// tab only when that worktree has no browser surface yet. The surface is
+    /// deliberately reused across links instead of creating a tab per click.
+    @discardableResult
+    func openBrowserURL(_ url: String, in worktree: Worktree) async -> Bool {
+        worktrees[worktree.id] = worktree
+        guard let browserAdapter = adapters[.browser] as? BrowserContentAdapter else {
+            lastRecoverableError = "browser adapter unavailable"
+            return false
+        }
+
+        var browserTab = layouts[worktree.id]?.allTabs.first { tab in
+            if case .browser = tab.content { return true }
+            return false
+        }
+        if browserTab == nil {
+            guard let groupID = activeOrFirstGroup(for: worktree.id) else {
+                lastRecoverableError = "workspace layout unavailable"
+                return false
+            }
+            await requestNewTab(into: groupID, choice: .newBrowser(url: nil), in: worktree)
+            browserTab = layouts[worktree.id]?.allTabs.first { tab in
+                if case .browser = tab.content { return true }
+                return false
+            }
+        }
+
+        guard let browserTab,
+              case .browser(let contentID) = browserTab.content else {
+            lastRecoverableError = "browser surface was not created"
+            return false
+        }
+        await handle(.activateTab(browserTab.id), in: worktree)
+        do {
+            let page = try await browserAdapter.open(contentID: contentID, url: url)
+            await updateBrowserPage(
+                tabID: browserTab.id, url: page.url.absoluteString,
+                title: page.title, in: worktree)
+            return true
+        } catch {
+            lastRecoverableError = String(describing: error)
+            return false
+        }
+    }
+
     private func gate(for worktreeID: UUID) -> WorktreeCommitGate {
         if let gate = gates[worktreeID] { return gate }
         let gate = WorktreeCommitGate()

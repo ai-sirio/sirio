@@ -12,11 +12,18 @@ import AppKit
 import UserNotifications
 import OSLog
 
+enum LinkNavigationOrigin: Equatable {
+    case humanGesture(modifiers: NSEvent.ModifierFlags)
+    case agentAction
+}
+
 @MainActor
 @Observable
 final class AppModel {
     let workspaceCoordinator: WorkspaceCoordinator
     private let workspacePersistenceBridge: WorkspacePersistenceBridge
+    private let openSystemURL: @MainActor (URL) -> Void
+    private let currentEventModifiers: @MainActor () -> NSEvent.ModifierFlags
 
     var projects: [Project] = []
     var worktrees: [UUID: [Worktree]] = [:]
@@ -230,6 +237,12 @@ final class AppModel {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
         },
+        openSystemURL: @escaping @MainActor (URL) -> Void = { url in
+            NSWorkspace.shared.open(url)
+        },
+        currentEventModifiers: @escaping @MainActor () -> NSEvent.ModifierFlags = {
+            NSApp.currentEvent?.modifierFlags ?? []
+        },
         controlTabPersister: ControlTabPersister? = nil,
         defaults: UserDefaults = .standard,
         foregroundProcessScanner: ForegroundProcessScanner? = nil,
@@ -241,6 +254,8 @@ final class AppModel {
         self.registrationTimeoutMs = registrationTimeoutMs
         self.paneIdGenerator = paneIdGenerator
         self.activateApplication = activateApplication
+        self.openSystemURL = openSystemURL
+        self.currentEventModifiers = currentEventModifiers
         self.controlTabPersister = controlTabPersister
         self.defaults = defaults
         self.persistenceCoordinator = persistenceCoordinator
@@ -304,6 +319,10 @@ final class AppModel {
         (self.workspaceCoordinator.adapters[.terminal] as? TerminalContentAdapter)?
             .agentDisplayName = { agentId in
                 AgentCatalog.all.first { $0.id == agentId }?.displayName ?? agentId
+            }
+        (self.workspaceCoordinator.adapters[.terminal] as? TerminalContentAdapter)?
+            .onOpenURL = { [weak self] raw, worktree, modifiers in
+                self?.handleTerminalOpenURL(raw, in: worktree, modifiers: modifiers)
             }
         (self.workspaceCoordinator.adapters[.browser] as? BrowserContentAdapter)?
             .onPageChange = { [weak self] tabID, page in
@@ -2427,10 +2446,52 @@ final class AppModel {
         saveActiveDocument()
     }
 
-    /// Link attivato (cmd+click) in un pane del terminale: file markdown →
-    /// tab editor nel worktree del pane; tutto il resto → apertura di sistema.
+    /// Shared human-link policy for terminal and chat links. The terminal
+    /// callback and chat markdown delegate both enter here so HTTP routing,
+    /// the system-browser escape hatch, and file handling cannot drift apart.
     func handleTerminalOpenURL(_ raw: String, in worktree: Worktree) {
-        openFileReference(raw, in: worktree)
+        handleTerminalOpenURL(raw, in: worktree, modifiers: currentEventModifiers())
+    }
+
+    private func handleTerminalOpenURL(_ raw: String, in worktree: Worktree,
+                                       modifiers: NSEvent.ModifierFlags) {
+        routeLink(raw, in: worktree, origin: .humanGesture(modifiers: modifiers))
+    }
+
+    /// Entry point reserved for navigation initiated by a browser control
+    /// action. Non-HTTP schemes must never become arbitrary app launchers.
+    func handleAgentOpenURL(_ raw: String, in worktree: Worktree) {
+        routeLink(raw, in: worktree, origin: .agentAction)
+    }
+
+    private func routeLink(_ raw: String, in worktree: Worktree,
+                           origin: LinkNavigationOrigin) {
+        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased() else {
+            openFileReference(raw, in: worktree)
+            return
+        }
+
+        if scheme == "http" || scheme == "https" {
+            if case .humanGesture(let modifiers) = origin,
+               modifiers.contains([.command, .shift]) {
+                openSystemURL(url)
+                return
+            }
+            selectedWorktree = worktree
+            Task { @MainActor [weak self] in
+                await self?.workspaceCoordinator.openBrowserURL(
+                    url.absoluteString, in: worktree)
+            }
+        } else if scheme == "file" {
+            openFileReference(raw, in: worktree)
+        } else {
+            switch origin {
+            case .humanGesture:
+                openSystemURL(url)
+            case .agentAction:
+                NSLog("Tiller ignored agent-originated non-HTTP URL: %@", raw)
+            }
+        }
     }
 
     /// File > Open File… (⌘O): NSOpenPanel in the selected worktree.

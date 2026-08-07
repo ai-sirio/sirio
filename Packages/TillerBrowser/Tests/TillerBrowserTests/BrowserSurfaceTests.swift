@@ -59,6 +59,38 @@ import TillerBrowser
         #expect(overrideSurface.webView.customUserAgent == "Tiller test agent")
     }
 
+    @Test func targetBlankNavigationStaysOnTheSameSurface() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-browser-target-blank-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let destination = directory.appendingPathComponent("destination.html")
+        let source = directory.appendingPathComponent("source.html")
+        try "<html><head><title>Destination</title></head><body>destination</body></html>"
+            .write(to: destination, atomically: true, encoding: .utf8)
+        try "<a href=\"\(destination.absoluteString)\" target=\"_blank\">Open</a>"
+            .write(to: source, atomically: true, encoding: .utf8)
+
+        let surface = BrowserSurface(dataStore: .nonPersistent())
+        let destinationLoaded = Task { @MainActor in
+            await withCheckedContinuation { continuation in
+                surface.onPageChange = { page in
+                    if page.url == destination {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+        _ = try await surface.open(source)
+        _ = try await surface.webView.evaluateJavaScript("document.querySelector('a').click()")
+        await destinationLoaded.value
+
+        #expect(try await surface.get(.url) == destination.absoluteString)
+        #expect(surface.webView.uiDelegate === surface)
+    }
+
     private func makeFixture() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tiller-browser-\(UUID().uuidString).html")

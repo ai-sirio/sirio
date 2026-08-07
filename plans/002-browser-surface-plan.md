@@ -237,6 +237,21 @@ resolver al namespace nuovo o fermarsi.
    e accoda in un buffer limitato.
 6. Tabella `not_supported` (D17 + non-obiettivi): ogni verbo elencato risponde
    `not_supported`, mai un successo silenzioso.
+7. **Obbligo ereditato dalla Fase 5** (debito noto, non opzionale):
+   `AppModel.handleAgentOpenURL` esiste ed è il punto in cui le navigazioni
+   originate da un agente vengono classificate `.agentAction` — oggi però è
+   chiamato **solo da un test**, perché il suo chiamante di produzione nasce
+   qui. Ogni navigazione che un agente può innescare (`eval` che scrive
+   `location.href`, `browser.act` su un anchor, redirect indotto) deve passare
+   da quella policy: se la Fase 6 instrada altrove, il divieto D20 sugli URL
+   scheme resta scritto e aggirato, e `eval` torna a essere un lanciatore di app
+   arbitrarie. Verifica: un `eval` che imposta `location.href = "mailto:…"` o
+   uno schema custom **non** deve raggiungere l'opener di sistema — asserito con
+   l'opener iniettato, non a occhio.
+   Nota residua da valutare qui: lato browser il non-http umano è permesso solo
+   per `WKNavigationType.linkActivated`; va verificato che un click sintetico
+   prodotto da JS non venga classificato `.linkActivated`, altrimenti la
+   distinzione umano/agente cade proprio nel caso che deve fermare.
 
 **Verifica**
 ```bash

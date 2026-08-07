@@ -64,8 +64,9 @@ final class MarkdownTextView: NSTextView {
 /// enclosing `ScrollView`, matching how `Markdown(text)` behaved before it.
 struct AgentMarkdownTextView: NSViewRepresentable {
     var markdown: String
+    var onOpenURL: ((URL) -> Void)? = nil
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     @MainActor
     static func makeTextView() -> MarkdownTextView {
@@ -90,6 +91,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSTextView {
         let textView = Self.makeTextView()
         let coordinator = context.coordinator
+        textView.delegate = coordinator
         textView.onAppearanceChanged = { [weak textView] in
             guard let textView, let source = coordinator.lastRenderedSource else { return }
             textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(source))
@@ -103,6 +105,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ textView: NSTextView, context: Context) {
+        context.coordinator.parent = self
         guard context.coordinator.lastRenderedSource != markdown else { return }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         (textView as? MarkdownTextView)?.rebuildCodeBlockHeaders()
@@ -151,9 +154,28 @@ struct AgentMarkdownTextView: NSViewRepresentable {
         return CGSize(width: width, height: height)
     }
 
-    final class Coordinator {
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: AgentMarkdownTextView
         var lastRenderedSource: String?
         var measuredWidth: CGFloat?
         var measuredHeight: CGFloat?
+
+        init(parent: AgentMarkdownTextView) {
+            self.parent = parent
+        }
+
+        func textView(_ textView: NSTextView, clickedOnLink link: Any, at _: Int) -> Bool {
+            let resolvedURL: URL?
+            if let url = link as? URL {
+                resolvedURL = url
+            } else if let nsURL = link as? NSURL {
+                resolvedURL = nsURL as URL
+            } else {
+                resolvedURL = nil
+            }
+            guard let resolvedURL else { return false }
+            parent.onOpenURL?(resolvedURL)
+            return true
+        }
     }
 }

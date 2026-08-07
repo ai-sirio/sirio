@@ -10,6 +10,76 @@ import TillerWorkspace
 @Suite(.serialized)
 @MainActor
 struct AppModelControlTests {
+    @Test func terminalOpenURLRoutesHTTPToBrowserWithoutRegressingMarkdownAndCodeLinks() async throws {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiller-terminal-links-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let markdownURL = directory.appendingPathComponent("README.md")
+        let codeURL = directory.appendingPathComponent("Sources.swift")
+        try "# Readme\n".write(to: markdownURL, atomically: true, encoding: .utf8)
+        try "let value = 1\n".write(to: codeURL, atomically: true, encoding: .utf8)
+
+        let worktree = makeWorktree(path: directory.path)
+        let coordinator = WorkspaceCoordinator(
+            persistence: ControlWorkspacePersistence(),
+            registry: WorkspaceContentRegistry(),
+            adapters: [
+                .document: DocumentContentAdapter(),
+                .browser: BrowserContentAdapter()
+            ])
+        let model = AppModel(
+            paneRegistry: PaneRegistry(), registrationTimeoutMs: 100,
+            workspaceCoordinator: coordinator)
+        model.worktrees = [worktree.projectId: [worktree]]
+        await coordinator.restore(worktree: worktree)
+
+        model.handleTerminalOpenURL(markdownURL.path, in: worktree)
+        let markdownTabs = try await waitForUniversalTabs(model, worktreeID: worktree.id, count: 1)
+        model.handleTerminalOpenURL(codeURL.path, in: worktree)
+        let documentTabs = try await waitForUniversalTabs(model, worktreeID: worktree.id, count: 2)
+
+        model.handleTerminalOpenURL("http://127.0.0.1:4173/fixture", in: worktree)
+        let allTabs = try await waitForUniversalTabs(model, worktreeID: worktree.id, count: 3)
+        model.handleTerminalOpenURL("https://127.0.0.1:4173/second", in: worktree)
+        try await Task.sleep(for: .milliseconds(50))
+        let reusedTabs = model.workspaceCoordinator.layouts[worktree.id]?.allTabs ?? []
+
+        #expect(markdownTabs.contains { tab in
+            if case .document(_, .markdown) = tab.content { return true }
+            return false
+        })
+        #expect(documentTabs.contains { tab in
+            if case .document(_, .code) = tab.content { return true }
+            return false
+        })
+        #expect(allTabs.filter {
+            if case .browser = $0.content { return true }
+            return false
+        }.count == 1)
+        #expect(reusedTabs.filter {
+            if case .browser = $0.content { return true }
+            return false
+        }.count == 1)
+    }
+
+    @Test func humanShiftCommandUsesSystemBrowserAndAgentSchemesAreIgnored() async throws {
+        var systemURLs: [URL] = []
+        let model = AppModel(
+            paneRegistry: PaneRegistry(), registrationTimeoutMs: 100,
+            openSystemURL: { systemURLs.append($0) },
+            currentEventModifiers: { [.command, .shift] })
+        let worktree = makeWorktree(path: "/tmp/phase5-d20")
+        model.worktrees = [worktree.projectId: [worktree]]
+
+        model.handleTerminalOpenURL("https://example.test/escape", in: worktree)
+        model.handleAgentOpenURL("mailto:agent@example.test", in: worktree)
+
+        #expect(systemURLs.map(\.absoluteString) == ["https://example.test/escape"])
+    }
+
     /// Title provenance: a manual rename is the user's word and must stop
     /// auto-naming from overwriting it; an auto title must not claim to be
     /// the user's.
@@ -126,6 +196,16 @@ struct AppModelControlTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         return try #require(model.workspaceCoordinator.layouts[worktree.id]?.tab(id))
+    }
+
+    private func waitForUniversalTabs(_ model: AppModel, worktreeID: UUID, count: Int) async throws
+        -> [WorkspaceTab] {
+        for _ in 0..<200 {
+            let tabs = model.workspaceCoordinator.layouts[worktreeID]?.allTabs ?? []
+            if tabs.count >= count { return tabs }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return try #require(model.workspaceCoordinator.layouts[worktreeID]?.allTabs)
     }
 
     @Test func panelCreateWithTheEngineEnabledResolvesThroughLiveControlPaneId() async {
