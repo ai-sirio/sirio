@@ -251,11 +251,7 @@ struct WindowChromeConfigurator: NSViewRepresentable {
         let token = context.coordinator.token
         DispatchQueue.main.async {
             guard let window = view.window else { return }
-            window.styleMask.insert(.fullSizeContentView)
-            window.titlebarAppearsTransparent = true
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.isMovableByWindowBackground = true
+            configureWindowSurface(window)
             window.installHideOnClose()
             host.install(on: window, token: token)
             let content = configuration()
@@ -274,6 +270,15 @@ struct WindowChromeConfigurator: NSViewRepresentable {
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.host.removeFromOwnerWindow(token: coordinator.token)
     }
+}
+
+@MainActor
+func configureWindowSurface(_ window: NSWindow) {
+    window.styleMask.insert(.fullSizeContentView)
+    window.titlebarAppearsTransparent = true
+    window.isOpaque = false
+    window.backgroundColor = .clear
+    window.isMovableByWindowBackground = false
 }
 
 extension View {

@@ -70,6 +70,23 @@ struct WindowChromeConfiguratorTests {
         #expect(host.trailingHostingView?.frame.size == CGSize(width: 3 * 24 + 2 * 2, height: 28))
     }
 
+    @Test func configuredWindowDoesNotMoveFromContentBackground() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.isMovableByWindowBackground = true
+
+        configureWindowSurface(window)
+
+        #expect(window.styleMask.contains(.fullSizeContentView))
+        #expect(window.titlebarAppearsTransparent)
+        #expect(window.isOpaque == false)
+        #expect(window.backgroundColor == .clear)
+        #expect(window.isMovableByWindowBackground == false)
+    }
+
     @Test func installingOnReplacementWindowMovesAccessoriesAndResetsEvidence() {
         let firstWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
                                    styleMask: [.titled, .closable, .resizable],

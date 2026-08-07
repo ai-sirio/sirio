@@ -4,6 +4,22 @@ import TillerCore
 import TillerGit
 import Inject
 
+private struct FileExplorerRowSelectionModifier: ViewModifier {
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            TapGesture(count: 1).onEnded { action() }
+        )
+    }
+}
+
+extension View {
+    func fileExplorerRowSelection(action: @escaping () -> Void) -> some View {
+        modifier(FileExplorerRowSelectionModifier(action: action))
+    }
+}
+
 struct FileExplorerView: View {
     @ObserveInjection private var inject
 
@@ -125,7 +141,7 @@ struct FileExplorerView: View {
         .draggable(dragURL(for: node) ?? URL(fileURLWithPath: "/"))
         .background(selected ? AppTheme.selectionFill : Color.clear,
                     in: RoundedRectangle(cornerRadius: 6))
-        .onTapGesture {
+        .fileExplorerRowSelection {
             selectedPath = node.relativePath
             treeFocused = true
             if node.kind.isDirectory {
