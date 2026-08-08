@@ -177,6 +177,7 @@
 		B06792596CFB40A69FE0208C /* StreamingAgentTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20E0E47DA51DA07F6C377AA5 /* StreamingAgentTextView.swift */; };
 		B1258A82727276A21A471066 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8B09A03733A33C9FDC925A05 /* Assets.xcassets */; };
 		B206B595F9AAEDAF00229BB6 /* AgentMessageSegmenterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED03CEB488EC73CF13DB8645 /* AgentMessageSegmenterTests.swift */; };
+		B2A91EAED2433539FE057F88 /* SideBySideDiffLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 691433DAA6EAB31A5E41BADE /* SideBySideDiffLayoutTests.swift */; };
 		B2C211EE47612CFD347E018E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 362949AA885756BAA5340B1C /* ContentView.swift */; };
 		B318CE8D6CA8002C4771BD42 /* CardLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1443A2D0924C094CFF5747E4 /* CardLayout.swift */; };
 		B31BF3CA3626865844B43E55 /* AttributedCodeRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 568C5A26954BF9814D4CE0CD /* AttributedCodeRendererTests.swift */; };
@@ -362,6 +363,7 @@
 		66D18AD8984B39142C8D80EC /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		67334A794B95BBFBA6C2255E /* TillerAgents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerAgents; path = Packages/TillerAgents; sourceTree = SOURCE_ROOT; };
 		67737A516872D92DD67ADE11 /* OpenChatTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenChatTabTests.swift; sourceTree = "<group>"; };
+		691433DAA6EAB31A5E41BADE /* SideBySideDiffLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SideBySideDiffLayoutTests.swift; sourceTree = "<group>"; };
 		6975FB3630EA8F7ADEF25299 /* WorkspaceMigrationIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMigrationIntegrationTests.swift; sourceTree = "<group>"; };
 		6990267B249A088C8003D1FA /* DiffTabDedupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffTabDedupTests.swift; sourceTree = "<group>"; };
 		6ACCC88E1D2338FB9158DE59 /* TillerACP */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerACP; path = Packages/TillerACP; sourceTree = SOURCE_ROOT; };
@@ -879,6 +881,7 @@
 				1BC79D907740805481818B7D /* FakeWorkspacePersistence.swift */,
 				18FAA79DA5CDC0C9FA5A6ACC /* PaneTabPresentationTests.swift */,
 				16B323027542BA38D5D5DB6B /* SidebarEngineParityTests.swift */,
+				691433DAA6EAB31A5E41BADE /* SideBySideDiffLayoutTests.swift */,
 				0827B3A31C9FB0EDA486EFA6 /* SplitContentMenuTests.swift */,
 				411AB5ECF79B23F45889AA5C /* SQLiteWorkspacePersistenceTests.swift */,
 				A920FB57F5E592E941A80135 /* UniversalChatFixture.swift */,
@@ -1318,6 +1321,7 @@
 				153AF8225BF7E8493C6014ED /* RightPanelFixture.swift in Sources */,
 				050DD729DA6D995C7E044D2F /* RightPanelPrefetchTests.swift in Sources */,
 				CE40B618334CCFB47BDF0B71 /* SQLiteWorkspacePersistenceTests.swift in Sources */,
+				B2A91EAED2433539FE057F88 /* SideBySideDiffLayoutTests.swift in Sources */,
 				F2C552423566C7290017B489 /* SidebarEngineParityTests.swift in Sources */,
 				63EAF339EA1D5FB645774912 /* SlashCommandSelectionTests.swift in Sources */,
 				2558008776CB5A2FE435C3AD /* SplitContentMenuTests.swift in Sources */,

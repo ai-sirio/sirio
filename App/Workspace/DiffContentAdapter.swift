@@ -174,6 +174,26 @@ struct SideBySideDiffView: View {
     }
 }
 
+enum SideBySideDiffLayout {
+    static let minimumColumnWidth: CGFloat = 360
+    private static let lineNumberWidth: CGFloat = 40
+    private static let codeLeadingPadding: CGFloat = 8
+
+    static func columnWidth(for diff: GitFileDiff) -> CGFloat {
+        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        let longestLineWidth = diff.lines.reduce(CGFloat.zero) { width, line in
+            guard line.kind == .addition || line.kind == .deletion || line.kind == .context else {
+                return width
+            }
+            let measured = (line.text as NSString).size(withAttributes: [.font: font]).width
+            return max(width, measured)
+        }
+        return max(
+            minimumColumnWidth,
+            ceil(lineNumberWidth + codeLeadingPadding + longestLineWidth))
+    }
+}
+
 private struct SideBySideDiffBody: View {
     let diff: GitFileDiff
     let fileURL: URL
@@ -196,6 +216,7 @@ private struct SideBySideDiffBody: View {
 
     var body: some View {
         let rows = GitDiffSideBySide.rows(from: diff)
+        let columnWidth = SideBySideDiffLayout.columnWidth(for: diff)
         ScrollView([.vertical, .horizontal]) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
@@ -209,9 +230,9 @@ private struct SideBySideDiffBody: View {
                             .background(AppTheme.diffHunkBackground)
                     } else {
                         HStack(alignment: .top, spacing: 1) {
-                            side(row.left, useOldHighlights: true)
+                            side(row.left, useOldHighlights: true, width: columnWidth)
                             Divider()
-                            side(row.right, useOldHighlights: false)
+                            side(row.right, useOldHighlights: false, width: columnWidth)
                         }
                     }
                 }
@@ -225,23 +246,27 @@ private struct SideBySideDiffBody: View {
     }
 
     @ViewBuilder
-    private func side(_ line: GitDiffLine?, useOldHighlights: Bool) -> some View {
+    private func side(
+        _ line: GitDiffLine?, useOldHighlights: Bool, width: CGFloat
+    ) -> some View {
         if let line {
             HStack(alignment: .top, spacing: 0) {
                 Text(lineNumber(for: line, useOldHighlights: useOldHighlights))
                     .frame(width: 40, alignment: .trailing)
                     .foregroundStyle(AppTheme.meta)
                 codeText(for: line, useOldHighlights: useOldHighlights)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                     .textSelection(.enabled)
                     .padding(.leading, 8)
             }
             .font(.system(size: 11, design: .monospaced))
             .padding(.vertical, 2)
-            .frame(minWidth: 360, alignment: .leading)
+            .frame(width: width, alignment: .leading)
             .background(background(for: line))
         } else {
             Color.clear
-                .frame(minWidth: 360, minHeight: 18)
+                .frame(width: width, height: 18)
         }
     }
 
