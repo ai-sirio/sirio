@@ -200,6 +200,7 @@ private struct SideBySideDiffBody: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var highlights: DiffHighlights?
+    @State private var columnWidth = SideBySideDiffLayout.minimumColumnWidth
 
     private struct HighlightRequest: Hashable {
         let path: String
@@ -216,7 +217,6 @@ private struct SideBySideDiffBody: View {
 
     var body: some View {
         let rows = GitDiffSideBySide.rows(from: diff)
-        let columnWidth = SideBySideDiffLayout.columnWidth(for: diff)
         ScrollView([.vertical, .horizontal]) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(rows) { row in
@@ -240,6 +240,11 @@ private struct SideBySideDiffBody: View {
             .padding(8)
         }
         .task(id: requestID) {
+            // Measured here rather than in `body`: the width comes from sizing
+            // every line's text, and `body` runs again as soon as the
+            // highlights below land — measuring 20k lines twice for a width
+            // that cannot have changed.
+            columnWidth = SideBySideDiffLayout.columnWidth(for: diff)
             highlights = await DiffHighlightCache.shared.highlights(
                 path: fileURL, oldText: diff.oldText, newText: diff.newText)
         }
