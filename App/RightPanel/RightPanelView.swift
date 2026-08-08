@@ -96,6 +96,7 @@ struct RightPanelView: View {
                             panelModel: panelModel,
                             worktree: worktree,
                             onOpenFile: { url in appModel.openDocument(fileURL: url, in: worktree) },
+                            onOpenDiff: { url in appModel.openDiff(fileURL: url, in: worktree) },
                             requestDiscard: { pendingDiscard = $0 })
                     }
                 } else {

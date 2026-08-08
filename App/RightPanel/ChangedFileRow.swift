@@ -29,6 +29,7 @@ struct ChangedFileRow: View {
     let onUnstage: () -> Void
     let onDiscard: () -> Void
     let onOpenFile: () -> Void
+    let onOpenDiff: () -> Void
 
     @State private var isHovering = false
 
@@ -79,6 +80,7 @@ struct ChangedFileRow: View {
             in: RoundedRectangle(cornerRadius: 6))
         .onHover { isHovering = $0 }
         .onTapGesture(perform: onToggle)
+        .onTapGesture(count: 2, perform: onOpenDiff)
         .contextMenu {
             if !entry.isConflicted {
                 if isStagedSection {
@@ -89,6 +91,7 @@ struct ChangedFileRow: View {
                 }
             }
             Button("Open in editor", action: onOpenFile)
+            Button("Open Diff in Editor", action: onOpenDiff)
         }
         .help(entry.isConflicted ? "Conflicted" : entry.path.value)
         .accessibilityElement(children: .combine)
@@ -114,6 +117,11 @@ struct ChangedFileRow: View {
             }
             .buttonStyle(.plain)
             .help("Open in editor")
+            Button(action: onOpenDiff) {
+                Image(systemName: "arrow.left.and.right.text.vertical")
+            }
+            .buttonStyle(.plain)
+            .help("Open Diff in Editor")
         }
         .font(.caption)
     }
