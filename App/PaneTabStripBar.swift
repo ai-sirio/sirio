@@ -55,6 +55,7 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
                                 entry: entry,
                                 presentation: presentation,
                                 isFocusedGroup: model.isFocusedGroup,
+                                worktreePath: worktree.path,
                                 onClose: { model.onClose(entry.tabID) },
                                 onFrameChange: { model.setTabFrame($0, for: entry.tabID) },
                                 onDragChanged: { model.onDragChanged(entry.tabID, $0) },
@@ -170,6 +171,7 @@ private struct PaneTabStripItem: View {
     let entry: TabMenuEntry
     let presentation: PaneTabPresentation
     let isFocusedGroup: Bool
+    let worktreePath: String
     let onClose: () -> Void
     let onFrameChange: (CGRect) -> Void
     let onDragChanged: (CGPoint) -> Void
@@ -261,8 +263,20 @@ private struct PaneTabStripItem: View {
                 .onChanged { _ in onDragChanged(NSEvent.mouseLocation) }
                 .onEnded { _ in onDragEnded() }
         )
-        .help(entry.title)
+        .help(tabHelp)
     .enableInjection()
+    }
+
+    private var tabHelp: String {
+        if case .diff(let documentID) = entry.content {
+            let root = URL(fileURLWithPath: worktreePath, isDirectory: true)
+                .standardizedFileURL.path
+            if documentID.canonicalPath.hasPrefix(root + "/") {
+                return String(documentID.canonicalPath.dropFirst(root.count + 1))
+            }
+            return documentID.canonicalPath
+        }
+        return entry.title
     }
 }
 
