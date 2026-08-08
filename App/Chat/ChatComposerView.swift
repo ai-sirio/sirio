@@ -20,22 +20,8 @@ struct ChatComposerView: View {
     @State private var slashSelectionIndex = 0
     @State private var slashPopupDismissed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var cardBackgroundStyle: AnyShapeStyle {
-        colorScheme == .dark
-            ? AnyShapeStyle(AppTheme.cardFill)
-            : AnyShapeStyle(.quaternary.opacity(0.4))
-    }
-
-    private var loadingBackgroundStyle: AnyShapeStyle {
-        colorScheme == .dark
-            ? AnyShapeStyle(AppTheme.cardFill)
-            : AnyShapeStyle(.quaternary)
-    }
 
     private var isPrompting: Bool { controller.state == .prompting }
-    private var isConnecting: Bool { controller.state == .connecting }
     private var canInteract: Bool {
         (controller.state == .ready || isPrompting || controller.state == .detached)
             && !controller.presentationSnapshot.hasPendingPermission
@@ -65,14 +51,12 @@ struct ChatComposerView: View {
             editor
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(AppTheme.composerFieldFill,
-                            in: RoundedRectangle(cornerRadius: 9))
             ComposerControlBar(
                 controller: controller, document: document, onAttach: attachImage,
                 onSend: sendCurrent, canSend: canSend, canInteract: canInteract)
         }
         .padding(12)
-        .background(cardBackgroundStyle, in: RoundedRectangle(cornerRadius: 14))
+        .background(AppTheme.cardFill, in: RoundedRectangle(cornerRadius: 22))
         .overlay {
             ComposerBorderView(
                 isAnimating: isPrompting,
@@ -96,8 +80,8 @@ struct ChatComposerView: View {
                     .foregroundStyle(.secondary)
                     .allowsHitTesting(false)
             }
-            ChatTextEditor(document: document, isEditable: canInteract, minHeight: 36,
-                           maxHeight: 160, onSubmit: sendCurrent,
+            ChatTextEditor(document: document, isEditable: canInteract, minHeight: 104,
+                           maxHeight: 180, onSubmit: sendCurrent,
                            onSlashKey: handleSlashKey)
         }
         .disabled(!canInteract)
@@ -109,16 +93,6 @@ struct ChatComposerView: View {
             slashSelectionIndex = 0
         }
     }
-
-
-    private var loadingButton: some View {
-        ProgressView()
-            .controlSize(.small)
-            .frame(width: 26, height: 26)
-            .background(loadingBackgroundStyle, in: Circle())
-            .help("Starting the agent…")
-    }
-
     // MARK: - Slash commands
 
     /// Active while the draft is a single "/token": the query is what follows
@@ -276,7 +250,7 @@ private struct ComposerBorderView: View {
 
     @State private var phase: Double = 0
 
-    private let cornerRadius: CGFloat = 14
+    private let cornerRadius: CGFloat = 22
     private let lineWidth: CGFloat = 1.5
 
     var body: some View {
