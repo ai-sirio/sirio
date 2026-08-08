@@ -26,6 +26,7 @@ struct TillerApp: App {
             .terminal: TerminalContentAdapter(),
             .chat: ChatContentAdapter(),
             .document: DocumentContentAdapter(),
+            .diff: DiffContentAdapter(),
             .browser: BrowserContentAdapter()
         ]
         let coordinator = WorkspaceCoordinator(

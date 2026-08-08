@@ -16,6 +16,7 @@
 		0689BDAD9758372CBF2D50B7 /* ChatTextEditorDropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93A1A9108EFCBABE6E5C56E3 /* ChatTextEditorDropTests.swift */; };
 		06C8C199DCAEB8CFD6B1ED99 /* AgentsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C73446E5618BB18EA2FF9D3 /* AgentsSettingsView.swift */; };
 		0861C10C3B431CD58B516CF6 /* MarkdownToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E71C8D94D39CE2EEAE0993 /* MarkdownToolbar.swift */; };
+		08D1776D0FB5770852F312BF /* DiffContentAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD07294202E241A743BC2120 /* DiffContentAdapter.swift */; };
 		0BD4B70930C1E4B669B26856 /* EditorTheme+Tiller.swift in Sources */ = {isa = PBXBuildFile; fileRef = F07CEA811BC4635297ACD0DF /* EditorTheme+Tiller.swift */; };
 		0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */; };
 		101210DBC6268B451C2DC69A /* ComposerFieldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */; };
@@ -447,6 +448,7 @@
 		C5C915191F113B83C9E787E7 /* WorkspaceMountTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMountTests.swift; sourceTree = "<group>"; };
 		CCE59B5FB8A4D65B946CFF3A /* BrowserSurfaceBudgetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserSurfaceBudgetTests.swift; sourceTree = "<group>"; };
 		CD056107EF0EA40BDCC86276 /* CodeFileTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeFileTabTests.swift; sourceTree = "<group>"; };
+		CD07294202E241A743BC2120 /* DiffContentAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffContentAdapter.swift; sourceTree = "<group>"; };
 		CF220F5964A9EC73D5E56484 /* ChatStreamFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamFixture.swift; sourceTree = "<group>"; };
 		D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatContentAdapterTests.swift; sourceTree = "<group>"; };
 		D0BFFBC3BF578B02D913D7CB /* FloatingCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingCard.swift; sourceTree = "<group>"; };
@@ -765,6 +767,7 @@
 			children = (
 				03E6348E6D87D476D3BFDE80 /* BrowserContentAdapter.swift */,
 				A7FBBDB62EF95306888EA950 /* ChatContentAdapter.swift */,
+				CD07294202E241A743BC2120 /* DiffContentAdapter.swift */,
 				96531962D46C0E179912D99D /* DocumentContentAdapter.swift */,
 				30EEB69355DE18720F5DE1D9 /* LegacyWorkspaceStore.swift */,
 				999C179DB72BDCBC14E1B877 /* PaneTabPresentation.swift */,
@@ -1150,6 +1153,7 @@
 				641B072F23BAD4883E77F891 /* ComposerDocument.swift in Sources */,
 				E5B005D1E6292D76645ACC83 /* ComposerDropApplier.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
+				08D1776D0FB5770852F312BF /* DiffContentAdapter.swift in Sources */,
 				FF9414FF0E5065A840B5EE23 /* DiffLoadStore.swift in Sources */,
 				E368E97B3A31047E97482E1A /* DividerCursorStrip.swift in Sources */,
 				9F7A522E977E7FB1FEE6454A /* DocumentContentAdapter.swift in Sources */,

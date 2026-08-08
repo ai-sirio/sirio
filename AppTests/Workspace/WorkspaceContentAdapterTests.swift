@@ -134,6 +134,24 @@ struct WorkspaceContentAdapterTests {
         #expect(await adapter.requiresExplicitChoice(tabID: tab.id))
     }
 
+    @Test func diffPreparationCreatesAReadOnlyFileTab() async throws {
+        let adapter = DiffContentAdapter()
+        let worktree = fixtureWorktree()
+        let fileURL = URL(fileURLWithPath: "/tmp/tiller-worktree/Sources/Feature.swift")
+
+        let prepared = try await adapter.prepare(
+            request: .openDiff(fileURL), worktree: worktree)
+
+        #expect(prepared.tab.title == "Feature.swift")
+        guard case .diff(let documentID) = prepared.tab.content else {
+            Issue.record("diff preparation must produce diff content")
+            return
+        }
+        #expect(documentID.worktreeID == worktree.id)
+        #expect(documentID.canonicalPath == fileURL.path)
+        #expect(prepared.tab.content.kind == .diff)
+    }
+
     @Test func disposalOfAPreparedCandidateIsIdempotent() async {
         let recorder = AdapterBoundaryRecorder()
         let adapter = TerminalContentAdapter(boundary: recorder.boundary)

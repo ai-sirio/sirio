@@ -11,6 +11,7 @@ enum ContentChoice: Sendable {
     case newChat(agentID: String)
     case resumeChat(ChatContentID)
     case openFile(URL, editor: DocumentEditorKind)
+    case openDiff(URL)
     case moveExistingTab(WorkspaceTabID)
 }
 
@@ -684,6 +685,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         case .newChat(let agentID): .newChat(agentID: agentID)
         case .resumeChat(let id): .resumeChat(id)
         case .openFile(let url, let editor): .openFile(url, editor: editor)
+        case .openDiff(let url): .openDiff(url)
         case .moveExistingTab: nil
         }
     }
@@ -729,6 +731,7 @@ private extension ContentRequest {
         case .newBrowser: .browser
         case .newChat, .resumeChat: .chat
         case .openFile: .document
+        case .openDiff: .diff
         }
     }
 }
