@@ -270,6 +270,7 @@ final class AppModel {
                 .terminal: TerminalContentAdapter(),
                 .chat: ChatContentAdapter(),
                 .document: DocumentContentAdapter(),
+                .diff: DiffContentAdapter(),
                 .browser: BrowserContentAdapter()
             ]
             self.workspaceCoordinator = WorkspaceCoordinator(

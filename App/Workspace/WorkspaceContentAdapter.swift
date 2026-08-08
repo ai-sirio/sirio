@@ -30,6 +30,7 @@ enum ContentRequest: Sendable, Equatable {
     case newChat(agentID: String)
     case resumeChat(ChatContentID)
     case openFile(URL, editor: DocumentEditorKind)
+    case openDiff(URL)
 }
 
 struct AdapterBoundary: Sendable {
