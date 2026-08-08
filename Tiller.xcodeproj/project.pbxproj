@@ -118,6 +118,7 @@
 		6C3B119F8CCC258257B30A09 /* ForegroundProcessAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 411061E348341AE80CBDDDB8 /* ForegroundProcessAgent.swift */; };
 		6C5099F2710CFBEDF77DD19A /* TillerBrowser in Frameworks */ = {isa = PBXBuildFile; productRef = 8742E3C6C8CB14C6C7A3FE78 /* TillerBrowser */; };
 		6F64B525D77FB47E0103E4CA /* ComposerControlBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65294A0A72CDEE56A073A480 /* ComposerControlBarTests.swift */; };
+		70695DFBA4C8C6272EED1B11 /* DiffDragPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = D37A95471207D441FFBA948B /* DiffDragPayload.swift */; };
 		70C04D4805FC437246E25D03 /* ChatComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */; };
 		71D3778396F3D2C1A933DA72 /* SlashCommandSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3D36422BCCDF9498160FDA5 /* SlashCommandSelection.swift */; };
 		71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */; };
@@ -203,6 +204,7 @@
 		CCAA5C3EC06736BD09F338CD /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56231D9700C4BE8BA92FCB02 /* AppModel.swift */; };
 		CE3124078D172C6FAFAD4631 /* PermissionsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C537030635E47A24B2D468E1 /* PermissionsSettingsView.swift */; };
 		CE40B618334CCFB47BDF0B71 /* SQLiteWorkspacePersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 411AB5ECF79B23F45889AA5C /* SQLiteWorkspacePersistenceTests.swift */; };
+		D0B5A888230BF64DE771C4C2 /* DiffDragPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22C4A897F1AB4BF17E882C85 /* DiffDragPayloadTests.swift */; };
 		D0C100BA6ECC54AF0D214B06 /* InsightCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44A4D7761754955F550F7ED9 /* InsightCardView.swift */; };
 		D2828EA88153C355E12698EC /* WorkspaceCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDBFD25A620DA385B2D0EC9 /* WorkspaceCoordinator.swift */; };
 		D32F83D99D9CCB563625E9A3 /* WorkspaceMigrationV15Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F199DFC3D8468A90A3A0B49D /* WorkspaceMigrationV15Tests.swift */; };
@@ -290,6 +292,7 @@
 		1FE0F25AF11FFCF1C640CB80 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		20192929728F6DE0A6DE5853 /* DividerCursorStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DividerCursorStripTests.swift; sourceTree = "<group>"; };
 		20E0E47DA51DA07F6C377AA5 /* StreamingAgentTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAgentTextView.swift; sourceTree = "<group>"; };
+		22C4A897F1AB4BF17E882C85 /* DiffDragPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDragPayloadTests.swift; sourceTree = "<group>"; };
 		23CE84CAAD5C3995436C6CB7 /* AppModelFacadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelFacadeTests.swift; sourceTree = "<group>"; };
 		24951BA69B5DA5E148D1079A /* Phase1FixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Phase1FixtureTests.swift; sourceTree = "<group>"; };
 		252DB14ADB73CFC185CA54D9 /* GeneralSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsView.swift; sourceTree = "<group>"; };
@@ -456,6 +459,7 @@
 		D1E0285EBF1B63D3A2E607DE /* CodeBlockStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlockStyle.swift; sourceTree = "<group>"; };
 		D1E46DF390E43B7EA1794BB7 /* ChatController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatController.swift; sourceTree = "<group>"; };
 		D2BA4247A916A8C34143444D /* icon-1024.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "icon-1024.png"; sourceTree = "<group>"; };
+		D37A95471207D441FFBA948B /* DiffDragPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffDragPayload.swift; sourceTree = "<group>"; };
 		D3CB01E518F8CD7DC085D5C0 /* TillerSkillResource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TillerSkillResource.swift; sourceTree = "<group>"; };
 		D804AADA29051BF13CAA1B3C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalOutputView.swift; sourceTree = "<group>"; };
@@ -581,6 +585,7 @@
 				55FA33A863AF6CCC3AAB04F9 /* ActivitySectionView.swift */,
 				9ADF81B45EE2D658E0500C1C /* ChangedFileRow.swift */,
 				86FC1E8AF12AAF2C88A2D9ED /* ChangesListView.swift */,
+				D37A95471207D441FFBA948B /* DiffDragPayload.swift */,
 				D1BA32F231F13BCC1136F29A /* DiffLoadStore.swift */,
 				03C57CFA628F44D68B6DBA19 /* FileDiffBody.swift */,
 				66D18AD8984B39142C8D80EC /* FileExplorerView.swift */,
@@ -824,6 +829,7 @@
 				4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */,
 				C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */,
 				3DCD6339C795A9A8572D9994 /* ComposerTextKit2Tests.swift */,
+				22C4A897F1AB4BF17E882C85 /* DiffDragPayloadTests.swift */,
 				20192929728F6DE0A6DE5853 /* DividerCursorStripTests.swift */,
 				2B01A4A86202F751E01F4FE1 /* FileExplorerRowInteractionTests.swift */,
 				C586A88693846D775479C9BB /* ForegroundProcessTreeTests.swift */,
@@ -1154,6 +1160,7 @@
 				E5B005D1E6292D76645ACC83 /* ComposerDropApplier.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
 				08D1776D0FB5770852F312BF /* DiffContentAdapter.swift in Sources */,
+				70695DFBA4C8C6272EED1B11 /* DiffDragPayload.swift in Sources */,
 				FF9414FF0E5065A840B5EE23 /* DiffLoadStore.swift in Sources */,
 				E368E97B3A31047E97482E1A /* DividerCursorStrip.swift in Sources */,
 				9F7A522E977E7FB1FEE6454A /* DocumentContentAdapter.swift in Sources */,
@@ -1283,6 +1290,7 @@
 				101210DBC6268B451C2DC69A /* ComposerFieldTests.swift in Sources */,
 				0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */,
 				427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */,
+				D0B5A888230BF64DE771C4C2 /* DiffDragPayloadTests.swift in Sources */,
 				19E39343B8CD4EC81B57DB43 /* DividerCursorStripTests.swift in Sources */,
 				C8DDAAF7471111DE677387A0 /* EmptyPaneClickReproductionTests.swift in Sources */,
 				641773C7642B2C6CDEC3EAAF /* FakeWorkspacePersistence.swift in Sources */,

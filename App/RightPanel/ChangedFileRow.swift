@@ -73,6 +73,7 @@ struct ChangedFileRow: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
         .contentShape(Rectangle())
+        .draggable(DiffDragPayload(path: entry.path.value))
         .background(
             isHovering ? AppTheme.rowHover : Color.clear,
             in: RoundedRectangle(cornerRadius: 6))
