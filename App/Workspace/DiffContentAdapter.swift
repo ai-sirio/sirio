@@ -175,22 +175,23 @@ struct SideBySideDiffView: View {
 }
 
 enum SideBySideDiffLayout {
-    static let minimumColumnWidth: CGFloat = 360
-    private static let lineNumberWidth: CGFloat = 40
-    private static let codeLeadingPadding: CGFloat = 8
+    static let minimumColumnWidth: CGFloat = 120
+    static let dividerWidth: CGFloat = 1
+    static let contentPadding: CGFloat = 8
 
-    static func columnWidth(for diff: GitFileDiff) -> CGFloat {
-        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        let longestLineWidth = diff.lines.reduce(CGFloat.zero) { width, line in
-            guard line.kind == .addition || line.kind == .deletion || line.kind == .context else {
-                return width
-            }
-            let measured = (line.text as NSString).size(withAttributes: [.font: font]).width
-            return max(width, measured)
-        }
-        return max(
-            minimumColumnWidth,
-            ceil(lineNumberWidth + codeLeadingPadding + longestLineWidth))
+    /// Halves the viewport rather than measuring the longest line. Sizing to the
+    /// content is what put the right-hand column past the right edge of the
+    /// pane: one long line in the file was enough to leave a side-by-side view
+    /// with only one visible side. Long lines are clipped instead.
+    static func columnWidth(forViewport viewport: CGFloat) -> CGFloat {
+        let usable = viewport - 2 * contentPadding - dividerWidth
+        return max(minimumColumnWidth, (usable / 2).rounded(.down))
+    }
+
+    /// A new or untracked file is all additions, so every left cell would be
+    /// filler. Half a pane of nothing compares nothing: those render full width.
+    static func isSingleColumn(_ diff: GitFileDiff) -> Bool {
+        !diff.lines.contains { $0.kind == .deletion }
     }
 }
 
@@ -200,7 +201,6 @@ private struct SideBySideDiffBody: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var highlights: DiffHighlights?
-    @State private var columnWidth = SideBySideDiffLayout.minimumColumnWidth
 
     private struct HighlightRequest: Hashable {
         let path: String
@@ -217,34 +217,45 @@ private struct SideBySideDiffBody: View {
 
     var body: some View {
         let rows = GitDiffSideBySide.rows(from: diff)
-        ScrollView([.vertical, .horizontal]) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(rows) { row in
-                    if row.isHunk, let hunk = row.left {
-                        Text(hunk.text)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(AppTheme.subtitle)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppTheme.diffHunkBackground)
-                    } else {
-                        HStack(alignment: .top, spacing: 1) {
-                            side(row.left, useOldHighlights: true, width: columnWidth)
-                            Divider()
-                            side(row.right, useOldHighlights: false, width: columnWidth)
+        let isSingleColumn = SideBySideDiffLayout.isSingleColumn(diff)
+        // One GeometryReader for the whole body, not one per row: the columns
+        // are sized from the pane, and the pane's width is the same for every
+        // row in it.
+        GeometryReader { proxy in
+            let columnWidth = isSingleColumn
+                ? proxy.size.width - 2 * SideBySideDiffLayout.contentPadding
+                : SideBySideDiffLayout.columnWidth(forViewport: proxy.size.width)
+            let contentWidth = isSingleColumn
+                ? columnWidth
+                : columnWidth * 2 + SideBySideDiffLayout.dividerWidth
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { row in
+                        if row.isHunk, let hunk = row.left {
+                            Text(hunk.text)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(AppTheme.subtitle)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                // An explicit width, not `.infinity`: the header
+                                // has to line up with the columns below it.
+                                .frame(width: contentWidth, alignment: .leading)
+                                .background(AppTheme.diffHunkBackground)
+                        } else if isSingleColumn {
+                            side(row.right ?? row.left, useOldHighlights: false, width: columnWidth)
+                        } else {
+                            HStack(alignment: .top, spacing: 0) {
+                                side(row.left, useOldHighlights: true, width: columnWidth)
+                                Divider().frame(width: SideBySideDiffLayout.dividerWidth)
+                                side(row.right, useOldHighlights: false, width: columnWidth)
+                            }
                         }
                     }
                 }
+                .padding(SideBySideDiffLayout.contentPadding)
             }
-            .padding(8)
         }
         .task(id: requestID) {
-            // Measured here rather than in `body`: the width comes from sizing
-            // every line's text, and `body` runs again as soon as the
-            // highlights below land — measuring 20k lines twice for a width
-            // that cannot have changed.
-            columnWidth = SideBySideDiffLayout.columnWidth(for: diff)
             highlights = await DiffHighlightCache.shared.highlights(
                 path: fileURL, oldText: diff.oldText, newText: diff.newText)
         }
@@ -261,14 +272,18 @@ private struct SideBySideDiffBody: View {
                     .foregroundStyle(AppTheme.meta)
                 codeText(for: line, useOldHighlights: useOldHighlights)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .truncationMode(.tail)
                     .textSelection(.enabled)
                     .padding(.leading, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .font(.system(size: 11, design: .monospaced))
             .padding(.vertical, 2)
             .frame(width: width, alignment: .leading)
             .background(background(for: line))
+            // Without this a line wider than its column paints over the other
+            // one; the column is a boundary, not a suggestion.
+            .clipped()
         } else {
             Color.clear
                 .frame(width: width, height: 18)
