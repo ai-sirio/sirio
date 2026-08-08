@@ -79,8 +79,8 @@ struct ChangedFileRow: View {
             isHovering ? AppTheme.rowHover : Color.clear,
             in: RoundedRectangle(cornerRadius: 6))
         .onHover { isHovering = $0 }
-        .onTapGesture(perform: onToggle)
         .onTapGesture(count: 2, perform: onOpenDiff)
+        .onTapGesture(perform: onToggle)
         .contextMenu {
             if !entry.isConflicted {
                 if isStagedSection {
