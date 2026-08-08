@@ -95,18 +95,44 @@ enum DiffTabLoadState: Equatable {
     case unavailable(DiffUnavailableReason)
 }
 
+/// How much of the file the diff tab shows. The changes list in the right panel
+/// is always `.hunks`; only the tab offers the choice.
+enum DiffScope: String, CaseIterable {
+    case wholeFile
+    case hunks
+
+    var title: String {
+        switch self {
+        case .wholeFile: "Whole file"
+        case .hunks: "Changes only"
+        }
+    }
+
+    var contextLines: Int {
+        switch self {
+        case .wholeFile: GitDiff.wholeFileContextLines
+        case .hunks: 3
+        }
+    }
+}
+
 struct SideBySideDiffView: View {
     let documentID: DocumentID
     let worktreePath: String
-    let loader: @Sendable (GitStatusEntry, String) async throws -> GitFileDiff
+    let loader: @Sendable (GitStatusEntry, String, Int) async throws -> GitFileDiff
 
     @State private var state: DiffTabLoadState = .loading
+    @State private var scope: DiffScope = .wholeFile
+    /// Set when the whole file blew the output limit and the tab fell back to
+    /// hunks on its own, so the reason is on screen instead of a silent switch.
+    @State private var didFallBackToHunks = false
 
     init(
         documentID: DocumentID,
         worktreePath: String,
-        loader: @escaping @Sendable (GitStatusEntry, String) async throws -> GitFileDiff = {
-            entry, path in try await GitDiff.load(entry: entry, in: path)
+        loader: @escaping @Sendable (GitStatusEntry, String, Int) async throws -> GitFileDiff = {
+            entry, path, contextLines in
+            try await GitDiff.load(entry: entry, in: path, contextLines: contextLines)
         }
     ) {
         self.documentID = documentID
@@ -117,21 +143,29 @@ struct SideBySideDiffView: View {
     private var fileURL: URL { URL(fileURLWithPath: documentID.canonicalPath) }
 
     var body: some View {
-        Group {
-            switch state {
-            case .loading:
-                ProgressView("Loading diff…")
-            case .loaded(let diff):
-                SideBySideDiffBody(diff: diff, fileURL: fileURL)
-            case .unavailable(let reason):
-                ContentUnavailableView(
-                    "Diff unavailable",
-                    systemImage: "exclamationmark.triangle",
-                    description: Text(reason.message))
+        VStack(spacing: 0) {
+            scopeBar
+            Divider()
+            Group {
+                switch state {
+                case .loading:
+                    ProgressView("Loading diff…")
+                case .loaded(let diff):
+                    SideBySideDiffBody(diff: diff, fileURL: fileURL)
+                case .unavailable(let reason):
+                    ContentUnavailableView(
+                        "Diff unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(reason.message))
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: documentID.canonicalPath) {
+            await load()
+        }
+        .task(id: scope) {
             await load()
         }
         .onReceive(NotificationCenter.default.publisher(
@@ -140,6 +174,25 @@ struct SideBySideDiffView: View {
                       worktreeID == documentID.worktreeID else { return }
                 Task { await load() }
             }
+    }
+
+    private var scopeBar: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: $scope) {
+                ForEach(DiffScope.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 220)
+            if didFallBackToHunks {
+                Text("File too large to show in full")
+                    .font(.system(size: 11))
+                    .foregroundStyle(AppTheme.subtitle)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
     }
 
     private func load() async {
@@ -162,7 +215,18 @@ struct SideBySideDiffView: View {
                 state = .unavailable(.clean)
                 return
             }
-            let diff = try await loader(entry, worktreePath)
+            didFallBackToHunks = false
+            let diff: GitFileDiff
+            do {
+                diff = try await loader(entry, worktreePath, scope.contextLines)
+            } catch where DiffTabAvailability.isOutputLimit(error) && scope == .wholeFile {
+                // A whole-file diff carries the entire file, so a large file
+                // trips the output limit where its hunks never would. Showing
+                // the changes beats showing "too large" — the fallback is
+                // labelled in the bar rather than silently swapping the mode.
+                diff = try await loader(entry, worktreePath, DiffScope.hunks.contextLines)
+                didFallBackToHunks = true
+            }
             if let reason = DiffTabAvailability.reason(for: diff) {
                 state = .unavailable(reason)
             } else {

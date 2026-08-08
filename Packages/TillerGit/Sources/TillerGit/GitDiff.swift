@@ -36,21 +36,31 @@ public enum GitDiff {
         maxBytes: 500_000,
         maxLines: 20_000)
 
-    public static func load(entry: GitStatusEntry, in repoPath: String) async throws -> GitFileDiff {
+    /// Enough context that git emits every line of the file as one hunk. Not
+    /// `Int.max`: git multiplies the value internally and overflows.
+    public static let wholeFileContextLines = 100_000
+
+    /// `contextLines` defaults to 3 — the hunk view the changes list shows. The
+    /// diff tab passes `wholeFileContextLines` to get the whole file with its
+    /// changes marked in place.
+    public static func load(
+        entry: GitStatusEntry, in repoPath: String, contextLines: Int = 3
+    ) async throws -> GitFileDiff {
         let hasHead = try await GitRepository.hasHead(in: repoPath)
+        let unified = "--unified=\(contextLines)"
         let result: GitCommandResult
         if entry.isUntracked || !hasHead {
             let absolutePath = URL(fileURLWithPath: repoPath, isDirectory: true)
                 .appendingPathComponent(entry.path.value).path
             result = try await GitRunner.runCaptured(
-                ["diff", "--no-color", "--no-ext-diff", "--no-index", "--unified=3",
+                ["diff", "--no-color", "--no-ext-diff", "--no-index", unified,
                  "--", "/dev/null", absolutePath],
                 in: repoPath,
                 acceptedExitCodes: [0, 1],
                 limits: outputLimits)
         } else {
             result = try await GitRunner.runCaptured(
-                ["diff", "--no-color", "--no-ext-diff", "--unified=3", "HEAD", "--"]
+                ["diff", "--no-color", "--no-ext-diff", unified, "HEAD", "--"]
                     + entry.mutationPaths.map(\.value),
                 in: repoPath,
                 limits: outputLimits)

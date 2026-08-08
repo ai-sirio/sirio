@@ -159,3 +159,33 @@ import Testing
         _ = try await GitDiff.load(entry: entry, in: repo.path)
     }
 }
+
+/// The right panel wants hunks; the diff tab wants the whole file with the
+/// changes marked inside it. Both come from the same loader, so the context
+/// size has to be the caller's choice — and the default has to stay 3, or the
+/// panel silently starts loading entire files.
+@Test func wholeFileContextKeepsLinesThatHunkContextDrops() async throws {
+    let repo = try makeGitTestRepository()
+    defer { try? FileManager.default.removeItem(at: repo) }
+    let file = repo.appendingPathComponent("file.txt")
+    // The filler has to be committed, or it is all additions and lands in the
+    // hunk regardless of context size. Committed, it puts the edit 40 lines
+    // beyond the 3 lines of context a hunk carries.
+    let filler = (1...40).map { "filler \($0)" }.joined(separator: "\n")
+    try "\(filler)\nlast\n".write(to: file, atomically: true, encoding: .utf8)
+    try runGitForTest(["add", "--", "file.txt"], in: repo)
+    try runGitForTest(["commit", "-m", "filler"], in: repo)
+    try "\(filler)\nedited\n".write(to: file, atomically: true, encoding: .utf8)
+    let snapshot = try await GitStatus.load(in: repo.path)
+    let entry = try #require(snapshot.entries.first)
+
+    let hunks = try await GitDiff.load(entry: entry, in: repo.path)
+    let wholeFile = try await GitDiff.load(
+        entry: entry, in: repo.path, contextLines: GitDiff.wholeFileContextLines)
+
+    let distantLine = "filler 1"
+    #expect(!hunks.lines.contains { $0.text == distantLine })
+    #expect(wholeFile.lines.contains { $0.kind == .context && $0.text == distantLine })
+    // The edit itself survives either way.
+    #expect(wholeFile.lines.contains { $0.kind == .addition && $0.text == "edited" })
+}
