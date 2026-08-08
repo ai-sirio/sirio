@@ -122,6 +122,26 @@ distinta da quella del file. `kindLabel` = "Diff" per l'accessibilità.
 Niente titolo decorato (`file.swift (diff)`): la larghezza del tab è la
 risorsa scarsa, l'icona distingue già.
 
+### D13 — File intero, con interruttore (aggiunta 2026-08-08)
+
+Il tab mostra il **file intero** con le modifiche evidenziate al loro posto, non
+i soli hunk: `GitDiff.load` ha ora `contextLines` (default **3**, così il
+pannello destro e ogni altro chiamante restano a hunk) e il tab passa
+`GitDiff.wholeFileContextLines` (100.000 — non `Int.max`: git moltiplica il
+valore internamente e va in overflow).
+
+Interruttore `Whole file` / `Changes only` in una barra sopra il diff, default
+file intero. È `@State`, **non persistito** con il tab: riaprendo si riparte da
+file intero. Persisterlo vorrebbe dire toccare `WorkspaceTabViewState` e la sua
+serializzazione, e non è stato chiesto.
+
+Un diff a file intero porta con sé tutto il file, quindi un file grande sfonda
+`GitDiff.outputLimits` dove i suoi hunk non lo farebbero mai: in quel caso il
+tab **ricade sugli hunk** e lo dichiara nella barra, invece di diventare uno
+stato vuoto "diff troppo grande".
+
+La visualizzazione a file intero vale **solo** per il tab nel pane centrale.
+
 ### D10 — Read-only + auto-refresh
 
 Nessun editing, nessun salvataggio, nessuno stage per hunk. Il tab si aggiorna
