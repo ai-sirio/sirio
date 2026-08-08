@@ -248,6 +248,8 @@ extension RightPanelModel {
             let snapshot = try await statusTask.value
             guard token == generation else { return }
             apply(snapshot)
+            NotificationCenter.default.post(
+                name: .tillerChangesDidRefresh, object: worktree.id)
             gitError = nil
             await loadStats(token: token)
         } catch {

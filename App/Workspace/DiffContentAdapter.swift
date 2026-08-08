@@ -92,7 +92,7 @@ final class DiffContentAdapter: WorkspaceContentAdapter {
 enum DiffTabLoadState: Equatable {
     case loading
     case loaded(GitFileDiff)
-    case failed(String)
+    case unavailable(DiffUnavailableReason)
 }
 
 struct SideBySideDiffView: View {
@@ -123,17 +123,23 @@ struct SideBySideDiffView: View {
                 ProgressView("Loading diff…")
             case .loaded(let diff):
                 SideBySideDiffBody(diff: diff, fileURL: fileURL)
-            case .failed(let error):
+            case .unavailable(let reason):
                 ContentUnavailableView(
                     "Diff unavailable",
                     systemImage: "exclamationmark.triangle",
-                    description: Text(error))
+                    description: Text(reason.message))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: documentID.canonicalPath) {
             await load()
         }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .tillerChangesDidRefresh)) { notification in
+                guard let worktreeID = notification.object as? UUID,
+                      worktreeID == documentID.worktreeID else { return }
+                Task { await load() }
+            }
     }
 
     private func load() async {
@@ -142,23 +148,28 @@ struct SideBySideDiffView: View {
             .standardizedFileURL.path
         let filePath = fileURL.standardizedFileURL.path
         guard filePath.hasPrefix(root + "/") else {
-            state = .failed("The file is outside this worktree.")
+            state = .unavailable(.error("The file is outside this worktree."))
             return
         }
         let relativePath = String(filePath.dropFirst(root.count + 1))
         guard let gitPath = try? GitPath(relativePath) else {
-            state = .failed("The file path is invalid.")
+            state = .unavailable(.error("The file path is invalid."))
             return
         }
         do {
             let status = try await GitStatus.load(in: worktreePath)
             guard let entry = status.entries.first(where: { $0.path == gitPath }) else {
-                state = .failed("The file is no longer modified.")
+                state = .unavailable(.clean)
                 return
             }
-            state = .loaded(try await loader(entry, worktreePath))
+            let diff = try await loader(entry, worktreePath)
+            if let reason = DiffTabAvailability.reason(for: diff) {
+                state = .unavailable(reason)
+            } else {
+                state = .loaded(diff)
+            }
         } catch {
-            state = .failed(error.localizedDescription)
+            state = .unavailable(DiffTabAvailability.reason(for: error))
         }
     }
 }
