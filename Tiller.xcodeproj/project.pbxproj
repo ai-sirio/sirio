@@ -124,6 +124,7 @@
 		71E2C3DE9A6D3344AAC16BD1 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */; };
 		71F6548CDE4DDE996575A40F /* PersistenceCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85CD54B2B351F4452AAAA407 /* PersistenceCoordinatorTests.swift */; };
 		73A38617B2049BD55B5D772B /* SystemPermissionProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04B70914CB8B69AABCCE4C40 /* SystemPermissionProbe.swift */; };
+		7413E867C8A248222A7F15AD /* DiffTabAvailability.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C299BA75C3CE947EADC61BF /* DiffTabAvailability.swift */; };
 		76B712FC6C4121A72F3FCA1E /* RightPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7F5ABE295C5749A082FD8FA /* RightPanelView.swift */; };
 		7CE9B2261C82392303742787 /* TillerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B5A41F673927F0554385559 /* TillerApp.swift */; };
 		7D902A00E3F4F21C9BC580B5 /* deterministic.json in Resources */ = {isa = PBXBuildFile; fileRef = F37622FD7F2C5CDF28B533DA /* deterministic.json */; };
@@ -241,6 +242,7 @@
 		EE95BCE4291756DF14F7C993 /* ComposerDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81756ED657FF327299FA133E /* ComposerDocumentTests.swift */; };
 		EE9CB8AB856EAAF50F6784F3 /* ChatStreamFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF220F5964A9EC73D5E56484 /* ChatStreamFixture.swift */; };
 		EF9FAEDD510D9448C5B9EF49 /* ChatTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 081A763ACD4658E3107C248C /* ChatTextEditor.swift */; };
+		F251F86FFAF901D8349FD67A /* DiffTabAvailabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BDE4D2BE22D7AEF786DC247 /* DiffTabAvailabilityTests.swift */; };
 		F2C552423566C7290017B489 /* SidebarEngineParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16B323027542BA38D5D5DB6B /* SidebarEngineParityTests.swift */; };
 		F443351C43D1A5F28DBB7E91 /* SKILL.md in Resources */ = {isa = PBXBuildFile; fileRef = ED802856C38F484D5CC6D6C6 /* SKILL.md */; };
 		F58EDD6213BE3AA8EF5359E0 /* OpenCodeGoUsageFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 089712CC679CF6D60EAEF02A /* OpenCodeGoUsageFetcher.swift */; };
@@ -302,6 +304,7 @@
 		2B01A4A86202F751E01F4FE1 /* FileExplorerRowInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerRowInteractionTests.swift; sourceTree = "<group>"; };
 		2B6E1D46AC2DF993DECA02BD /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		2B6E2FBE0F45D5C64AD76289 /* PaneTabStripBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneTabStripBar.swift; sourceTree = "<group>"; };
+		2BDE4D2BE22D7AEF786DC247 /* DiffTabAvailabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffTabAvailabilityTests.swift; sourceTree = "<group>"; };
 		2C73446E5618BB18EA2FF9D3 /* AgentsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsSettingsView.swift; sourceTree = "<group>"; };
 		2CA1904C754B27667371D982 /* WorkspaceLayoutPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceLayoutPersistence.swift; sourceTree = "<group>"; };
 		2D0C9843AF412998E675F96E /* UsageBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageBarView.swift; sourceTree = "<group>"; };
@@ -371,6 +374,7 @@
 		71EF8B1869683ACB6050352A /* CodeHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlighter.swift; sourceTree = "<group>"; };
 		754ED987A43572FB14EBB2FD /* RightPanelMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelMode.swift; sourceTree = "<group>"; };
 		77E0B8485FF4CF181492A047 /* ComposerDocumentObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDocumentObservationTests.swift; sourceTree = "<group>"; };
+		7C299BA75C3CE947EADC61BF /* DiffTabAvailability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffTabAvailability.swift; sourceTree = "<group>"; };
 		7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoRenameWiringTests.swift; sourceTree = "<group>"; };
 		7DB1869C83CFBFF1F7AD7355 /* AutoNamerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoNamerTests.swift; sourceTree = "<group>"; };
 		7F152EDFE5AD82B6A13407D5 /* ChatControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatControllerTests.swift; sourceTree = "<group>"; };
@@ -773,6 +777,7 @@
 				03E6348E6D87D476D3BFDE80 /* BrowserContentAdapter.swift */,
 				A7FBBDB62EF95306888EA950 /* ChatContentAdapter.swift */,
 				CD07294202E241A743BC2120 /* DiffContentAdapter.swift */,
+				7C299BA75C3CE947EADC61BF /* DiffTabAvailability.swift */,
 				96531962D46C0E179912D99D /* DocumentContentAdapter.swift */,
 				30EEB69355DE18720F5DE1D9 /* LegacyWorkspaceStore.swift */,
 				999C179DB72BDCBC14E1B877 /* PaneTabPresentation.swift */,
@@ -866,6 +871,7 @@
 			children = (
 				23CE84CAAD5C3995436C6CB7 /* AppModelFacadeTests.swift */,
 				D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */,
+				2BDE4D2BE22D7AEF786DC247 /* DiffTabAvailabilityTests.swift */,
 				530662F4D1F5566E3CC392D0 /* EmptyPaneClickReproductionTests.swift */,
 				1BC79D907740805481818B7D /* FakeWorkspacePersistence.swift */,
 				18FAA79DA5CDC0C9FA5A6ACC /* PaneTabPresentationTests.swift */,
@@ -1162,6 +1168,7 @@
 				08D1776D0FB5770852F312BF /* DiffContentAdapter.swift in Sources */,
 				70695DFBA4C8C6272EED1B11 /* DiffDragPayload.swift in Sources */,
 				FF9414FF0E5065A840B5EE23 /* DiffLoadStore.swift in Sources */,
+				7413E867C8A248222A7F15AD /* DiffTabAvailability.swift in Sources */,
 				E368E97B3A31047E97482E1A /* DividerCursorStrip.swift in Sources */,
 				9F7A522E977E7FB1FEE6454A /* DocumentContentAdapter.swift in Sources */,
 				6ABCA221B30C94B74744F851 /* EditSummaryCardView.swift in Sources */,
@@ -1291,6 +1298,7 @@
 				0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */,
 				427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */,
 				D0B5A888230BF64DE771C4C2 /* DiffDragPayloadTests.swift in Sources */,
+				F251F86FFAF901D8349FD67A /* DiffTabAvailabilityTests.swift in Sources */,
 				19E39343B8CD4EC81B57DB43 /* DividerCursorStripTests.swift in Sources */,
 				C8DDAAF7471111DE677387A0 /* EmptyPaneClickReproductionTests.swift in Sources */,
 				641773C7642B2C6CDEC3EAAF /* FakeWorkspacePersistence.swift in Sources */,
