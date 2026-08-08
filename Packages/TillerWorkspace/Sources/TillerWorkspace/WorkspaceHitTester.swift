@@ -26,8 +26,8 @@ public enum WorkspaceHitTester {
     public static func target(
         at point: CGPoint,
         in frames: [PaneGroupHitFrame],
-        draggedTab: WorkspaceTabID,
-        sourceGroup: PaneGroupID,
+        draggedTab: WorkspaceTabID? = nil,
+        sourceGroup: PaneGroupID? = nil,
         tabStripHeight: CGFloat = WorkspaceMetrics.tabStripHeight
     ) -> DropTarget {
         guard let frame = frames.first(where: { $0.bounds.contains(point) }) else {

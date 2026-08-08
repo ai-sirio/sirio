@@ -117,6 +117,34 @@ struct DropTargetResolverTests {
     }
 
     @Test
+    func anExternalDragUsesEveryTargetWithoutApplyingTheSoleTabRule() {
+        let groupID = PaneGroupID()
+        let frames = [
+            CGRect(x: 0, y: 0, width: 100, height: 30),
+            CGRect(x: 100, y: 0, width: 100, height: 30)
+        ]
+
+        #expect(
+            DropTargetResolver.resolve(
+                pointInGroup: CGPoint(x: 500, y: 250), groupBounds: bounds,
+                tabStripHeight: 40, tabFrames: [], draggedTab: nil,
+                sourceGroup: nil, hoveredGroup: groupID, groupTabCount: 1
+            ) == .center(groupID))
+        #expect(
+            DropTargetResolver.resolve(
+                pointInGroup: CGPoint(x: 995, y: 250), groupBounds: bounds,
+                tabStripHeight: 40, tabFrames: [], draggedTab: nil,
+                sourceGroup: nil, hoveredGroup: groupID, groupTabCount: 1
+            ) == .edge(groupID, placement: .right))
+        #expect(
+            DropTargetResolver.resolve(
+                pointInGroup: CGPoint(x: 110, y: 10), groupBounds: bounds,
+                tabStripHeight: 40, tabFrames: frames, draggedTab: nil,
+                sourceGroup: nil, hoveredGroup: groupID, groupTabCount: 1
+            ) == .tabStrip(groupID, insertionIndex: 1))
+    }
+
+    @Test
     func splitIsIneligibleWhenEitherHalfWouldFallBelowTwoFortyPoints() {
         let result = SplitEligibility.check(
             groupSize: CGSize(width: 400, height: 300),
