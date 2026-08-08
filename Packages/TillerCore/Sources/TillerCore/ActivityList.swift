@@ -83,6 +83,8 @@ public enum ActivityListBuilder {
             activityKey = paneId
         case .document:
             return nil
+        case .diff:
+            return nil
         case .browser:
             return nil
         }

@@ -86,6 +86,37 @@ struct SQLiteWorkspacePersistenceTests {
         #expect(try database.read { try BrowserContentRecord.fetchCount($0) } == 0)
     }
 
+    @Test func diffTabRestoresAlongsideEditorForTheSameFilePath() async throws {
+        let (database, worktreeID) = try makeDatabase()
+        let persistence = SQLiteWorkspacePersistence(database: database)
+        let groupID = PaneGroupID()
+        let editorID = WorkspaceTabID()
+        let diffID = WorkspaceTabID()
+        let fileURL = URL(fileURLWithPath: "/tmp/project/Sources/Feature.swift")
+        let documentID = DocumentID.make(worktreeID: worktreeID, fileURL: fileURL)
+        let editor = WorkspaceTab(
+            id: editorID, title: "Feature.swift", titleIsAutoNamed: true,
+            content: .document(documentID, editor: .code))
+        let diff = WorkspaceTab(
+            id: diffID, title: "Feature.swift", titleIsAutoNamed: true,
+            content: .diff(documentID))
+        let layout = try #require(try WorkspaceLayout.make(
+            root: .group(groupID),
+            groups: [groupID: PaneGroup(
+                id: groupID, tabs: [editor, diff], activeTabID: diffID)],
+            activeGroupID: groupID).get())
+
+        try await persistence.commitStructural(
+            worktreeID: worktreeID, revision: 1,
+            snapshot: WorkspaceSnapshot(layout: layout),
+            tabs: [editor, diff], terminalContents: [], browserContents: [])
+
+        let restored = await persistence.restore(worktreeID: worktreeID)
+        #expect(restored.tabs[editorID]?.content == editor.content)
+        #expect(restored.tabs[diffID]?.content == .diff(documentID))
+        #expect(restored.layout.allTabs.count == 2)
+    }
+
     @Test func structuralCommitWritesSnapshotAndTabsInOneTransaction() async throws {
         let (database, worktreeID) = try makeDatabase()
         let persistence = SQLiteWorkspacePersistence(database: database)

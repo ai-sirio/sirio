@@ -151,6 +151,8 @@ public final class WorkspaceFocusCoordinator {
             .composer
         case .document:
             .editor
+        case .diff:
+            .editor
         case .browser:
             .webView
         }

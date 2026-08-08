@@ -119,7 +119,8 @@ public enum WorkspaceLayoutEngine {
             return .failure(.duplicateID("tab:" + tab.id.rawValue.uuidString))
         }
         guard !layout.allTabs.contains(where: {
-            $0.content.contentIdentifierString == tab.content.contentIdentifierString
+            $0.content.kind == tab.content.kind
+                && $0.content.contentIdentifierString == tab.content.contentIdentifierString
         }) else {
             return .failure(.duplicateContentOwnership(tab.content.contentIdentifierString))
         }
@@ -281,7 +282,8 @@ public enum WorkspaceLayoutEngine {
                 return .failure(.duplicateID("tab:" + newTab.id.rawValue.uuidString))
             }
             guard !layout.allTabs.contains(where: {
-                $0.content.contentIdentifierString == newTab.content.contentIdentifierString
+                $0.content.kind == newTab.content.kind
+                    && $0.content.contentIdentifierString == newTab.content.contentIdentifierString
             }) else {
                 return .failure(.duplicateContentOwnership(
                     newTab.content.contentIdentifierString))

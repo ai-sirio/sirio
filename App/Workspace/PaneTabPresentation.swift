@@ -6,12 +6,13 @@ enum PaneTabIconKind: Equatable {
     case terminal(agentID: String?)
     case chat(agentID: String?)
     case document(DocumentEditorKind)
+    case diff
     case browser(faviconURL: URL?)
 
     var agentID: String? {
         switch self {
         case .terminal(let id), .chat(let id): id
-        case .document, .browser: nil
+        case .document, .diff, .browser: nil
         }
     }
 }
@@ -27,6 +28,7 @@ struct PaneTabPresentation: Equatable {
         case .chat: "Chat"
         case .document(.markdown): "Markdown document"
         case .document(.code): "Code document"
+        case .diff: "Diff"
         case .browser: "Browser"
         }
     }
@@ -71,6 +73,8 @@ struct PaneTabPresentationResolver {
                 icon: .document(editor),
                 isDirty: isDirty(entry.tabID),
                 agentStatus: nil)
+        case .diff:
+            return PaneTabPresentation(icon: .diff, isDirty: false, agentStatus: nil)
         case .browser(let contentID):
             return PaneTabPresentation(
                 icon: .browser(faviconURL: browserFaviconURL(contentID)),

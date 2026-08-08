@@ -9,6 +9,7 @@ public enum WorkspaceContentKind: String, Codable, Sendable {
     case terminal
     case chat
     case document
+    case diff
     case browser
 }
 
@@ -16,6 +17,7 @@ public enum WorkspaceContentRef: Hashable, Sendable, Codable {
     case terminal(TerminalContentID)
     case chat(ChatContentID)
     case document(DocumentID, editor: DocumentEditorKind)
+    case diff(DocumentID)
     case browser(BrowserContentID)
 
     public var kind: WorkspaceContentKind {
@@ -26,6 +28,8 @@ public enum WorkspaceContentRef: Hashable, Sendable, Codable {
             .chat
         case .document:
             .document
+        case .diff:
+            .diff
         case .browser:
             .browser
         }
@@ -39,6 +43,8 @@ public enum WorkspaceContentRef: Hashable, Sendable, Codable {
         case .chat(let rawValue):
             rawValue.rawValue
         case .document(let documentID, editor: _):
+            documentID.canonicalPath
+        case .diff(let documentID):
             documentID.canonicalPath
         case .browser(let rawValue):
             rawValue.rawValue.uuidString
