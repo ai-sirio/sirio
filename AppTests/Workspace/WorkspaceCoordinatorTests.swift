@@ -10,6 +10,32 @@ import TillerWorkspace
 @Suite(.serialized)
 @MainActor
 struct WorkspaceCoordinatorTests {
+    @Test func droppingTheSameDiffPathTwiceLeavesOneTabAndActivatesIt() async {
+        let persistence = CoordinatorPersistence(emptyUntouchedWorktrees: true)
+        let coordinator = WorkspaceCoordinator(
+            persistence: persistence,
+            registry: WorkspaceContentRegistry(),
+            adapters: [.diff: DiffContentAdapter()])
+        let worktree = fixtureWorktree(number: 2)
+
+        await coordinator.restore(worktree: worktree)
+        let groupID = coordinator.layouts[worktree.id]!.activeGroupID
+        let intent = WorkspaceIntent.requestOpenDiff(
+            path: "Sources/Feature.swift", target: .center(groupID))
+
+        await coordinator.handle(intent, in: worktree)
+        guard let first = coordinator.layouts[worktree.id]?.allTabs.first else {
+            Issue.record("the first diff drop must create a tab")
+            return
+        }
+        await coordinator.handle(intent, in: worktree)
+
+        let tabs = coordinator.layouts[worktree.id]?.allTabs ?? []
+        #expect(tabs.count == 1)
+        #expect(tabs[0].id == first.id)
+        #expect(coordinator.layouts[worktree.id]?.group(groupID)?.activeTabID == first.id)
+    }
+
     @Test func structuralCommitCarriesBrowserRecordsFromTheLayout() async {
         let worktree = fixtureWorktree(number: 1)
         let browserID = BrowserContentID()

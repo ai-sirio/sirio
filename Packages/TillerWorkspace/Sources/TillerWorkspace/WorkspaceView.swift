@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import TillerCore
 
 @MainActor
@@ -10,6 +11,7 @@ public struct WorkspaceView: NSViewControllerRepresentable {
     private let intentSink: WorkspaceIntentSink
     private let stripFactory: PaneTabStripFactory?
     private let emptyStateFactory: PaneEmptyStateFactory?
+    private let diffPathFromPasteboard: @MainActor (NSPasteboard) -> String?
 
     public init(
         layout: WorkspaceLayout,
@@ -18,7 +20,8 @@ public struct WorkspaceView: NSViewControllerRepresentable {
         hostProvider: WorkspaceHostProvider,
         intentSink: WorkspaceIntentSink,
         stripFactory: PaneTabStripFactory? = nil,
-        emptyStateFactory: PaneEmptyStateFactory? = nil
+        emptyStateFactory: PaneEmptyStateFactory? = nil,
+        diffPathFromPasteboard: @escaping @MainActor (NSPasteboard) -> String? = { _ in nil }
     ) {
         self.layout = layout
         self.delta = delta
@@ -27,6 +30,7 @@ public struct WorkspaceView: NSViewControllerRepresentable {
         self.intentSink = intentSink
         self.stripFactory = stripFactory
         self.emptyStateFactory = emptyStateFactory
+        self.diffPathFromPasteboard = diffPathFromPasteboard
     }
 
     public func makeNSViewController(context: Context) -> WorkspaceViewController {
@@ -34,7 +38,8 @@ public struct WorkspaceView: NSViewControllerRepresentable {
             hostProvider: hostProvider,
             intentSink: intentSink,
             stripFactory: stripFactory,
-            emptyStateFactory: emptyStateFactory
+            emptyStateFactory: emptyStateFactory,
+            diffPathFromPasteboard: diffPathFromPasteboard
         )
         controller.update(layout: layout, delta: delta, isVisible: isVisible)
         return controller

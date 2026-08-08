@@ -190,6 +190,23 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         case .requestNewTab(let groupID):
             await requestNewTab(
                 into: groupID, choice: .newTerminal(command: nil), in: worktree)
+        case .requestOpenDiff(let path, let target):
+            let url = URL(fileURLWithPath: worktree.path, isDirectory: true)
+                .appendingPathComponent(path)
+            switch target {
+            case .center(let groupID):
+                await requestNewTab(
+                    into: groupID, choice: .openDiff(url), in: worktree)
+            case .tabStrip(let groupID, let insertionIndex):
+                await requestNewTab(
+                    into: groupID, index: insertionIndex, choice: .openDiff(url), in: worktree)
+            case .edge(let groupID, let placement):
+                await requestSplit(
+                    anchor: groupID, placement: placement.splitSide,
+                    choice: .openDiff(url), in: worktree)
+            case .none:
+                break
+            }
         case .requestClose(let tabID):
             await closeTab(tabID, in: worktree)
         case .requestMove(let tabID, to: let destination):
@@ -228,6 +245,11 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         }
         guard layout.group(anchor) != nil else {
             lastRecoverableError = "missing anchor"
+            return
+        }
+        if case .openDiff(let url) = choice,
+           let existing = existingDiffTab(for: url, in: layout, worktreeID: worktree.id) {
+            await activateExistingTab(existing, in: worktree)
             return
         }
         let sourceTabID: WorkspaceTabID?
@@ -297,11 +319,16 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         }
     }
 
-    func requestNewTab(into groupID: PaneGroupID, choice: ContentChoice,
+    func requestNewTab(into groupID: PaneGroupID, index: Int? = nil, choice: ContentChoice,
                        in worktree: Worktree) async {
         worktrees[worktree.id] = worktree
         guard let layout = layouts[worktree.id], layout.group(groupID) != nil else {
             lastRecoverableError = "missing group"
+            return
+        }
+        if case .openDiff(let url) = choice,
+           let existing = existingDiffTab(for: url, in: layout, worktreeID: worktree.id) {
+            await activateExistingTab(existing, in: worktree)
             return
         }
         guard let preparedContent = await prepareContent(for: choice, in: worktree) else {
@@ -320,7 +347,7 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         ) { currentLayout, prepared in
             guard currentLayout.group(groupID) != nil, let prepared else { return nil }
             return PreparedCommand(
-                command: .insertTab(prepared.tab, into: groupID, index: nil, activate: true),
+                command: .insertTab(prepared.tab, into: groupID, index: index, activate: true),
                 attachPreparedContent: true,
                 discardPreparedContent: false)
         }
@@ -687,6 +714,36 @@ final class WorkspaceCoordinator: WorkspaceHostProvider {
         case .openFile(let url, let editor): .openFile(url, editor: editor)
         case .openDiff(let url): .openDiff(url)
         case .moveExistingTab: nil
+        }
+    }
+
+    private func existingDiffTab(
+        for url: URL,
+        in layout: WorkspaceLayout,
+        worktreeID: UUID
+    ) -> WorkspaceTabID? {
+        let documentID = DocumentID.make(worktreeID: worktreeID, fileURL: url)
+        return layout.allTabs.first { tab in
+            guard case .diff(let existingID) = tab.content else { return false }
+            return existingID == documentID
+        }?.id
+    }
+
+    private func activateExistingTab(_ tabID: WorkspaceTabID, in worktree: Worktree) async {
+        await commit(
+            .activateTab(tabID),
+            in: worktree,
+            expectedRevision: revisions[worktree.id] ?? 0)
+    }
+}
+
+private extension EdgePlacement {
+    var splitSide: SplitPlacementSide {
+        switch self {
+        case .left: .left
+        case .right: .right
+        case .top: .above
+        case .bottom: .below
         }
     }
 }

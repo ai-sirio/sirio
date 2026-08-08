@@ -8,6 +8,7 @@ public enum WorkspaceIntentDestination: Sendable, Equatable {
 public enum WorkspaceIntent: Sendable, Equatable {
     case requestSplit(anchor: PaneGroupID, placement: SplitPlacementSide)
     case requestNewTab(into: PaneGroupID)
+    case requestOpenDiff(path: String, target: DropTarget)
     case requestClose(WorkspaceTabID)
     case requestMove(WorkspaceTabID, to: WorkspaceIntentDestination)
     case activateTab(WorkspaceTabID)

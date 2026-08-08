@@ -313,16 +313,6 @@ struct ContentView: View {
             }
             .padding(.horizontal, AppTheme.cardGap / 2)
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
-            .dropDestination(for: URL.self) { urls, _ in
-                guard let worktree = model.selectedWorktree,
-                      let url = urls.first(where: {
-                          guard $0.isFileURL else { return false }
-                          return (try? $0.resourceValues(
-                              forKeys: [.isRegularFileKey]).isRegularFile) ?? false
-                      }) else { return false }
-                model.openDocument(fileURL: url, in: worktree)
-                return true
-            }
             if rightPanelVisible {
                 FloatingCard {
                     RightPanelView(
@@ -620,7 +610,8 @@ struct ContentView: View {
                                     onBeforeAction: stripModel.onActivateGroup,
                                     onNewTerminal: stripModel.onNewTab)
                             }
-                        })
+                        },
+                        diffPathFromPasteboard: { DiffDragPayload.path(from: $0) })
                         .focusedSceneValue(
                             \.workspaceMenuTarget,
                             WorkspaceMenuTarget(
