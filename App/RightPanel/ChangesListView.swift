@@ -11,6 +11,7 @@ struct ChangesListView: View {
     @Bindable var panelModel: RightPanelModel
     let worktree: Worktree
     let onOpenFile: (URL) -> Void
+    let onOpenDiff: (URL) -> Void
     let requestDiscard: (PendingGitDiscard) -> Void
 
     @AppStorage(AppSettings.fileIconThemeKey) private var fileIconThemeRaw = FileIconTheme.sfSymbols.rawValue
@@ -132,7 +133,8 @@ struct ChangesListView: View {
                         kind: entry.isUntracked ? .untracked : .changes,
                         entries: [entry]))
                 },
-                onOpenFile: { onOpenFile(fileURL(for: entry)) })
+                onOpenFile: { onOpenFile(fileURL(for: entry)) },
+                onOpenDiff: { onOpenDiff(fileURL(for: entry)) })
 
             if panelModel.diffStore.isExpanded(entry.path) {
                 diffBody(for: entry)

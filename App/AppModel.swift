@@ -2408,6 +2408,24 @@ final class AppModel {
         }
     }
 
+    func openDiff(fileURL: URL, in worktree: Worktree) {
+        guard WorkspaceEngineGate.isEnabled else { return }
+        let root = URL(fileURLWithPath: worktree.path, isDirectory: true)
+            .standardizedFileURL.path
+        let absolute = fileURL.standardizedFileURL.path
+        guard absolute.hasPrefix(root + "/") else { return }
+        let relativePath = String(absolute.dropFirst(root.count + 1))
+        selectedWorktree = worktree
+        Task {
+            guard let groupID = await workspaceCoordinator.ensureGroup(for: worktree) else {
+                return
+            }
+            await workspaceCoordinator.handle(
+                .requestOpenDiff(path: relativePath, target: .center(groupID)),
+                in: worktree)
+        }
+    }
+
     @discardableResult
     func openMarkdownTab(fileURL: URL, in worktree: Worktree) -> LegacyWorkspaceTab? {
         openDocument(fileURL: fileURL, in: worktree)
