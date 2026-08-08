@@ -137,10 +137,32 @@ binario, submodule, oltre i limiti, file tornato pulito.
 - Allineamento per hunk, righe filler dal lato mancante.
 - **Niente** evidenziazione word-level in fase 1 (richiede diff intra-riga:
   feature separata).
-- Niente wrap: scroll orizzontale sincronizzato tra le colonne.
-- Scroll verticale unico — le due colonne stanno in un solo `ScrollView`,
-  quindi la sincronia è gratis e non ci sono due offset da inseguire.
 - Riuso di `DiffHighlightCache` (già async e condiviso), non di `FileDiffBody`.
+
+**Rivista dopo la prima verifica visiva (2026-08-08).** La versione originale
+diceva: niente wrap, scroll orizzontale sul contenitore, colonne larghe quanto
+la riga più lunga, scroll verticale unico "così la sincronia è gratis".
+Sbagliato: se lo scroll orizzontale è del contenitore, la larghezza delle
+colonne la detta il **contenuto**. Una sola riga lunga spingeva la colonna
+destra oltre il bordo del pane — un side-by-side con un lato solo visibile. Su
+un file untracked (tutte addizioni) metà pane era filler vuoto.
+
+Come è ora:
+
+- Larghezza colonna = **metà del viewport** (`columnWidth(forViewport:)`), da un
+  solo `GeometryReader` per il corpo, non uno per riga.
+- Righe più lunghe della colonna: **troncate** (`lineLimit(1)` +
+  `.truncationMode(.tail)` + `.clipped()`). Niente `.fixedSize(horizontal:)`,
+  che direbbe al testo di ignorare il frame.
+- Scroll solo verticale.
+- Diff **senza cancellazioni** (file nuovo/untracked) → **colonna singola** a
+  piena larghezza: metà pane di nulla non confronta nulla.
+- Header hunk con larghezza esplicita: `.infinity` dentro uno scroll
+  orizzontale non ha un valore definito e lo faceva fluttuare.
+
+Non fatto: scroll orizzontale interno sincronizzato tra le due colonne, che
+toglierebbe il troncamento. Da valutare solo se il troncamento dà fastidio
+nell'uso reale.
 
 ## Test prima del codice (swift-testing)
 
