@@ -33,9 +33,16 @@ enum DiffTabAvailability {
     }
 
     static func reason(for error: Error) -> DiffUnavailableReason {
-        if case .outputTooLarge = error as? GitError {
+        if isOutputLimit(error) {
             return .outputLimit
         }
         return .error(error.localizedDescription)
+    }
+
+    /// The diff tab needs this on its own: a whole-file diff that trips the
+    /// limit falls back to hunks instead of becoming an empty state.
+    static func isOutputLimit(_ error: Error) -> Bool {
+        if case .outputTooLarge = error as? GitError { return true }
+        return false
     }
 }

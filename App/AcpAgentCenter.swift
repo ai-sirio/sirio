@@ -42,7 +42,8 @@ final class AcpAgentCenter {
     private let shell: ShellRunning
     private let pathProbe: @Sendable (String) -> Bool
     private var registryAgents: [RegistryAgent] = []
-
+    
+    //ciao
     init(installStore: AgentInstallStore,
          registryClient: AgentRegistryClient? = nil,
          installer: AgentInstaller? = nil,
