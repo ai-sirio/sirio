@@ -32,6 +32,18 @@ import TillerBrowser
             OriginGrant(worktreeID: worktreeID, origin: "https://other.test")))
     }
 
+    /// `NSAlert.runModal()` used to answer itself with the default button when
+    /// the app was not active, granting access with nobody at the keyboard.
+    /// Nothing may grant a permission except an answer to the question.
+    @Test func anUngrantedOriginIsDeniedWhenThereIsNobodyToAsk() async throws {
+        let defaults = try makeDefaults()
+        let store = BrowserPermissionStore(defaults: defaults, hostWindow: { nil })
+        let url = try #require(URL(string: "https://never-granted.test/a"))
+
+        #expect(await store.requestAccess(worktreeID: worktreeID, url: url) == false)
+        #expect(store.grants.isEmpty)
+    }
+
     @Test func revokingRemovesTheGrantFromDisk() throws {
         let defaults = try makeDefaults(granting: "https://example.test")
         let store = BrowserPermissionStore(defaults: defaults)
