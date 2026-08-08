@@ -165,6 +165,7 @@
 		A4D0224C9E07E1F509AB542D /* ActivitySectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55FA33A863AF6CCC3AAB04F9 /* ActivitySectionView.swift */; };
 		A5FE4417E2CE7408481A645C /* AutoNamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DB60BAAD4CE10123E09FB38 /* AutoNamer.swift */; };
 		AB45F46F4212708E6E7D557C /* WorkspaceCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C21E555A6EA9C7FE6766A927 /* WorkspaceCoordinatorTests.swift */; };
+		ACC409EBCEE612A31F07FB79 /* DiffTabDedupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6990267B249A088C8003D1FA /* DiffTabDedupTests.swift */; };
 		AE217E1957BB981E22D78418 /* OpenChatTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67737A516872D92DD67ADE11 /* OpenChatTabTests.swift */; };
 		AE41392F109B84DFD623FEF5 /* missing-document.json in Resources */ = {isa = PBXBuildFile; fileRef = A34C5DAED9B65C9D66F5BBB9 /* missing-document.json */; };
 		AE6DD6CCCBD43F45F5D44C15 /* WorkspaceEngineGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F688664B694868C7A2885AA4 /* WorkspaceEngineGate.swift */; };
@@ -362,6 +363,7 @@
 		67334A794B95BBFBA6C2255E /* TillerAgents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerAgents; path = Packages/TillerAgents; sourceTree = SOURCE_ROOT; };
 		67737A516872D92DD67ADE11 /* OpenChatTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenChatTabTests.swift; sourceTree = "<group>"; };
 		6975FB3630EA8F7ADEF25299 /* WorkspaceMigrationIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMigrationIntegrationTests.swift; sourceTree = "<group>"; };
+		6990267B249A088C8003D1FA /* DiffTabDedupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffTabDedupTests.swift; sourceTree = "<group>"; };
 		6ACCC88E1D2338FB9158DE59 /* TillerACP */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerACP; path = Packages/TillerACP; sourceTree = SOURCE_ROOT; };
 		6B0021EAA22E67AAAC4E68AF /* ChatComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerView.swift; sourceTree = "<group>"; };
 		6BE4EAE5FC325A0ED79995A1 /* AcpAgentCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AcpAgentCenter.swift; sourceTree = "<group>"; };
@@ -872,6 +874,7 @@
 				23CE84CAAD5C3995436C6CB7 /* AppModelFacadeTests.swift */,
 				D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */,
 				2BDE4D2BE22D7AEF786DC247 /* DiffTabAvailabilityTests.swift */,
+				6990267B249A088C8003D1FA /* DiffTabDedupTests.swift */,
 				530662F4D1F5566E3CC392D0 /* EmptyPaneClickReproductionTests.swift */,
 				1BC79D907740805481818B7D /* FakeWorkspacePersistence.swift */,
 				18FAA79DA5CDC0C9FA5A6ACC /* PaneTabPresentationTests.swift */,
@@ -1299,6 +1302,7 @@
 				427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */,
 				D0B5A888230BF64DE771C4C2 /* DiffDragPayloadTests.swift in Sources */,
 				F251F86FFAF901D8349FD67A /* DiffTabAvailabilityTests.swift in Sources */,
+				ACC409EBCEE612A31F07FB79 /* DiffTabDedupTests.swift in Sources */,
 				19E39343B8CD4EC81B57DB43 /* DividerCursorStripTests.swift in Sources */,
 				C8DDAAF7471111DE677387A0 /* EmptyPaneClickReproductionTests.swift in Sources */,
 				641773C7642B2C6CDEC3EAAF /* FakeWorkspacePersistence.swift in Sources */,
