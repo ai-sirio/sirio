@@ -5,22 +5,37 @@ import Testing
 @Suite("ComposerControlBar")
 @MainActor
 struct ComposerControlBarTests {
-    @Test func primaryActionUsesAStableCircularFootprint() {
-        #expect(ComposerControlBar.primaryActionSize == 30)
+    @Test func sendPresentationDefinesTheInteractiveActionChrome() {
+        let presentation = ComposerControlBar.primaryActionPresentation(for: .ready)
+
+        #expect(presentation.kind == .send)
+        #expect(presentation.footprintSize == 30)
+        #expect(presentation.shape == .circle)
+        #expect(presentation.accessibilityLabel == "Send message")
+        #expect(presentation.systemImage == "arrow.up")
+        #expect(presentation.inactiveFillOpacity == 0.18)
     }
 
-    @Test func inactiveActionFillIsVisiblySubdued() {
-        #expect(ComposerControlBar.inactiveActionFillOpacity == 0.18)
+    @Test func loadingPresentationKeepsTheInactiveCircularFootprint() {
+        let presentation = ComposerControlBar.primaryActionPresentation(for: .connecting)
+
+        #expect(presentation.kind == .loading)
+        #expect(presentation.footprintSize == 30)
+        #expect(presentation.shape == .circle)
+        #expect(presentation.accessibilityLabel == "Starting agent")
+        #expect(presentation.systemImage == nil)
+        #expect(presentation.inactiveFillOpacity == 0.18)
     }
 
-    @Test func sendActionUsesTheArrowUpSymbol() {
-        #expect(ComposerControlBar.sendSystemImage == "arrow.up")
-    }
+    @Test func stopPresentationDefinesTheStopActionChrome() {
+        let presentation = ComposerControlBar.primaryActionPresentation(for: .prompting)
 
-    @Test func primaryActionStatesHaveStableAccessibilityLabels() {
-        #expect(ComposerControlBar.sendAccessibilityLabel == "Send message")
-        #expect(ComposerControlBar.loadingAccessibilityLabel == "Starting agent")
-        #expect(ComposerControlBar.stopAccessibilityLabel == "Stop response")
+        #expect(presentation.kind == .stop)
+        #expect(presentation.footprintSize == 30)
+        #expect(presentation.shape == .circle)
+        #expect(presentation.accessibilityLabel == "Stop response")
+        #expect(presentation.systemImage == "stop.fill")
+        #expect(presentation.inactiveFillOpacity == nil)
     }
 
     @Test func connectingShowsTheLoadingControl() {
