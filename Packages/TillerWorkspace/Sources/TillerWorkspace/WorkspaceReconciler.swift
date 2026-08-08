@@ -40,7 +40,8 @@ public final class WorkspaceReconciler {
         hostProvider: WorkspaceHostProvider,
         intentSink: WorkspaceIntentSink? = nil,
         stripFactory: PaneTabStripFactory? = nil,
-        emptyStateFactory: PaneEmptyStateFactory? = nil
+        emptyStateFactory: PaneEmptyStateFactory? = nil,
+        diffPathFromPasteboard: @escaping @MainActor (NSPasteboard) -> String? = { _ in nil }
     ) {
         let overlay = WorkspaceDragOverlay(frame: .zero)
         self.hostProvider = hostProvider
@@ -48,7 +49,12 @@ public final class WorkspaceReconciler {
         self.stripFactory = stripFactory
         self.emptyStateFactory = emptyStateFactory
         self.overlayView = overlay
-        self.rootViewController = WorkspaceRootController(overlay: overlay)
+        let root = WorkspaceRootController(
+            overlay: overlay,
+            intentSink: intentSink,
+            diffPathFromPasteboard: diffPathFromPasteboard)
+        self.rootViewController = root
+        root.configure { [weak self] in self?.hitFrames() ?? [] }
     }
 
     /// Every mounted pane's geometry in root space. Read fresh on each pointer
@@ -223,9 +229,19 @@ public final class WorkspaceReconciler {
 @MainActor
 private final class WorkspaceRootController: NSViewController {
     private let overlay: WorkspaceDragOverlay
+    private weak var intentSink: WorkspaceIntentSink?
+    private let diffPathFromPasteboard: @MainActor (NSPasteboard) -> String?
+    private var framesProvider: @MainActor () -> [PaneGroupHitFrame] = { [] }
+    private var currentDropTarget: DropTarget = .none
 
-    init(overlay: WorkspaceDragOverlay) {
+    init(
+        overlay: WorkspaceDragOverlay,
+        intentSink: WorkspaceIntentSink?,
+        diffPathFromPasteboard: @escaping @MainActor (NSPasteboard) -> String?
+    ) {
         self.overlay = overlay
+        self.intentSink = intentSink
+        self.diffPathFromPasteboard = diffPathFromPasteboard
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -234,7 +250,62 @@ private final class WorkspaceRootController: NSViewController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func loadView() { view = NSView() }
+    override func loadView() {
+        let dropView = WorkspaceDropRootView()
+        dropView.destination = self
+        dropView.registerForDraggedTypes([WorkspaceExternalDrop.diffPasteboardType])
+        view = dropView
+    }
+
+    func configure(framesProvider: @escaping @MainActor () -> [PaneGroupHitFrame]) {
+        self.framesProvider = framesProvider
+    }
+
+    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        updateDropTarget(sender)
+        return currentDropTarget == .none ? [] : .copy
+    }
+
+    func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        updateDropTarget(sender)
+        return currentDropTarget == .none ? [] : .copy
+    }
+
+    func draggingExited(_ sender: NSDraggingInfo?) {
+        _ = sender
+        currentDropTarget = .none
+        overlay.previewRect = nil
+    }
+
+    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        updateDropTarget(sender)
+        guard currentDropTarget != .none,
+              let path = diffPathFromPasteboard(sender.draggingPasteboard) else {
+            draggingExited(nil)
+            return false
+        }
+        intentSink?.send(.requestOpenDiff(path: path, target: currentDropTarget))
+        draggingExited(nil)
+        return true
+    }
+
+    private func updateDropTarget(_ sender: NSDraggingInfo) {
+        guard sender.draggingPasteboard.availableType(from: [
+            WorkspaceExternalDrop.diffPasteboardType
+        ]) != nil,
+              let rootView = viewIfLoaded else {
+            draggingExited(nil)
+            return
+        }
+        let point = rootView.convert(sender.draggingLocation, from: nil)
+        currentDropTarget = WorkspaceHitTester.target(
+            at: point,
+            in: framesProvider(),
+            draggedTab: nil,
+            sourceGroup: nil)
+        overlay.previewRect = DragPreviewGeometry.previewRect(
+            for: currentDropTarget, in: framesProvider())
+    }
 
     func setContent(_ child: NSViewController) {
         // Reinstalling the child that is already installed would take the whole
@@ -270,5 +341,27 @@ private final class WorkspaceRootController: NSViewController {
             overlay.topAnchor.constraint(equalTo: view.topAnchor),
             overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+    }
+}
+
+private final class WorkspaceDropRootView: NSView {
+    weak var destination: WorkspaceRootController?
+
+    override var isFlipped: Bool { true }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        destination?.draggingEntered(sender) ?? []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        destination?.draggingUpdated(sender) ?? []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        destination?.draggingExited(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        destination?.performDragOperation(sender) ?? false
     }
 }

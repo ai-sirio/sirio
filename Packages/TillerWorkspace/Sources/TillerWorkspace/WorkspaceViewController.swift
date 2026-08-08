@@ -12,13 +12,15 @@ public final class WorkspaceViewController: NSViewController {
         hostProvider: WorkspaceHostProvider,
         intentSink: WorkspaceIntentSink,
         stripFactory: PaneTabStripFactory? = nil,
-        emptyStateFactory: PaneEmptyStateFactory? = nil
+        emptyStateFactory: PaneEmptyStateFactory? = nil,
+        diffPathFromPasteboard: @escaping @MainActor (NSPasteboard) -> String? = { _ in nil }
     ) {
         self.reconciler = WorkspaceReconciler(
             hostProvider: hostProvider,
             intentSink: intentSink,
             stripFactory: stripFactory,
-            emptyStateFactory: emptyStateFactory)
+            emptyStateFactory: emptyStateFactory,
+            diffPathFromPasteboard: diffPathFromPasteboard)
         self.intentSink = intentSink
         super.init(nibName: nil, bundle: nil)
     }
