@@ -649,13 +649,13 @@ Expected staged paths: exactly the two paths above.
 
 ---
 
-### Task 4: Run the repository gate and perform live visual verification
+### Task 4: Run focused final checks and perform live visual verification
 
 **Files:**
 - No source files should change in this task.
 - Inspect only; do not stage generated or unrelated working-tree changes.
 
-- [ ] **Step 1: Run all App-target tests using the repository's current test path**
+- [ ] **Step 1: Run the complete focused regression selection**
 
 Run:
 
@@ -663,23 +663,34 @@ Run:
 xcodegen generate
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
   -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates \
-  -clonedSourcePackagesDirPath DerivedData/SourcePackages
+  -clonedSourcePackagesDirPath DerivedData/SourcePackages \
+  -only-testing:TillerTests/ComposerLayoutMetricsTests \
+  -only-testing:TillerTests/ComposerControlBarTests \
+  -only-testing:TillerTests/ChatControllerTests/pendingPermissionRendersAboveComposerWhilePromptRemainsOpen \
+  -only-testing:TillerTests/ComposerSendTests \
+  -only-testing:TillerTests/ComposerDocumentTests \
+  -only-testing:TillerTests/ComposerChipTests
 ```
 
-Expected: the App test run succeeds and reports a non-zero test count. If it
-fails, inspect the complete log rather than relying on the final xcodebuild
-epilogue, fix only regressions caused by the composer commits, and rerun.
+Expected: every selected suite runs and passes with a non-zero test count. If it
+fails, inspect the complete output, fix only regressions caused by the composer
+commits, and rerun the same focused selection.
 
-- [ ] **Step 2: Run the single authoritative repository gate**
+- [ ] **Step 2: Build the app without running the repository gate**
 
 Run:
 
 ```bash
-Scripts/ci.sh
+xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
+  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO \
+  -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates build
 ```
 
-Expected final output: `CI OK`. This is required before implementation can be
-called complete. A focused suite or successful build is not a substitute.
+Expected: `BUILD SUCCEEDED`.
+
+User boundary: never run `Scripts/ci.sh` or an equivalent all-repository test
+sweep for this task. The focused suites and build above are the complete
+automated verification scope; the final report must state this explicitly.
 
 - [ ] **Step 3: Launch the built app and verify dark appearance**
 

@@ -151,7 +151,10 @@ Follow the repository's test-first convention with `swift-testing`.
    pixel-snapshot harness for these SwiftUI controls.
 4. Run the existing composer behavior tests for submission, queueing, chips,
    attachments, slash commands, mentions, focus, and permission blocking.
-5. Run `Scripts/ci.sh`; completion requires its final `CI OK` output.
+5. Do not run `Scripts/ci.sh` or an equivalent all-repository gate. The user
+   explicitly prohibited that command after approving this design. Run only the
+   focused composer/chat suites and the app build named in the implementation
+   plan, and report this narrower verification boundary.
 6. Inspect the built app manually in dark and light appearances at wide and
    narrow pane widths. Compare the dark appearance with the supplied Codex
    reference and verify the unified surface, equal margins, increased height,
@@ -178,8 +181,10 @@ pixel-level verification.
 - Banner, permission, queue, attachment, drop, and error behavior is unchanged.
 - Dark and light appearances remain legible, with no global palette change.
 - Existing local work and the transcript redesign remain untouched.
-- `Scripts/ci.sh` finishes with `CI OK`, followed by successful manual visual
-  inspection or an explicit report that live visual verification was blocked.
+- The focused composer/chat suites and app build named in the implementation
+  plan pass, followed by successful manual visual inspection or an explicit
+  report that live visual verification was blocked. No `Scripts/ci.sh` or
+  equivalent all-repository gate is run.
 
 ## Out of scope
 
