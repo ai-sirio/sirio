@@ -20,7 +20,18 @@ struct ComposerControlBar: View {
     @State private var modelPickerShown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    enum TrailingControl { case loading, stop, send }
+    enum TrailingControl: Equatable { case loading, stop, send }
+
+    enum PrimaryActionShape: Equatable { case circle }
+
+    struct PrimaryActionPresentation: Equatable {
+        let kind: TrailingControl
+        let footprintSize: CGFloat
+        let shape: PrimaryActionShape
+        let accessibilityLabel: String
+        let systemImage: String?
+        let inactiveFillOpacity: Double?
+    }
 
     static let primaryActionSize: CGFloat = 30
     static let inactiveActionFillOpacity = 0.18
@@ -40,7 +51,40 @@ struct ComposerControlBar: View {
         }
     }
 
+    static func primaryActionPresentation(
+        for state: ChatController.ChatState
+    ) -> PrimaryActionPresentation {
+        let kind = trailingControl(for: state)
+        switch kind {
+        case .send:
+            return PrimaryActionPresentation(
+                kind: kind,
+                footprintSize: primaryActionSize,
+                shape: .circle,
+                accessibilityLabel: sendAccessibilityLabel,
+                systemImage: sendSystemImage,
+                inactiveFillOpacity: inactiveActionFillOpacity)
+        case .loading:
+            return PrimaryActionPresentation(
+                kind: kind,
+                footprintSize: primaryActionSize,
+                shape: .circle,
+                accessibilityLabel: loadingAccessibilityLabel,
+                systemImage: nil,
+                inactiveFillOpacity: inactiveActionFillOpacity)
+        case .stop:
+            return PrimaryActionPresentation(
+                kind: kind,
+                footprintSize: primaryActionSize,
+                shape: .circle,
+                accessibilityLabel: stopAccessibilityLabel,
+                systemImage: "stop.fill",
+                inactiveFillOpacity: nil)
+        }
+    }
+
     var body: some View {
+        let primaryAction = Self.primaryActionPresentation(for: controller.state)
         HStack(spacing: 8) {
             HStack(spacing: 8) {
                 attachmentButton
@@ -53,10 +97,10 @@ struct ComposerControlBar: View {
                 overflowMenu
                 contextUsageIndicator
                 agentPill
-                switch Self.trailingControl(for: controller.state) {
-                case .loading: loadingButton
-                case .stop: stopButton
-                case .send: sendButton
+                switch primaryAction.kind {
+                case .loading: loadingButton(presentation: primaryAction)
+                case .stop: stopButton(presentation: primaryAction)
+                case .send: sendButton(presentation: primaryAction)
                 }
             }
         }
@@ -245,52 +289,75 @@ struct ComposerControlBar: View {
             ?? controller.agentId
     }
 
-    private var sendButton: some View {
-        Button(action: onSend) {
-            Image(systemName: Self.sendSystemImage)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(canSend ? Color.white : Color.accentColor)
-                .frame(width: Self.primaryActionSize, height: Self.primaryActionSize)
-                .background(
-                    canSend
-                        ? AnyShapeStyle(Color.accentColor)
-                        : AnyShapeStyle(Color.accentColor.opacity(Self.inactiveActionFillOpacity)),
-                    in: Circle())
+    @ViewBuilder
+    private func primaryActionChrome<Content: View>(
+        presentation: PrimaryActionPresentation,
+        fill: AnyShapeStyle,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        switch presentation.shape {
+        case .circle:
+            content()
+                .frame(width: presentation.footprintSize,
+                       height: presentation.footprintSize)
+                .background(fill, in: Circle())
+        }
+    }
+
+    private func sendButton(presentation: PrimaryActionPresentation) -> some View {
+        let inactiveOpacity = presentation.inactiveFillOpacity ?? 0
+        return Button(action: onSend) {
+            primaryActionChrome(
+                presentation: presentation,
+                fill: canSend
+                    ? AnyShapeStyle(Color.accentColor)
+                    : AnyShapeStyle(Color.accentColor.opacity(inactiveOpacity))) {
+                if let systemImage = presentation.systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(canSend ? Color.white : Color.accentColor)
+                }
+            }
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.return, modifiers: [])
         .disabled(!canSend)
-        .accessibilityLabel(Self.sendAccessibilityLabel)
+        .accessibilityLabel(presentation.accessibilityLabel)
         .help("Send message")
     }
 
     /// A spinner in the primary action's fixed footprint while the agent starts.
-    private var loadingButton: some View {
-        ProgressView()
-            .controlSize(.small)
-            .tint(.accentColor)
-            .frame(width: Self.primaryActionSize, height: Self.primaryActionSize)
-            .background(
-                Color.accentColor.opacity(Self.inactiveActionFillOpacity),
-                in: Circle())
+    private func loadingButton(presentation: PrimaryActionPresentation) -> some View {
+        let inactiveOpacity = presentation.inactiveFillOpacity ?? 0
+        return primaryActionChrome(
+            presentation: presentation,
+            fill: AnyShapeStyle(Color.accentColor.opacity(inactiveOpacity))) {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.accentColor)
+        }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Self.loadingAccessibilityLabel)
+            .accessibilityLabel(presentation.accessibilityLabel)
             .help("Starting the agent…")
     }
 
-    private var stopButton: some View {
-        Button {
+    private func stopButton(presentation: PrimaryActionPresentation) -> some View {
+        return Button {
             Task { await controller.cancelTurn() }
         } label: {
-            Image(systemName: "stop.fill")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: Self.primaryActionSize, height: Self.primaryActionSize)
-                .background(Color.red.opacity(0.8), in: Circle())
+            primaryActionChrome(
+                presentation: presentation,
+                fill: AnyShapeStyle(Color.red.opacity(0.8))) {
+                if let systemImage = presentation.systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.escape, modifiers: [])
-        .accessibilityLabel(Self.stopAccessibilityLabel)
+        .accessibilityLabel(presentation.accessibilityLabel)
         .help("Stop the turn")
     }
 }
