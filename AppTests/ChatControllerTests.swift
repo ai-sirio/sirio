@@ -804,21 +804,30 @@ extension ChatControllerTests {
 
         let worktree = Worktree(id: worktreeId, projectId: UUID(), branch: "main", path: root.path)
         let appModel = AppModel(paneRegistry: PaneRegistry(), activateApplication: {})
-        let capture = ChatPaneLayoutCapture()
-        let host = NSHostingView(rootView: ChatPaneLayoutProbe(capture: capture) {
-            ChatPaneView(controller: controller, worktree: worktree, appModel: appModel)
-                .environment(\.chatPaneLayoutCaptureEnabled, true)
-        })
-        host.setFrameSize(NSSize(width: 640, height: 480))
-        host.layoutSubtreeIfNeeded()
-        for _ in 0..<20 {
-            if capture.frames[.approvalPanel] != nil, capture.frames[.composer] != nil { break }
-            await Task.yield()
-        }
+        for containerWidth in [CGFloat(640), CGFloat(2_000)] {
+            let capture = ChatPaneLayoutCapture()
+            let host = NSHostingView(rootView: ChatPaneLayoutProbe(capture: capture) {
+                ChatPaneView(controller: controller, worktree: worktree, appModel: appModel)
+                    .environment(\.chatPaneLayoutCaptureEnabled, true)
+            })
+            host.setFrameSize(NSSize(width: containerWidth, height: 480))
+            host.layoutSubtreeIfNeeded()
+            for _ in 0..<20 {
+                if capture.frames[.approvalPanel] != nil,
+                   capture.frames[.composer] != nil { break }
+                await Task.yield()
+            }
 
-        let approvalFrame = try #require(capture.frames[.approvalPanel])
-        let composerFrame = try #require(capture.frames[.composer])
-        #expect(approvalFrame.maxY <= composerFrame.minY)
+            let approvalFrame = try #require(capture.frames[.approvalPanel])
+            let composerFrame = try #require(capture.frames[.composer])
+            let expectedWidth = ComposerLayoutMetrics.contentWidth(for: containerWidth)
+            let leftInset = composerFrame.minX
+            let rightInset = containerWidth - composerFrame.maxX
+
+            #expect(approvalFrame.maxY <= composerFrame.minY)
+            #expect(abs(composerFrame.width - expectedWidth) < 0.5)
+            #expect(abs(leftInset - rightInset) < 0.5)
+        }
 
         await driver.releasePrompt()
     }

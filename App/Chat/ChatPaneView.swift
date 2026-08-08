@@ -31,6 +31,21 @@ extension EnvironmentValues {
     }
 }
 
+extension View {
+    @ViewBuilder
+    func captureLayout(_ role: ChatPaneLayoutRole, enabled: Bool) -> some View {
+        if enabled {
+            background(GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ChatPaneLayoutPreferenceKey.self,
+                    value: [role: proxy.frame(in: .named("chat-pane"))])
+            })
+        } else {
+            self
+        }
+    }
+}
+
 /// A whole chat tab: transcript + composer. Agent identity/state live in
 /// the window toolbar; state banners cover auth/disconnect/npx failures.
 struct ChatPaneView: View {
@@ -90,17 +105,16 @@ struct ChatPaneView: View {
                     detail: "Review the proposed plan in the transcript, then approve or reject it.",
                     actionTitle: "OK") {}
             }
-            captureLayout(.approvalPanel) {
-                PendingQuestionBar(permissions: snapshot.composerPermissions,
-                                   controller: controller)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .layoutPriority(1)
-            }
-            Divider()
-            captureLayout(.composer) {
+            PendingQuestionBar(permissions: snapshot.composerPermissions,
+                               controller: controller)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .layoutPriority(1)
+                .captureLayout(.approvalPanel, enabled: layoutCaptureEnabled)
+            CenteredComposerLayout {
                 ChatComposerView(controller: controller, worktreePath: worktree.path,
                                  document: document)
+                    .captureLayout(.composer, enabled: layoutCaptureEnabled)
             }
         }
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
@@ -158,21 +172,6 @@ struct ChatPaneView: View {
             }
         }
         return true
-    }
-
-    @ViewBuilder
-    private func captureLayout<Content: View>(_ role: ChatPaneLayoutRole,
-                                              @ViewBuilder content: () -> Content) -> some View {
-        if layoutCaptureEnabled {
-            content()
-                .background(GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: ChatPaneLayoutPreferenceKey.self,
-                        value: [role: proxy.frame(in: .named("chat-pane"))])
-                })
-        } else {
-            content()
-        }
     }
 
     private func banner(_ title: String, detail: String,
