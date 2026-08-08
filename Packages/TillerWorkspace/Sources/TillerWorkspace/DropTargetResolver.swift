@@ -29,8 +29,8 @@ public enum DropTargetResolver {
         groupBounds: CGRect,
         tabStripHeight: CGFloat,
         tabFrames: [CGRect],
-        draggedTab: WorkspaceTabID,
-        sourceGroup: PaneGroupID,
+        draggedTab: WorkspaceTabID?,
+        sourceGroup: PaneGroupID?,
         hoveredGroup: PaneGroupID,
         groupTabCount: Int
     ) -> DropTarget {
@@ -52,7 +52,7 @@ public enum DropTargetResolver {
 
         // Rule 7: only the tab's *own* group is barred, and only when taking
         // that tab out would leave the group empty.
-        if hoveredGroup == sourceGroup, groupTabCount == 1 {
+        if let sourceGroup, hoveredGroup == sourceGroup, groupTabCount == 1 {
             return .center(hoveredGroup)
         }
 
