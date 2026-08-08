@@ -110,6 +110,11 @@ targets:
             UTTypeConformsTo:
               - public.data
             UTTypeTagSpecification: {}
+          - UTTypeIdentifier: it.tiller.diff-drag
+            UTTypeDescription: Tiller Diff
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification: {}
     postbuildScripts:
       - name: Embed tillerctl
         script: |
