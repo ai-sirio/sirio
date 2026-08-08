@@ -299,6 +299,10 @@ private struct PaneTabIcon: View {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
+            case .diff:
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 10))
+                    .foregroundStyle(AppTheme.meta)
             case .browser(let faviconURL):
                 if let faviconURL {
                     AsyncImage(url: faviconURL) { phase in

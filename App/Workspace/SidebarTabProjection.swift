@@ -52,6 +52,8 @@ enum SidebarTabProjection {
             // Browser surfaces are universal-engine-only. If the legacy engine
             // is forced, they are not shown; Phase 3 will also hide New Browser.
             nil
+        case .diff:
+            nil
         }
     }
 }

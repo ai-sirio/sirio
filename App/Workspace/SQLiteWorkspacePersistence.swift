@@ -406,6 +406,9 @@ final class SQLiteWorkspacePersistence: WorkspaceLayoutPersistence, @unchecked S
             content = .document(
                 DocumentID.make(worktreeID: worktreeID, fileURL: URL(fileURLWithPath: row.contentId)),
                 editor: viewState.editorMode ?? .code)
+        case WorkspaceContentKind.diff.rawValue:
+            content = .diff(
+                DocumentID.make(worktreeID: worktreeID, fileURL: URL(fileURLWithPath: row.contentId)))
         case WorkspaceContentKind.browser.rawValue:
             guard let contentUUID = UUID(uuidString: row.contentId),
                   browserContents.contains(where: {

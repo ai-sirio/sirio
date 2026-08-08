@@ -185,6 +185,8 @@ struct WorkspaceMigrationV15Tests {
                 return ExpectedTab(id: tab.id.rawValue.uuidString, title: tab.title,
                                    titleIsAutoNamed: tab.titleIsAutoNamed, contentKind: "document",
                                    contentID: id.canonicalPath, editor: editor.rawValue)
+            case .diff:
+                preconditionFailure("v15 migration cannot produce diff content")
             case .browser:
                 preconditionFailure("v15 migration cannot produce browser content")
             }
