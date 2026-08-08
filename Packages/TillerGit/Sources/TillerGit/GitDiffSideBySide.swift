@@ -11,6 +11,10 @@ public struct GitDiffSideBySideRow: Identifiable, Equatable, Sendable {
 }
 
 public enum GitDiffSideBySide {
+    public static func rows(from diff: GitFileDiff) -> [GitDiffSideBySideRow] {
+        rows(from: diff.lines)
+    }
+
     /// Pairs unified-diff lines into side-by-side rows: context appears on both
     /// sides, each run of deletions is zipped with the following run of
     /// additions, and metadata lines are dropped.

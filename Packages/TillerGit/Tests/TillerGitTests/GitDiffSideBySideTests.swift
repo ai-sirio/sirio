@@ -90,4 +90,38 @@ struct GitDiffSideBySideTests {
         let rows = GitDiffSideBySide.rows(from: lines)
         #expect(Set(rows.map(\.id)).count == rows.count)
     }
+
+    @Test func aGitFileDiffAlignsMultipleHunksAndAnEmptyDiffHasNoRows() throws {
+        let diff = try GitDiff.parse(
+            """
+            diff --git a/file.txt b/file.txt
+            --- a/file.txt
+            +++ b/file.txt
+            @@ -1,2 +1,2 @@
+             context
+            -old
+            +new
+            @@ -10 +10,2 @@
+            -removed
+            +replacement
+            +inserted
+            """,
+            path: GitPath("file.txt"))
+
+        let rows = GitDiffSideBySide.rows(from: diff)
+        #expect(rows.count == 6)
+        #expect(rows[0].isHunk)
+        #expect(rows[1].left?.text == "context")
+        #expect(rows[1].right?.text == "context")
+        #expect(rows[2].left?.text == "old")
+        #expect(rows[2].right?.text == "new")
+        #expect(rows[3].isHunk)
+        #expect(rows[4].left?.text == "removed")
+        #expect(rows[4].right?.text == "replacement")
+        #expect(rows[5].left == nil)
+        #expect(rows[5].right?.text == "inserted")
+
+        let empty = try GitDiff.parse("", path: GitPath("empty.txt"))
+        #expect(GitDiffSideBySide.rows(from: empty).isEmpty)
+    }
 }
