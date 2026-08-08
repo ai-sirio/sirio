@@ -19,15 +19,15 @@ struct ComposerControlBar: View {
 
     @State private var modelPickerShown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
-
-    /// The composer card's border: accent while the text view holds focus,
-    /// separator otherwise.
-    static func borderStyle(isFocused: Bool) -> (color: Color, width: CGFloat) {
-        isFocused ? (.accentColor, 1.5) : (Color(nsColor: .separatorColor), 1)
-    }
 
     enum TrailingControl { case loading, stop, send }
+
+    static let primaryActionSize: CGFloat = 30
+    static let inactiveActionFillOpacity = 0.18
+    static let sendSystemImage = "arrow.up"
+    static let sendAccessibilityLabel = "Send message"
+    static let loadingAccessibilityLabel = "Starting agent"
+    static let stopAccessibilityLabel = "Stop response"
 
     /// Which control closes the row. Startup is slow enough on some agents that
     /// a plain Send button reads as "nothing happened", so connecting gets a
@@ -42,26 +42,35 @@ struct ComposerControlBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Button(action: onAttach) {
-                Image(systemName: "plus")
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                attachmentButton
+                modePill
             }
-            .buttonStyle(.plain)
-            .help("Attach image")
-            .disabled(!canInteract)
 
-            agentPill
             Spacer()
-            overflowMenu
-            contextUsageIndicator
-            modePill
-            switch Self.trailingControl(for: controller.state) {
-            case .loading: loadingButton
-            case .stop: stopButton
-            case .send: sendButton
+
+            HStack(spacing: 8) {
+                overflowMenu
+                contextUsageIndicator
+                agentPill
+                switch Self.trailingControl(for: controller.state) {
+                case .loading: loadingButton
+                case .stop: stopButton
+                case .send: sendButton
+                }
             }
         }
     .enableInjection()
+    }
+
+    private var attachmentButton: some View {
+        Button(action: onAttach) {
+            Image(systemName: "plus")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Attach image")
+        .disabled(!canInteract)
     }
 
     private var overflowMenu: some View {
@@ -238,36 +247,34 @@ struct ComposerControlBar: View {
 
     private var sendButton: some View {
         Button(action: onSend) {
-            Text("Send")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(canSend ? Color.white : Color.secondary)
-                .padding(.horizontal, 10)
-                .frame(height: 24)
+            Image(systemName: Self.sendSystemImage)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(canSend ? Color.white : Color.accentColor)
+                .frame(width: Self.primaryActionSize, height: Self.primaryActionSize)
                 .background(
                     canSend
                         ? AnyShapeStyle(Color.accentColor)
-                        : colorScheme == .dark
-                            ? AnyShapeStyle(AppTheme.cardFill)
-                            : AnyShapeStyle(.quaternary),
-                            in: RoundedRectangle(cornerRadius: 6))
+                        : AnyShapeStyle(Color.accentColor.opacity(Self.inactiveActionFillOpacity)),
+                    in: Circle())
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.return, modifiers: [])
         .disabled(!canSend)
+        .accessibilityLabel(Self.sendAccessibilityLabel)
+        .help("Send message")
     }
 
-    /// Send-button chrome with a spinner in place of the label, so the row
-    /// keeps its 24pt height while the agent starts up.
+    /// A spinner in the primary action's fixed footprint while the agent starts.
     private var loadingButton: some View {
         ProgressView()
             .controlSize(.small)
-            .padding(.horizontal, 10)
-            .frame(height: 24)
+            .tint(.accentColor)
+            .frame(width: Self.primaryActionSize, height: Self.primaryActionSize)
             .background(
-                colorScheme == .dark
-                    ? AnyShapeStyle(AppTheme.cardFill)
-                    : AnyShapeStyle(.quaternary),
-                in: RoundedRectangle(cornerRadius: 6))
+                Color.accentColor.opacity(Self.inactiveActionFillOpacity),
+                in: Circle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Self.loadingAccessibilityLabel)
             .help("Starting the agent…")
     }
 
@@ -278,12 +285,12 @@ struct ComposerControlBar: View {
             Image(systemName: "stop.fill")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .frame(height: 24)
-                .background(Color.red.opacity(0.8), in: RoundedRectangle(cornerRadius: 6))
+                .frame(width: Self.primaryActionSize, height: Self.primaryActionSize)
+                .background(Color.red.opacity(0.8), in: Circle())
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.escape, modifiers: [])
+        .accessibilityLabel(Self.stopAccessibilityLabel)
         .help("Stop the turn")
     }
 }

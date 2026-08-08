@@ -1,4 +1,3 @@
-import SwiftUI
 import Testing
 
 @testable import Tiller
@@ -6,16 +5,22 @@ import Testing
 @Suite("ComposerControlBar")
 @MainActor
 struct ComposerControlBarTests {
-    @Test func focusedBorderUsesTheAccentColor() {
-        let style = ComposerControlBar.borderStyle(isFocused: true)
-        #expect(style.color == Color.accentColor)
-        #expect(style.width == 1.5)
+    @Test func primaryActionUsesAStableCircularFootprint() {
+        #expect(ComposerControlBar.primaryActionSize == 30)
     }
 
-    @Test func unfocusedBorderUsesTheSeparatorColor() {
-        let style = ComposerControlBar.borderStyle(isFocused: false)
-        #expect(style.color != Color.accentColor)
-        #expect(style.width == 1)
+    @Test func inactiveActionFillIsVisiblySubdued() {
+        #expect(ComposerControlBar.inactiveActionFillOpacity == 0.18)
+    }
+
+    @Test func sendActionUsesTheArrowUpSymbol() {
+        #expect(ComposerControlBar.sendSystemImage == "arrow.up")
+    }
+
+    @Test func primaryActionStatesHaveStableAccessibilityLabels() {
+        #expect(ComposerControlBar.sendAccessibilityLabel == "Send message")
+        #expect(ComposerControlBar.loadingAccessibilityLabel == "Starting agent")
+        #expect(ComposerControlBar.stopAccessibilityLabel == "Stop response")
     }
 
     @Test func connectingShowsTheLoadingControl() {
