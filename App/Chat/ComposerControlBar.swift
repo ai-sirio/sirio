@@ -29,16 +29,18 @@ struct ComposerControlBar: View {
         let footprintSize: CGFloat
         let shape: PrimaryActionShape
         let accessibilityLabel: String
+        let accessibilityHelp: String
         let systemImage: String?
         let inactiveFillOpacity: Double?
     }
 
     static let primaryActionSize: CGFloat = 30
     static let inactiveActionFillOpacity = 0.18
+    static let inactiveActionFill = Color.secondary.opacity(inactiveActionFillOpacity)
     static let sendSystemImage = "arrow.up"
-    static let sendAccessibilityLabel = "Send message"
-    static let loadingAccessibilityLabel = "Starting agent"
-    static let stopAccessibilityLabel = "Stop response"
+    static let sendAccessibilityLabel = "Send"
+    static let loadingAccessibilityLabel = "Starting the agent"
+    static let stopAccessibilityLabel = "Stop the turn"
 
     /// Which control closes the row. Startup is slow enough on some agents that
     /// a plain Send button reads as "nothing happened", so connecting gets a
@@ -62,6 +64,7 @@ struct ComposerControlBar: View {
                 footprintSize: primaryActionSize,
                 shape: .circle,
                 accessibilityLabel: sendAccessibilityLabel,
+                accessibilityHelp: sendAccessibilityLabel,
                 systemImage: sendSystemImage,
                 inactiveFillOpacity: inactiveActionFillOpacity)
         case .loading:
@@ -70,6 +73,7 @@ struct ComposerControlBar: View {
                 footprintSize: primaryActionSize,
                 shape: .circle,
                 accessibilityLabel: loadingAccessibilityLabel,
+                accessibilityHelp: loadingAccessibilityLabel,
                 systemImage: nil,
                 inactiveFillOpacity: inactiveActionFillOpacity)
         case .stop:
@@ -78,6 +82,7 @@ struct ComposerControlBar: View {
                 footprintSize: primaryActionSize,
                 shape: .circle,
                 accessibilityLabel: stopAccessibilityLabel,
+                accessibilityHelp: stopAccessibilityLabel,
                 systemImage: "stop.fill",
                 inactiveFillOpacity: nil)
         }
@@ -305,13 +310,12 @@ struct ComposerControlBar: View {
     }
 
     private func sendButton(presentation: PrimaryActionPresentation) -> some View {
-        let inactiveOpacity = presentation.inactiveFillOpacity ?? 0
         return Button(action: onSend) {
             primaryActionChrome(
                 presentation: presentation,
                 fill: canSend
                     ? AnyShapeStyle(Color.accentColor)
-                    : AnyShapeStyle(Color.accentColor.opacity(inactiveOpacity))) {
+                    : AnyShapeStyle(Self.inactiveActionFill)) {
                 if let systemImage = presentation.systemImage {
                     Image(systemName: systemImage)
                         .font(.system(size: 12, weight: .bold))
@@ -323,22 +327,21 @@ struct ComposerControlBar: View {
         .keyboardShortcut(.return, modifiers: [])
         .disabled(!canSend)
         .accessibilityLabel(presentation.accessibilityLabel)
-        .help("Send message")
+        .help(presentation.accessibilityHelp)
     }
 
     /// A spinner in the primary action's fixed footprint while the agent starts.
     private func loadingButton(presentation: PrimaryActionPresentation) -> some View {
-        let inactiveOpacity = presentation.inactiveFillOpacity ?? 0
         return primaryActionChrome(
             presentation: presentation,
-            fill: AnyShapeStyle(Color.accentColor.opacity(inactiveOpacity))) {
+            fill: AnyShapeStyle(Self.inactiveActionFill)) {
             ProgressView()
                 .controlSize(.small)
                 .tint(.accentColor)
         }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(presentation.accessibilityLabel)
-            .help("Starting the agent…")
+            .help(presentation.accessibilityHelp)
     }
 
     private func stopButton(presentation: PrimaryActionPresentation) -> some View {
@@ -358,7 +361,7 @@ struct ComposerControlBar: View {
         .buttonStyle(.plain)
         .keyboardShortcut(.escape, modifiers: [])
         .accessibilityLabel(presentation.accessibilityLabel)
-        .help("Stop the turn")
+        .help(presentation.accessibilityHelp)
     }
 }
 
