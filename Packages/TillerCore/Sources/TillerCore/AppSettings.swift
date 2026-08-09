@@ -64,6 +64,14 @@ public enum AppSettings {
         return id
     }
 
+    /// UserDefaults key for a single agent's composer accent color, stored as
+    /// a "#RRGGBB" hex string. Key shape only — TillerCore does not know the
+    /// agent catalog or valid hex format; that validation happens at the App
+    /// layer, same split as `summarizerAgentIdKey` above.
+    public static func agentColorKey(for agentId: String) -> String {
+        "appearance.agentColor.\(agentId)"
+    }
+
     /// UserDefaults key for the app appearance (AppAppearance rawValue).
     /// Missing value means `.system`.
     public static let appearanceThemeKey = "appearance.theme"
