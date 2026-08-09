@@ -156,6 +156,7 @@
 		954FDC6088639CE62ECD79C4 /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = 674A9F35B2BA0F7A96549E8C /* AppFont.swift */; };
 		958D33062AA6E73A1127D05F /* TransientMessageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FAEE46A8B473190D8DC0591 /* TransientMessageTests.swift */; };
 		9658303623FFE30F6E668907 /* ChatTranscriptSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDAB7CF9FAEF5FF2AE2B49D5 /* ChatTranscriptSource.swift */; };
+		9674F88FE0180B36E7AD2A0B /* AgentAccentColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79A42C8739F09C42AE3363FF /* AgentAccentColorTests.swift */; };
 		96B92E17A1A9A34BA592F374 /* GlassStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CFF13A5A9E0340964D2171 /* GlassStyle.swift */; };
 		977D87D1FD9197E63FAE48E9 /* TerminalOutputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */; };
 		97B4E42FD1D7A7852F710A88 /* Inject in Frameworks */ = {isa = PBXBuildFile; productRef = 273340C0C8C921E2D89AC088 /* Inject */; };
@@ -237,6 +238,7 @@
 		E368E97B3A31047E97482E1A /* DividerCursorStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BE1AC17EADF4CD667F5B721 /* DividerCursorStrip.swift */; };
 		E5B005D1E6292D76645ACC83 /* ComposerDropApplier.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4522CE09CEB46A410FFD2FA /* ComposerDropApplier.swift */; };
 		E75EB552B60E70C8DB389A9D /* TillerAgents in Frameworks */ = {isa = PBXBuildFile; productRef = 56F2759B5316866B25363AF7 /* TillerAgents */; };
+		E7DF87C2AD2BBEDF4AAA0BBB /* AgentAccentColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A24076A2D997DFA0A6E899C /* AgentAccentColor.swift */; };
 		E8EC832481BE1F2530BCE3D1 /* UpdateToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8F974FE5B8920C407DE1EB /* UpdateToastView.swift */; };
 		E9879D1D09D8580E1714ADA7 /* ChatControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F152EDFE5AD82B6A13407D5 /* ChatControllerTests.swift */; };
 		E9B0F079A700EBB78BD7295B /* ChatRowChromeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F309A8DBFAA9DB8331297508 /* ChatRowChromeTests.swift */; };
@@ -297,6 +299,7 @@
 		151A96CDE3F828AEDD1094D9 /* nested-split.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "nested-split.json"; sourceTree = "<group>"; };
 		16B323027542BA38D5D5DB6B /* SidebarEngineParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarEngineParityTests.swift; sourceTree = "<group>"; };
 		18FAA79DA5CDC0C9FA5A6ACC /* PaneTabPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneTabPresentationTests.swift; sourceTree = "<group>"; };
+		1A24076A2D997DFA0A6E899C /* AgentAccentColor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAccentColor.swift; sourceTree = "<group>"; };
 		1BC79D907740805481818B7D /* FakeWorkspacePersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeWorkspacePersistence.swift; sourceTree = "<group>"; };
 		1BE1AC17EADF4CD667F5B721 /* DividerCursorStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DividerCursorStrip.swift; sourceTree = "<group>"; };
 		1FBD1096E7A5252C91133067 /* WindowSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowSurfaces.swift; sourceTree = "<group>"; };
@@ -390,6 +393,7 @@
 		71EF8B1869683ACB6050352A /* CodeHighlighter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlighter.swift; sourceTree = "<group>"; };
 		754ED987A43572FB14EBB2FD /* RightPanelMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelMode.swift; sourceTree = "<group>"; };
 		77E0B8485FF4CF181492A047 /* ComposerDocumentObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerDocumentObservationTests.swift; sourceTree = "<group>"; };
+		79A42C8739F09C42AE3363FF /* AgentAccentColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAccentColorTests.swift; sourceTree = "<group>"; };
 		7C299BA75C3CE947EADC61BF /* DiffTabAvailability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffTabAvailability.swift; sourceTree = "<group>"; };
 		7DA8807DD0C6DED75AD0392A /* AutoRenameWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoRenameWiringTests.swift; sourceTree = "<group>"; };
 		7DB1869C83CFBFF1F7AD7355 /* AutoNamerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoNamerTests.swift; sourceTree = "<group>"; };
@@ -715,6 +719,7 @@
 			children = (
 				6BE4EAE5FC325A0ED79995A1 /* AcpAgentCenter.swift */,
 				57203478CAD5658B46BACB4C /* AddProjectSheet.swift */,
+				1A24076A2D997DFA0A6E899C /* AgentAccentColor.swift */,
 				448394CDE33B4E363B8D2B2E /* AgentAccountStore.swift */,
 				DA3CF5A9A555CE3F7B9D45DE /* AgentIcon.swift */,
 				440886206B85A90DD5467FE6 /* AgentMenuIconCache.swift */,
@@ -829,6 +834,7 @@
 			children = (
 				C1226B463D7B10AC634BE876 /* AcpAgentCenterTests.swift */,
 				B8AD2F83125EEE8E5E845A28 /* ActivityPanelTests.swift */,
+				79A42C8739F09C42AE3363FF /* AgentAccentColorTests.swift */,
 				ED03CEB488EC73CF13DB8645 /* AgentMessageSegmenterTests.swift */,
 				516A0EC113C050943267DA86 /* AppModelControlTests.swift */,
 				568C5A26954BF9814D4CE0CD /* AttributedCodeRendererTests.swift */,
@@ -1143,6 +1149,7 @@
 				47B39097E0DD4C127999A3A2 /* ActivityPanelModel.swift in Sources */,
 				A4D0224C9E07E1F509AB542D /* ActivitySectionView.swift in Sources */,
 				66BF97EA5D657DEDCB4A268D /* AddProjectSheet.swift in Sources */,
+				E7DF87C2AD2BBEDF4AAA0BBB /* AgentAccentColor.swift in Sources */,
 				4D4787EA1EE7F550C5244DF8 /* AgentAccountStore.swift in Sources */,
 				49230E53BF69A9AF9AF00DB1 /* AgentIcon.swift in Sources */,
 				BC9A7B29199C3A82AE922D9A /* AgentMarkdownTextView.swift in Sources */,
@@ -1296,6 +1303,7 @@
 			files = (
 				A3A20B905F142CC7F2B58E0A /* AcpAgentCenterTests.swift in Sources */,
 				8144CBEB51DC84C6F9F7DE0D /* ActivityPanelTests.swift in Sources */,
+				9674F88FE0180B36E7AD2A0B /* AgentAccentColorTests.swift in Sources */,
 				B206B595F9AAEDAF00229BB6 /* AgentMessageSegmenterTests.swift in Sources */,
 				44D002186AD3C17D9452C4FD /* AppModelControlTests.swift in Sources */,
 				AF3FCBA3540CEFB6A92217A6 /* AppModelFacadeTests.swift in Sources */,
