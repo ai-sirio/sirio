@@ -37,10 +37,9 @@ struct ChatComposerView: View {
                 mentionPopup(query: query)
             }
             queuedList
-            card
+            card.composerCardAppearance()
         }
         .padding(.vertical, 10)
-        .environment(\.colorScheme, AppTheme.ComposerAppearance.colorScheme)
     .enableInjection()
     }
 
@@ -240,6 +239,15 @@ struct ChatComposerView: View {
                                          base64Data: data.base64EncodedString())
         document.insert(.image(attachment),
                         replacing: NSRange(location: document.storage.length, length: 0))
+    }
+}
+
+extension View {
+    /// Keeps the fixed-dark composer card's semantic labels and controls
+    /// legible without changing the appearance of transparent queued content
+    /// or adaptive popups around it.
+    func composerCardAppearance() -> some View {
+        environment(\.colorScheme, AppTheme.ComposerAppearance.colorScheme)
     }
 }
 
