@@ -4,7 +4,7 @@ import TillerACP
 
 @testable import Tiller
 
-@Suite("ComposerChip")
+@Suite("ComposerChip", .serialized)
 @MainActor
 struct ComposerChipTests {
     private let png = ImageAttachment(mimeType: "image/png", base64Data: "AAAA")
