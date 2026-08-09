@@ -41,6 +41,9 @@ struct ChatTextEditor: NSViewRepresentable {
     @MainActor
     static func makeTextView(document: ComposerDocument? = nil) -> NSTextView {
         let textView = NSTextView()
+        textView.appearance = NSAppearance(named: AppTheme.ComposerAppearance.appKitAppearance)
+        textView.textColor = AppTheme.ComposerAppearance.primaryTextColor
+        textView.insertionPointColor = AppTheme.ComposerAppearance.primaryTextColor
         if let document {
             textView.textContentStorage?.textStorage = document.storage
         }

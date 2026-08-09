@@ -40,6 +40,7 @@ struct ChatComposerView: View {
             card
         }
         .padding(.vertical, 10)
+        .environment(\.colorScheme, AppTheme.ComposerAppearance.colorScheme)
     .enableInjection()
     }
 
