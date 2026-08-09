@@ -18,6 +18,16 @@ private func resolved(_ color: Color, _ name: NSAppearance.Name) -> NSColor {
     return result
 }
 
+/// Chat cards and the composer's surrounding chrome use the approved dark
+/// surface color.
+@MainActor
+@Test func chatCardFillUsesTheApprovedDarkSurfaceColor() {
+    let fill = resolved(AppTheme.cardFill, .darkAqua)
+    #expect(abs(fill.redComponent - 44.0 / 255.0) < 0.0001)
+    #expect(abs(fill.greenComponent - 47.0 / 255.0) < 0.0001)
+    #expect(abs(fill.blueComponent - 57.0 / 255.0) < 0.0001)
+}
+
 @MainActor
 private func resolved(_ color: NSColor, _ name: NSAppearance.Name) -> NSColor {
     var result = NSColor.black

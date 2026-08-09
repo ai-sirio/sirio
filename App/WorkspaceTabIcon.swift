@@ -15,11 +15,11 @@ struct WorkspaceTabIcon: View {
         Group {
             if tab.markdownFileURL != nil {
                 Image(systemName: "doc.text")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             } else if tab.codeFileURL != nil {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             } else if let agentId = tab.chatAgentId {
                 AgentIcon(agentId: agentId, size: 12)
@@ -27,7 +27,7 @@ struct WorkspaceTabIcon: View {
                 AgentIcon(agentId: agentId, size: 12)
             } else {
                 Image(systemName: "terminal")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             }
         }

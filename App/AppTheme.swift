@@ -101,9 +101,10 @@ enum AppTheme {
     static let hairline = dynamic(
         light: NSColor(srgbRed: 0.82, green: 0.83, blue: 0.87, alpha: 1),
         dark: NSColor(srgbRed: 0.25, green: 0.26, blue: 0.31, alpha: 1))
+    /// Dark is #20242D — the one hover fill every row-like surface shares.
     static let rowHover = dynamic(
         light: NSColor(srgbRed: 0.90, green: 0.905, blue: 0.93, alpha: 1),
-        dark: NSColor(srgbRed: 0.125, green: 0.137, blue: 0.176, alpha: 1))
+        dark: NSColor(srgbRed: 32.0 / 255.0, green: 36.0 / 255.0, blue: 45.0 / 255.0, alpha: 1))
     static let selectionFill = dynamic(
         light: NSColor(srgbRed: 0.85, green: 0.86, blue: 0.91, alpha: 1),
         dark: NSColor(srgbRed: 0.169, green: 0.184, blue: 0.227, alpha: 1))
@@ -164,7 +165,7 @@ enum AppTheme {
     /// bypasses the tuned light/dark pairs above.
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
-        dark: NSColor(srgbRed: 52.0 / 255.0, green: 53.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
+        dark: NSColor(srgbRed: 44.0 / 255.0, green: 47.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
     /// Composer-only surface approved from the Codex-inspired visual review (#20232D).
     static let composerFill = Color(
         .sRGB,
@@ -173,6 +174,13 @@ enum AppTheme {
         blue: 45.0 / 255.0,
         opacity: 1
     )
+    /// Recessed surface for code and diff content nested inside chat cards.
+    static let codeInsetFill = dynamic(
+        light: .white,
+        dark: NSColor(srgbRed: 13.0 / 255.0,
+                      green: 14.0 / 255.0,
+                      blue: 16.0 / 255.0,
+                      alpha: 1))
     enum ComposerAppearance {
         static let colorScheme: ColorScheme = .dark
         static let appKitAppearance = NSAppearance.Name.darkAqua

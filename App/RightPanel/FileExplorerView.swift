@@ -38,7 +38,7 @@ struct FileExplorerView: View {
         VStack(spacing: 0) {
             HStack {
                 Text(worktree.path)
-                    .font(.system(size: 11))
+                    .font(AppFont.system(size: 11))
                     .foregroundStyle(AppTheme.meta)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -92,7 +92,7 @@ struct FileExplorerView: View {
             if node.kind.isDirectory {
                 Image(systemName: panelModel.expandedDirectories.contains(node.relativePath)
                       ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(AppFont.system(size: 9, weight: .semibold))
                     .frame(width: 10)
             } else {
                 Color.clear.frame(width: 10, height: 1)
@@ -100,7 +100,7 @@ struct FileExplorerView: View {
             if node.kind.isDirectory {
                 Color.clear.frame(width: 14, height: 1)
                 Text(node.name)
-                    .font(.system(size: 12))
+                    .font(AppFont.system(size: 12))
                     .foregroundStyle(nameColor(for: node))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -108,7 +108,7 @@ struct FileExplorerView: View {
                 iconView(for: node)
                     .frame(width: 14)
                 Text(node.name)
-                    .font(.system(size: 12))
+                    .font(AppFont.system(size: 12))
                     .foregroundStyle(nameColor(for: node))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -121,7 +121,7 @@ struct FileExplorerView: View {
             Spacer(minLength: 4)
             if let entry = panelModel.statusByPath[node.relativePath] {
                 Text(GitStatusStyle.symbol(entry))
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(AppFont.mono(size: 10, weight: .semibold))
                     .foregroundStyle(GitStatusStyle.color(entry))
                     .help(statusLabel(entry))
             } else if node.kind.isDirectory,
@@ -157,7 +157,7 @@ struct FileExplorerView: View {
         .overlay(alignment: .bottomLeading) {
             if let error = panelModel.directoryErrors[node.relativePath] {
                 Text(error)
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(AppTheme.gitConflict)
                     .padding(.leading, CGFloat(row.depth) * 14 + 38)
             }

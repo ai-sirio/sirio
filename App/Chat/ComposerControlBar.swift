@@ -164,8 +164,8 @@ struct ComposerControlBar: View {
             } label: {
                 HStack(spacing: 5) {
                     Circle().fill(statusDotColor).frame(width: 6, height: 6)
-                    Text(mode.displayName).font(.caption)
-                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                    Text(mode.displayName).font(AppFont.caption)
+                    Image(systemName: "chevron.down").font(AppFont.system(size: 7, weight: .bold))
                 }
             }
             .menuStyle(.borderlessButton)
@@ -183,8 +183,8 @@ struct ComposerControlBar: View {
             } label: {
                 HStack(spacing: 5) {
                     Circle().fill(statusDotColor).frame(width: 6, height: 6)
-                    Text(currentModeName).font(.caption)
-                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                    Text(currentModeName).font(AppFont.caption)
+                    Image(systemName: "chevron.down").font(AppFont.system(size: 7, weight: .bold))
                 }
             }
             .menuStyle(.borderlessButton)
@@ -194,7 +194,7 @@ struct ComposerControlBar: View {
         } else {
             HStack(spacing: 5) {
                 Circle().fill(statusDotColor).frame(width: 6, height: 6)
-                Text(stateLabel).font(.caption)
+                Text(stateLabel).font(AppFont.caption)
             }
             .modifier(PillBackground())
         }
@@ -224,14 +224,14 @@ struct ComposerControlBar: View {
                 modelPickerShown.toggle()
             } label: {
                 HStack(spacing: 5) {
-                    Text(currentModelName).font(.caption).lineLimit(1)
+                    Text(currentModelName).font(AppFont.caption).lineLimit(1)
                     if let effort = controller.effortOption,
                        effort.currentValue != nil {
                         Text(effortLabel(effort))
-                            .font(.caption2.weight(.semibold))
+                            .font(AppFont.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
-                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                    Image(systemName: "chevron.down").font(AppFont.system(size: 7, weight: .bold))
                 }
             }
             .buttonStyle(.plain)
@@ -241,7 +241,7 @@ struct ComposerControlBar: View {
                                    isPresented: $modelPickerShown)
             }
         } else {
-            Text(agentDisplayName).font(.caption)
+            Text(agentDisplayName).font(AppFont.caption)
                 .modifier(PillBackground())
         }
     }
@@ -314,7 +314,7 @@ struct ComposerControlBar: View {
                     : AnyShapeStyle(Self.inactiveActionFill)) {
                 if let systemImage = presentation.systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 12, weight: .bold))
+                        .font(AppFont.system(size: 12, weight: .bold))
                         .foregroundStyle(canSend ? Color.white : Color.accentColor)
                 }
             }
@@ -349,7 +349,7 @@ struct ComposerControlBar: View {
                 fill: AnyShapeStyle(Color.red.opacity(0.8))) {
                 if let systemImage = presentation.systemImage {
                     Image(systemName: systemImage)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(AppFont.system(size: 10, weight: .bold))
                         .foregroundStyle(.white)
                 }
             }

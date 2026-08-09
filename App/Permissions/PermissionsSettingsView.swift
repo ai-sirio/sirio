@@ -85,7 +85,7 @@ struct PermissionsSettingsView: View {
 
     private func statusBadge(_ status: PermissionStatus) -> some View {
         Text(status.badgeLabel)
-            .font(.caption2.weight(.semibold))
+            .font(AppFont.caption2.weight(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .foregroundStyle(badgeColor(status))

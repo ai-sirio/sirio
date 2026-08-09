@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 import MarkdownUI
 import TillerACP
@@ -16,7 +15,6 @@ struct TranscriptView: View {
     let appModel: AppModel
     var bottomContentInset: CGFloat = 0
     @State private var scrollPosition = ScrollPosition(idType: String.self)
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     // Stopgap: timeline-row rendering (work groups, turn folds, 700pt column)
@@ -39,18 +37,22 @@ struct TranscriptView: View {
                                 .id(item.id)
                         }
                         if controller.state == .prompting {
-                            thinkingRow.padding(.top, 14)
+                            ThinkingRowView(
+                                title: snapshot.currentActivity ?? "Thinking",
+                                detail: latestThought(in: snapshot.items),
+                                initiallyExpanded: true)
+                                .padding(.top, 10)
                         }
-                            Color.clear
-                                .frame(height: max(1, bottomContentInset))
-                                .id("bottom")
-                                .captureLayout(.transcriptBottomSpacer,
-                                               enabled: layoutCaptureEnabled)
-                        }
-                        .padding(.vertical, 14)
-                        .captureLayout(.transcriptContent, enabled: layoutCaptureEnabled)
+                        Color.clear
+                            .frame(height: max(1, bottomContentInset))
+                            .id("bottom")
+                            .captureLayout(.transcriptBottomSpacer,
+                                           enabled: layoutCaptureEnabled)
                     }
+                    .padding(.vertical, 14)
+                    .captureLayout(.transcriptContent, enabled: layoutCaptureEnabled)
                 }
+            }
             .scrollPosition($scrollPosition)
             // Do not observe live scroll geometry here: the observation reads
             // the LazyVStack geometry while that same stack is laying out,
@@ -85,7 +87,7 @@ struct TranscriptView: View {
             }
             .captureLayout(.transcriptViewport, enabled: layoutCaptureEnabled)
         }
-    .enableInjection()
+        .enableInjection()
     }
 
     /// Re-pins the transcript to the bottom with the same short ease used
@@ -129,7 +131,9 @@ struct TranscriptView: View {
         case .proposedPlan(_, let entries, let approval):
             PlanCardView(entries: entries, approval: approval, controller: controller)
         case .working:
-            thinkingRow
+            ThinkingRowView(title: controller.presentationSnapshot.currentActivity ?? "Thinking",
+                            detail: latestThought(in: controller.presentationSnapshot.items),
+                            initiallyExpanded: true)
         }
     }
 
@@ -143,17 +147,22 @@ struct TranscriptView: View {
         case .agentMessage(let id, let text, let isComplete):
             switch AgentMessagePresentation.mode(isComplete: isComplete) {
             case .streaming:
-                StreamingAgentTextView(text: text)
+                MessageRowView(timestamp: nil, duration: nil,
+                               showsCopyButton: false, copyText: text) {
+                    StreamingAgentTextView(text: text)
+                }
             case .rich:
-                VStack(alignment: .leading, spacing: 4) {
+                let timestamp = meta?.at ?? messageTimestamp(for: id,
+                                                              in: snapshot.items)
+                MessageRowView(timestamp: timestamp, duration: meta?.duration,
+                               showsCopyButton: meta?.showsCopyButton
+                                   ?? (isComplete && timestamp != nil),
+                               copyText: text) {
                     agentMessage(id: id, snapshot: snapshot)
-                    if let meta, meta.showsCopyButton || meta.duration != nil {
-                        messageMetaRow(meta, text: text)
-                    }
                 }
             }
         case .thought(_, let text):
-            ThoughtRow(text: text)
+            ThoughtRowView(text: text)
         case .toolCall(let toolCall):
             let question = ChatQuestion.from(toolCall)
             let subagent = SubagentTasks.info(for: toolCall)
@@ -179,12 +188,11 @@ struct TranscriptView: View {
             EditSummaryCardView(paths: paths, worktree: worktree,
                                 appModel: appModel)
         case .systemNotice(_, let text):
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 6)
+            ChatRowSurface(kind: .system, isFlat: true) {
+                Label(text, systemImage: "info.circle")
+                    .font(AppFont.caption)
+                    .foregroundStyle(AppTheme.meta)
+            }
         }
     }
 
@@ -203,54 +211,68 @@ struct TranscriptView: View {
                     }
                 case .insight(let body):
                     InsightCardView(text: body)
+                case .diff(let path, let oldText, let newText):
+                    ChatDiffPreviewView(path: path,
+                                        oldText: oldText,
+                                        newText: newText,
+                                        worktree: worktree,
+                                        appModel: appModel)
                 }
             }
         }
     }
 
-    // MARK: - Thinking indicator
-
-    /// Live status while a turn is in flight. Naming the current tool call
-    /// turns a mute spinner into an answer to "what is it doing?".
-    private var thinkingRow: some View {
-        HStack(spacing: 6) {
-            RunningDots(color: AppTheme.railQuestion)
-            Text(controller.presentationSnapshot.currentActivity ?? "Thinking")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+    private func latestThought(in items: [TranscriptItem]) -> String? {
+        for item in items.reversed() {
+            if case .thought(_, let text) = item { return text }
         }
+        return nil
+    }
+
+    /// The flat transcript path intentionally avoids TimelineBuilder while
+    /// the streaming layout is being stabilized. Recover the closed-turn
+    /// timestamp here so the message row still owns its metadata instead of
+    /// leaving the only visible time on a detached divider.
+    private func messageTimestamp(for messageID: String,
+                                  in items: [TranscriptItem]) -> Date? {
+        guard let index = items.firstIndex(where: { $0.id == messageID }) else {
+            return nil
+        }
+        for item in items.dropFirst(index + 1) {
+            switch item {
+            case .turnDivider(_, let at): return at
+            case .userMessage: return nil
+            default: continue
+            }
+        }
+        return nil
     }
 
     // MARK: - User bubble
 
     private func userBubble(_ blocks: [ContentBlock]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                userBlockView(block)
+        ChatRowSurface(kind: .user, usesInsetChrome: true) {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    userBlockView(block)
+                }
             }
+            .foregroundStyle(Color.primary)
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .foregroundStyle(Color.primary)
-        .background(
-            colorScheme == .dark
-                ? AnyShapeStyle(AppTheme.cardFill)
-                : AnyShapeStyle(.quaternary.opacity(0.7)),
-            in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 0)
     }
 
     @ViewBuilder
     private func userBlockView(_ block: ContentBlock) -> some View {
         switch block {
         case .text(let text):
-            Text(text).font(.system(size: 13)).textSelection(.enabled)
+            Text(text).font(AppFont.system(size: 13)).textSelection(.enabled)
         case .resourceLink(_, let name):
             Label(name, systemImage: "doc")
-                .font(.caption)
+                .font(AppFont.caption)
         case .image:
             Label("Image", systemImage: "photo")
-                .font(.caption)
+                .font(AppFont.caption)
         case .resource, .unknown:
             EmptyView()
         }
@@ -262,33 +284,12 @@ struct TranscriptView: View {
         HStack(spacing: 10) {
             Rectangle().fill(.separator).frame(height: 1)
             Text(date, format: .dateTime.hour().minute())
-                .font(.caption2)
+                .font(AppFont.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize()
             Rectangle().fill(.separator).frame(height: 1)
         }
         .padding(.vertical, 6)
-    }
-
-    private func messageMetaRow(_ meta: TimelineRow.MessageMeta, text: String) -> some View {
-        HStack(spacing: 8) {
-            if let duration = meta.duration {
-                Text(Self.formatDuration(duration))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            if meta.showsCopyButton {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc").font(.caption2)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("Copy message")
-            }
-        }
     }
 
     static func formatDuration(_ seconds: TimeInterval) -> String {
@@ -297,38 +298,4 @@ struct TranscriptView: View {
         return "\(total / 60)m \(String(format: "%02d", total % 60))s"
     }
 
-}
-
-/// Collapsed-by-default "> Thought" row; the chevron rotates when expanded.
-private struct ThoughtRow: View {
-    @ObserveInjection private var inject
-
-    let text: String
-    @State private var isExpanded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(.easeOut(duration: 0.12)) { isExpanded.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    Text("Thought")
-                        .font(.caption)
-                }
-                .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            if isExpanded {
-                Text(text)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .padding(.leading, 14)
-            }
-        }
-    .enableInjection()
-    }
 }

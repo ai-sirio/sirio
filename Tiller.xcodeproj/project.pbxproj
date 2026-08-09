@@ -61,6 +61,7 @@
 		38FF3B1CD1CB02E364BD065C /* MarkdownAttributedStringRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */; };
 		39AE727AD01F0280D8BA0B8B /* AppRoute.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */; };
 		3B12996104D8C2CB7F64CF20 /* ChangesListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C6A42AC41BB59E38476BB /* ChangesListTests.swift */; };
+		3D010F53782C7EA8FA8A9567 /* ChatRowChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 393A136EFAFC295599660B68 /* ChatRowChrome.swift */; };
 		3DB91E8DFDE4337823E0E3D0 /* PaneTabStripBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B6E2FBE0F45D5C64AD76289 /* PaneTabStripBar.swift */; };
 		3DBB4D532180921DDC4A5088 /* AppModel+Control.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7F2ED339842DA8F4A8AA1AA /* AppModel+Control.swift */; };
 		3E0C7F3C743B17D97F55B798 /* AcpAgentCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BE4EAE5FC325A0ED79995A1 /* AcpAgentCenter.swift */; };
@@ -71,6 +72,7 @@
 		427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DCD6339C795A9A8572D9994 /* ComposerTextKit2Tests.swift */; };
 		43DAE27D1CFFC7E6CFE202B5 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 975BAD166D2494015F7ACD59 /* CodeEditSourceEditor */; };
 		44D002186AD3C17D9452C4FD /* AppModelControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 516A0EC113C050943267DA86 /* AppModelControlTests.swift */; };
+		45B4E8D3EC239DD823AF3AC6 /* ComposerLayoutMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B722EB1C950F720C8E367FC4 /* ComposerLayoutMetricsTests.swift */; };
 		460BCA1B1C8C29F719F14052 /* WorktreeStatusGlyph.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD047B77D2E168922ADC710C /* WorktreeStatusGlyph.swift */; };
 		46C93C46A715F2FCF7BB24FA /* ComposerChipLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F4A54D95CCDA4F5834023E8 /* ComposerChipLayoutTests.swift */; };
 		4742245A9E1D227D13379A56 /* AutoNamerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DB1869C83CFBFF1F7AD7355 /* AutoNamerTests.swift */; };
@@ -110,6 +112,7 @@
 		66BF97EA5D657DEDCB4A268D /* AddProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57203478CAD5658B46BACB4C /* AddProjectSheet.swift */; };
 		66D9243C99772AF84C5D2838 /* ChatContentAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7FBBDB62EF95306888EA950 /* ChatContentAdapter.swift */; };
 		67FB529584389E037E1941C7 /* ChatController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1E46DF390E43B7EA1794BB7 /* ChatController.swift */; };
+		6868B74A95B07FC9A7310411 /* ComposerLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B87A64DCC73E13BDD84F4E /* ComposerLayout.swift */; };
 		689F0FEBB5755C13DB31C2BC /* WorkspaceTabIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6414000C1B38D33F09352947 /* WorkspaceTabIcon.swift */; };
 		6A50CF0356E4EB5585ED1D74 /* SplitContentMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4754F38C4D2FACDC47D74C1A /* SplitContentMenu.swift */; };
 		6ABCA221B30C94B74744F851 /* EditSummaryCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0147E80EE5F3B7B9F50B2E78 /* EditSummaryCardView.swift */; };
@@ -144,11 +147,13 @@
 		87FF0CFBD55268ED0ADA4770 /* UniversalChatFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A920FB57F5E592E941A80135 /* UniversalChatFixture.swift */; };
 		8A1083A5E14CD5C7AD36AA79 /* FileDiffBody.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03C57CFA628F44D68B6DBA19 /* FileDiffBody.swift */; };
 		8A4A2707324A17F3BE027B92 /* ChatCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5309B32D170F4FF73CE6BE24 /* ChatCard.swift */; };
+		8A77F4C806B29B56505B5AB9 /* MessageRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B670BC4802ACB89209586E /* MessageRowView.swift */; };
 		8AA361A924BD1CFC83A30CC1 /* SidebarTabProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64C1658F860ED743A9F6CFC /* SidebarTabProjection.swift */; };
 		8BD86A743611283ACF2DD601 /* ComposerDropApplierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4485234FC6B35C316849E96C /* ComposerDropApplierTests.swift */; };
 		8D9D1C05D835E0BA7A7B0D14 /* TabBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80DC2F061B4A286C7ADF990F /* TabBarView.swift */; };
 		8E5D8ACB74A4F8DB576AB990 /* SummarizerSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 829705C11FEAE19AF6E58E77 /* SummarizerSelection.swift */; };
 		8ECABD13D02543070A0AD0F9 /* MenuBarStatusIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ED264D1B3306C90BC890ECE /* MenuBarStatusIcon.swift */; };
+		954FDC6088639CE62ECD79C4 /* AppFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = 674A9F35B2BA0F7A96549E8C /* AppFont.swift */; };
 		958D33062AA6E73A1127D05F /* TransientMessageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FAEE46A8B473190D8DC0591 /* TransientMessageTests.swift */; };
 		9658303623FFE30F6E668907 /* ChatTranscriptSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDAB7CF9FAEF5FF2AE2B49D5 /* ChatTranscriptSource.swift */; };
 		96B92E17A1A9A34BA592F374 /* GlassStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CFF13A5A9E0340964D2171 /* GlassStyle.swift */; };
@@ -187,6 +192,7 @@
 		B580DE3B2EFE80CF8CCC1A64 /* FloatingCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0BFFBC3BF578B02D913D7CB /* FloatingCard.swift */; };
 		B7327A247202A9098E8F2C77 /* spokes-1024.png in Resources */ = {isa = PBXBuildFile; fileRef = 64880FCA0680E0D6E7A1DFC4 /* spokes-1024.png */; };
 		B9888CC9AF89737DF3110B17 /* TranscriptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C26563F4760C9F22B2AF31 /* TranscriptView.swift */; };
+		B9B40E25935B5EA2B8CE4918 /* ThinkingRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F738789BF7DF008BDA53B /* ThinkingRowView.swift */; };
 		BC36BBAC9EFC0EE66783CD9E /* TillerGit in Frameworks */ = {isa = PBXBuildFile; productRef = 4D97F96516DB1AF9CEC67128 /* TillerGit */; };
 		BC9A3B09E25EA97499B46478 /* ChatContentAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D08468BE5032705E26C07514 /* ChatContentAdapterTests.swift */; };
 		BC9A7B29199C3A82AE922D9A /* AgentMarkdownTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB553F17F039EA89047AFC1C /* AgentMarkdownTextView.swift */; };
@@ -233,6 +239,7 @@
 		E75EB552B60E70C8DB389A9D /* TillerAgents in Frameworks */ = {isa = PBXBuildFile; productRef = 56F2759B5316866B25363AF7 /* TillerAgents */; };
 		E8EC832481BE1F2530BCE3D1 /* UpdateToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8F974FE5B8920C407DE1EB /* UpdateToastView.swift */; };
 		E9879D1D09D8580E1714ADA7 /* ChatControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F152EDFE5AD82B6A13407D5 /* ChatControllerTests.swift */; };
+		E9B0F079A700EBB78BD7295B /* ChatRowChromeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F309A8DBFAA9DB8331297508 /* ChatRowChromeTests.swift */; };
 		EAECD88E66ABD96509FA8CCC /* RunningDots.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE99F2EBC89020C876AA77E7 /* RunningDots.swift */; };
 		EB829689692FD812FCD4A11E /* TillerPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = 1F3A30808F2FA158DD84EA0F /* TillerPersistence */; };
 		EB8F22D86775174B7FB94E40 /* UsagePollingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB6C322F7AB1312FF9D6347C /* UsagePollingTests.swift */; };
@@ -316,6 +323,7 @@
 		33CA699595B62838D78DA632 /* RightPanelPrefetchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelPrefetchTests.swift; sourceTree = "<group>"; };
 		34C55A86B935C5132C534A26 /* WorkspaceMountPlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMountPlan.swift; sourceTree = "<group>"; };
 		362949AA885756BAA5340B1C /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		393A136EFAFC295599660B68 /* ChatRowChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRowChrome.swift; sourceTree = "<group>"; };
 		3AFBA57E03B80A9B41F89BA7 /* AgentMessageSegmenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMessageSegmenter.swift; sourceTree = "<group>"; };
 		3B7E529CAE3DF87EE44AA91D /* WorkspaceContentAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceContentAdapterTests.swift; sourceTree = "<group>"; };
 		3C1E8C217EDD3F4C6BA03068 /* UniversalChatParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UniversalChatParityTests.swift; sourceTree = "<group>"; };
@@ -337,6 +345,8 @@
 		4749D109F24B9A3C1D17E46C /* chat-null-session.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "chat-null-session.json"; sourceTree = "<group>"; };
 		4754F38C4D2FACDC47D74C1A /* SplitContentMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitContentMenu.swift; sourceTree = "<group>"; };
 		49151B264C9CB940952FCDAB /* OllamaCloudUsageFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaCloudUsageFetcher.swift; sourceTree = "<group>"; };
+		499F738789BF7DF008BDA53B /* ThinkingRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThinkingRowView.swift; sourceTree = "<group>"; };
+		49B87A64DCC73E13BDD84F4E /* ComposerLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerLayout.swift; sourceTree = "<group>"; };
 		4A1932E69ABB0CAF9670AD7E /* WindowChromeConfigurator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowChromeConfigurator.swift; sourceTree = "<group>"; };
 		4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerFieldTests.swift; sourceTree = "<group>"; };
 		4D0CBADBB33BFC7F4D11E20D /* TillerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TillerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -353,6 +363,7 @@
 		568C5A26954BF9814D4CE0CD /* AttributedCodeRendererTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttributedCodeRendererTests.swift; sourceTree = "<group>"; };
 		56BF03BAD030DCBF0451100D /* WorkspacePersistenceBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspacePersistenceBridge.swift; sourceTree = "<group>"; };
 		57203478CAD5658B46BACB4C /* AddProjectSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddProjectSheet.swift; sourceTree = "<group>"; };
+		57B670BC4802ACB89209586E /* MessageRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRowView.swift; sourceTree = "<group>"; };
 		5FAEE46A8B473190D8DC0591 /* TransientMessageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransientMessageTests.swift; sourceTree = "<group>"; };
 		60A64ED0ED545E2D2D5D2A4C /* ComposerChipViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerChipViewTests.swift; sourceTree = "<group>"; };
 		61AFD75A225D957FBD64864D /* TillerControl */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerControl; path = Packages/TillerControl; sourceTree = SOURCE_ROOT; };
@@ -362,6 +373,7 @@
 		65294A0A72CDEE56A073A480 /* ComposerControlBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerControlBarTests.swift; sourceTree = "<group>"; };
 		66D18AD8984B39142C8D80EC /* FileExplorerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExplorerView.swift; sourceTree = "<group>"; };
 		67334A794B95BBFBA6C2255E /* TillerAgents */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerAgents; path = Packages/TillerAgents; sourceTree = SOURCE_ROOT; };
+		674A9F35B2BA0F7A96549E8C /* AppFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppFont.swift; sourceTree = "<group>"; };
 		67737A516872D92DD67ADE11 /* OpenChatTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenChatTabTests.swift; sourceTree = "<group>"; };
 		691433DAA6EAB31A5E41BADE /* SideBySideDiffLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SideBySideDiffLayoutTests.swift; sourceTree = "<group>"; };
 		6975FB3630EA8F7ADEF25299 /* WorkspaceMigrationIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMigrationIntegrationTests.swift; sourceTree = "<group>"; };
@@ -436,6 +448,7 @@
 		B457A39E9A952BEF47EBEB0A /* ChatPresentationSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPresentationSnapshotTests.swift; sourceTree = "<group>"; };
 		B5E1B7C6800A3744A2BCCFCF /* TillerCode */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TillerCode; path = Packages/TillerCode; sourceTree = SOURCE_ROOT; };
 		B6C61641B8A9F9A5B190A3D0 /* CodeEditorTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeEditorTabView.swift; sourceTree = "<group>"; };
+		B722EB1C950F720C8E367FC4 /* ComposerLayoutMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerLayoutMetricsTests.swift; sourceTree = "<group>"; };
 		B77BD717DBAD9BA574213A27 /* UpdaterModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterModel.swift; sourceTree = "<group>"; };
 		B7F2ED339842DA8F4A8AA1AA /* AppModel+Control.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel+Control.swift"; sourceTree = "<group>"; };
 		B8AD2F83125EEE8E5E845A28 /* ActivityPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityPanelTests.swift; sourceTree = "<group>"; };
@@ -506,6 +519,7 @@
 		F07CEA811BC4635297ACD0DF /* EditorTheme+Tiller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EditorTheme+Tiller.swift"; sourceTree = "<group>"; };
 		F199DFC3D8468A90A3A0B49D /* WorkspaceMigrationV15Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceMigrationV15Tests.swift; sourceTree = "<group>"; };
 		F26842C9CF6C1B7558321445 /* RightPanelDirectoryStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightPanelDirectoryStatusTests.swift; sourceTree = "<group>"; };
+		F309A8DBFAA9DB8331297508 /* ChatRowChromeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRowChromeTests.swift; sourceTree = "<group>"; };
 		F37622FD7F2C5CDF28B533DA /* deterministic.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = deterministic.json; sourceTree = "<group>"; };
 		F40DAB221BF29036B76B496D /* ChatPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPaneView.swift; sourceTree = "<group>"; };
 		F67821CF41F860369657183B /* SQLiteWorkspacePersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteWorkspacePersistence.swift; sourceTree = "<group>"; };
@@ -649,6 +663,7 @@
 				BB0031493C124EF4E6D118F7 /* ChatHistoryRows.swift */,
 				F40DAB221BF29036B76B496D /* ChatPaneView.swift */,
 				A1EC16E5251786DCF2778C46 /* ChatPresentationSnapshot.swift */,
+				393A136EFAFC295599660B68 /* ChatRowChrome.swift */,
 				081A763ACD4658E3107C248C /* ChatTextEditor.swift */,
 				EDAB7CF9FAEF5FF2AE2B49D5 /* ChatTranscriptSource.swift */,
 				A69A4378ADAA0562DD45A8EE /* CodeBlockHeaderView.swift */,
@@ -660,9 +675,11 @@
 				07247E7D1AA2C959D9B0B394 /* ComposerControlBar.swift */,
 				C2212AB15551248120A5A204 /* ComposerDocument.swift */,
 				C4522CE09CEB46A410FFD2FA /* ComposerDropApplier.swift */,
+				49B87A64DCC73E13BDD84F4E /* ComposerLayout.swift */,
 				0147E80EE5F3B7B9F50B2E78 /* EditSummaryCardView.swift */,
 				44A4D7761754955F550F7ED9 /* InsightCardView.swift */,
 				A70F52A4788CC3FE01F09E67 /* MarkdownAttributedStringRenderer.swift */,
+				57B670BC4802ACB89209586E /* MessageRowView.swift */,
 				8E7BCB7765ABEE79057FA44C /* ModelPickerPopover.swift */,
 				41192C3C5CA87F86A1E4EC4D /* PendingQuestionBar.swift */,
 				A3592EBDE2DC633F0652BF83 /* PlanCardView.swift */,
@@ -672,6 +689,7 @@
 				28CADD8A489F3E0119D26F9C /* StreamingTextBuffer.swift */,
 				BDC88E40C5105DC25C7E9A58 /* TaskCardView.swift */,
 				D87DEF81B5B2A8BC0D5410B8 /* TerminalOutputView.swift */,
+				499F738789BF7DF008BDA53B /* ThinkingRowView.swift */,
 				E78AB8A516CF2F33D8CAFF4E /* TillerMarkdownTheme.swift */,
 				3DD81EF2BE2C6D4F67BC7EF7 /* TimelineRowViews.swift */,
 				A05EFE98529F40E18CF9A8F2 /* ToolCallCardView.swift */,
@@ -708,6 +726,7 @@
 				EFDADB4FD77F95DC2D1F77ED /* AppAppearance+NSAppearance.swift */,
 				D804AADA29051BF13CAA1B3C /* AppDelegate.swift */,
 				4F97AFC616EA59C7DE21F48D /* AppearanceSettingsView.swift */,
+				674A9F35B2BA0F7A96549E8C /* AppFont.swift */,
 				56231D9700C4BE8BA92FCB02 /* AppModel.swift */,
 				B7F2ED339842DA8F4A8AA1AA /* AppModel+Control.swift */,
 				BFC0D2B6F7637BF65BC0401C /* AppRoute.swift */,
@@ -823,6 +842,7 @@
 				522D287F1FAB491CD43B4968 /* ChatDiffPreviewTests.swift */,
 				8B91E0609AE4D591DDF0268A /* ChatHistoryRowsTests.swift */,
 				B457A39E9A952BEF47EBEB0A /* ChatPresentationSnapshotTests.swift */,
+				F309A8DBFAA9DB8331297508 /* ChatRowChromeTests.swift */,
 				93A1A9108EFCBABE6E5C56E3 /* ChatTextEditorDropTests.swift */,
 				E75C88B95B0A66ECC447B04F /* ChatTextEditorSlashTests.swift */,
 				E1AE4E67FB07DADE7410A120 /* ChatTranscriptSourceTests.swift */,
@@ -836,6 +856,7 @@
 				81756ED657FF327299FA133E /* ComposerDocumentTests.swift */,
 				4485234FC6B35C316849E96C /* ComposerDropApplierTests.swift */,
 				4B3B329C1AE7E816208190DF /* ComposerFieldTests.swift */,
+				B722EB1C950F720C8E367FC4 /* ComposerLayoutMetricsTests.swift */,
 				C08CA3A996A41FBEA9A35BD0 /* ComposerSendTests.swift */,
 				3DCD6339C795A9A8572D9994 /* ComposerTextKit2Tests.swift */,
 				22C4A897F1AB4BF17E882C85 /* DiffDragPayloadTests.swift */,
@@ -1134,6 +1155,7 @@
 				06C8C199DCAEB8CFD6B1ED99 /* AgentsSettingsView.swift in Sources */,
 				9BBC8955CB8107D7AE5F96A5 /* AppAppearance+NSAppearance.swift in Sources */,
 				CB13A89EF951925FAD56A199 /* AppDelegate.swift in Sources */,
+				954FDC6088639CE62ECD79C4 /* AppFont.swift in Sources */,
 				3DBB4D532180921DDC4A5088 /* AppModel+Control.swift in Sources */,
 				CCAA5C3EC06736BD09F338CD /* AppModel.swift in Sources */,
 				39AE727AD01F0280D8BA0B8B /* AppRoute.swift in Sources */,
@@ -1158,6 +1180,7 @@
 				265AE3DBCD1D47AE3E17632B /* ChatHistoryRows.swift in Sources */,
 				E2BB6072F2A503E3A44E461E /* ChatPaneView.swift in Sources */,
 				6C2C66CF8128A57649684B3B /* ChatPresentationSnapshot.swift in Sources */,
+				3D010F53782C7EA8FA8A9567 /* ChatRowChrome.swift in Sources */,
 				EF9FAEDD510D9448C5B9EF49 /* ChatTextEditor.swift in Sources */,
 				9658303623FFE30F6E668907 /* ChatTranscriptSource.swift in Sources */,
 				4ED691D5A1EEB98DBC8030FB /* CodeBlockHeaderView.swift in Sources */,
@@ -1170,6 +1193,7 @@
 				618ADEBEB5C341497226E298 /* ComposerControlBar.swift in Sources */,
 				641B072F23BAD4883E77F891 /* ComposerDocument.swift in Sources */,
 				E5B005D1E6292D76645ACC83 /* ComposerDropApplier.swift in Sources */,
+				6868B74A95B07FC9A7310411 /* ComposerLayout.swift in Sources */,
 				B2C211EE47612CFD347E018E /* ContentView.swift in Sources */,
 				08D1776D0FB5770852F312BF /* DiffContentAdapter.swift in Sources */,
 				70695DFBA4C8C6272EED1B11 /* DiffDragPayload.swift in Sources */,
@@ -1195,6 +1219,7 @@
 				C25533F2D034C7F522E85A9A /* MarkdownEditorTabView.swift in Sources */,
 				0861C10C3B431CD58B516CF6 /* MarkdownToolbar.swift in Sources */,
 				8ECABD13D02543070A0AD0F9 /* MenuBarStatusIcon.swift in Sources */,
+				8A77F4C806B29B56505B5AB9 /* MessageRowView.swift in Sources */,
 				022817D4BD2028609175C196 /* ModelPickerPopover.swift in Sources */,
 				FACE3803227ABE03D36D87B1 /* NewTabMenuItems.swift in Sources */,
 				1A0AA30587BDFB6593034A29 /* OllamaCloudUsageFetcher.swift in Sources */,
@@ -1231,6 +1256,7 @@
 				D861250EC099E0DCB9CCE4B5 /* TerminalContentAdapter.swift in Sources */,
 				C4108D9D49F385613BAFD87B /* TerminalContextMenuProvider.swift in Sources */,
 				977D87D1FD9197E63FAE48E9 /* TerminalOutputView.swift in Sources */,
+				B9B40E25935B5EA2B8CE4918 /* ThinkingRowView.swift in Sources */,
 				7CE9B2261C82392303742787 /* TillerApp.swift in Sources */,
 				9A421353A3548A7F73376DF0 /* TillerMarkdownTheme.swift in Sources */,
 				250881E7C94F2893D17090F5 /* TillerSkillResource.swift in Sources */,
@@ -1287,6 +1313,7 @@
 				1571C5C395C89F12D02F9EA7 /* ChatDiffPreviewTests.swift in Sources */,
 				5136DA22AFFB8781ABAFA195 /* ChatHistoryRowsTests.swift in Sources */,
 				D89DAD6ECC77E066C8A7C4BF /* ChatPresentationSnapshotTests.swift in Sources */,
+				E9B0F079A700EBB78BD7295B /* ChatRowChromeTests.swift in Sources */,
 				EE9CB8AB856EAAF50F6784F3 /* ChatStreamFixture.swift in Sources */,
 				0689BDAD9758372CBF2D50B7 /* ChatTextEditorDropTests.swift in Sources */,
 				C3321224A14DD88E681BDF17 /* ChatTextEditorSlashTests.swift in Sources */,
@@ -1301,6 +1328,7 @@
 				EE95BCE4291756DF14F7C993 /* ComposerDocumentTests.swift in Sources */,
 				8BD86A743611283ACF2DD601 /* ComposerDropApplierTests.swift in Sources */,
 				101210DBC6268B451C2DC69A /* ComposerFieldTests.swift in Sources */,
+				45B4E8D3EC239DD823AF3AC6 /* ComposerLayoutMetricsTests.swift in Sources */,
 				0C1FFD210F29F5812494C87D /* ComposerSendTests.swift in Sources */,
 				427D978DC0A752F2483E6D15 /* ComposerTextKit2Tests.swift in Sources */,
 				D0B5A888230BF64DE771C4C2 /* DiffDragPayloadTests.swift in Sources */,

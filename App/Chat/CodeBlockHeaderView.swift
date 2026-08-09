@@ -17,7 +17,7 @@ struct CodeBlockHeaderView: View {
     var body: some View {
         HStack {
             Text(language)
-                .font(.caption.monospaced())
+                .font(AppFont.caption.monospaced())
                 .foregroundStyle(.secondary)
             Spacer()
             Button {
@@ -27,7 +27,7 @@ struct CodeBlockHeaderView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
             } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 11))
+                    .font(AppFont.system(size: 11))
                     .foregroundStyle(copied ? .green : .secondary)
             }
             .buttonStyle(.plain)

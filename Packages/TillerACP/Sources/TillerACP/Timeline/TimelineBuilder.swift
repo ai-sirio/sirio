@@ -126,6 +126,7 @@ public enum TimelineBuilder {
                 var meta: TimelineRow.MessageMeta?
                 if item.id == lastAgentMessageId {
                     meta = TimelineRow.MessageMeta(
+                        at: turn.divider?.at,
                         duration: turn.divider.flatMap { state.turnDurations[$0.id] },
                         showsCopyButton: isComplete
                             && (turn.divider != nil || !state.isStreaming))

@@ -31,15 +31,15 @@ struct PaneTabStatusGlyph: View {
                 RunningDots(color: AgentIcon.color(for: agentID ?? ""), dotSize: 3)
             case .needsInput:
                 Image(systemName: "exclamationmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(AppFont.system(size: 8, weight: .bold))
                     .foregroundStyle(AppTheme.tabNeedsInput)
             case .done:
                 Image(systemName: "checkmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(AppFont.system(size: 8, weight: .bold))
                     .foregroundStyle(AppTheme.tabDone)
             case .error:
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(AppFont.system(size: 8, weight: .semibold))
                     .foregroundStyle(AppTheme.tabError)
             }
         }

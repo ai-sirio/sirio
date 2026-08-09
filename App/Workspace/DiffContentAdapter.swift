@@ -186,7 +186,7 @@ struct SideBySideDiffView: View {
             .frame(width: 220)
             if didFallBackToHunks {
                 Text("File too large to show in full")
-                    .font(.system(size: 11))
+                    .font(AppFont.system(size: 11))
                     .foregroundStyle(AppTheme.subtitle)
             }
             Spacer()
@@ -297,7 +297,7 @@ private struct SideBySideDiffBody: View {
                     ForEach(rows) { row in
                         if row.isHunk, let hunk = row.left {
                             Text(hunk.text)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(AppFont.mono(size: 11))
                                 .foregroundStyle(AppTheme.subtitle)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
@@ -341,7 +341,7 @@ private struct SideBySideDiffBody: View {
                     .padding(.leading, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .font(.system(size: 11, design: .monospaced))
+            .font(AppFont.mono(size: 11))
             .padding(.vertical, 2)
             .frame(width: width, alignment: .leading)
             .background(background(for: line))
@@ -368,7 +368,7 @@ private struct SideBySideDiffBody: View {
                 line.text,
                 ranges: map.ranges(forLine: number),
                 theme: .tiller(isDark: colorScheme == .dark),
-                font: .monospacedSystemFont(ofSize: 11, weight: .regular)))
+                font: AppFont.nsMono(size: 11)))
         } else {
             Text(line.text)
                 .foregroundStyle(foreground(for: line))

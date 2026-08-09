@@ -56,14 +56,14 @@ struct ActivitySectionView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(.secondary)
                 Text("Activity")
-                    .font(.subheadline.weight(.semibold))
+                    .font(AppFont.subheadline.weight(.semibold))
                 Spacer()
                 if runningCount > 0 {
                     Text("\(runningCount) running")
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -134,11 +134,11 @@ private struct ActivityRowView: View {
                 .frame(width: 14, height: 14)
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.title)
-                    .font(.callout)
+                    .font(AppFont.callout)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(row.worktreeLabel)
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -147,7 +147,7 @@ private struct ActivityRowView: View {
             statusIndicator
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -170,7 +170,7 @@ private struct ActivityRowView: View {
         } else {
             Image(systemName: row.kind == .chat
                   ? "bubble.left.and.text.bubble.right" : "terminal")
-                .font(.caption)
+                .font(AppFont.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -184,10 +184,10 @@ private struct ActivityRowView: View {
             Circle().fill(.yellow).frame(width: 7, height: 7)
         case .done:
             Image(systemName: "checkmark.circle.fill")
-                .font(.caption2).foregroundStyle(.secondary)
+                .font(AppFont.caption2).foregroundStyle(.secondary)
         case .error:
             Image(systemName: "xmark.circle.fill")
-                .font(.caption2).foregroundStyle(.red)
+                .font(AppFont.caption2).foregroundStyle(.red)
         case .idle:
             Circle().strokeBorder(.secondary, lineWidth: 1).frame(width: 7, height: 7)
         }

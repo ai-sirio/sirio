@@ -10,4 +10,14 @@ struct ChatDiffPreviewTests {
         #expect(rows.filter { $0.side == .new }.count == 60)
         #expect(rows.count == 115)
     }
+
+    @Test func keepsContextLinesBetweenInlineChanges() {
+        let rows = ChatDiffPreviewModel.rows(
+            oldText: "let prefix = \"chat\"\nlet oldTitle = legacyTitle\nlet suffix = \"view\"",
+            newText: "let prefix = \"chat\"\nlet title = currentTitle\nlet suffix = \"view\"")
+
+        #expect(rows.map(\.side) == [.context, .old, .new, .context])
+        #expect(rows[1].lineNumber == 2)
+        #expect(rows[2].lineNumber == 2)
+    }
 }

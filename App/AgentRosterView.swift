@@ -83,7 +83,7 @@ private struct RosterRow: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(worktree.branch)
                     Text(status.map { "\(projectName) — \($0.humanLabel)" } ?? projectName)
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()

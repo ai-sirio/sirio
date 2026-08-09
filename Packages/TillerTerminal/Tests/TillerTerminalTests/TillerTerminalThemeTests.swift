@@ -12,13 +12,24 @@ import TillerCore
     #expect(theme.light == TerminalConfiguration.alabaster
         .appending(.background(AppSurfaceColor.terminalLightHex))
         .appending(.fontSize(14))
-        .appending(scrollbackLimit))
+        .appending(scrollbackLimit)
+        .appending(.fontFamily(TillerTerminalTheme.fontFamily)))
     #expect(theme.dark == TerminalConfiguration.afterglow
         .appending(.background(AppSurfaceColor.terminalHex))
         .appending(TerminalConfigCommand.custom(key: "background-opacity", value: "\(AppSurfaceColor.surfaceOpacity(translucencyEnabled: true))"))
         .appending(TerminalConfigCommand.custom(key: "background-blur-radius", value: "20"))
         .appending(.fontSize(14))
-        .appending(scrollbackLimit))
+        .appending(scrollbackLimit)
+        .appending(.fontFamily(TillerTerminalTheme.fontFamily)))
+}
+
+/// CoreText substitutes a missing family silently — ghostty would render a
+/// proportional font with no error anywhere. Pin the name so a rename or a
+/// typo fails here instead of on screen.
+/// The test above asserts the wiring through the constant, so it would pass
+/// with any value in it. This pins the literal.
+@Test func themePinsTheNerdFontFamily() {
+    #expect(TillerTerminalTheme.fontFamily == "MesloLGS Nerd Font Mono")
 }
 
 @Test func themeDiffersByFontSize() {
@@ -53,6 +64,7 @@ import TillerCore
         .appending(.background(AppSurfaceColor.terminalHex))
         .appending(.fontSize(13))
         .appending(TerminalConfigCommand.custom(key: "scrollback-limit", value: "262144"))
+        .appending(.fontFamily(TillerTerminalTheme.fontFamily))
     #expect(theme.dark == expected)
 }
 
@@ -70,5 +82,6 @@ import TillerCore
         .appending(TerminalConfigCommand.custom(key: "background-blur-radius", value: "20"))
         .appending(.fontSize(Float(AppSettings.defaultTerminalFontSize)))
         .appending(TerminalConfigCommand.custom(key: "scrollback-limit", value: "262144"))
+        .appending(.fontFamily(TillerTerminalTheme.fontFamily))
     #expect(theme.dark == expected)
 }

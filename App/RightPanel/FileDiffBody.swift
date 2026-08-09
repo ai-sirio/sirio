@@ -40,7 +40,7 @@ struct FileDiffBody: View {
             ForEach(Self.renderableLines(of: diff)) { line in
                 if line.kind == .hunk {
                     Text(line.text)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(AppFont.mono(size: 11))
                         .foregroundStyle(AppTheme.subtitle)
                         .padding(.vertical, 1)
                         .padding(.leading, 8)
@@ -75,7 +75,7 @@ struct FileDiffBody: View {
                 .padding(.leading, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .font(.system(size: 11, design: .monospaced))
+        .font(AppFont.mono(size: 11))
         .padding(.vertical, 1)
         .background(background(for: line))
     }
@@ -102,10 +102,10 @@ struct FileDiffBody: View {
                 line.text,
                 ranges: ranges,
                 theme: .tiller(isDark: colorScheme == .dark),
-                font: .monospacedSystemFont(ofSize: 11, weight: .regular)))
+                font: AppFont.nsMono(size: 11)))
         } else {
             Text(line.text)
-                .font(.system(size: 11, design: .monospaced))
+                .font(AppFont.mono(size: 11))
                 .foregroundStyle(foreground(for: line))
         }
     }

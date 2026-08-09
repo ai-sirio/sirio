@@ -29,7 +29,7 @@ struct CodeEditorTabView: View {
                 configuration: SourceEditorConfiguration(
                     appearance: .init(
                         theme: .tiller(isDark: colorScheme == .dark),
-                        font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+                        font: AppFont.nsMono(size: 12),
                         wrapLines: false),
                     behavior: .init(isEditable: true, isSelectable: true,
                                     indentOption: .spaces(count: 4)),
@@ -56,12 +56,12 @@ struct CodeEditorTabView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Text(document.fileURL.path)
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Text(detectedLanguage.tsName)
-                .font(.system(size: 10, weight: .medium))
+                .font(AppFont.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer()
         }
@@ -77,7 +77,7 @@ struct CodeEditorTabView: View {
             Button("Reload") { document.reloadFromDisk() }
             Button("Keep") { document.keepLocalBuffer() }
         }
-        .font(.system(size: 12))
+        .font(AppFont.system(size: 12))
         .padding(8)
         .background(.orange.opacity(0.15))
     }
@@ -88,7 +88,7 @@ struct CodeEditorTabView: View {
             Text("File deleted on disk. ⌘S recreates it.")
             Spacer()
         }
-        .font(.system(size: 12))
+        .font(AppFont.system(size: 12))
         .padding(8)
         .background(.red.opacity(0.15))
     }

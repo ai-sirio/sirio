@@ -21,7 +21,7 @@ final class ComposerDocument {
     /// Mirrors the text view's `typingAttributes` so a chip insertion cannot
     /// leak attachment attributes into the text typed after it.
     var typingAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+        .font: AppFont.nsBody,
         .foregroundColor: NSColor.textColor,
     ]
 
@@ -109,9 +109,25 @@ final class ComposerDocument {
         return draft
     }
 
+    /// Re-stamps the base font after the interface font size changes. The
+    /// draft already on screen carries the old size in its attribute runs, so
+    /// updating only `typingAttributes` would leave a draft in two sizes.
+    /// Attachment runs are skipped — a chip sizes itself.
+    func applyBaseFont() {
+        resetTypingAttributes()
+        guard storage.length > 0 else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        storage.beginEditing()
+        storage.enumerateAttribute(.attachment, in: full) { attachment, range, _ in
+            guard attachment == nil else { return }
+            storage.addAttribute(.font, value: AppFont.nsBody, range: range)
+        }
+        storage.endEditing()
+    }
+
     private func resetTypingAttributes() {
         typingAttributes = [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .font: AppFont.nsBody,
             .foregroundColor: NSColor.textColor,
         ]
     }

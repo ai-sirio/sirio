@@ -29,9 +29,9 @@ struct WorkGroupView: View {
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.semibold))
+                            .font(AppFont.caption2.weight(.semibold))
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        Text("\(entries.count) steps").font(.caption)
+                        Text("\(entries.count) steps").font(AppFont.caption)
                     }
                     .foregroundStyle(.secondary)
                 }
@@ -55,7 +55,7 @@ struct WorkGroupView: View {
         HStack(spacing: 6) {
             statusGlyph(entry.item.status)
             Text(entry.label)
-                .font(.callout)
+                .font(AppFont.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 0)
@@ -72,10 +72,10 @@ struct WorkGroupView: View {
             ProgressView().controlSize(.mini)
         case .completed:
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green).font(.caption)
+                .foregroundStyle(.green).font(AppFont.caption)
         case .failed:
             Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red).font(.caption)
+                .foregroundStyle(.red).font(AppFont.caption)
         }
     }
 }
@@ -97,13 +97,13 @@ struct TurnFoldRow: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
+                    .font(AppFont.caption2.weight(.semibold))
                 Text("Turn: \(label)")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .lineLimit(1)
                 Spacer()
                 Text(at, format: .dateTime.hour().minute())
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(.tertiary)
             }
             .foregroundStyle(.secondary)

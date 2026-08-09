@@ -76,7 +76,7 @@ struct RightPanelView: View {
             Divider()
             if let monitorError = panelModel.monitorError {
                 Label(monitorError, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(AppTheme.gitModified)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)

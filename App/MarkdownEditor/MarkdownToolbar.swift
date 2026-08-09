@@ -31,7 +31,7 @@ struct MarkdownToolbar: View {
     private func button(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .frame(width: 22, height: 20)
         }
         .buttonStyle(.plain)

@@ -47,7 +47,7 @@ struct AddProjectSheet: View {
         HStack {
             if step == .menu {
                 Text("Add a project")
-                    .font(.system(size: 17, weight: .bold))
+                    .font(AppFont.system(size: 17, weight: .bold))
                     .foregroundStyle(AppTheme.title)
             } else {
                 Button {
@@ -78,7 +78,7 @@ struct AddProjectSheet: View {
                 action: browseFolder
             )
             Text("OTHER WAYS TO ADD")
-                .font(.system(size: 11, weight: .semibold))
+                .font(AppFont.system(size: 11, weight: .semibold))
                 .foregroundStyle(AppTheme.meta)
                 .padding(.top, 8)
             AddProjectMenuRow(
@@ -149,15 +149,15 @@ private struct AddProjectMenuRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(AppFont.system(size: 16))
                 .foregroundStyle(AppTheme.title)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(AppFont.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.title)
                 Text(subtitle)
-                    .font(.system(size: 11))
+                    .font(AppFont.system(size: 11))
                     .foregroundStyle(AppTheme.subtitle)
             }
             Spacer(minLength: 0)
@@ -185,10 +185,10 @@ private struct LocationRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Git repository in \(parentDir)")
-                .font(.system(size: 12, weight: .semibold))
+                .font(AppFont.system(size: 12, weight: .semibold))
                 .foregroundStyle(AppTheme.title)
             Text(derivedPath)
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(AppTheme.meta)
         }
         .padding(10)
@@ -228,14 +228,14 @@ struct CloneFromURLView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Clone from URL")
-                .font(.system(size: 17, weight: .bold))
+                .font(AppFont.system(size: 17, weight: .bold))
                 .foregroundStyle(AppTheme.title)
             Text("Clone a remote Git repository into a new project.")
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
                 .foregroundStyle(AppTheme.subtitle)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("URL").font(.system(size: 12)).foregroundStyle(AppTheme.subtitle)
+                Text("URL").font(AppFont.system(size: 12)).foregroundStyle(AppTheme.subtitle)
                 TextField("https://github.com/owner/repo.git", text: $url)
                     .textFieldStyle(.plain)
                     .padding(10)
@@ -299,14 +299,14 @@ struct CreateNewProjectView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Create a new project")
-                .font(.system(size: 17, weight: .bold))
+                .font(AppFont.system(size: 17, weight: .bold))
                 .foregroundStyle(AppTheme.title)
             Text("Name it and Tiller will create a real project with sensible defaults.")
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
                 .foregroundStyle(AppTheme.subtitle)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Name").font(.system(size: 12)).foregroundStyle(AppTheme.subtitle)
+                Text("Name").font(AppFont.system(size: 12)).foregroundStyle(AppTheme.subtitle)
                 TextField("my-project", text: $name)
                     .textFieldStyle(.plain)
                     .padding(10)

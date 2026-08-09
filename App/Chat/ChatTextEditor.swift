@@ -24,6 +24,9 @@ struct ChatTextEditor: NSViewRepresentable {
     /// Returns true to consume the key (popup navigation); false restores
     /// the default behavior. nil behaves like always-false.
     var onSlashKey: ((SlashKey) -> Bool)? = nil
+    /// Read here, in the parent's body, so Observation sees the dependency:
+    /// `updateNSView` alone is never re-run by a change AppKit cannot observe.
+    var fontSize: CGFloat = AppFont.base
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -47,7 +50,7 @@ struct ChatTextEditor: NSViewRepresentable {
         if let document {
             textView.textContentStorage?.textStorage = document.storage
         }
-        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
+        textView.font = AppFont.nsBody
         textView.isRichText = false
         // Drops are handled by ChatPaneView, which routes them through
         // FileDrop. An editable NSTextView otherwise claims the file types
@@ -88,6 +91,10 @@ struct ChatTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? NSTextView else { return }
         textView.isEditable = isEditable
+        if textView.font?.pointSize != fontSize {
+            document.applyBaseFont()
+            textView.font = AppFont.nsBody
+        }
         textView.typingAttributes = document.typingAttributes
         scrollView.minHeight = minHeight
         scrollView.maxHeight = maxHeight

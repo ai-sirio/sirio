@@ -40,7 +40,7 @@ struct ChangedFileRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(AppTheme.meta)
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 .frame(width: 12)
@@ -52,7 +52,7 @@ struct ChangedFileRow: View {
                 .frame(width: 14)
 
             Text(entry.path.value)
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
                 .foregroundStyle(GitStatusStyle.color(entry))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -61,13 +61,13 @@ struct ChangedFileRow: View {
 
             if entry.isConflicted {
                 Text("Resolve in terminal")
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(AppTheme.gitConflict)
             } else if isHovering {
                 actions
             } else if let counts = ChangedFileCounts.label(for: stat) {
                 Text(counts)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(AppFont.mono(size: 11))
                     .foregroundStyle(AppTheme.meta)
             }
         }
@@ -123,6 +123,6 @@ struct ChangedFileRow: View {
             .buttonStyle(.plain)
             .help("Open Diff in Editor")
         }
-        .font(.caption)
+        .font(AppFont.caption)
     }
 }

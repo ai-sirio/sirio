@@ -37,7 +37,7 @@ struct MarkdownEditorTabView: View {
                     MarkdownToolbar(document: document, selection: $selection)
                     Divider()
                     TextEditor(text: $document.text, selection: $selection)
-                        .font(.system(.body, design: .monospaced))
+                        .font(AppFont.mono())
                         .scrollContentBackground(.hidden)
                         .padding(8)
                 } else {
@@ -58,13 +58,13 @@ struct MarkdownEditorTabView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Text(document.fileURL.path)
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if isHuge {
                 Text("Large file — manual preview")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(.orange)
             }
             Spacer()
@@ -91,7 +91,7 @@ struct MarkdownEditorTabView: View {
             Button("Reload") { document.reloadFromDisk() }
             Button("Keep") { document.keepLocalBuffer() }
         }
-        .font(.system(size: 12))
+        .font(AppFont.system(size: 12))
         .padding(8)
         .background(.orange.opacity(0.15))
     }
@@ -102,7 +102,7 @@ struct MarkdownEditorTabView: View {
             Text("File deleted on disk. Cmd-S recreates it.")
             Spacer()
         }
-        .font(.system(size: 12))
+        .font(AppFont.system(size: 12))
         .padding(8)
         .background(.red.opacity(0.15))
     }

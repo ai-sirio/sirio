@@ -24,7 +24,7 @@ struct ChangesListView: View {
         VStack(spacing: 0) {
             HStack {
                 Text(panelModel.status.isClean ? "Working tree clean" : "Local changes")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(AppFont.system(size: 12, weight: .semibold))
                 Spacer()
                 Button { Task { await panelModel.refresh() } } label: {
                     Image(systemName: "arrow.clockwise")
@@ -90,11 +90,11 @@ struct ChangesListView: View {
             VStack(spacing: 2) {
                 HStack {
                     Text("\(title) (\(entries.count))")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppFont.system(size: 11, weight: .semibold))
                     Spacer()
                     Button(actionTitle) { action(actionable) }
                         .buttonStyle(.plain)
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .disabled(actionable.isEmpty)
                     if kind == .changes || kind == .untracked {
                         Button("Discard all", role: .destructive) {
@@ -103,7 +103,7 @@ struct ChangesListView: View {
                                 entries: actionable))
                         }
                         .buttonStyle(.plain)
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .disabled(actionable.isEmpty)
                     }
                 }
@@ -150,7 +150,7 @@ struct ChangesListView: View {
                 ProgressView()
                     .controlSize(.small)
                 Text("Loading diff…")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(AppTheme.meta)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -170,9 +170,9 @@ struct ChangesListView: View {
                     .foregroundStyle(AppTheme.gitModified)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Diff unavailable")
-                        .font(.caption.weight(.semibold))
+                        .font(AppFont.caption.weight(.semibold))
                     Text(error)
-                        .font(.caption2)
+                        .font(AppFont.caption2)
                         .foregroundStyle(AppTheme.meta)
                         .lineLimit(2)
                 }
@@ -181,7 +181,7 @@ struct ChangesListView: View {
                     Task { await panelModel.diffStore.retry(entry, repoPath: worktree.path) }
                 }
                 .buttonStyle(.plain)
-                .font(.caption)
+                .font(AppFont.caption)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 8)

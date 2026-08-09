@@ -43,7 +43,7 @@ struct TaskCardView: View {
                     HStack(spacing: 6) {
                         RunningDots(color: AppTheme.railQuestion)
                         Text(currentChild?.title ?? "Starting")
-                            .font(.caption)
+                            .font(AppFont.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -57,10 +57,10 @@ struct TaskCardView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(info.title)
-                    .font(.callout.weight(.medium))
+                    .font(AppFont.callout.weight(.medium))
                     .lineLimit(isExpanded ? nil : 1)
                 Text(info.subagentType)
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1)
                     .background(AppTheme.primaryPillBg,
@@ -74,11 +74,11 @@ struct TaskCardView: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
+                        .font(AppFont.caption2.weight(.semibold))
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     Text(children.count == 1 ? "1 tool call"
                                              : "\(children.count) tool calls")
-                        .font(.caption2)
+                        .font(AppFont.caption2)
                 }
                 .foregroundStyle(.tertiary)
             }
@@ -97,10 +97,10 @@ struct TaskCardView: View {
             ProgressView().controlSize(.small)
         case .completed:
             Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(AppTheme.railEdit).font(.caption)
+                .foregroundStyle(AppTheme.railEdit).font(AppFont.caption)
         case .failed:
             Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(AppTheme.gitConflict).font(.caption)
+                .foregroundStyle(AppTheme.gitConflict).font(AppFont.caption)
         }
     }
 }

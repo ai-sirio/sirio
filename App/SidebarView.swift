@@ -23,7 +23,7 @@ struct SidebarView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
                     Text("Projects")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(AppFont.system(size: 11, weight: .semibold))
                         .foregroundStyle(AppTheme.meta)
                     Spacer(minLength: 0)
                     Button {
@@ -155,11 +155,11 @@ private struct FilterField: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(AppTheme.meta)
             TextField("Filter", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(AppFont.system(size: 12.5))
                 .foregroundStyle(AppTheme.title)
                 .focusEffectDisabled()
         }
@@ -246,12 +246,12 @@ private struct ProjectRow: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: model.isProjectExpanded(project) ? "chevron.down" : "chevron.right")
-                .font(.system(size: 10, weight: .semibold))
+                .font(AppFont.system(size: 10, weight: .semibold))
                 .foregroundStyle(AppTheme.meta)
                 .frame(width: 12)
             projectIcon(project)
             Text((project.displayName?.isEmpty == false ? project.displayName : nil) ?? project.name)
-                .font(.system(size: 13, weight: .semibold))
+                .font(AppFont.system(size: 13, weight: .semibold))
                 .foregroundStyle(AppTheme.title)
             Spacer(minLength: 4)
             if hovering {
@@ -259,7 +259,7 @@ private struct ProjectRow: View {
                     onSettings(project)
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 11))
+                        .font(AppFont.system(size: 11))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())
@@ -305,6 +305,7 @@ private struct ProjectRow: View {
 /// avatar image, a tinted SF Symbol, or a literal emoji — else the default
 /// folder glyph tinted by `projectColor`.
 @ViewBuilder
+@MainActor
 private func projectIcon(_ project: Project) -> some View {
     switch project.iconKind {
     case .avatar:
@@ -317,19 +318,19 @@ private func projectIcon(_ project: Project) -> some View {
         } else {
             Image(systemName: "folder.fill")
                 .foregroundStyle(projectColor(project))
-                .font(.system(size: 13))
+                .font(AppFont.system(size: 13))
         }
     case .icon:
         Image(systemName: project.iconValue ?? "folder.fill")
             .foregroundStyle(projectColor(project))
-            .font(.system(size: 13))
+            .font(AppFont.system(size: 13))
     case .emoji:
         if let emoji = project.iconValue, !emoji.isEmpty {
-            Text(emoji).font(.system(size: 13))
+            Text(emoji).font(AppFont.system(size: 13))
         } else {
             Image(systemName: "folder.fill")
                 .foregroundStyle(projectColor(project))
-                .font(.system(size: 13))
+                .font(AppFont.system(size: 13))
         }
     }
 }
@@ -360,16 +361,16 @@ private struct WorktreeRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Image(systemName: isGit ? "arrow.triangle.branch" : "folder")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppFont.system(size: 10, weight: .semibold))
                         .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.meta)
                     Text(isGit ? worktree.branch : (worktree.path as NSString).lastPathComponent)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(AppFont.system(size: 13, weight: .semibold))
                         .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.title)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     if worktree.isPrimary && isGit {
                         Text("primary")
-                            .font(.system(size: 9.5))
+                            .font(AppFont.system(size: 9.5))
                             .textCase(.uppercase)
                             .foregroundStyle(AppTheme.title)
                             .padding(.horizontal, 5)
@@ -379,7 +380,7 @@ private struct WorktreeRow: View {
                 }
                 if agentId != nil || !comment.isEmpty {
                     Text(subtitle(agentId: agentId, comment: comment, status: status))
-                        .font(.system(size: 11))
+                        .font(AppFont.system(size: 11))
                         .foregroundStyle(AppTheme.subtitle)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -393,7 +394,7 @@ private struct WorktreeRow: View {
                     NewTabMenuItems(model: model, worktree: worktree)
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 11))
+                        .font(AppFont.system(size: 11))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(.plain)
@@ -408,7 +409,7 @@ private struct WorktreeRow: View {
 
             if !comment.isEmpty, let updated = worktree.commentUpdatedAt {
                 Text(Self.relativeAge(updated))
-                    .font(.system(size: 11))
+                    .font(AppFont.system(size: 11))
                     .foregroundStyle(AppTheme.meta)
             }
         }
@@ -470,10 +471,10 @@ private struct NewWorktreeButton: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "plus")
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .frame(width: 18)
             Text("New Worktree\u{2026}")
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
             Spacer(minLength: 0)
         }
         .foregroundStyle(hovering ? AppTheme.title : AppTheme.subtitle)
@@ -524,7 +525,7 @@ private struct TabRow: View {
             if renaming {
                 TextField("", text: $draftTitle)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(AppFont.system(size: 12))
                     .focused($renameFieldFocused)
                     .onSubmit {
                         model.renameTab(tab.id, in: worktree.id, to: draftTitle)
@@ -533,7 +534,7 @@ private struct TabRow: View {
                     .onExitCommand { renaming = false }
             } else {
                 Text(tab.title)
-                    .font(.system(size: 12))
+                    .font(AppFont.system(size: 12))
                     .foregroundStyle(isSelected ? AppTheme.titleSelected : AppTheme.subtitle)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -557,7 +558,7 @@ private struct TabRow: View {
                     model.closeTab(tab.id, in: worktree)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AppFont.system(size: 9, weight: .bold))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())
@@ -646,7 +647,7 @@ private struct PaneRow: View {
             icon
                 .frame(width: 14)
             Text(model.paneTitles[paneId] ?? "Pane \(index + 1)")
-                .font(.system(size: 11.5))
+                .font(AppFont.system(size: 11.5))
                 .foregroundStyle(AppTheme.subtitle)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -688,7 +689,7 @@ private struct PaneRow: View {
             AgentIcon(agentId: agentId, size: 12)
         } else {
             Image(systemName: "terminal")
-                .font(.system(size: 10))
+                .font(AppFont.system(size: 10))
                 .foregroundStyle(AppTheme.meta)
         }
     }

@@ -24,19 +24,19 @@ struct EditSummaryCardView: View {
     }
 
     var body: some View {
-        ChatCard(kind: .edit) {
+        ChatRowSurface(kind: .tool, isFlat: true) {
             VStack(alignment: .leading, spacing: 6) {
                 Label(paths.count == 1 ? "1 file changed"
                                        : "\(paths.count) files changed",
                       systemImage: "pencil.line")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .font(AppFont.caption)
+                    .foregroundStyle(AppTheme.subtitle)
                 ForEach(paths, id: \.self) { path in
                     row(path)
                 }
                 if let revertError {
                     Text(revertError)
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(.red)
                 }
             }
@@ -64,7 +64,7 @@ struct EditSummaryCardView: View {
             } label: {
                 Label((path as NSString).lastPathComponent,
                       systemImage: "chevron.left.forwardslash.chevron.right")
-                    .font(.caption)
+                    .font(AppFont.caption)
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppTheme.fileLink)
@@ -72,7 +72,7 @@ struct EditSummaryCardView: View {
             Spacer()
             if revertedPaths.contains(path) {
                 Text("reverted")
-                    .font(.caption2)
+                    .font(AppFont.caption2)
                     .foregroundStyle(.secondary)
             } else if isGitProject {
                 Button("Revert") { confirmingPath = path }

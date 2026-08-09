@@ -36,10 +36,10 @@ struct PlanCardView: View {
                             .foregroundStyle(.tertiary)
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.semibold))
+                            .font(AppFont.caption2.weight(.semibold))
                             .rotationEffect(.degrees(showsEntries ? 90 : 0))
                     }
-                    .font(.caption.weight(.semibold))
+                    .font(AppFont.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -50,8 +50,8 @@ struct PlanCardView: View {
                             Image(systemName: symbol(for: entry.status))
                                 .foregroundStyle(entry.status == "completed"
                                                  ? AppTheme.railEdit : .secondary)
-                                .font(.caption)
-                            Text(entry.content).font(.callout)
+                                .font(AppFont.caption)
+                            Text(entry.content).font(AppFont.callout)
                         }
                     }
                 }

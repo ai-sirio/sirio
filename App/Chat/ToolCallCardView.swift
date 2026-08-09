@@ -3,8 +3,9 @@ import TillerACP
 import TillerCore
 import Inject
 
-/// One tool call as a card: kind icon, title, status; expandable content
-/// (diff/output); pending permission requests remain highlighted.
+/// One tool call as a quiet transcript row: kind icon, title, status badge and
+/// line-count badge; expandable content (diff/output) stays available without
+/// making every tool call look like a separate panel.
 struct ToolCallCardView: View {
     @ObserveInjection private var inject
 
@@ -18,7 +19,12 @@ struct ToolCallCardView: View {
     private var isPermissionPending: Bool { item.permission?.isPending == true }
 
     var body: some View {
-        ChatCard(kind: .tool, isHighlighted: isPermissionPending) {
+        // Flat: a tool call is one line in the log, not a panel. Only a
+        // pending permission still paints a fill, because that one is a
+        // question to the reader.
+        ChatRowSurface(kind: .tool,
+                       isActive: isPermissionPending,
+                       isFlat: true) {
             VStack(alignment: .leading, spacing: 6) {
                 header
                 if expanded || isPermissionPending {
@@ -32,14 +38,22 @@ struct ToolCallCardView: View {
 
     private var header: some View {
         HStack(spacing: 6) {
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                .font(AppFont.caption2.weight(.semibold))
+                .foregroundStyle(AppTheme.meta)
             Image(systemName: kindSymbol)
-                .foregroundStyle(.secondary)
-                .font(.caption)
+                .foregroundStyle(AppTheme.meta)
+                .font(AppFont.caption)
+                .frame(width: 13)
             Text(item.title)
-                .font(.callout.weight(.medium))
-                .lineLimit(expanded ? nil : 1)
+                .font(AppFont.caption)
+                .foregroundStyle(AppTheme.subtitle)
+                .lineLimit(1)
             Spacer()
-            statusGlyph
+            if ChatRowMetrics.lineCount(for: item) > 0 {
+                ChatCountBadge(count: ChatRowMetrics.lineCount(for: item), label: "lines")
+            }
+            ChatStatusBadge(status: item.status)
         }
         .contentShape(Rectangle())
         .onTapGesture { expanded.toggle() }
@@ -57,20 +71,6 @@ struct ToolCallCardView: View {
         case .fetch: "globe"
         case .switchMode: "arrow.triangle.2.circlepath"
         case .other: "wrench.and.screwdriver"
-        }
-    }
-
-    @ViewBuilder
-    private var statusGlyph: some View {
-        switch item.status {
-        case .pending, .inProgress:
-            ProgressView().controlSize(.small)
-        case .completed:
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green).font(.caption)
-        case .failed:
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red).font(.caption)
         }
     }
 
@@ -103,7 +103,7 @@ struct ToolCallCardView: View {
                     appModel: appModel)
             case .content(.text(let text)):
                 Text(text)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(AppFont.mono(size: 11))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .terminal:
@@ -123,7 +123,7 @@ struct ToolCallCardView: View {
                     } label: {
                         Label((location.path as NSString).lastPathComponent,
                               systemImage: "arrow.up.forward.square")
-                            .font(.caption)
+                            .font(AppFont.caption)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.tint)
