@@ -26,6 +26,25 @@ private func resolved(_ color: NSColor, _ name: NSAppearance.Name) -> NSColor {
     return result
 }
 
+@MainActor
+private final class ColorSchemeCapture {
+    var value: ColorScheme?
+}
+
+private struct ColorSchemeProbe: NSViewRepresentable {
+    @Environment(\.colorScheme) private var colorScheme
+    let capture: ColorSchemeCapture
+
+    func makeNSView(context: Context) -> NSView {
+        capture.value = colorScheme
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        capture.value = colorScheme
+    }
+}
+
 @Suite("ComposerStyle", .serialized)
 @MainActor
 struct ComposerStyleTests {
@@ -51,5 +70,22 @@ struct ComposerStyleTests {
         let caret = resolved(textView.insertionPointColor ?? .black, .darkAqua)
         #expect(text.brightnessComponent > surface.brightnessComponent)
         #expect(caret.brightnessComponent > surface.brightnessComponent)
+    }
+
+    @Test func composerCardDarkAppearanceDoesNotLeakIntoQueuedContent() {
+        let queuedCapture = ColorSchemeCapture()
+        let cardCapture = ColorSchemeCapture()
+        let root = VStack {
+            ColorSchemeProbe(capture: queuedCapture)
+            ColorSchemeProbe(capture: cardCapture)
+                .composerCardAppearance()
+        }
+        .environment(\.colorScheme, .light)
+        let host = NSHostingView(rootView: root)
+        host.frame = NSRect(x: 0, y: 0, width: 300, height: 100)
+        host.layoutSubtreeIfNeeded()
+
+        #expect(queuedCapture.value == .light)
+        #expect(cardCapture.value == .dark)
     }
 }
