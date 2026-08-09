@@ -9,6 +9,11 @@ import Inject
 enum ChatPaneLayoutRole: Hashable {
     case approvalPanel
     case composer
+    case transcriptViewport
+    case transcriptContent
+    case transcriptBottomSpacer
+    case bottomFade
+    case bottomOverlay
 }
 
 struct ChatPaneLayoutPreferenceKey: PreferenceKey {
@@ -58,6 +63,7 @@ struct ChatPaneView: View {
     /// the drop target, and a drop has to reach the draft.
     @State private var document = ComposerDocument()
     @State private var isDropTargeted = false
+    @State private var bottomOverlayHeight: CGFloat = 0
     @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     var body: some View {
@@ -81,40 +87,34 @@ struct ChatPaneView: View {
             default:
                 EmptyView()
             }
-            TranscriptView(controller: controller, worktree: worktree,
-                           appModel: appModel)
-            if let promptError = controller.promptError {
-                banner(
-                    "Turn error",
-                    detail: promptError,
-                    actionTitle: "OK") {
-                    controller.promptError = nil
+            ZStack(alignment: .bottom) {
+                TranscriptView(
+                    controller: controller,
+                    worktree: worktree,
+                    appModel: appModel,
+                    bottomContentInset: ChatBottomOverlayMetrics.contentInset(
+                        for: bottomOverlayHeight))
+
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    LinearGradient(
+                        colors: [AppTheme.chatSurface.opacity(0), AppTheme.chatSurface],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: ChatBottomOverlayMetrics.fadeHeight(
+                        for: bottomOverlayHeight))
+                    .captureLayout(.bottomFade, enabled: layoutCaptureEnabled)
                 }
+                .allowsHitTesting(false)
+
+                bottomOverlay(snapshot: snapshot)
+                    .captureChatBottomOverlayHeight()
+                    .captureLayout(.bottomOverlay, enabled: layoutCaptureEnabled)
             }
-            if let mcpWarning = controller.mcpWarning {
-                banner(
-                    "MCP configuration",
-                    detail: mcpWarning,
-                    actionTitle: "OK") {
-                    controller.mcpWarning = nil
-                }
-            }
-            if snapshot.hasPlanAwaitingApproval {
-                banner(
-                    "Plan awaiting approval",
-                    detail: "Review the proposed plan in the transcript, then approve or reject it.",
-                    actionTitle: "OK") {}
-            }
-            PendingQuestionBar(permissions: snapshot.composerPermissions,
-                               controller: controller)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .layoutPriority(1)
-                .captureLayout(.approvalPanel, enabled: layoutCaptureEnabled)
-            CenteredComposerLayout {
-                ChatComposerView(controller: controller, worktreePath: worktree.path,
-                                 document: document)
-                    .captureLayout(.composer, enabled: layoutCaptureEnabled)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onPreferenceChange(ChatBottomOverlayHeightPreferenceKey.self) { height in
+                bottomOverlayHeight = max(0, height)
             }
         }
         .background { MainSurfaceMaterial(tint: AppTheme.chatSurface) }
@@ -172,6 +172,46 @@ struct ChatPaneView: View {
             }
         }
         return true
+    }
+
+    @ViewBuilder
+    private func bottomOverlay(snapshot: ChatPresentationSnapshot) -> some View {
+        VStack(spacing: 0) {
+            if let promptError = controller.promptError {
+                banner(
+                    "Turn error",
+                    detail: promptError,
+                    actionTitle: "OK") {
+                    controller.promptError = nil
+                }
+            }
+            if let mcpWarning = controller.mcpWarning {
+                banner(
+                    "MCP configuration",
+                    detail: mcpWarning,
+                    actionTitle: "OK") {
+                    controller.mcpWarning = nil
+                }
+            }
+            if snapshot.hasPlanAwaitingApproval {
+                banner(
+                    "Plan awaiting approval",
+                    detail: "Review the proposed plan in the transcript, then approve or reject it.",
+                    actionTitle: "OK") {}
+            }
+            PendingQuestionBar(permissions: snapshot.composerPermissions,
+                               controller: controller)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .layoutPriority(1)
+                .captureLayout(.approvalPanel, enabled: layoutCaptureEnabled)
+
+            CenteredComposerLayout {
+                ChatComposerView(controller: controller, worktreePath: worktree.path,
+                                 document: document)
+                    .captureLayout(.composer, enabled: layoutCaptureEnabled)
+            }
+        }
     }
 
     private func banner(_ title: String, detail: String,

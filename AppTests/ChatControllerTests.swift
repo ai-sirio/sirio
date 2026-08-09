@@ -812,14 +812,37 @@ extension ChatControllerTests {
             })
             host.setFrameSize(NSSize(width: containerWidth, height: 480))
             host.layoutSubtreeIfNeeded()
-            for _ in 0..<20 {
-                if capture.frames[.approvalPanel] != nil,
-                   capture.frames[.composer] != nil { break }
+            for _ in 0..<100 {
+                let frames = capture.frames
+                let requiredRoles: Set<ChatPaneLayoutRole> = [
+                    .approvalPanel, .composer, .transcriptViewport,
+                    .transcriptContent, .transcriptBottomSpacer, .bottomFade,
+                    .bottomOverlay
+                ]
+                let hasAllFrames = requiredRoles.allSatisfy { frames[$0] != nil }
+                let hasConvergedHeights: Bool = {
+                    guard let overlay = frames[.bottomOverlay],
+                          let spacer = frames[.transcriptBottomSpacer],
+                          let fade = frames[.bottomFade] else { return false }
+                    return abs(
+                        spacer.height
+                            - ChatBottomOverlayMetrics.contentInset(for: overlay.height)
+                    ) < 0.5 && abs(
+                        fade.height
+                            - ChatBottomOverlayMetrics.fadeHeight(for: overlay.height)
+                    ) < 0.5
+                }()
+                if hasAllFrames && hasConvergedHeights { break }
                 await Task.yield()
             }
 
             let approvalFrame = try #require(capture.frames[.approvalPanel])
             let composerFrame = try #require(capture.frames[.composer])
+            let transcriptViewport = try #require(capture.frames[.transcriptViewport])
+            let transcriptContent = try #require(capture.frames[.transcriptContent])
+            let bottomSpacer = try #require(capture.frames[.transcriptBottomSpacer])
+            let fadeFrame = try #require(capture.frames[.bottomFade])
+            let overlayFrame = try #require(capture.frames[.bottomOverlay])
             let expectedWidth = ComposerLayoutMetrics.contentWidth(for: containerWidth)
             let leftInset = composerFrame.minX
             let rightInset = containerWidth - composerFrame.maxX
@@ -827,6 +850,19 @@ extension ChatControllerTests {
             #expect(approvalFrame.maxY <= composerFrame.minY)
             #expect(abs(composerFrame.width - expectedWidth) < 0.5)
             #expect(abs(leftInset - rightInset) < 0.5)
+            #expect(abs(transcriptContent.width - composerFrame.width) < 0.5)
+            #expect(abs(transcriptContent.minX - composerFrame.minX) < 0.5)
+            #expect(transcriptViewport.maxY >= composerFrame.maxY)
+            #expect(overlayFrame.minY < transcriptViewport.maxY)
+            #expect(abs(
+                bottomSpacer.height
+                    - ChatBottomOverlayMetrics.contentInset(for: overlayFrame.height)
+            ) < 0.5)
+            #expect(abs(
+                fadeFrame.height
+                    - ChatBottomOverlayMetrics.fadeHeight(for: overlayFrame.height)
+            ) < 0.5)
+            #expect(approvalFrame.maxY <= composerFrame.minY)
         }
 
         await driver.releasePrompt()
