@@ -25,7 +25,6 @@ struct ComposerControlBarTests {
         #expect(presentation.accessibilityLabel == "Send")
         #expect(presentation.accessibilityHelp == "Send")
         #expect(presentation.systemImage == "arrow.up")
-        #expect(presentation.inactiveFillOpacity == 0.18)
     }
 
     @Test func loadingPresentationKeepsTheInactiveCircularFootprint() {
@@ -37,7 +36,6 @@ struct ComposerControlBarTests {
         #expect(presentation.accessibilityLabel == "Starting the agent")
         #expect(presentation.accessibilityHelp == "Starting the agent")
         #expect(presentation.systemImage == nil)
-        #expect(presentation.inactiveFillOpacity == 0.18)
     }
 
     @Test func stopPresentationDefinesTheStopActionChrome() {
@@ -49,7 +47,6 @@ struct ComposerControlBarTests {
         #expect(presentation.accessibilityLabel == "Stop the turn")
         #expect(presentation.accessibilityHelp == "Stop the turn")
         #expect(presentation.systemImage == "stop.fill")
-        #expect(presentation.inactiveFillOpacity == nil)
     }
 
     @Test func connectingShowsTheLoadingControl() {

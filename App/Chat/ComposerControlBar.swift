@@ -31,7 +31,6 @@ struct ComposerControlBar: View {
         let accessibilityLabel: String
         let accessibilityHelp: String
         let systemImage: String?
-        let inactiveFillOpacity: Double?
     }
 
     static let primaryActionSize: CGFloat = 30
@@ -65,8 +64,7 @@ struct ComposerControlBar: View {
                 shape: .circle,
                 accessibilityLabel: sendAccessibilityLabel,
                 accessibilityHelp: sendAccessibilityLabel,
-                systemImage: sendSystemImage,
-                inactiveFillOpacity: inactiveActionFillOpacity)
+                systemImage: sendSystemImage)
         case .loading:
             return PrimaryActionPresentation(
                 kind: kind,
@@ -74,8 +72,7 @@ struct ComposerControlBar: View {
                 shape: .circle,
                 accessibilityLabel: loadingAccessibilityLabel,
                 accessibilityHelp: loadingAccessibilityLabel,
-                systemImage: nil,
-                inactiveFillOpacity: inactiveActionFillOpacity)
+                systemImage: nil)
         case .stop:
             return PrimaryActionPresentation(
                 kind: kind,
@@ -83,8 +80,7 @@ struct ComposerControlBar: View {
                 shape: .circle,
                 accessibilityLabel: stopAccessibilityLabel,
                 accessibilityHelp: stopAccessibilityLabel,
-                systemImage: "stop.fill",
-                inactiveFillOpacity: nil)
+                systemImage: "stop.fill")
         }
     }
 
