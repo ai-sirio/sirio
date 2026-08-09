@@ -103,7 +103,7 @@ git commit -m "feat: add AppSettings.agentColorKey(for:)"
 - Consumes: `Color(hex:)` failable init (`App/SidebarView.swift`).
 - Produces: `AgentAccentColor.defaultHex(for agentId: String) -> String`, `AgentAccentColor.resolvedHex(for agentId: String, storedValue: String?) -> String`, `AgentAccentColor.color(for agentId: String, storedValue: String?) -> Color`. Used by Task 5 (`AgentAccentColorProvider`) and Task 10 (`AppearanceSettingsView`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `AppTests/AgentAccentColorTests.swift`:
 
@@ -146,12 +146,12 @@ struct AgentAccentColorTests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/AgentAccentColorTests 2>&1 | tail -40`
 Expected: FAIL to build — `AgentAccentColor` does not exist.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `App/AgentAccentColor.swift`:
 
@@ -201,12 +201,12 @@ enum AgentAccentColor {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/AgentAccentColorTests 2>&1 | tail -40`
 Expected: PASS, `Test run with 6 tests ... passed`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add App/AgentAccentColor.swift AppTests/AgentAccentColorTests.swift Tiller.xcodeproj
