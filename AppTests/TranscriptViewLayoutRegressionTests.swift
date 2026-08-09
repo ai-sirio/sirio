@@ -16,4 +16,17 @@ struct TranscriptViewLayoutRegressionTests {
             "Reading scroll geometry while LazyVStack is laying out can create an AttributeGraph feedback loop"
         )
     }
+
+    @Test("transcript bottom clearance does not observe live scroll geometry")
+    func bottomClearanceAvoidsScrollGeometryFeedback() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("App/Chat/TranscriptView.swift"),
+            encoding: .utf8
+        )
+        #expect(source.contains("bottomContentInset"))
+        #expect(!source.contains(".onScrollGeometryChange("))
+    }
 }

@@ -20,6 +20,40 @@ struct ComposerLayoutMetrics {
     }
 }
 
+struct ChatBottomOverlayMetrics {
+    static let fadeExtension: CGFloat = 36
+    static let bottomClearance: CGFloat = 16
+
+    static func fadeHeight(for overlayHeight: CGFloat) -> CGFloat {
+        max(0, overlayHeight) + fadeExtension
+    }
+
+    static func contentInset(for overlayHeight: CGFloat) -> CGFloat {
+        max(0, overlayHeight) + bottomClearance
+    }
+}
+
+struct ChatBottomOverlayHeightPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+extension View {
+    func captureChatBottomOverlayHeight() -> some View {
+        background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ChatBottomOverlayHeightPreferenceKey.self,
+                    value: proxy.size.height
+                )
+            }
+        }
+    }
+}
+
 struct CenteredComposerLayout: Layout {
     func sizeThatFits(
         proposal: ProposedViewSize,
