@@ -255,12 +255,16 @@ extension View {
     }
 }
 
-/// Accent border for the composer card: static when idle/focused, spinning
-/// conic gradient while the agent is processing a turn.
-private struct ComposerBorderView: View {
+/// Accent border for the composer card: static neutral hairline at rest,
+/// static per-agent accent color when focused, spinning per-agent conic
+/// gradient while the agent is processing a turn. Not `private`: its pure
+/// color-selection functions are covered directly by
+/// `AppTests/ComposerFieldTests.swift`.
+struct ComposerBorderView: View {
     let isAnimating: Bool
     let isFocused: Bool
     let reduceMotion: Bool
+    let agentAccentColor: Color
 
     @State private var phase: Double = 0
 
@@ -270,13 +274,7 @@ private struct ComposerBorderView: View {
     var body: some View {
         if isAnimating && !reduceMotion {
             AngularGradient(
-                colors: [
-                    .accentColor,
-                    .accentColor.opacity(0.15),
-                    .accentColor.opacity(0),
-                    .accentColor.opacity(0.15),
-                    .accentColor
-                ],
+                colors: Self.animatedGradientColors(agentAccentColor: agentAccentColor),
                 center: .center
             )
             .rotationEffect(.degrees(phase))
@@ -290,15 +288,32 @@ private struct ComposerBorderView: View {
                 }
             }
         } else {
-            // Idle and focused states use a neutral hairline: an accent ring
-            // around a floating composer reads as a highlight over the
-            // transcript rather than as the edge of the card.
             RoundedRectangle(cornerRadius: cornerRadius)
                 .strokeBorder(
-                    AppTheme.hairline.opacity(isFocused ? 0.45 : 0.24),
+                    Self.borderColor(isFocused: isFocused, agentAccentColor: agentAccentColor),
                     lineWidth: 1
                 )
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isFocused)
         }
+    }
+
+    /// Idle: the shared neutral hairline, always visible. Focused: the
+    /// active agent's accent color. No opacity fade in either case — the
+    /// border reads as a fixed frame around the card, not a highlight that
+    /// comes and goes.
+    static func borderColor(isFocused: Bool, agentAccentColor: Color) -> Color {
+        isFocused ? agentAccentColor : AppTheme.hairline
+    }
+
+    /// Same 5-stop shape the rotating gradient always used, recolored from
+    /// `Color.accentColor` to the active agent's accent color.
+    static func animatedGradientColors(agentAccentColor: Color) -> [Color] {
+        [
+            agentAccentColor,
+            agentAccentColor.opacity(0.15),
+            agentAccentColor.opacity(0),
+            agentAccentColor.opacity(0.15),
+            agentAccentColor
+        ]
     }
 }
