@@ -71,7 +71,7 @@ struct TabBarView: View {
                     }
                 } label: {
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 10))
+                        .font(AppFont.system(size: 10))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(.plain)
@@ -85,7 +85,7 @@ struct TabBarView: View {
                 NewTabMenuItems(model: model, worktree: worktree)
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 11))
+                    .font(AppFont.system(size: 11))
                     .foregroundStyle(AppTheme.meta)
             }
             .buttonStyle(.plain)
@@ -133,7 +133,7 @@ struct TabBarItem: View {
             if renaming {
                 TextField("", text: $draftTitle)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(AppFont.system(size: 12))
                     .frame(width: 120)
                     .focused($renameFieldFocused)
                     .onSubmit {
@@ -143,7 +143,7 @@ struct TabBarItem: View {
                     .onExitCommand { renaming = false }
             } else {
                 Text(tab.title)
-                    .font(.system(size: 12))
+                    .font(AppFont.system(size: 12))
                     .foregroundStyle(isActive ? AppTheme.titleSelected : AppTheme.subtitle)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -171,7 +171,7 @@ struct TabBarItem: View {
                     model.closeTab(tab.id, in: worktree)
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AppFont.system(size: 9, weight: .bold))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())

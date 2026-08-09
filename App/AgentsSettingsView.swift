@@ -26,7 +26,7 @@ struct AgentsSettingsView: View {
                 Spacer()
                 if let fetched = center.lastFetchedAt {
                     Text("Updated \(fetched.formatted(.relative(presentation: .named)))")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(AppFont.caption).foregroundStyle(.secondary)
                 }
                 Button {
                     Task { await center.refresh(force: true) }
@@ -37,7 +37,7 @@ struct AgentsSettingsView: View {
             }
             if let error = center.registryError {
                 Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(AppFont.caption).foregroundStyle(.orange)
             }
             ScrollView {
                 LazyVStack(spacing: 0) {
@@ -58,9 +58,9 @@ struct AgentsSettingsView: View {
         HStack(spacing: 10) {
             AgentIcon(agentId: row.id, size: 20)
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.name).font(.body)
+                Text(row.name).font(AppFont.body)
                 if let description = row.description {
-                    Text(description).font(.caption)
+                    Text(description).font(AppFont.caption)
                         .foregroundStyle(.secondary).lineLimit(2)
                 }
             }
@@ -80,26 +80,26 @@ struct AgentsSettingsView: View {
             ProgressView().controlSize(.small)
         case .installed(let version):
             Label("Installed \(version)", systemImage: "checkmark.circle.fill")
-                .font(.caption).foregroundStyle(.green)
+                .font(AppFont.caption).foregroundStyle(.green)
         case .updateAvailable(let installed, let latest):
             HStack(spacing: 6) {
-                Text("v\(installed)").font(.caption).foregroundStyle(.secondary)
+                Text("v\(installed)").font(AppFont.caption).foregroundStyle(.secondary)
                 Button("Update to \(latest)") { Task { await center.install(row.id) } }
                     .controlSize(.small)
             }
         case .failed(let message):
             HStack(spacing: 6) {
-                Text(message).font(.caption).foregroundStyle(.red)
+                Text(message).font(AppFont.caption).foregroundStyle(.red)
                     .lineLimit(1).help(message)
                 Button("Retry") { Task { await center.install(row.id) } }
                     .controlSize(.small)
             }
         case .unsupported:
-            Text("Not supported yet").font(.caption).foregroundStyle(.secondary)
+            Text("Not supported yet").font(AppFont.caption).foregroundStyle(.secondary)
         case .builtin(let available):
             Label(available ? "Available" : "omp binary not found on PATH",
                   systemImage: available ? "checkmark.circle.fill" : "questionmark.circle")
-                .font(.caption)
+                .font(AppFont.caption)
                 .foregroundStyle(available ? .green : .secondary)
         }
     }

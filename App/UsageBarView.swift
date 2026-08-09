@@ -67,7 +67,7 @@ struct UsageBarView: View {
                 WorktreeContextSegment(worktree: worktree)
             }
         }
-        .font(.system(size: 10))
+        .font(AppFont.system(size: 10))
         // The bar is a fixed height, so segments truncate rather than wrap —
         // wrapping would silently clip the second line on a narrow window.
         .lineLimit(1)

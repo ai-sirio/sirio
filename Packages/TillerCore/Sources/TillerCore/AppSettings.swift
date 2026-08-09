@@ -105,6 +105,18 @@ public enum AppSettings {
     public static func clampTerminalFontSize(_ size: Int) -> Int {
         min(max(size, terminalFontSizeRange.lowerBound), terminalFontSizeRange.upperBound)
     }
+
+    /// UserDefaults key for the interface font size in points — the base the
+    /// whole UI's type scale is derived from (the terminal keeps its own).
+    public static let uiFontSizeKey = "appearance.uiFontSize"
+    /// 13pt — the macOS system UI size, which is what Xcode's own chrome
+    /// uses. The 12pt SF Mono Light of its editor lives in `AppFont.codeSize`.
+    public static let defaultUIFontSize = 13
+    public static let uiFontSizeRange: ClosedRange<Int> = 10...20
+
+    public static func clampUIFontSize(_ size: Int) -> Int {
+        min(max(size, uiFontSizeRange.lowerBound), uiFontSizeRange.upperBound)
+    }
     public static let rightPanelVisibleKey = "rightPanel.visible"
     public static let rightPanelWidthKey = "rightPanel.width"
     public static let rightPanelModeKey = "rightPanel.mode"

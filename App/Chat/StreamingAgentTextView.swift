@@ -5,6 +5,9 @@ import TillerTerminal
 
 struct StreamingAgentTextView: NSViewRepresentable {
     var text: String
+    /// Read in the parent's body so Observation registers the dependency —
+    /// the streaming diff below would otherwise early-return forever.
+    var fontSize: CGFloat = AppFont.base
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -39,6 +42,7 @@ struct StreamingAgentTextView: NSViewRepresentable {
         textView.textStorage?.setAttributedString(
             NSAttributedString(string: text, attributes: MarkdownAttributedStringRenderer.bodyAttributes))
         context.coordinator.buffer = StreamingTextBuffer(current: text)
+        context.coordinator.appliedFontSize = fontSize
         return textView
     }
 
@@ -63,6 +67,16 @@ struct StreamingAgentTextView: NSViewRepresentable {
 
     func updateNSView(_ textView: NSTextView, context: Context) {
         guard let storage = textView.textStorage else { return }
+        // A size change restamps the whole buffer: the streaming diff only
+        // ever appends, so it can never revisit text already committed.
+        if context.coordinator.appliedFontSize != fontSize {
+            context.coordinator.appliedFontSize = fontSize
+            textView.font = MarkdownAttributedStringRenderer.bodyFont
+            _ = Self.apply(.reset(text), to: storage)
+            context.coordinator.buffer = StreamingTextBuffer(current: text)
+            context.coordinator.measuredHeight = nil
+            return
+        }
         let edit = context.coordinator.buffer.update(to: text)
         if case .none = edit { return }
         var changedBytes = 0
@@ -106,6 +120,7 @@ struct StreamingAgentTextView: NSViewRepresentable {
 
     final class Coordinator {
         var buffer = StreamingTextBuffer()
+        var appliedFontSize: CGFloat?
         var measuredWidth: CGFloat?
         var measuredHeight: CGFloat?
     }

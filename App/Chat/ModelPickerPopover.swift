@@ -31,7 +31,7 @@ struct ModelPickerPopover: View {
                     }
                     if filtered.isEmpty {
                         Text("No models match")
-                            .font(.caption)
+                            .font(AppFont.caption)
                             .foregroundStyle(.secondary)
                             .padding(6)
                     }
@@ -52,13 +52,13 @@ struct ModelPickerPopover: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark")
-                    .font(.caption2.weight(.semibold))
+                    .font(AppFont.caption2.weight(.semibold))
                     .opacity(model.modelId == controller.models?.currentModelId ? 1 : 0)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(model.name).font(.callout)
+                    Text(model.name).font(AppFont.callout)
                     if let description = model.description, !description.isEmpty {
                         Text(description)
-                            .font(.caption2)
+                            .font(AppFont.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -66,7 +66,7 @@ struct ModelPickerPopover: View {
                 Spacer(minLength: 0)
                 if model.modelId == recommendedId {
                     Text("Recommended")
-                        .font(.caption2)
+                        .font(AppFont.caption2)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Color.accentColor.opacity(0.15), in: Capsule())
                         .foregroundStyle(Color.accentColor)
@@ -89,7 +89,7 @@ struct ModelPickerPopover: View {
             Divider()
             HStack(spacing: 6) {
                 Text(effort.name ?? "Effort")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 ForEach(choices, id: \.value) { choice in

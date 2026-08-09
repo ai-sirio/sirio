@@ -12,13 +12,13 @@ struct PaneEmptyStateView<NewTabMenu: View>: View {
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "rectangle.on.rectangle.slash")
-                .font(.system(size: 24, weight: .light))
+                .font(AppFont.system(size: 24, weight: .light))
                 .foregroundStyle(AppTheme.meta)
             Text("Empty Pane")
-                .font(.system(size: 14, weight: .semibold))
+                .font(AppFont.system(size: 14, weight: .semibold))
                 .foregroundStyle(AppTheme.title)
             Text("Open a terminal, agent, or chat in this pane.")
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
                 .foregroundStyle(AppTheme.subtitle)
             HStack(spacing: 8) {
                 Button("New Terminal") {

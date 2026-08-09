@@ -18,15 +18,15 @@ struct PendingQuestionBar: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "questionmark.circle.fill")
-                            .font(.caption)
+                            .font(AppFont.caption)
                             .foregroundStyle(AppTheme.railQuestion)
                         Text(permissions.count > 1
                              ? "\(permissions.count) questions waiting · \(current.title)"
                              : "Question waiting · \(current.title)")
-                            .font(.caption)
+                            .font(AppFont.caption)
                             .lineLimit(1)
                         Spacer()
-                        Text("Show").font(.caption2).foregroundStyle(.secondary)
+                        Text("Show").font(AppFont.caption2).foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 10)

@@ -6,10 +6,13 @@ import Foundation
 public enum TimelineRow: Sendable, Equatable, Identifiable {
     /// Meta attached to assistant message rows (turn duration, copy action).
     public struct MessageMeta: Sendable, Equatable {
+        public var at: Date?
         public var duration: TimeInterval?
         public var showsCopyButton: Bool
 
-        public init(duration: TimeInterval? = nil, showsCopyButton: Bool = false) {
+        public init(at: Date? = nil, duration: TimeInterval? = nil,
+                    showsCopyButton: Bool = false) {
+            self.at = at
             self.duration = duration
             self.showsCopyButton = showsCopyButton
         }

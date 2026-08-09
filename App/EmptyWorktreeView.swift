@@ -11,15 +11,15 @@ struct EmptyWorktreeView: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "terminal")
-                .font(.system(size: 48))
+                .font(AppFont.system(size: 48))
                 .foregroundStyle(.secondary)
 
             Text("No Terminals")
-                .font(.title2)
+                .font(AppFont.title2)
                 .foregroundStyle(.primary)
 
             Text("Open a new terminal to get started.")
-                .font(.subheadline)
+                .font(AppFont.subheadline)
                 .foregroundStyle(.secondary)
 
             Button("New Terminal", action: onNewTerminal)
@@ -27,7 +27,7 @@ struct EmptyWorktreeView: View {
                 .controlSize(.large)
 
             Text("⌘T")
-                .font(.caption)
+                .font(AppFont.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

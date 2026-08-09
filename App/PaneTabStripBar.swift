@@ -120,7 +120,7 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
             newTabMenu()
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(AppTheme.meta)
         }
         .buttonStyle(.plain)
@@ -145,7 +145,7 @@ struct PaneTabStripBar<NewTabMenu: View>: View {
             }
         } label: {
             Image(systemName: "chevron.down")
-                .font(.system(size: 10, weight: .medium))
+                .font(AppFont.system(size: 10, weight: .medium))
                 .foregroundStyle(AppTheme.meta)
         }
         .buttonStyle(.plain)
@@ -185,7 +185,7 @@ private struct PaneTabStripItem: View {
                 .frame(width: 14, height: 14)
 
             Text(entry.title)
-                .font(.system(size: 12))
+                .font(AppFont.system(size: 12))
                 .foregroundStyle(entry.isActive ? AppTheme.titleSelected : AppTheme.subtitle)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -201,7 +201,7 @@ private struct PaneTabStripItem: View {
             if hovering {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(AppFont.system(size: 9, weight: .bold))
                         .foregroundStyle(AppTheme.meta)
                 }
                 .buttonStyle(HoverIconButtonStyle())
@@ -294,7 +294,7 @@ private struct PaneTabIcon: View {
                     AgentIcon(agentId: agentID, size: 12)
                 } else {
                     Image(systemName: "terminal")
-                        .font(.system(size: 10))
+                        .font(AppFont.system(size: 10))
                         .foregroundStyle(AppTheme.meta)
                 }
             case .chat(let agentID):
@@ -302,20 +302,20 @@ private struct PaneTabIcon: View {
                     AgentIcon(agentId: agentID, size: 12)
                 } else {
                     Image(systemName: "bubble.left")
-                        .font(.system(size: 10))
+                        .font(AppFont.system(size: 10))
                         .foregroundStyle(AppTheme.meta)
                 }
             case .document(.markdown):
                 Image(systemName: "doc.text")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             case .document(.code):
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             case .diff:
                 Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 10))
+                    .font(AppFont.system(size: 10))
                     .foregroundStyle(AppTheme.meta)
             case .browser(let faviconURL):
                 if let faviconURL {

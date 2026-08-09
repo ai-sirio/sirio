@@ -12,6 +12,7 @@ struct TillerApp: App {
     @AppStorage(AppSettings.rightPanelVisibleKey)
     private var rightPanelVisible = AppSettings.defaultRightPanelVisible
     @AppStorage(AppSettings.appearanceThemeKey) private var appearanceRaw = AppAppearance.system.rawValue
+    @AppStorage(AppSettings.uiFontSizeKey) private var uiFontSize = AppSettings.defaultUIFontSize
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
@@ -59,6 +60,9 @@ struct TillerApp: App {
                     applyAppearance()
                 }
                 .onChange(of: appearanceRaw) { _, _ in applyAppearance() }
+                .onChange(of: uiFontSize) { _, size in
+                    UIFontScale.shared.apply(size)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

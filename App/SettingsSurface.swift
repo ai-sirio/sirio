@@ -33,7 +33,7 @@ struct SettingsSurface: View {
             .buttonStyle(.plain)
             .keyboardShortcut(.escape, modifiers: [])
             Text("Settings")
-                .font(.headline)
+                .font(AppFont.headline)
                 .foregroundStyle(AppTheme.title)
             Spacer()
         }

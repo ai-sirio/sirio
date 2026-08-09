@@ -28,7 +28,7 @@ struct TerminalOutputView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(tailLines.enumerated()), id: \.offset) { _, line in
                             Text(line.isEmpty ? " " : String(line))
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(AppFont.mono(size: 12))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
@@ -48,17 +48,17 @@ struct TerminalOutputView: View {
     private var statusChip: some View {
         if isRunning {
             Label("in esecuzione", systemImage: "circle.dotted")
-                .font(.caption2)
+                .font(AppFont.caption2)
                 .foregroundStyle(.orange)
         } else if let exitCode = exit?.exitCode {
             Label("exit \(exitCode)",
                   systemImage: exitCode == 0
                       ? "checkmark.circle" : "xmark.circle")
-                .font(.caption2)
+                .font(AppFont.caption2)
                 .foregroundStyle(exitCode == 0 ? .green : .red)
         } else if let signal = exit?.signal {
             Label("segnale \(signal)", systemImage: "exclamationmark.triangle")
-                .font(.caption2)
+                .font(AppFont.caption2)
                 .foregroundStyle(.orange)
         }
     }

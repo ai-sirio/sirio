@@ -38,7 +38,7 @@ struct ChatHistoryMenu: View {
             }
         } label: {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11))
+                .font(AppFont.system(size: 11))
                 .foregroundStyle(AppTheme.meta)
         }
         .buttonStyle(.plain)

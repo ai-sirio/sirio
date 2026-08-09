@@ -70,4 +70,30 @@ struct AgentMessageSegmenterTests {
         let segments = AgentMessageSegmenter.segments(from: markdown)
         #expect(segments == [.insight("Some educational point.")])
     }
+
+    @Test("a unified git diff becomes an inline diff segment")
+    func unifiedDiffExtractsAsDiff() {
+        let markdown = """
+        Here is the proposed change.
+
+        diff --git a/visual-review.md b/visual-review.md
+        new file mode 100644
+        index 0000000..4c20585
+        --- /dev/null
+        +++ b/visual-review.md
+        @@ -0,0 +1,3 @@
+        +# Visual Review Proposal
+        +
+        +Add a lightweight visual regression check.
+        """
+
+        let segments = AgentMessageSegmenter.segments(from: markdown)
+        #expect(segments.first == .prose("Here is the proposed change.\n\n"))
+        #expect(segments.contains {
+            guard case .diff(let path, let oldText, let newText) = $0 else { return false }
+            return path == "visual-review.md"
+                && oldText == nil
+                && newText == "# Visual Review Proposal\n\nAdd a lightweight visual regression check."
+        })
+    }
 }

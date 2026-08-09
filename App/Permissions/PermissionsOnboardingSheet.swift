@@ -16,7 +16,7 @@ struct PermissionsOnboardingSheet: View {
             Divider()
             HStack {
                 Text("You can change these anytime in Settings → Permissions.")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Continue", action: onContinue)

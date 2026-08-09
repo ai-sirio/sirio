@@ -144,7 +144,7 @@ struct ContentView: View {
                 sidebarVisible.toggle()
             } label: {
                 Image(systemName: "sidebar.left")
-                    .font(.system(size: AppTheme.titleStripIconSize))
+                    .font(AppFont.system(size: AppTheme.titleStripIconSize))
             }
             .buttonStyle(HoverIconButtonStyle())
             .help(sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
@@ -165,7 +165,7 @@ struct ContentView: View {
                 rightPanelVisible.toggle()
             } label: {
                 Image(systemName: "sidebar.right")
-                    .font(.system(size: AppTheme.titleStripIconSize))
+                    .font(AppFont.system(size: AppTheme.titleStripIconSize))
             }
             .buttonStyle(HoverIconButtonStyle())
             .help(rightPanelVisible ? "Hide right panel (⌃⌘I)" : "Show right panel (⌃⌘I)")
@@ -184,7 +184,7 @@ struct ContentView: View {
                     model.workspaceSplitCurrent(.horizontal)
                 } label: {
                     Image(systemName: "square.split.1x2")
-                        .font(.system(size: AppTheme.titleStripIconSize))
+                        .font(AppFont.system(size: AppTheme.titleStripIconSize))
                 }
                 .buttonStyle(HoverIconButtonStyle())
                 .help("Split terminal")
@@ -203,7 +203,7 @@ struct ContentView: View {
                 model.openSettings()
             } label: {
                 Image(systemName: "lock.shield")
-                    .font(.system(size: AppTheme.titleStripIconSize))
+                    .font(AppFont.system(size: AppTheme.titleStripIconSize))
             }
             .buttonStyle(HoverIconButtonStyle())
             .help("Permissions")
@@ -283,7 +283,7 @@ struct ContentView: View {
     private func splitColumns() -> some View {
         HSplitView {
             if sidebarVisible {
-                FloatingCard { SidebarView(model: model) }
+                SidebarView(model: model)
                     .padding(.horizontal, AppTheme.cardGap / 2)
                     .frame(
                         minWidth: CGFloat(AppSettings.sidebarWidthRange.lowerBound),
@@ -385,7 +385,7 @@ struct ContentView: View {
             }
             .labelStyle(.iconOnly)
             .buttonStyle(HoverIconButtonStyle())
-            .font(.system(size: AppTheme.titleStripIconSize))
+            .font(AppFont.system(size: AppTheme.titleStripIconSize))
             .disabled(true)
             .accessibilityIdentifier("tiller.titlebar.split.workspace")
             .background(TitlebarControlProbe(

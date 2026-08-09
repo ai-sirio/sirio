@@ -118,11 +118,11 @@ struct AIProvidersSettingsView: View {
                 SecureField("Session cookie", text: $opencodeGoCookieInput)
                     .textFieldStyle(.roundedBorder)
                 Text("Paste either the raw token value (e.g. Fe26.2**...) or the full cookie header (e.g. auth=Fe26.2**...). Find it in your browser's DevTools → Network → any opencode.ai request → Cookie header. OpenCode Go auth is web-based and shared across Windows and WSL terminals.")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(AppTheme.subtitle)
                 if opencodeGoKeychainError {
                     Text("Failed to update Keychain — check System Settings > Privacy & Security.")
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(.red)
                 }
                 HStack {
@@ -148,7 +148,7 @@ struct AIProvidersSettingsView: View {
                 TextField("Workspace ID override", text: $workspaceIdOverride)
                     .textFieldStyle(.roundedBorder)
                 Text("Find this in the URL after logging into opencode.ai (e.g. opencode.ai/workspace/wrk_.../go).")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(AppTheme.subtitle)
                 Button("Clear") {
                     workspaceIdOverride = ""
@@ -177,11 +177,11 @@ struct AIProvidersSettingsView: View {
                 SecureField("Session cookie", text: $ollamaCloudCookieInput)
                     .textFieldStyle(.roundedBorder)
                 Text("Paste the raw token value or the full cookie header from ollama.com. Find it in your browser's DevTools → Network → any ollama.com request → Cookie header.")
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(AppTheme.subtitle)
                 if ollamaCloudKeychainError {
                     Text("Failed to update Keychain — check System Settings > Privacy & Security.")
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(.red)
                 }
                 HStack {
@@ -340,9 +340,9 @@ private struct AgentAccountsBlock: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
+                    Text(title).font(AppFont.headline)
                     Text("Showing accounts for this device. New accounts are added there.")
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(AppTheme.subtitle)
                 }
                 Spacer()
@@ -352,12 +352,12 @@ private struct AgentAccountsBlock: View {
                 case .waitingForBrowser:
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Waiting for browser login…").font(.caption)
+                        Text("Waiting for browser login…").font(AppFont.caption)
                         Button("Cancel", action: onCancelAdd)
                     }
                 case .failed(let message):
                     HStack(spacing: 6) {
-                        Text(message).font(.caption).foregroundStyle(.red)
+                        Text(message).font(AppFont.caption).foregroundStyle(.red)
                         Button("Add Account", action: onAdd)
                     }
                 }
@@ -390,15 +390,15 @@ private struct AgentAccountsBlock: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(label).fontWeight(.medium)
-                    Text("This device").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                    Text("This device").font(AppFont.caption2).padding(.horizontal, 6).padding(.vertical, 2)
                         .background(.quaternary, in: Capsule())
                     if isActive {
-                        Text("Active").font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                        Text("Active").font(AppFont.caption2).padding(.horizontal, 6).padding(.vertical, 2)
                             .background(.tint, in: Capsule())
                     }
                 }
                 if let subtitle {
-                    Text(subtitle).font(.caption).foregroundStyle(AppTheme.subtitle)
+                    Text(subtitle).font(AppFont.caption).foregroundStyle(AppTheme.subtitle)
                 }
             }
             Spacer()

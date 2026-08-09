@@ -11,12 +11,17 @@ final class CodeHighlighter {
         let code: String
         let language: String
         let isDark: Bool
+        /// Part of the key, not a reason to flush: the font is baked into the
+        /// attributed string, so a cached entry is only valid at its own size.
+        let fontSize: CGFloat
     }
     private var cache: [Key: NSAttributedString] = [:]
 
     func highlight(code: String, language: String, isDark: Bool) -> NSAttributedString? {
         guard code.count <= Self.maxHighlightableLength else { return nil }
-        let key = Key(code: code, language: language, isDark: isDark)
+        let codeFont = AppFont.nsMono(size: MarkdownAttributedStringRenderer.codeSize)
+        let key = Key(code: code, language: language, isDark: isDark,
+                      fontSize: codeFont.pointSize)
         if let cached = cache[key] { return cached }
         let resolved = CodeLanguageResolver.language(forFence: language)
         guard resolved.id != .plainText,
@@ -24,9 +29,7 @@ final class CodeHighlighter {
                 code: code,
                 language: resolved,
                 theme: .tiller(isDark: isDark),
-                font: .monospacedSystemFont(
-                    ofSize: MarkdownAttributedStringRenderer.codeSize,
-                    weight: .regular)) else { return nil }
+                font: codeFont) else { return nil }
         if cache.count >= Self.maxCacheEntries { cache.removeAll(keepingCapacity: true) }
         cache[key] = attributed
         return attributed

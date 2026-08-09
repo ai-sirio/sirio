@@ -130,7 +130,7 @@ struct ChatPaneView: View {
                                 in: RoundedRectangle(cornerRadius: 12))
                     .overlay {
                         Text("Drop files to attach")
-                            .font(.callout.weight(.medium))
+                            .font(AppFont.callout.weight(.medium))
                             .foregroundStyle(AppTheme.title)
                     }
                     .padding(8)
@@ -219,8 +219,8 @@ struct ChatPaneView: View {
                         action: @escaping () -> Void) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.callout.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(title).font(AppFont.callout.weight(.semibold))
+                Text(detail).font(AppFont.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Button(actionTitle, action: action).controlSize(.small)

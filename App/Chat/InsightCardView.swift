@@ -13,7 +13,7 @@ struct InsightCardView: View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "sparkles")
                 .foregroundStyle(.yellow)
-                .font(.caption)
+                .font(AppFont.caption)
             AgentMarkdownTextView(markdown: text)
         }
         .padding(8)

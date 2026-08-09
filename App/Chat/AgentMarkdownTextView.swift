@@ -65,6 +65,10 @@ final class MarkdownTextView: NSTextView {
 struct AgentMarkdownTextView: NSViewRepresentable {
     var markdown: String
     var onOpenURL: ((URL) -> Void)? = nil
+    /// Same role as `onAppearanceChanged` below, for the other thing AppKit
+    /// cannot observe: read in the parent's body so a size change reaches
+    /// `updateNSView` at all.
+    var fontSize: CGFloat = AppFont.base
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -101,15 +105,18 @@ struct AgentMarkdownTextView: NSViewRepresentable {
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         textView.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown
+        context.coordinator.lastRenderedFontSize = fontSize
         return textView
     }
 
     func updateNSView(_ textView: NSTextView, context: Context) {
         context.coordinator.parent = self
-        guard context.coordinator.lastRenderedSource != markdown else { return }
+        guard context.coordinator.lastRenderedSource != markdown
+                || context.coordinator.lastRenderedFontSize != fontSize else { return }
         textView.textStorage?.setAttributedString(MarkdownAttributedStringRenderer.render(markdown))
         (textView as? MarkdownTextView)?.rebuildCodeBlockHeaders()
         context.coordinator.lastRenderedSource = markdown
+        context.coordinator.lastRenderedFontSize = fontSize
         // Invalidate cached height so the next `sizeThatFits` re-runs layout.
         context.coordinator.measuredHeight = nil
     }
@@ -157,6 +164,7 @@ struct AgentMarkdownTextView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: AgentMarkdownTextView
         var lastRenderedSource: String?
+        var lastRenderedFontSize: CGFloat?
         var measuredWidth: CGFloat?
         var measuredHeight: CGFloat?
 

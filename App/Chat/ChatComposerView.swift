@@ -137,9 +137,9 @@ struct ChatComposerView: View {
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text("/\(command.name)")
-                            .font(.caption.weight(.semibold))
+                            .font(AppFont.caption.weight(.semibold))
                         Text(command.description)
-                            .font(.caption)
+                            .font(AppFont.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 0)
@@ -163,7 +163,7 @@ struct ChatComposerView: View {
     private var queuedList: some View {
         ForEach(Array(controller.queued.enumerated()), id: \.offset) { _, queuedText in
             Label(queuedText, systemImage: "clock")
-                .font(.caption)
+                .font(AppFont.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -176,8 +176,8 @@ struct ChatComposerView: View {
                     acceptMention(path)
                 } label: {
                     HStack {
-                        Image(systemName: "doc").font(.caption)
-                        Text(path).font(.caption).lineLimit(1)
+                        Image(systemName: "doc").font(AppFont.caption)
+                        Text(path).font(AppFont.caption).lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -290,10 +290,13 @@ private struct ComposerBorderView: View {
                 }
             }
         } else {
+            // Idle and focused states use a neutral hairline: an accent ring
+            // around a floating composer reads as a highlight over the
+            // transcript rather than as the edge of the card.
             RoundedRectangle(cornerRadius: cornerRadius)
                 .strokeBorder(
-                    Color.accentColor.opacity(isFocused ? 1.0 : 0.4),
-                    lineWidth: isFocused ? lineWidth : 1
+                    AppTheme.hairline.opacity(isFocused ? 0.45 : 0.24),
+                    lineWidth: 1
                 )
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isFocused)
         }

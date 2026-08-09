@@ -6,6 +6,16 @@ import TillerCore
 /// #28292C for dark mode and #F6F6F8 for light mode. Font size is injected
 /// into both configurations.
 enum TillerTerminalTheme {
+    /// The terminal deliberately does *not* follow the interface font.
+    /// Agent CLIs (Claude Code, Codex) draw box-drawing and Nerd Font glyphs
+    /// in their TUIs; SF Mono has no coverage for those and renders tofu.
+    ///
+    /// Ghostty resolves this by name through CoreText, which substitutes
+    /// silently rather than failing — an unavailable family here comes back
+    /// as a proportional font, not an error. `TillerTerminalThemeTests`
+    /// pins the name for that reason.
+    static let fontFamily = "MesloLGS Nerd Font Mono"
+
     static func theme(fontSize: Float, translucencyEnabled: Bool = true) -> TerminalTheme {
         // Ghostty's surface scrollback defaults to 10MB/pane; Tiller keeps
         // many worktrees' panes mounted at once (openWorktreeIds), so that
@@ -31,10 +41,11 @@ enum TillerTerminalTheme {
                 .appending(.fontSize(fontSize))
                 .appending(scrollbackLimit)
         return TerminalTheme(
-            light: lightConfiguration,
+            light: lightConfiguration.appending(.fontFamily(fontFamily)),
             dark: darkConfiguration
                 .appending(.fontSize(fontSize))
                 .appending(scrollbackLimit)
+                .appending(.fontFamily(fontFamily))
         )
     }
 

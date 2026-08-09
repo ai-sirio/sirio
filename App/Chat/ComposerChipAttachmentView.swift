@@ -12,10 +12,10 @@ struct ComposerChipView: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: chip.iconName)
-                .font(.system(size: 9, weight: .semibold))
+                .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(.secondary)
             Text(chip.label)
-                .font(.caption)
+                .font(AppFont.caption)
                 .lineLimit(1)
         }
         .padding(.horizontal, 6)

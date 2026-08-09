@@ -22,18 +22,18 @@ struct QuestionCardView: View {
         ChatCard(kind: .question, isHighlighted: !question.isAnswered) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(question.header)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(AppFont.system(size: 15, weight: .semibold))
                     .textSelection(.enabled)
                 if !question.prompt.isEmpty {
                     Text(question.prompt)
-                        .font(.system(size: 14))
+                        .font(AppFont.system(size: 14))
                         .textSelection(.enabled)
                 }
                 if let chosen = question.chosenOptionId {
                     answered(chosen)
                 } else if question.isExpired {
                     Text("No answer — the turn ended")
-                        .font(.caption)
+                        .font(AppFont.caption)
                         .foregroundStyle(.tertiary)
                 } else {
                     unansweredControls
@@ -49,7 +49,7 @@ struct QuestionCardView: View {
             HStack(spacing: 8) {
                 TextField(input.placeholder ?? "Type an answer", text: $textAnswer)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 14))
+                    .font(AppFont.system(size: 14))
                     .onSubmit { submitTextAnswer() }
                 Button("Send") { submitTextAnswer() }
                     .disabled(textAnswer.trimmingCharacters(
@@ -81,10 +81,10 @@ struct QuestionCardView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(option.label)
-                            .font(.system(size: 14))
+                            .font(AppFont.system(size: 14))
                             .multilineTextAlignment(.leading)
                         if let detail = option.detail {
-                            Text(detail).font(.caption).foregroundStyle(.secondary)
+                            Text(detail).font(AppFont.caption).foregroundStyle(.secondary)
                         }
                     }
                     // Full-width rows: the options are the answer, not a
@@ -103,9 +103,9 @@ struct QuestionCardView: View {
         let label = question.options.first { $0.id == optionId }?.label ?? optionId
         return HStack(spacing: 5) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.caption2)
+                .font(AppFont.caption2)
                 .foregroundStyle(AppTheme.railEdit)
-            Text(label).font(.caption)
+            Text(label).font(AppFont.caption)
         }
         .foregroundStyle(.secondary)
     }

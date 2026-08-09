@@ -25,7 +25,7 @@ struct BrowserPaneView: View {
             chrome
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.caption)
+                    .font(AppFont.caption)
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
@@ -99,7 +99,7 @@ struct BrowserPaneView: View {
             }
             if drivingState.isAgentDriving {
                 Label("Agent driving", systemImage: "bolt.fill")
-                    .font(.caption.weight(.semibold))
+                    .font(AppFont.caption.weight(.semibold))
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Agent driving")
             }

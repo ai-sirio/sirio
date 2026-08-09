@@ -30,6 +30,19 @@ swift build --package-path Packages/TillerControl --product tillerctl
 
 `Tiller.xcodeproj`, `App/Info.plist`, `DerivedData/`, and `.build/` are all generated/gitignored — never hand-edit `Tiller.xcodeproj`; change `project.yml` and re-run `xcodegen generate`. `App/Info.plist` is generated inline by `project.yml`'s `info.properties`, not a checked-in file.
 
+## Exploring the code (tokensave)
+
+This repo is indexed by [tokensave](https://github.com/aovestdipaperino/tokensave) — a code graph over the 658 Swift sources (~17.5k symbols) in `.tokensave/tokensave.db` (gitignored).
+
+**Use it instead of grep/glob sweeps for any structural question.** `tokensave_context` takes a question in plain English and returns the relevant symbols with their relationships; `tokensave_search` finds a symbol by name. `tokensave_callers` / `tokensave_callees` / `tokensave_impact` answer "what breaks if I change this" without reading the files. Grep is still the right tool for a literal string (an error message, a UserDefaults key).
+
+```bash
+tokensave sync     # re-index after adding or moving files; also run after a rebase
+tokensave status   # node/edge counts, last sync, active branch
+```
+
+The graph covers everything git tracks, which means the generated artefacts are absent by construction: `Tiller.xcodeproj`, `DerivedData/`, `.build/` and vendored SwiftPM checkouts are all gitignored, so they never enter the index — for those, read the file. If a question needs a structural query the tools don't expose, the DB is plain SQLite (`nodes`, `edges`, `files`) and can be queried directly.
+
 ## Architecture
 
 ### Package boundaries (dependencies flow one way)
