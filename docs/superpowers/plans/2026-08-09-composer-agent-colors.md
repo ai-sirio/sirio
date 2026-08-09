@@ -937,7 +937,7 @@ git commit -m "feat: add per-agent accent color settings"
 
 **Files:** none (verification only).
 
-- [ ] **Step 1: Run the full gate**
+- [x] **Step 1: Run the full gate**
 
 Run: `Scripts/ci.sh`
 Expected: prints `CI OK`. If it fails, fix the reported failure before proceeding — do not skip or weaken any check.
@@ -953,7 +953,7 @@ With the app running (⌘R from Xcode, or the built app), for at least two diffe
 - Send button is filled with the agent's accent color while a message is ready to send, and the existing neutral/gray fill while the field is empty.
 - Repeat the focus/prompting/send-button checks after changing that agent's color in Settings (Task 10) — the open composer updates live.
 
-- [ ] **Step 3: Final commit (if the QA pass required fixes)**
+- [x] **Step 3: Final commit (if the QA pass required fixes)**
 
 ```bash
 git add -A

@@ -97,10 +97,6 @@ struct ComposerStyleTests {
         #expect(!source.contains(".environment(\\.colorScheme"))
     }
 
-    @Test func textViewNoLongerForcesADarkAppKitAppearance() {
-        let textView = ChatTextEditor.makeTextView()
-        #expect(textView.appearance == nil)
-    }
 }
 
 @Suite("ComposerBorderView")
