@@ -1,6 +1,17 @@
+import AppKit
+import SwiftUI
 import Testing
 
 @testable import Tiller
+
+@MainActor
+private func resolved(_ color: Color, _ appearance: NSAppearance.Name) -> NSColor {
+    var result = NSColor.black
+    NSAppearance(named: appearance)!.performAsCurrentDrawingAppearance {
+        result = NSColor(color).usingColorSpace(.sRGB) ?? .black
+    }
+    return result
+}
 
 @Suite("ComposerControlBar", .serialized)
 @MainActor
@@ -11,7 +22,8 @@ struct ComposerControlBarTests {
         #expect(presentation.kind == .send)
         #expect(presentation.footprintSize == 30)
         #expect(presentation.shape == .circle)
-        #expect(presentation.accessibilityLabel == "Send message")
+        #expect(presentation.accessibilityLabel == "Send")
+        #expect(presentation.accessibilityHelp == "Send")
         #expect(presentation.systemImage == "arrow.up")
         #expect(presentation.inactiveFillOpacity == 0.18)
     }
@@ -22,7 +34,8 @@ struct ComposerControlBarTests {
         #expect(presentation.kind == .loading)
         #expect(presentation.footprintSize == 30)
         #expect(presentation.shape == .circle)
-        #expect(presentation.accessibilityLabel == "Starting agent")
+        #expect(presentation.accessibilityLabel == "Starting the agent")
+        #expect(presentation.accessibilityHelp == "Starting the agent")
         #expect(presentation.systemImage == nil)
         #expect(presentation.inactiveFillOpacity == 0.18)
     }
@@ -33,7 +46,8 @@ struct ComposerControlBarTests {
         #expect(presentation.kind == .stop)
         #expect(presentation.footprintSize == 30)
         #expect(presentation.shape == .circle)
-        #expect(presentation.accessibilityLabel == "Stop response")
+        #expect(presentation.accessibilityLabel == "Stop the turn")
+        #expect(presentation.accessibilityHelp == "Stop the turn")
         #expect(presentation.systemImage == "stop.fill")
         #expect(presentation.inactiveFillOpacity == nil)
     }
@@ -52,6 +66,24 @@ struct ComposerControlBarTests {
         for state in [ChatController.ChatState.idle, .ready, .needsAuth,
                       .disconnected(message: nil)] {
             #expect(ComposerControlBar.trailingControl(for: state) == .send)
+        }
+    }
+
+    @Test func inactiveActionFillMatchesSecondaryOpacityInEveryAppearance() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let fill = resolved(ComposerControlBar.inactiveActionFill, appearance)
+            let expected = resolved(Color.secondary.opacity(0.18), appearance)
+            let accent = resolved(Color.accentColor, appearance)
+            let deltaFromAccent = abs(fill.redComponent - accent.redComponent)
+                + abs(fill.greenComponent - accent.greenComponent)
+                + abs(fill.blueComponent - accent.blueComponent)
+                + abs(fill.alphaComponent - accent.alphaComponent)
+
+            #expect(abs(fill.redComponent - expected.redComponent) < 0.0001)
+            #expect(abs(fill.greenComponent - expected.greenComponent) < 0.0001)
+            #expect(abs(fill.blueComponent - expected.blueComponent) < 0.0001)
+            #expect(abs(fill.alphaComponent - expected.alphaComponent) < 0.0001)
+            #expect(deltaFromAccent > 0.001)
         }
     }
 }
