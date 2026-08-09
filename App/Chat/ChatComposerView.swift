@@ -37,7 +37,7 @@ struct ChatComposerView: View {
                 mentionPopup(query: query)
             }
             queuedList
-            cardWithAppearance
+            card
         }
         .padding(.vertical, 10)
     .enableInjection()
@@ -46,27 +46,27 @@ struct ChatComposerView: View {
     // MARK: - Card
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            editor
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-            ComposerControlBar(
-                controller: controller, document: document, onAttach: attachImage,
-                onSend: sendCurrent, canSend: canSend, canInteract: canInteract)
+        AgentAccentColorProvider(agentId: controller.agentId) { agentAccentColor in
+            VStack(alignment: .leading, spacing: 8) {
+                editor
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                ComposerControlBar(
+                    controller: controller, document: document, onAttach: attachImage,
+                    onSend: sendCurrent, canSend: canSend, canInteract: canInteract,
+                    agentAccentColor: agentAccentColor)
+            }
+            .padding(12)
+            .background(AppTheme.chatSurface, in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                ComposerBorderView(
+                    isAnimating: isPrompting,
+                    isFocused: document.isFocused,
+                    reduceMotion: reduceMotion,
+                    agentAccentColor: agentAccentColor)
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
         }
-        .padding(12)
-        .background(AppTheme.composerFill, in: RoundedRectangle(cornerRadius: 22))
-        .overlay {
-            ComposerBorderView(
-                isAnimating: isPrompting,
-                isFocused: document.isFocused,
-                reduceMotion: reduceMotion)
-        }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
-    }
-
-    private var cardWithAppearance: some View {
-        card.composerCardAppearance()
     }
 
     private var editorPlaceholder: String {
@@ -243,15 +243,6 @@ struct ChatComposerView: View {
                                          base64Data: data.base64EncodedString())
         document.insert(.image(attachment),
                         replacing: NSRange(location: document.storage.length, length: 0))
-    }
-}
-
-extension View {
-    /// Keeps the fixed-dark composer card's semantic labels and controls
-    /// legible without changing the appearance of transparent queued content
-    /// or adaptive popups around it.
-    func composerCardAppearance() -> some View {
-        environment(\.colorScheme, AppTheme.ComposerAppearance.colorScheme)
     }
 }
 

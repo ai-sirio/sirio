@@ -543,7 +543,7 @@ git commit -m "feat: add AgentAccentColorProvider"
 **Interfaces:**
 - Consumes: `AgentAccentColorProvider` (Task 5), `ComposerBorderView(isAnimating:isFocused:reduceMotion:agentAccentColor:)` (Task 3), `ComposerControlBar(controller:document:onAttach:onSend:canSend:canInteract:agentAccentColor:)` (Task 4), `AppTheme.chatSurface` (existing), `controller.agentId` (existing, `ChatController`).
 
-- [ ] **Step 1: Update the `card` property**
+- [x] **Step 1: Update the `card` property**
 
 Replace `App/Chat/ChatComposerView.swift` lines 48-70 (the `card` property through the end of `cardWithAppearance`):
 
@@ -573,7 +573,7 @@ Replace `App/Chat/ChatComposerView.swift` lines 48-70 (the `card` property throu
     }
 ```
 
-- [ ] **Step 2: Drop the forced-dark appearance seam**
+- [x] **Step 2: Drop the forced-dark appearance seam**
 
 Delete the `extension View { func composerCardAppearance() ... }` block (lines 249-256) and its call site. The `cardWithAppearance` computed property (line 68-70) becomes redundant with `card` doing everything now — delete it too, and rename every use of `cardWithAppearance` back to `card`.
 
@@ -634,13 +634,13 @@ extension View {
 }
 ```
 
-- [ ] **Step 3: Verify the previously-deferred tests from Tasks 3, 4, 5 now pass**
+- [x] **Step 3: Verify the previously-deferred tests from Tasks 3, 4, 5 now pass**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/ComposerBorderViewTests -only-testing:TillerTests/ComposerControlBarTests -only-testing:TillerTests/AgentAccentColorProviderTests 2>&1 | tail -60`
 
 Expected: the target now builds (the `card` call sites match every new signature) and all three suites PASS. If it fails to build, re-check Task 3/4's exact parameter names against what `card` now passes — a mismatched label (e.g. `agentAccentColor` vs `accentColor`) is the most likely cause.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add App/Chat/ChatComposerView.swift
