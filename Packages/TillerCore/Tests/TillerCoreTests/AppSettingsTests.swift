@@ -108,6 +108,11 @@ import Testing
     #expect(AppSettings.summarizerAgentIdKey == "autoNaming.summarizerAgentId")
 }
 
+@Test func agentColorKeyIsNamespacedPerAgent() {
+    #expect(AppSettings.agentColorKey(for: "claude") == "appearance.agentColor.claude")
+    #expect(AppSettings.agentColorKey(for: "codex") == "appearance.agentColor.codex")
+}
+
 @Test func chatHistoryRetentionKeyAndDefault() {
     #expect(AppSettings.chatHistoryRetentionKey == "chat.history.retentionCount")
     #expect(AppSettings.defaultChatHistoryRetention == 50)

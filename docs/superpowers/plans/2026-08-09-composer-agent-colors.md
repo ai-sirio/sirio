@@ -49,7 +49,7 @@
 **Interfaces:**
 - Produces: `AppSettings.agentColorKey(for agentId: String) -> String`, used by Task 5 (`AgentAccentColorProvider`) and Task 10 (`AppearanceSettingsView`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `Packages/TillerCore/Tests/TillerCoreTests/AppSettingsTests.swift`:
 
@@ -60,12 +60,12 @@ Append to `Packages/TillerCore/Tests/TillerCoreTests/AppSettingsTests.swift`:
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerCore && swift test --filter agentColorKeyIsNamespacedPerAgent`
 Expected: FAIL — `agentColorKey` does not exist.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `Packages/TillerCore/Sources/TillerCore/AppSettings.swift`, add near `summarizerAgentIdKey` (after the `summarizerAgentId(defaultsValue:)` function, before the `appearanceThemeKey` doc comment):
 
@@ -79,12 +79,12 @@ In `Packages/TillerCore/Sources/TillerCore/AppSettings.swift`, add near `summari
     }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerCore && swift test --filter agentColorKeyIsNamespacedPerAgent`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerCore/Sources/TillerCore/AppSettings.swift Packages/TillerCore/Tests/TillerCoreTests/AppSettingsTests.swift
