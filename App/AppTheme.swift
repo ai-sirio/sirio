@@ -165,12 +165,14 @@ enum AppTheme {
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
         dark: NSColor(srgbRed: 52.0 / 255.0, green: 53.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
-    /// The composer's text area — a field sunk into the composer chrome rather
-    /// than flush with it. Near-black in dark, so the caret and the typed text
-    /// have the most contrast in the one place the user is actually writing.
-    static let composerFieldFill = dynamic(
-        light: .white,
-        dark: NSColor(srgbRed: 13.0 / 255.0, green: 14.0 / 255.0, blue: 16.0 / 255.0, alpha: 1))
+    /// Composer-only surface approved from the Codex-inspired visual review (#20232D).
+    static let composerFill = Color(
+        .sRGB,
+        red: 32.0 / 255.0,
+        green: 35.0 / 255.0,
+        blue: 45.0 / 255.0,
+        opacity: 1
+    )
     /// Clickable file paths in the transcript. `.tint` bypasses the tuned
     /// light/dark pairs and reads as a dark blue on the chat surface.
     static let fileLink = gitUntracked

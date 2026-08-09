@@ -39,7 +39,6 @@ struct ChatComposerView: View {
             queuedList
             card
         }
-        .padding(.horizontal, 12)
         .padding(.vertical, 10)
     .enableInjection()
     }
@@ -56,7 +55,7 @@ struct ChatComposerView: View {
                 onSend: sendCurrent, canSend: canSend, canInteract: canInteract)
         }
         .padding(12)
-        .background(AppTheme.cardFill, in: RoundedRectangle(cornerRadius: 22))
+        .background(AppTheme.composerFill, in: RoundedRectangle(cornerRadius: 22))
         .overlay {
             ComposerBorderView(
                 isAnimating: isPrompting,
@@ -80,8 +79,10 @@ struct ChatComposerView: View {
                     .foregroundStyle(.secondary)
                     .allowsHitTesting(false)
             }
-            ChatTextEditor(document: document, isEditable: canInteract, minHeight: 104,
-                           maxHeight: 180, onSubmit: sendCurrent,
+            ChatTextEditor(document: document, isEditable: canInteract,
+                           minHeight: ComposerLayoutMetrics.editorMinimumHeight,
+                           maxHeight: ComposerLayoutMetrics.editorMaximumHeight,
+                           onSubmit: sendCurrent,
                            onSlashKey: handleSlashKey)
         }
         .disabled(!canInteract)

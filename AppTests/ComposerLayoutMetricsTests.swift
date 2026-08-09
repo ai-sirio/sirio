@@ -10,6 +10,11 @@ struct ComposerLayoutMetricsTests {
         #expect(ComposerLayoutMetrics.minimumHorizontalInset == 16)
     }
 
+    @Test func compactComposerHeightsMatchTheApprovedDesign() {
+        #expect(ComposerLayoutMetrics.editorMinimumHeight == 56)
+        #expect(ComposerLayoutMetrics.editorMaximumHeight == 128)
+    }
+
     @Test func compactWidthUsesThePreferredFraction() {
         let width = ComposerLayoutMetrics.contentWidth(for: 320)
 
