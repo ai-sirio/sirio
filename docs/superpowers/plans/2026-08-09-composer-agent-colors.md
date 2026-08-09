@@ -720,13 +720,13 @@ git commit -m "fix: stop forcing dark AppKit appearance on the composer text vie
 **Interfaces:**
 - Produces: `AppTheme.ComposerAppearance.primaryTextColor` (kept, still used by `ChatTextEditor.swift`). `AppTheme.composerFill` and `AppTheme.ComposerAppearance.colorScheme`/`.appKitAppearance` no longer exist.
 
-- [ ] **Step 1: Confirm nothing else references what's being deleted**
+- [x] **Step 1: Confirm nothing else references what's being deleted**
 
 Run: `grep -rn "AppTheme.composerFill\|ComposerAppearance.colorScheme\|ComposerAppearance.appKitAppearance" --include="*.swift" App AppTests Packages`
 
 Expected output: only the lines this task and Task 9 are about to remove/rewrite (by this point, Task 6 has already removed the `ChatComposerView.swift` reference to `composerFill`, and Task 7 has already removed the `ChatTextEditor.swift` reference to `appKitAppearance`). If anything else shows up, stop and re-check Tasks 6/7 landed correctly before proceeding.
 
-- [ ] **Step 2: Delete the dead token and trim the enum**
+- [x] **Step 2: Delete the dead token and trim the enum**
 
 In `App/AppTheme.swift`, delete lines 169-176:
 
@@ -762,12 +762,12 @@ with:
     }
 ```
 
-- [ ] **Step 3: Verify the build is clean**
+- [x] **Step 3: Verify the build is clean**
 
 Run: `xcodegen generate && xcodebuild -project Tiller.xcodeproj -scheme Tiller -configuration Debug -derivedDataPath DerivedData -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates build 2>&1 | tail -20`
 Expected: `** BUILD SUCCEEDED **`. (`ComposerStyleTests.composerUsesDarkSemanticAppearanceOnAqua` and `composerSurfaceMatchesTheApprovedHexInEveryAppearance` in the *test target* will now fail to build until Task 9 — that's expected here, since this step only checks the app target compiles; if the app-target build itself fails, something outside those two known test methods still references a deleted symbol.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add App/AppTheme.swift

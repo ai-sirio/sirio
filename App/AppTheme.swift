@@ -166,14 +166,6 @@ enum AppTheme {
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
         dark: NSColor(srgbRed: 44.0 / 255.0, green: 47.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
-    /// Composer-only surface approved from the Codex-inspired visual review (#20232D).
-    static let composerFill = Color(
-        .sRGB,
-        red: 32.0 / 255.0,
-        green: 35.0 / 255.0,
-        blue: 45.0 / 255.0,
-        opacity: 1
-    )
     /// Recessed surface for code and diff content nested inside chat cards.
     static let codeInsetFill = dynamic(
         light: .white,
@@ -182,8 +174,9 @@ enum AppTheme {
                       blue: 16.0 / 255.0,
                       alpha: 1))
     enum ComposerAppearance {
-        static let colorScheme: ColorScheme = .dark
-        static let appKitAppearance = NSAppearance.Name.darkAqua
+        /// Semantic — resolves against whatever appearance the composer's
+        /// text view actually has (now the app's real theme; see
+        /// `ChatTextEditor.makeTextView`).
         static let primaryTextColor = NSColor.textColor
     }
     /// Clickable file paths in the transcript. `.tint` bypasses the tuned
