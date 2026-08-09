@@ -2,7 +2,7 @@ import Testing
 
 @testable import Tiller
 
-@Suite("ComposerControlBar")
+@Suite("ComposerControlBar", .serialized)
 @MainActor
 struct ComposerControlBarTests {
     @Test func sendPresentationDefinesTheInteractiveActionChrome() {
