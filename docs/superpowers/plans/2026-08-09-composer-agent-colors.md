@@ -858,7 +858,7 @@ git commit -m "test: rewrite ComposerStyleTests for the adaptive composer contra
 
 No dedicated unit test for this task: it's declarative `ColorPicker`/`@AppStorage` wiring with no branching logic of its own — the resolution logic it calls (`AgentAccentColor`) is already covered by Task 2, and this codebase doesn't unit-test `AppearanceSettingsView`'s existing sections either (no test file exists for it today). Verify manually per Step 3.
 
-- [ ] **Step 1: Add the row type and import**
+- [x] **Step 1: Add the row type and import**
 
 In `App/AppearanceSettingsView.swift`, add the import (alongside the existing ones at the top):
 
@@ -905,7 +905,7 @@ private struct AgentColorRow: View {
 }
 ```
 
-- [ ] **Step 2: Add the section**
+- [x] **Step 2: Add the section**
 
 In `AppearanceSettingsView.body`, inside the `Form { ... }`, add a new `Section` after the existing `Section("Files")` block (before the closing `}` of `Form`):
 
@@ -917,14 +917,14 @@ In `AppearanceSettingsView.body`, inside the `Form { ... }`, add a new `Section`
             }
 ```
 
-- [ ] **Step 3: Manual verification**
+- [x] **Step 3: Manual verification**
 
 Run: `xcodegen generate && open Tiller.xcodeproj`, build and run (⌘R), open Settings → Appearance. Confirm:
 - An "Agent Colors" section lists all 5 agents (Claude Code, Codex, OpenCode, omp, Pi) each with their icon and a color swatch matching the Task 2 defaults.
 - Changing a color updates any open chat composer for that agent immediately (focus border / send button) without restarting the app.
 - Quitting and relaunching keeps the changed color.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add App/AppearanceSettingsView.swift Tiller.xcodeproj
