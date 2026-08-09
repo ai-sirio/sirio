@@ -225,7 +225,7 @@ git commit -m "feat: add AgentAccentColor default hex table and resolution"
 - Consumes: `AppTheme.hairline` (`App/AppTheme.swift`).
 - Produces: `ComposerBorderView.borderColor(isFocused:agentAccentColor:) -> Color`, `ComposerBorderView.animatedGradientColors(agentAccentColor:) -> [Color]` (pure static funcs, testable without mounting the view). `ComposerBorderView` gains an `agentAccentColor: Color` stored property — Task 6 wires it from `AgentAccentColorProvider`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `AppTests/ComposerFieldTests.swift` (new suite, anywhere at file scope — e.g. right after the existing `ComposerStyleTests` closing brace):
 
@@ -251,12 +251,12 @@ struct ComposerBorderViewTests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/ComposerBorderViewTests 2>&1 | tail -40`
 Expected: FAIL to build — `ComposerBorderView` is `private` (invisible to the test target) and has no `borderColor`/`animatedGradientColors`/`agentAccentColor`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `App/Chat/ChatComposerView.swift`, replace the whole `ComposerBorderView` struct (lines 258-304):
 
@@ -327,7 +327,7 @@ struct ComposerBorderView: View {
 
 Note: the `card` computed property at line 60 still constructs `ComposerBorderView(isAnimating:isFocused:reduceMotion:)` with three arguments — this will fail to compile until Task 6 adds the fourth (`agentAccentColor:`). That's expected and resolved in Task 6; this task's own test target (`ComposerBorderViewTests`) only exercises the static functions, not `card`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 This step's test run will still fail to *build* the whole `Tiller` scheme (Task 6 hasn't fixed the `card` call site yet), because `-only-testing` still compiles the whole target first. That's expected here — do not try to make the full build green in this task. Instead, confirm the two new symbols exist and are correctly named by compiling just this file's logic in isolation:
 
@@ -335,7 +335,7 @@ Run: `swift -typecheck App/Chat/ChatComposerView.swift 2>&1 | grep -c "cannot fi
 
 Expected: non-zero (the file references sibling types `swift -typecheck` on a single file can't see — this only confirms `ComposerBorderView`'s own new code parses; the real green run happens at the end of Task 6, Step 4, which re-runs `ComposerBorderViewTests` and will pass then).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add App/Chat/ChatComposerView.swift AppTests/ComposerFieldTests.swift
@@ -353,7 +353,7 @@ git commit -m "feat: recolor ComposerBorderView per agent, un-fade the idle hair
 **Interfaces:**
 - Produces: `ComposerControlBar.sendFill(canSend: Bool, agentAccentColor: Color) -> Color` (pure static func). `ComposerControlBar` gains an `agentAccentColor: Color` stored property — Task 6 wires it from `AgentAccentColorProvider`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `AppTests/ComposerControlBarTests.swift` (inside `struct ComposerControlBarTests`, e.g. after `inactiveActionFillMatchesSecondaryOpacityInEveryAppearance`):
 
@@ -368,12 +368,12 @@ Append to `AppTests/ComposerControlBarTests.swift` (inside `struct ComposerContr
     }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/ComposerControlBarTests 2>&1 | tail -40`
 Expected: FAIL to build — `sendFill` does not exist.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `App/Chat/ComposerControlBar.swift`:
 
@@ -420,11 +420,11 @@ In `App/Chat/ComposerControlBar.swift`:
 
 Note: `ChatComposerView.swift`'s `card` still constructs `ComposerControlBar(controller:document:onAttach:onSend:canSend:canInteract:)` without `agentAccentColor:` — this will fail to compile until Task 6. Expected, same as Task 3.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Deferred to Task 6, Step 4 (same reason as Task 3 — the target won't build clean until the `card` call site is fixed there). Confirm this task's own diff is syntactically self-consistent by reading it back before committing.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add App/Chat/ComposerControlBar.swift AppTests/ComposerControlBarTests.swift

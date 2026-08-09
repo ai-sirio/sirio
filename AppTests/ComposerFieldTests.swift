@@ -130,3 +130,23 @@ struct ComposerStyleTests {
         #expect(seamSource.contains("card.composerCardAppearance()"))
     }
 }
+
+@Suite("ComposerBorderView")
+struct ComposerBorderViewTests {
+    @Test func idleBorderIsTheNeutralHairlineAtFullOpacity() {
+        #expect(ComposerBorderView.borderColor(isFocused: false, agentAccentColor: .red)
+                == AppTheme.hairline)
+    }
+
+    @Test func focusedBorderIsTheAgentAccentColor() {
+        #expect(ComposerBorderView.borderColor(isFocused: true, agentAccentColor: .red) == .red)
+    }
+
+    @Test func animatedGradientStartsAndEndsOnTheOpaqueAgentColor() {
+        let colors = ComposerBorderView.animatedGradientColors(agentAccentColor: .red)
+        #expect(colors.count == 5)
+        #expect(colors.first == .red)
+        #expect(colors.last == .red)
+        #expect(colors[2] == Color.red.opacity(0))
+    }
+}
