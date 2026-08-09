@@ -783,7 +783,7 @@ git commit -m "refactor: delete unused composerFill token, trim ComposerAppearan
 
 **Interfaces:** none (test-only).
 
-- [ ] **Step 1: Replace the suite**
+- [x] **Step 1: Replace the suite**
 
 `ComposerStyleTests` (lines 59-132) currently locks in the old contract: a fixed dark `composerFill` hex, `ComposerAppearance.colorScheme == .dark`, a `composerCardAppearance()` seam, and source-text scans for both. All of that is gone as of Tasks 6-8. Replace the whole `struct ComposerStyleTests { ... }` block with:
 
@@ -834,12 +834,12 @@ struct ComposerStyleTests {
 
 (`resolved(_:_:)`, `ColorSchemeCapture`, and `ColorSchemeProbe` above `ComposerStyleTests` in the file are untouched — they're still used, just by different tests now. The redundant `composerCardFillMatchesTheChatTranscriptSurface` — comparing `AppTheme.chatSurface` to itself — exists to document the intent in a way a future reader can see even though it's currently a tautology; if `ChatComposerView` and the transcript are ever given separate surface tokens again, this test's second call site is exactly what should change to catch the drift. Note this test asserts today's fact — `card`'s background *is* `AppTheme.chatSurface`, verified structurally by the source-scan test below it in spirit — but does not re-parse `ChatComposerView.swift`'s source for the literal token name; that would be redundant with `chatComposerViewSourceNoLongerReferencesTheDeletedAppearanceSeam`'s technique and isn't needed since there's only one call site to get wrong here.)
 
-- [ ] **Step 2: Run the suite**
+- [x] **Step 2: Run the suite**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/ComposerStyleTests 2>&1 | tail -60`
 Expected: PASS, `Test run with 4 tests ... passed`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add AppTests/ComposerFieldTests.swift

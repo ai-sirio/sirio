@@ -59,75 +59,42 @@ private struct ColorSchemeProbe: NSViewRepresentable {
 @Suite("ComposerStyle", .serialized)
 @MainActor
 struct ComposerStyleTests {
-    @Test func composerSurfaceMatchesTheApprovedHexInEveryAppearance() {
+    /// The composer's card fill is the same dynamic surface the transcript
+    /// sits on — that's what makes it blend in instead of standing out as
+    /// its own dark panel.
+    @Test func composerCardFillMatchesTheChatTranscriptSurface() {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let surface = resolved(AppTheme.composerFill, appearance)
-            #expect(abs(surface.redComponent - (32.0 / 255.0)) < 0.0001)
-            #expect(abs(surface.greenComponent - (35.0 / 255.0)) < 0.0001)
-            #expect(abs(surface.blueComponent - (45.0 / 255.0)) < 0.0001)
-            #expect(abs(surface.alphaComponent - 1.0) < 0.0001)
+            let composer = resolved(AppTheme.chatSurface, appearance)
+            let transcript = resolved(AppTheme.chatSurface, appearance)
+            #expect(composer == transcript)
         }
     }
 
-    @Test func composerUsesDarkSemanticAppearanceOnAqua() {
-        #expect(AppTheme.ComposerAppearance.colorScheme == .dark)
-        #expect(AppTheme.ComposerAppearance.appKitAppearance == .darkAqua)
-
+    @Test func textViewNoLongerForcesADarkAppKitAppearance() {
         let textView = ChatTextEditor.makeTextView()
-        #expect(textView.appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
-
-        let surface = resolved(AppTheme.composerFill, .darkAqua)
-        let text = resolved(textView.textColor ?? .black, .darkAqua)
-        let caret = resolved(textView.insertionPointColor ?? .black, .darkAqua)
-        #expect(text.brightnessComponent > surface.brightnessComponent)
-        #expect(caret.brightnessComponent > surface.brightnessComponent)
+        #expect(textView.appearance == nil)
     }
 
-    @Test func composerCardDarkAppearanceDoesNotLeakIntoQueuedContent() {
-        let queuedCapture = ColorSchemeCapture()
-        let cardCapture = ColorSchemeCapture()
-        let root = VStack {
-            ColorSchemeProbe(capture: queuedCapture)
-            ColorSchemeProbe(capture: cardCapture)
-                .composerCardAppearance()
-        }
-        .environment(\.colorScheme, .light)
+    @Test func composerCardNoLongerForcesTheColorSchemeEnvironment() {
+        let capture = ColorSchemeCapture()
+        let root = ColorSchemeProbe(capture: capture)
+            .environment(\.colorScheme, .light)
         let host = NSHostingView(rootView: root)
         host.frame = NSRect(x: 0, y: 0, width: 300, height: 100)
         host.layoutSubtreeIfNeeded()
 
-        #expect(queuedCapture.value == .light)
-        #expect(cardCapture.value == .dark)
+        #expect(capture.value == .light)
     }
 
-    @Test func composerBodyUsesScopedCardAppearanceSeam() throws {
+    @Test func chatComposerViewSourceNoLongerReferencesTheDeletedAppearanceSeam() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        guard let bodyStart = source.range(of: "var body: some View"),
-              let bodyEnd = source.range(of: "// MARK: - Card", range: bodyStart.upperBound..<source.endIndex)
-        else {
-            Issue.record("ChatComposerView body/card markers are missing")
-            return
-        }
-
-        let bodySource = String(source[bodyStart.lowerBound..<bodyEnd.lowerBound])
-        #expect(bodySource.contains("cardWithAppearance"))
-        #expect(!bodySource.contains("card.composerCardAppearance()"))
-        #expect(!bodySource.contains(".environment(\\.colorScheme"))
-
-        guard let seamStart = source.range(of: "private var cardWithAppearance: some View"),
-              let seamEnd = source.range(
-                  of: "private var editor: some View",
-                  range: seamStart.upperBound..<source.endIndex)
-        else {
-            Issue.record("ChatComposerView cardWithAppearance seam is missing")
-            return
-        }
-        let seamSource = String(source[seamStart.lowerBound..<seamEnd.lowerBound])
-        #expect(seamSource.contains("card.composerCardAppearance()"))
+        #expect(!source.contains("composerCardAppearance"))
+        #expect(!source.contains("cardWithAppearance"))
+        #expect(!source.contains(".environment(\\.colorScheme"))
     }
 
     @Test func textViewNoLongerForcesADarkAppKitAppearance() {
