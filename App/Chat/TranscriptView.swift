@@ -60,6 +60,10 @@ struct TranscriptView: View {
                 guard !scrollPosition.isPositionedByUser else { return }
                 scrollPosition.scrollTo(edge: .bottom)
             }
+            .onChange(of: bottomContentInset) {
+                guard !scrollPosition.isPositionedByUser else { return }
+                pinToBottom()
+            }
             // A new item re-pins whenever the user is still pinned at the
             // bottom — a freshly created message, question card, or finished
             // turn scrolls into view. The user's own send re-pins even after

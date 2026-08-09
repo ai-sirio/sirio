@@ -804,6 +804,7 @@ extension ChatControllerTests {
 
         let worktree = Worktree(id: worktreeId, projectId: UUID(), branch: "main", path: root.path)
         let appModel = AppModel(paneRegistry: PaneRegistry(), activateApplication: {})
+        var exercisedOverlayTransition = false
         for containerWidth in [CGFloat(640), CGFloat(2_000)] {
             let capture = ChatPaneLayoutCapture()
             let host = NSHostingView(rootView: ChatPaneLayoutProbe(capture: capture) {
@@ -811,30 +812,15 @@ extension ChatControllerTests {
                     .environment(\.chatPaneLayoutCaptureEnabled, true)
             })
             host.setFrameSize(NSSize(width: containerWidth, height: 480))
-            host.layoutSubtreeIfNeeded()
-            for _ in 0..<100 {
-                let frames = capture.frames
-                let requiredRoles: Set<ChatPaneLayoutRole> = [
-                    .approvalPanel, .composer, .transcriptViewport,
-                    .transcriptContent, .transcriptBottomSpacer, .bottomFade,
-                    .bottomOverlay
-                ]
-                let hasAllFrames = requiredRoles.allSatisfy { frames[$0] != nil }
-                let hasConvergedHeights: Bool = {
-                    guard let overlay = frames[.bottomOverlay],
-                          let spacer = frames[.transcriptBottomSpacer],
-                          let fade = frames[.bottomFade] else { return false }
-                    return abs(
-                        spacer.height
-                            - ChatBottomOverlayMetrics.contentInset(for: overlay.height)
-                    ) < 0.5 && abs(
-                        fade.height
-                            - ChatBottomOverlayMetrics.fadeHeight(for: overlay.height)
-                    ) < 0.5
-                }()
-                if hasAllFrames && hasConvergedHeights { break }
-                await Task.yield()
+            let converged = await waitForChatPaneLayoutConvergence(
+                host: host,
+                capture: capture)
+            if !converged {
+                let diagnostics = "Timed out waiting for chat layout convergence at width \(containerWidth); " +
+                    missingChatPaneLayoutRoles(in: capture.frames)
+                #expect(converged, "\(diagnostics)")
             }
+            #expect(converged)
 
             let approvalFrame = try #require(capture.frames[.approvalPanel])
             let composerFrame = try #require(capture.frames[.composer])
@@ -847,7 +833,6 @@ extension ChatControllerTests {
             let leftInset = composerFrame.minX
             let rightInset = containerWidth - composerFrame.maxX
 
-            #expect(approvalFrame.maxY <= composerFrame.minY)
             #expect(abs(composerFrame.width - expectedWidth) < 0.5)
             #expect(abs(leftInset - rightInset) < 0.5)
             #expect(abs(transcriptContent.width - composerFrame.width) < 0.5)
@@ -862,7 +847,60 @@ extension ChatControllerTests {
                 fadeFrame.height
                     - ChatBottomOverlayMetrics.fadeHeight(for: overlayFrame.height)
             ) < 0.5)
+            #expect(abs(overlayFrame.maxY - transcriptViewport.maxY) < 0.5)
+            #expect(abs(fadeFrame.maxY - transcriptViewport.maxY) < 0.5)
+            #expect(abs(
+                fadeFrame.minY
+                    - (overlayFrame.minY - ChatBottomOverlayMetrics.fadeExtension)
+            ) < 0.5)
             #expect(approvalFrame.maxY <= composerFrame.minY)
+
+            if !exercisedOverlayTransition {
+                let initialOverlayHeight = overlayFrame.height
+                controller.promptError = "A temporary prompt error for layout testing."
+                let expanded = await waitForChatPaneLayoutConvergence(
+                    host: host,
+                    capture: capture,
+                    overlayHeight: { $0 > initialOverlayHeight + 0.5 })
+                if !expanded {
+                    let diagnostics = "Prompt error did not expand the bottom overlay; " +
+                        missingChatPaneLayoutRoles(in: capture.frames)
+                    #expect(expanded, "\(diagnostics)")
+                }
+                #expect(expanded)
+                let expandedOverlay = try #require(capture.frames[.bottomOverlay])
+                let expandedSpacer = try #require(capture.frames[.transcriptBottomSpacer])
+                let expandedFade = try #require(capture.frames[.bottomFade])
+                let expandedViewport = try #require(capture.frames[.transcriptViewport])
+                #expect(expandedOverlay.height > initialOverlayHeight + 0.5)
+                #expect(abs(
+                    expandedSpacer.height
+                        - ChatBottomOverlayMetrics.contentInset(for: expandedOverlay.height)
+                ) < 0.5)
+                #expect(abs(
+                    expandedFade.height
+                        - ChatBottomOverlayMetrics.fadeHeight(for: expandedOverlay.height)
+                ) < 0.5)
+                #expect(abs(expandedOverlay.maxY - expandedViewport.maxY) < 0.5)
+                #expect(abs(expandedFade.maxY - expandedViewport.maxY) < 0.5)
+                #expect(abs(
+                    expandedFade.minY
+                        - (expandedOverlay.minY - ChatBottomOverlayMetrics.fadeExtension)
+                ) < 0.5)
+
+                controller.promptError = nil
+                let restored = await waitForChatPaneLayoutConvergence(
+                    host: host,
+                    capture: capture,
+                    overlayHeight: { abs($0 - initialOverlayHeight) < 0.5 })
+                if !restored {
+                    let diagnostics = "Bottom overlay did not restore after clearing prompt error; " +
+                        missingChatPaneLayoutRoles(in: capture.frames)
+                    #expect(restored, "\(diagnostics)")
+                }
+                #expect(restored)
+                exercisedOverlayTransition = true
+            }
         }
 
         await driver.releasePrompt()
@@ -919,6 +957,52 @@ private struct ChatPaneLayoutProbe<Content: View>: View {
                 capture.frames = frames
             }
     }
+}
+
+@MainActor
+private func waitForChatPaneLayoutConvergence<Content: View>(
+    host: NSHostingView<ChatPaneLayoutProbe<Content>>,
+    capture: ChatPaneLayoutCapture,
+    overlayHeight: (CGFloat) -> Bool = { _ in true }
+) async -> Bool {
+    let requiredRoles: Set<ChatPaneLayoutRole> = [
+        .approvalPanel, .composer, .transcriptViewport,
+        .transcriptContent, .transcriptBottomSpacer, .bottomFade,
+        .bottomOverlay
+    ]
+    for _ in 0..<100 {
+        host.layoutSubtreeIfNeeded()
+        let frames = capture.frames
+        let hasAllFrames = requiredRoles.allSatisfy { frames[$0] != nil }
+        let hasConvergedHeights: Bool = {
+            guard let overlay = frames[.bottomOverlay],
+                  let spacer = frames[.transcriptBottomSpacer],
+                  let fade = frames[.bottomFade] else { return false }
+            return overlayHeight(overlay.height) && abs(
+                spacer.height
+                    - ChatBottomOverlayMetrics.contentInset(for: overlay.height)
+            ) < 0.5 && abs(
+                fade.height
+                    - ChatBottomOverlayMetrics.fadeHeight(for: overlay.height)
+            ) < 0.5
+        }()
+        if hasAllFrames && hasConvergedHeights { return true }
+        try? await Task.sleep(for: .milliseconds(5))
+    }
+    return false
+}
+
+private func missingChatPaneLayoutRoles(
+    in frames: [ChatPaneLayoutRole: CGRect]
+) -> String {
+    let requiredRoles: Set<ChatPaneLayoutRole> = [
+        .approvalPanel, .composer, .transcriptViewport,
+        .transcriptContent, .transcriptBottomSpacer, .bottomFade,
+        .bottomOverlay
+    ]
+    let missing = requiredRoles.filter { frames[$0] == nil }
+    if missing.isEmpty { return "all frames present but numeric convergence timed out" }
+    return "missing roles: \(missing.map { String(describing: $0) }.sorted().joined(separator: ", "))"
 }
 
 private func makeChatTestFixture(worktreeId: UUID) throws
