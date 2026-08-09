@@ -17,6 +17,7 @@ struct TranscriptView: View {
     var bottomContentInset: CGFloat = 0
     @State private var scrollPosition = ScrollPosition(idType: String.self)
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.chatPaneLayoutCaptureEnabled) private var layoutCaptureEnabled
 
     // Stopgap: timeline-row rendering (work groups, turn folds, 700pt column)
     // is disabled — three main-thread layout storms were sampled with it
@@ -40,13 +41,16 @@ struct TranscriptView: View {
                         if controller.state == .prompting {
                             thinkingRow.padding(.top, 14)
                         }
-                        Color.clear
-                            .frame(height: max(1, bottomContentInset))
-                            .id("bottom")
+                            Color.clear
+                                .frame(height: max(1, bottomContentInset))
+                                .id("bottom")
+                                .captureLayout(.transcriptBottomSpacer,
+                                               enabled: layoutCaptureEnabled)
+                        }
+                        .padding(.vertical, 14)
+                        .captureLayout(.transcriptContent, enabled: layoutCaptureEnabled)
                     }
-                    .padding(.vertical, 14)
                 }
-            }
             .scrollPosition($scrollPosition)
             // Do not observe live scroll geometry here: the observation reads
             // the LazyVStack geometry while that same stack is laying out,
@@ -75,6 +79,7 @@ struct TranscriptView: View {
                 }
                 controller.scrollTarget = nil
             }
+            .captureLayout(.transcriptViewport, enabled: layoutCaptureEnabled)
         }
     .enableInjection()
     }
