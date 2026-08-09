@@ -61,13 +61,19 @@ private struct ColorSchemeProbe: NSViewRepresentable {
 struct ComposerStyleTests {
     /// The composer's card fill is the same dynamic surface the transcript
     /// sits on — that's what makes it blend in instead of standing out as
-    /// its own dark panel.
-    @Test func composerCardFillMatchesTheChatTranscriptSurface() {
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let composer = resolved(AppTheme.chatSurface, appearance)
-            let transcript = resolved(AppTheme.chatSurface, appearance)
-            #expect(composer == transcript)
-        }
+    /// its own dark panel. Asserted at the call site, because comparing the
+    /// token to itself would pass even if the card went back to a fixed fill.
+    @Test func composerCardFillIsTheChatTranscriptSurface() throws {
+        let source = try chatComposerViewSource()
+        #expect(source.contains("background(AppTheme.chatSurface"))
+    }
+
+    /// The point of that swap: unlike the fixed `#20232D` it replaced, this
+    /// surface actually follows the app's light/dark theme.
+    @Test func chatSurfaceAdaptsToTheAppearance() {
+        let light = resolved(AppTheme.chatSurface, .aqua)
+        let dark = resolved(AppTheme.chatSurface, .darkAqua)
+        #expect(light.brightnessComponent > dark.brightnessComponent)
     }
 
     @Test func textViewNoLongerForcesADarkAppKitAppearance() {
@@ -86,12 +92,16 @@ struct ComposerStyleTests {
         #expect(capture.value == .light)
     }
 
-    @Test func chatComposerViewSourceNoLongerReferencesTheDeletedAppearanceSeam() throws {
+    private func chatComposerViewSource() throws -> String {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    @Test func chatComposerViewSourceNoLongerReferencesTheDeletedAppearanceSeam() throws {
+        let source = try chatComposerViewSource()
         #expect(!source.contains("composerCardAppearance"))
         #expect(!source.contains("cardWithAppearance"))
         #expect(!source.contains(".environment(\\.colorScheme"))
