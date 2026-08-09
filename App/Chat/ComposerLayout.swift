@@ -62,8 +62,10 @@ struct CenteredComposerLayout: Layout {
     ) -> CGSize {
         guard let subview = subviews.first else { return .zero }
 
-        let idealSize = subview.sizeThatFits(.unspecified)
-        let availableWidth = max(0, proposal.width ?? idealSize.width)
+        let availableWidth = max(
+            0,
+            proposal.width ?? subview.sizeThatFits(.unspecified).width
+        )
         let contentWidth = ComposerLayoutMetrics.contentWidth(for: availableWidth)
         let contentSize = subview.sizeThatFits(
             ProposedViewSize(width: contentWidth, height: proposal.height)
