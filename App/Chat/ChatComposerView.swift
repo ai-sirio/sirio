@@ -37,7 +37,7 @@ struct ChatComposerView: View {
                 mentionPopup(query: query)
             }
             queuedList
-            card.composerCardAppearance()
+            cardWithAppearance
         }
         .padding(.vertical, 10)
     .enableInjection()
@@ -63,6 +63,10 @@ struct ChatComposerView: View {
                 reduceMotion: reduceMotion)
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
+    }
+
+    private var cardWithAppearance: some View {
+        card.composerCardAppearance()
     }
 
     private var editorPlaceholder: String {
