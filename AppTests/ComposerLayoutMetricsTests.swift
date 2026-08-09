@@ -1,8 +1,38 @@
+import AppKit
+import SwiftUI
 import Testing
 
 @testable import Tiller
 
+private final class LayoutProposalRecorder: @unchecked Sendable {
+    var proposals: [ProposedViewSize] = []
+}
+
+private struct RecordingLayout: Layout {
+    let recorder: LayoutProposalRecorder
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        recorder.proposals.append(proposal)
+        return CGSize(
+            width: proposal.width ?? 80,
+            height: proposal.height ?? 24
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {}
+}
+
 @Suite("ComposerLayoutMetrics")
+@MainActor
 struct ComposerLayoutMetricsTests {
     @Test func constantsMatchTheResponsiveComposerSpecification() {
         #expect(ComposerLayoutMetrics.preferredWidthFraction == 0.84)
@@ -49,5 +79,26 @@ struct ComposerLayoutMetricsTests {
     @Test func bottomOverlayMetricsClampNegativeMeasurements() {
         #expect(ChatBottomOverlayMetrics.fadeHeight(for: -20) == 36)
         #expect(ChatBottomOverlayMetrics.contentInset(for: -20) == 16)
+    }
+
+    @Test func finiteWidthLayoutAvoidsIntrinsicChildMeasurement() {
+        let recorder = LayoutProposalRecorder()
+        let host = NSHostingView(
+            rootView: CenteredComposerLayout {
+                RecordingLayout(recorder: recorder) {
+                    Color.clear
+                }
+            }
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        host.layoutSubtreeIfNeeded()
+
+        let hasUnspecifiedProposal = recorder.proposals.contains {
+            $0.width == nil && $0.height == nil
+        }
+        #expect(
+            !hasUnspecifiedProposal,
+            "finite-width layout recorded proposals: \(recorder.proposals)"
+        )
     }
 }
