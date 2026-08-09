@@ -443,7 +443,7 @@ git commit -m "feat: recolor ComposerControlBar send button per agent"
 - Consumes: `AppSettings.agentColorKey(for:)` (Task 1), `AgentAccentColor.defaultHex(for:)` / `AgentAccentColor.color(for:storedValue:)` (Task 2).
 - Produces: `AgentAccentColorProvider<Content: View>`, `init(agentId: String, store: UserDefaults = .standard, content: @escaping (Color) -> Content)`. Used by Task 6 (`ChatComposerView`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `AppTests/AgentAccentColorProviderTests.swift`:
 
@@ -482,12 +482,12 @@ struct AgentAccentColorProviderTests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/AgentAccentColorProviderTests 2>&1 | tail -40`
 Expected: FAIL to build — `AgentAccentColorProvider` does not exist.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `App/AgentAccentColorProvider.swift`:
 
@@ -521,12 +521,12 @@ struct AgentAccentColorProvider<Content: View>: View {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/AgentAccentColorProviderTests 2>&1 | tail -40`
 Expected: PASS, `Test run with 2 tests ... passed`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add App/AgentAccentColorProvider.swift AppTests/AgentAccentColorProviderTests.swift Tiller.xcodeproj
