@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import SwiftUI
 import Testing
 @testable import Tiller
@@ -87,5 +88,35 @@ struct ComposerStyleTests {
 
         #expect(queuedCapture.value == .light)
         #expect(cardCapture.value == .dark)
+    }
+
+    @Test func composerBodyUsesScopedCardAppearanceSeam() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        guard let bodyStart = source.range(of: "var body: some View"),
+              let bodyEnd = source.range(of: "// MARK: - Card", range: bodyStart.upperBound..<source.endIndex)
+        else {
+            Issue.record("ChatComposerView body/card markers are missing")
+            return
+        }
+
+        let bodySource = String(source[bodyStart.lowerBound..<bodyEnd.lowerBound])
+        #expect(bodySource.contains("cardWithAppearance"))
+        #expect(!bodySource.contains("card.composerCardAppearance()"))
+        #expect(!bodySource.contains(".environment(\\.colorScheme"))
+
+        guard let seamStart = source.range(of: "private var cardWithAppearance: some View"),
+              let seamEnd = source.range(
+                  of: "private var editor: some View",
+                  range: seamStart.upperBound..<source.endIndex)
+        else {
+            Issue.record("ChatComposerView cardWithAppearance seam is missing")
+            return
+        }
+        let seamSource = String(source[seamStart.lowerBound..<seamEnd.lowerBound])
+        #expect(seamSource.contains("card.composerCardAppearance()"))
     }
 }
