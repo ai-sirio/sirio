@@ -29,4 +29,19 @@ struct TranscriptViewLayoutRegressionTests {
         #expect(source.contains("bottomContentInset"))
         #expect(!source.contains(".onScrollGeometryChange("))
     }
+
+    @Test("overlay inset changes re-pin only while transcript is not user-positioned")
+    func overlayInsetChangesRePinWhenFollowing() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("App/Chat/TranscriptView.swift"),
+            encoding: .utf8
+        )
+        #expect(source.contains(".onChange(of: bottomContentInset)"))
+        #expect(source.contains(
+            "guard !scrollPosition.isPositionedByUser else { return }\n                pinToBottom()"
+        ))
+    }
 }
