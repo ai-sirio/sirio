@@ -129,6 +129,11 @@ struct ComposerStyleTests {
         let seamSource = String(source[seamStart.lowerBound..<seamEnd.lowerBound])
         #expect(seamSource.contains("card.composerCardAppearance()"))
     }
+
+    @Test func textViewNoLongerForcesADarkAppKitAppearance() {
+        let textView = ChatTextEditor.makeTextView()
+        #expect(textView.appearance == nil)
+    }
 }
 
 @Suite("ComposerBorderView")

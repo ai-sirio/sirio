@@ -657,7 +657,7 @@ git commit -m "feat: adopt AgentAccentColorProvider in ChatComposerView, drop fo
 **Interfaces:**
 - Consumes: `AppTheme.ComposerAppearance.primaryTextColor` (still exists after Task 8 trims the type — see that task).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `AppTests/ComposerFieldTests.swift`, inside `ComposerStyleTests` — this replaces the assertions in `composerUsesDarkSemanticAppearanceOnAqua` (lines 72-84) that this task makes false. That rewrite happens in Task 9, which runs after this task's implementation exists so it can assert the *new* behavior instead of just deleting coverage. For this task alone, add a narrower, additive test that does not conflict with the not-yet-updated `composerUsesDarkSemanticAppearanceOnAqua` (which still exists until Task 9 and will start failing here — expected, see Step 2):
 
@@ -670,14 +670,14 @@ In `AppTests/ComposerFieldTests.swift`, inside `ComposerStyleTests` — this rep
 
 Add it inside `struct ComposerStyleTests` (anywhere after `composerCardDarkAppearanceDoesNotLeakIntoQueuedContent`).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/ComposerStyleTests/textViewNoLongerForcesADarkAppKitAppearance 2>&1 | tail -40`
 Expected: FAIL — `textView.appearance` is still `.darkAqua`, not `nil`.
 
 (`composerUsesDarkSemanticAppearanceOnAqua` in the same suite is now also failing, since it asserts the opposite. That's expected and fixed in Task 9 — don't fix it here, to keep this task's diff to just `ChatTextEditor.swift`.)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `App/Chat/ChatTextEditor.swift`, delete line 47:
 
@@ -698,12 +698,12 @@ In `App/Chat/ChatTextEditor.swift`, delete line 47:
 
 (everything else in the function is unchanged — only that one line is removed). Leaving `textView.appearance` at its default `nil` means it inherits from the view hierarchy's effective appearance, which now correctly follows the app's real theme once Task 6 has removed the forced-dark `environment(\.colorScheme:)`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `xcodegen generate && xcodebuild test -project Tiller.xcodeproj -scheme Tiller -skipPackagePluginValidation -skipMacroValidation -skipPackageUpdates -only-testing:TillerTests/ComposerStyleTests/textViewNoLongerForcesADarkAppKitAppearance 2>&1 | tail -40`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add App/Chat/ChatTextEditor.swift AppTests/ComposerFieldTests.swift
