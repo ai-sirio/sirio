@@ -1,5 +1,6 @@
 import SwiftUI
 import TillerCore
+import TillerAgents
 import Inject
 
 /// Appearance settings: app theme (system/light/dark) and terminal font
@@ -45,9 +46,49 @@ struct AppearanceSettingsView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            Section("Agent Colors") {
+                ForEach(AgentCatalog.all, id: \.id) { adapter in
+                    AgentColorRow(agentId: adapter.id, displayName: adapter.displayName)
+                }
+            }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
     .enableInjection()
+    }
+}
+
+/// One Settings row per agent: icon, name, and a `ColorPicker` bound to that
+/// agent's stored accent-color hex. Read-write counterpart to
+/// `AgentAccentColorProvider` (read-only, used by the composer itself).
+private struct AgentColorRow: View {
+    let agentId: String
+    let displayName: String
+    @AppStorage private var hex: String
+
+    init(agentId: String, displayName: String) {
+        self.agentId = agentId
+        self.displayName = displayName
+        _hex = AppStorage(
+            wrappedValue: AgentAccentColor.defaultHex(for: agentId),
+            AppSettings.agentColorKey(for: agentId))
+    }
+
+    private var colorBinding: Binding<Color> {
+        Binding(
+            get: { AgentAccentColor.color(for: agentId, storedValue: hex) },
+            set: { newColor in
+                hex = newColor.toHex() ?? hex
+            })
+    }
+
+    var body: some View {
+        HStack {
+            AgentIcon(agentId: agentId)
+            Text(displayName)
+            Spacer()
+            ColorPicker("", selection: colorBinding, supportsOpacity: false)
+                .labelsHidden()
+        }
     }
 }
