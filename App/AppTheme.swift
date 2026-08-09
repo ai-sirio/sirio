@@ -173,6 +173,11 @@ enum AppTheme {
         blue: 45.0 / 255.0,
         opacity: 1
     )
+    enum ComposerAppearance {
+        static let colorScheme: ColorScheme = .dark
+        static let appKitAppearance = NSAppearance.Name.darkAqua
+        static let primaryTextColor = NSColor.textColor
+    }
     /// Clickable file paths in the transcript. `.tint` bypasses the tuned
     /// light/dark pairs and reads as a dark blue on the chat surface.
     static let fileLink = gitUntracked
