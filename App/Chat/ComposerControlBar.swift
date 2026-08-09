@@ -16,6 +16,7 @@ struct ComposerControlBar: View {
     let onSend: () -> Void
     let canSend: Bool
     let canInteract: Bool
+    let agentAccentColor: Color
 
     @State private var modelPickerShown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -50,6 +51,12 @@ struct ComposerControlBar: View {
         case .prompting: .stop
         default: .send
         }
+    }
+
+    /// Send button fill: the active agent's accent color while a send is
+    /// possible, the shared neutral inactive fill otherwise.
+    static func sendFill(canSend: Bool, agentAccentColor: Color) -> Color {
+        canSend ? agentAccentColor : inactiveActionFill
     }
 
     static func primaryActionPresentation(
@@ -309,9 +316,8 @@ struct ComposerControlBar: View {
         return Button(action: onSend) {
             primaryActionChrome(
                 presentation: presentation,
-                fill: canSend
-                    ? AnyShapeStyle(Color.accentColor)
-                    : AnyShapeStyle(Self.inactiveActionFill)) {
+                fill: AnyShapeStyle(Self.sendFill(
+                    canSend: canSend, agentAccentColor: agentAccentColor))) {
                 if let systemImage = presentation.systemImage {
                     Image(systemName: systemImage)
                         .font(AppFont.system(size: 12, weight: .bold))
