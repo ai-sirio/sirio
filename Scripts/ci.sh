@@ -89,11 +89,16 @@ if [ -d "Packages/$serial_pkg" ]; then
     echo "==> swift test: Packages/$serial_pkg/ (serial — timing-sensitive PTY tests)"
     serial_start=$SECONDS
     set +e
-    ( cd "Packages/$serial_pkg" && swift test )
+    timeout 900 bash -c "cd 'Packages/$serial_pkg' && swift test"
     serial_status=$?
     set -e
     echo "==> swift test: Packages/$serial_pkg/ completed in $((SECONDS - serial_start))s"
-    [ "$serial_status" = 0 ] || failed_names="$failed_names $serial_pkg"
+    if [ "$serial_status" = 124 ]; then
+        echo "TIMEOUT: serial tests hung for >900s (15 minutes)"
+        failed_names="$failed_names $serial_pkg"
+    elif [ "$serial_status" != 0 ]; then
+        failed_names="$failed_names $serial_pkg"
+    fi
 fi
 
 if [ -n "$failed_names" ]; then

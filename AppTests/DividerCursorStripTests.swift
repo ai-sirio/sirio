@@ -3,7 +3,7 @@ import Testing
 
 @testable import Tiller
 
-@Suite("DividerCursorStrip")
+@Suite("DividerCursorStrip", .serialized)
 @MainActor
 struct DividerCursorStripTests {
     /// The strip sits on top of the split divider. If it answered the click, it
