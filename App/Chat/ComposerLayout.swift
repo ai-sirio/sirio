@@ -4,6 +4,8 @@ struct ComposerLayoutMetrics {
     static let preferredWidthFraction: CGFloat = 0.84
     static let maximumWidth: CGFloat = 1_440
     static let minimumHorizontalInset: CGFloat = 16
+    static let editorMinimumHeight: CGFloat = 56
+    static let editorMaximumHeight: CGFloat = 128
 
     static func contentWidth(for availableWidth: CGFloat) -> CGFloat {
         max(0, min(
