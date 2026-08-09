@@ -38,4 +38,16 @@ struct ComposerLayoutMetricsTests {
         #expect(ComposerLayoutMetrics.contentWidth(for: -100) == 0)
         #expect(ComposerLayoutMetrics.horizontalOffset(for: -100) == 0)
     }
+
+    @Test func bottomOverlayMetricsMatchTheApprovedFadeAndClearance() {
+        #expect(ChatBottomOverlayMetrics.fadeExtension == 36)
+        #expect(ChatBottomOverlayMetrics.bottomClearance == 16)
+        #expect(ChatBottomOverlayMetrics.fadeHeight(for: 100) == 136)
+        #expect(ChatBottomOverlayMetrics.contentInset(for: 100) == 116)
+    }
+
+    @Test func bottomOverlayMetricsClampNegativeMeasurements() {
+        #expect(ChatBottomOverlayMetrics.fadeHeight(for: -20) == 36)
+        #expect(ChatBottomOverlayMetrics.contentInset(for: -20) == 16)
+    }
 }

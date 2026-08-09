@@ -14,6 +14,7 @@ struct TranscriptView: View {
     let controller: ChatController
     let worktree: Worktree
     let appModel: AppModel
+    var bottomContentInset: CGFloat = 0
     @State private var scrollPosition = ScrollPosition(idType: String.self)
     @Environment(\.colorScheme) private var colorScheme
 
@@ -29,19 +30,22 @@ struct TranscriptView: View {
 
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(grouped.roots) { item in
-                        itemView(item, meta: nil, grouped: grouped, snapshot: snapshot)
-                            .padding(.top, Self.topSpacing(for: item))
-                            .id(item.id)
+                CenteredComposerLayout {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(grouped.roots) { item in
+                            itemView(item, meta: nil, grouped: grouped, snapshot: snapshot)
+                                .padding(.top, Self.topSpacing(for: item))
+                                .id(item.id)
+                        }
+                        if controller.state == .prompting {
+                            thinkingRow.padding(.top, 14)
+                        }
+                        Color.clear
+                            .frame(height: max(1, bottomContentInset))
+                            .id("bottom")
                     }
-                    if controller.state == .prompting {
-                        thinkingRow.padding(.top, 14)
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
+                    .padding(.vertical, 14)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
             }
             .scrollPosition($scrollPosition)
             // Do not observe live scroll geometry here: the observation reads
