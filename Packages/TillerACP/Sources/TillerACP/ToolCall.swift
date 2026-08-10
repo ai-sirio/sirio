@@ -196,7 +196,7 @@ public struct ToolCall: Sendable, Equatable, Codable {
 /// Partial tool call: every field except the id is optional.
 public struct ToolCallUpdate: Sendable, Equatable, Codable {
     private enum CodingKeys: String, CodingKey {
-        case toolCallId, title, kind, status, content, locations, rawInput
+        case toolCallId, title, kind, status, content, locations, rawInput, rawOutput
         case parentToolCallId
         case terminalMeta = "_meta"
     }
@@ -208,12 +208,14 @@ public struct ToolCallUpdate: Sendable, Equatable, Codable {
     public var content: [ToolCallContent]?
     public var locations: [ToolCallLocation]?
     public var rawInput: JSONValue?
+    public var rawOutput: JSONValue?
     public var terminalMeta: TerminalMeta?
     public var parentToolCallId: String?
 
     public init(toolCallId: String, title: String? = nil, kind: ToolKind? = nil,
                 status: ToolCallStatus? = nil, content: [ToolCallContent]? = nil,
                 locations: [ToolCallLocation]? = nil, rawInput: JSONValue? = nil,
+                rawOutput: JSONValue? = nil,
                 terminalMeta: TerminalMeta? = nil,
                 parentToolCallId: String? = nil) {
         self.toolCallId = toolCallId
@@ -223,6 +225,7 @@ public struct ToolCallUpdate: Sendable, Equatable, Codable {
         self.content = content
         self.locations = locations
         self.rawInput = rawInput
+        self.rawOutput = rawOutput
         self.terminalMeta = terminalMeta
         self.parentToolCallId = parentToolCallId
     }
