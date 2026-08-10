@@ -27,9 +27,16 @@ struct TranscriptView: View {
         let snapshot = controller.presentationSnapshot
         let grouped = snapshot.grouped
 
-        ScrollViewReader { proxy in
-            ScrollView {
-                CenteredComposerLayout {
+        // GeometryReader sits above the ScrollView, not between it and the
+        // LazyVStack — it just reports the available width synchronously,
+        // it never asks the LazyVStack for its own size. A custom `Layout`
+        // in that position (as CenteredComposerLayout did) would instead
+        // query the LazyVStack's sizeThatFits directly, which defeats
+        // ScrollView/LazyVStack virtualization and re-measures every row on
+        // every pass (the same class of storm noted above).
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(grouped.roots) { item in
                             itemView(item, meta: nil, grouped: grouped, snapshot: snapshot)
@@ -50,10 +57,11 @@ struct TranscriptView: View {
                                            enabled: layoutCaptureEnabled)
                     }
                     .padding(.vertical, 14)
+                    .frame(width: ComposerLayoutMetrics.contentWidth(for: geometry.size.width))
                     .captureLayout(.transcriptContent, enabled: layoutCaptureEnabled)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
-            }
-            .scrollPosition($scrollPosition)
+                .scrollPosition($scrollPosition)
             // Do not observe live scroll geometry here: the observation reads
             // the LazyVStack geometry while that same stack is laying out,
             // which can create an AttributeGraph invalidation loop. Rely on
@@ -85,7 +93,8 @@ struct TranscriptView: View {
                 }
                 controller.scrollTarget = nil
             }
-            .captureLayout(.transcriptViewport, enabled: layoutCaptureEnabled)
+                .captureLayout(.transcriptViewport, enabled: layoutCaptureEnabled)
+            }
         }
         .enableInjection()
     }
