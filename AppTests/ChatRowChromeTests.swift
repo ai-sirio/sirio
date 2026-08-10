@@ -28,6 +28,33 @@ struct ChatRowChromeTests {
         #expect(ChatRowMetrics.lineCount(for: item) == 7)
     }
 
+    @Test func truncatedTailLeavesShortTextUntouched() {
+        let result = ChatRowMetrics.truncatedTail("one\ntwo\nthree", maxCharacters: 20_000)
+
+        #expect(result.text == "one\ntwo\nthree")
+        #expect(result.wasTruncated == false)
+    }
+
+    @Test func truncatedTailCapsTextExceedingTheLimit() {
+        let huge = String(repeating: "a", count: 100)
+
+        let result = ChatRowMetrics.truncatedTail(huge, maxCharacters: 10)
+
+        #expect(result.text == String(repeating: "a", count: 10))
+        #expect(result.wasTruncated == true)
+    }
+
+    @Test func truncatedTailCapsASingleLineWithNoNewlines() {
+        // MCP tool results commonly arrive as one giant line (e.g. inline
+        // JSON) with no "\n" at all — a line-based cap would miss this.
+        let hugeSingleLine = String(repeating: "x", count: 50_000)
+
+        let result = ChatRowMetrics.truncatedTail(hugeSingleLine)
+
+        #expect(result.text.count == ChatRowMetrics.maxRenderedCharacters)
+        #expect(result.wasTruncated == true)
+    }
+
     @Test func messageMetaCarriesTheTurnTimestamp() {
         let at = Date(timeIntervalSince1970: 1_700_000_000)
         let meta = TimelineRow.MessageMeta(at: at, duration: 3.5,
