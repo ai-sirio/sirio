@@ -46,12 +46,13 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     private var started = false
     private var finished = false
     private var sessionId: String?
-    private var didEmitCommands = false
     private var promptContinuation: CheckedContinuation<StopReason, Error>?
     private var queuedResults: [ClaudeResult] = []
     private var pending: [String: CheckedContinuation<JSONValue?, Error>] = [:]
     private var cancelRequested = false
     private var effort: String?
+    private var effortLevels: [String] = []
+    public private(set) var diagnostics: [ClaudeDiagnostic] = []
 
     public nonisolated var supportsStructuredAnswers: Bool { true }
 
@@ -72,11 +73,15 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                                        permissionMode: PermissionMode,
                                        model: String?,
                                        resumeSessionId: String?,
+                                       effort: String? = nil,
                                        onStderrLine: (@Sendable (String) -> Void)? = nil) -> ClaudeLaunch {
         var command = "exec claude -p --input-format stream-json --output-format stream-json --verbose"
         command += " --permission-mode \(shellArgument(permissionMode.claudeValue))"
         if let model {
             command += " --model \(shellArgument(model))"
+        }
+        if let effort {
+            command += " --effort \(shellArgument(effort))"
         }
         let sessionId = resumeSessionId ?? UUID().uuidString
         if let resumeSessionId {
@@ -180,20 +185,27 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     }
 
     public func setEffort(_ effort: String?) async {
+        guard let effort else {
+            self.effort = nil
+            return
+        }
+        guard effortLevels.contains(effort) else { return }
         self.effort = effort
+        Task { [weak self] in
+            _ = try? await self?.sendControlRequest(.object([
+                "subtype": .string("apply_flag_settings"),
+                "settings": .object(["effort": .string(effort)])
+            ]))
+        }
     }
 
-    /// Claude has no native effort concept; these levels only ever surface
-    /// as the `effortPrefix` string prepended to the next prompt.
-    private static let effortLevels: [SessionConfigOption.Choice] = [
-        .init(value: "low", name: "Low"),
-        .init(value: "medium", name: "Medium"),
-        .init(value: "high", name: "High")
-    ]
-
     public func staticEffortOptions() async -> SessionConfigOption? {
-        SessionConfigOption(id: "effort", name: "Effort",
-                             currentValue: effort, options: Self.effortLevels)
+        guard !effortLevels.isEmpty else { return nil }
+        return SessionConfigOption(
+            id: "effort", name: "Effort", currentValue: effort,
+            options: effortLevels.map {
+                SessionConfigOption.Choice(value: $0, name: $0.capitalized)
+            })
     }
 
     public func setConfigOption(id: String, value: String) async throws
@@ -201,6 +213,27 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         _ = id
         _ = value
         throw DriverError.unsupported
+    }
+
+    private func sendControlResponse(id: String, payload: JSONValue) async {
+        let response = JSONValue.object([
+            "type": .string("control_response"),
+            "response": payload
+        ])
+        try? await transport.send(line: makeLine(response))
+    }
+
+    /// Every control request must be answered, including ones this driver
+    /// does not implement: the CLI correlates by `request_id` and blocks
+    /// until it hears back. An explicit refusal is an answer; silence is not.
+    private func declineControlRequest(id: String, reason: String) {
+        Task { [weak self] in
+            await self?.sendControlResponse(id: id, payload: .object([
+                "request_id": .string(id),
+                "subtype": .string("error"),
+                "error": .string(reason)
+            ]))
+        }
     }
 
     public func answerPermission(requestId: JSONRPCID, outcome: PermissionOutcome) async {
@@ -245,13 +278,8 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             if !initMessage.sessionId.isEmpty {
                 sessionId = initMessage.sessionId
             }
-            if !didEmitCommands {
-                didEmitCommands = true
-                eventContinuation.yield(.update(.availableCommandsUpdate(
-                    initMessage.slashCommands.map {
-                        AvailableCommand(name: $0, description: "")
-                    })))
-            }
+            // `system/init` is strictly worse than initialize on count and content,
+            // so it has nothing to contribute. Refreshes come from `commands_changed`.
 
         case .assistant(let assistant):
             for block in assistant.message.content {
@@ -266,13 +294,20 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                     eventContinuation.yield(.update(.toolCallUpdate(ToolCallUpdate(
                         toolCallId: result.toolUseId,
                         status: result.isError ? .failed : .completed,
-                        content: [.content(.text(output))]))))
+                        content: [.content(.text(output))],
+                        rawOutput: user.toolUseResult))))
                 }
             }
 
         case .result(let result):
-            Task { [weak self] in
-                await self?.probeContextUsage()
+            if let usage = contextUsage(from: result) {
+                eventContinuation.yield(.update(.usageUpdate(usage)))
+            } else {
+                Task { [weak self] in await self?.probeContextUsage() }
+            }
+            if let stats = turnStatsNotice(result) { emitNotice(stats) }
+            if let denials = result.permissionDenials, !denials.isEmpty {
+                emitNotice("\(denials.count) permission request(s) denied")
             }
             if let promptContinuation {
                 self.promptContinuation = nil
@@ -282,7 +317,12 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             }
 
         case .controlRequest(let id, let request):
-            guard request.subtype == "can_use_tool" else { return }
+            guard request.subtype == "can_use_tool" else {
+                declineControlRequest(
+                    id: id,
+                    reason: "Tiller does not implement \(request.subtype)")
+                return
+            }
             if permissionMode == .fullAuto {
                 Task { [weak self] in
                     await self?.answerPermission(
@@ -315,6 +355,31 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
         case .controlResponse(let id, let value):
             guard let continuation = pending.removeValue(forKey: id) else { return }
             continuation.resume(returning: value)
+
+        case .commandsChanged(let values):
+            eventContinuation.yield(.update(.availableCommandsUpdate(
+                commands(from: values))))
+
+        case .systemEvent(let event):
+            switch event.subtype {
+            case "compact_boundary":
+                emitNotice("Context compacted")
+            case "model_fallback", "model_refusal_fallback",
+                 "model_consent_fallback", "model_refusal_no_fallback":
+                let model = event.payload["model"]?.stringValue ?? "another model"
+                emitNotice("Model fell back to \(model)")
+            default:
+                if let diagnostic = ClaudeDiagnostics.diagnostic(for: event) {
+                    record(diagnostic)
+                }
+            }
+
+        case .rateLimit(let info):
+            guard info.status != "allowed" else { return }
+            emitNotice("Rate limit \(info.status) (\(info.rateLimitType ?? "unknown"))")
+
+        case .promptSuggestion, .streamEvent:
+            break
 
         case .unknown:
             break
@@ -393,24 +458,30 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             availableModes: supported.map(\.sessionMode))
         let payload = response?["response"] ?? response
         emitAvailableCommands(from: payload)
+        let models = modelState(from: payload)
+        let selected = requestedModel ?? models?.currentModelId
+        effortLevels = models?.availableModels
+            .first { $0.modelId == selected }?.supportedEffortLevels ?? []
         return SessionHandle(
             sessionId: sessionId,
             agentCapabilities: AgentCapabilities(),
             modes: modes,
-            models: modelState(from: payload),
+            models: models,
             configOptions: [],
             didResume: didResume)
     }
 
-    private func emitAvailableCommands(from payload: JSONValue?) {
-        guard !didEmitCommands, let values = payload?["commands"]?.arrayValue else { return }
-        didEmitCommands = true
-        let commands = values.compactMap { value -> AvailableCommand? in
+    private func commands(from values: [JSONValue]) -> [AvailableCommand] {
+        values.compactMap { value in
             guard let name = value["name"]?.stringValue else { return nil }
             return AvailableCommand(name: name,
                                     description: value["description"]?.stringValue ?? "")
         }
-        eventContinuation.yield(.update(.availableCommandsUpdate(commands)))
+    }
+
+    private func emitAvailableCommands(from payload: JSONValue?) {
+        guard let values = payload?["commands"]?.arrayValue else { return }
+        eventContinuation.yield(.update(.availableCommandsUpdate(commands(from: values))))
     }
 
     private func modelState(from payload: JSONValue?) -> SessionModelState? {
@@ -421,8 +492,12 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             let name = value["displayName"]?.stringValue
                 ?? value["name"]?.stringValue
                 ?? modelId
+            let levels: [String]? = value["supportsEffort"]?.boolValue == true
+                ? value["supportedEffortLevels"]?.arrayValue?.compactMap(\.stringValue)
+                : nil
             return ModelInfo(modelId: modelId, name: name,
-                             description: value["description"]?.stringValue)
+                             description: value["description"]?.stringValue,
+                             supportedEffortLevels: levels)
         }
         guard !models.isEmpty else { return nil }
         let currentModelId = requestedModel ?? models[0].modelId
@@ -437,6 +512,51 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
               let size = payload?["maxTokens"]?.intValue ?? payload?["rawMaxTokens"]?.intValue,
               used >= 0, size > 0 else { return nil }
         return ContextUsage(used: used, size: size)
+    }
+
+    /// `modelUsage` is keyed by model name; any entry carries the same
+    /// context window, so the first one with the field wins.
+    private func contextUsage(from result: ClaudeResult) -> ContextUsage? {
+        guard case .object(let byModel)? = result.modelUsage,
+              let size = byModel.values.compactMap({ $0["contextWindow"]?.intValue }).first,
+              size > 0, let usage = result.usage else { return nil }
+        let used = (usage.inputTokens ?? 0)
+            + (usage.outputTokens ?? 0)
+            + (usage.cacheReadInputTokens ?? 0)
+            + (usage.cacheCreationInputTokens ?? 0)
+        guard used >= 0 else { return nil }
+        return ContextUsage(used: used, size: size)
+    }
+
+    private func turnStatsNotice(_ result: ClaudeResult) -> String? {
+        var parts: [String] = []
+        if let duration = result.durationMs {
+            parts.append(String(format: "%.1fs", Double(duration) / 1000))
+        }
+        if let ttft = result.ttftMs {
+            parts.append(String(format: "TTFT %.1fs", Double(ttft) / 1000))
+        }
+        if let cost = result.totalCostUsd {
+            parts.append(String(format: "$%.2f", cost))
+        }
+        if let usage = result.usage {
+            parts.append("\(usage.inputTokens ?? 0)↑ \(usage.outputTokens ?? 0)↓")
+        }
+        if let turns = result.numTurns, turns > 1 {
+            parts.append("\(turns) turns")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func emitNotice(_ text: String) {
+        eventContinuation.yield(.update(.notice(text)))
+    }
+
+    private func record(_ diagnostic: ClaudeDiagnostic) {
+        diagnostics.append(diagnostic)
+        if diagnostics.count > 500 {
+            diagnostics.removeFirst(diagnostics.count - 500)
+        }
     }
 
     private func stopReason(for result: ClaudeResult) -> StopReason {
@@ -469,7 +589,7 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
     }
 
     private func makeUserPromptLine(_ blocks: [ContentBlock]) throws -> Data {
-        let content = JSONValue.array(wireBlocks(promptBlocks(blocks)))
+        let content = JSONValue.array(wireBlocks(blocks))
         return makeLine(.object([
             "type": .string("user"),
             "message": .object([
@@ -477,22 +597,6 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                 "content": content
             ])
         ]))
-    }
-
-    private func promptBlocks(_ blocks: [ContentBlock]) -> [ContentBlock] {
-        guard let effort else { return blocks }
-        let prefix = effortPrefix(effort)
-        var blocks = blocks
-        if let index = blocks.firstIndex(where: {
-            if case .text = $0 { true } else { false }
-        }) {
-            if case .text(let text) = blocks[index] {
-                blocks[index] = .text(prefix + text)
-            }
-        } else {
-            blocks.insert(.text(prefix), at: 0)
-        }
-        return blocks
     }
 
     /// Claude Code forwards `message.content` to the Messages API unchanged,
@@ -519,10 +623,6 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
                 nil
             }
         }
-    }
-
-    private func effortPrefix(_ effort: String) -> String {
-        "Reasoning effort for this and following turns: \(effort). "
     }
 
     private func makeLine(_ value: JSONValue) -> Data {

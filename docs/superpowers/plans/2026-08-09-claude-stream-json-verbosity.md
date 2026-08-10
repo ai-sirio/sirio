@@ -54,7 +54,7 @@ the existing `TranscriptItem.systemNotice`, which is already rendered
   `status: String`, `resetsAt: Int?`, `rateLimitType: String?`).
   Later tasks switch on these.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `ClaudeWireTests.swift`, inside `@Suite struct ClaudeWireTests`:
 
@@ -102,13 +102,13 @@ Add to `ClaudeWireTests.swift`, inside `@Suite struct ClaudeWireTests`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeWireTests`
 Expected: FAIL — `.systemEvent`, `.rateLimit`, `.promptSuggestion` are not
 members of `ClaudeWireMessage`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `ClaudeWire.swift`, add the two new types after `ClaudeInit`:
 
@@ -172,7 +172,7 @@ rest:
             self = .streamEvent(value["event"] ?? value)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeWireTests`
 Expected: PASS, including the pre-existing `unknownTypesDecodeAsUnknown`.
@@ -185,7 +185,7 @@ exhaustive. Add a temporary no-op arm so the package builds:
             break
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP/Sources/TillerACP/Drivers/ClaudeWire.swift \
@@ -211,7 +211,7 @@ This is the correctness fix. The protocol correlates every `control_request`
 to a `control_response` by `request_id`. Today anything that is not
 `can_use_tool` hits `guard ... else { return }` and the CLI waits forever.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `ClaudeDriverTests.swift`:
 
@@ -238,13 +238,13 @@ Add to `ClaudeDriverTests.swift`:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter unhandledControlRequestsStillGetAResponse`
 Expected: FAIL — `waitForSent(count: 2)` times out and returns 1 line, so the
 subscript traps or the expectations fail. Nothing is ever sent back.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `ClaudeStreamJSONDriver.swift`, add the two helpers near
 `answerPermission`:
@@ -284,12 +284,12 @@ Replace the `guard` at the head of the `.controlRequest` arm in `handle(_:)`:
             }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: PASS, and no pre-existing driver test regresses.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP/Sources/TillerACP/Drivers/ClaudeStreamJSONDriver.swift \
@@ -314,7 +314,23 @@ git commit -m "fix: answer every claude control request instead of dropping unkn
 `didEmitCommands` (`:49`) fires once per session. After a `reload_plugins` or
 a skill install the command list is stale for the rest of the session.
 
-- [ ] **Step 1: Write the failing test**
+**Correction, 2026-08-09, after a live probe of CLI 2.1.226.** The latch was
+doing two jobs, and this task originally described only one of them. The
+command list arrives twice, from sources of unequal quality:
+
+| Source | Order | Payload |
+|---|---|---|
+| `initialize` control response | first | 266 commands as objects, all with a non-empty `description` |
+| `system` / `init` stream message | second | 263 commands as bare strings → `description: ""` |
+
+Removing the latch alone lets the second, impoverished source overwrite the
+first two lines after it arrives, losing all 266 descriptions and 3 commands
+every session. So this task also **stops `.systemInit` from emitting
+`availableCommandsUpdate` at all**; refreshes come from `commands_changed`,
+which carries the rich payload. Do not re-add a latch of any kind — suppressing
+the poor source is not the same as freezing the good one.
+
+- [x] **Step 1: Write the failing test**
 
 ```swift
     @Test func commandsChangedRefreshesTheCommandList() async throws {
@@ -342,13 +358,13 @@ a skill install the command list is stale for the rest of the session.
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter commandsChangedRefreshesTheCommandList`
 Expected: FAIL — `commands_changed` decodes as `.unknown` and is ignored, so
 no second `availableCommandsUpdate` is ever emitted.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `ClaudeWire.swift` `init(from:)`, add:
 
@@ -404,14 +420,14 @@ extract the mapping so both call sites share it:
     }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: PASS. `fixtureTurnMapsToCanonicalUpdates` asserts
 `availableCommandsUpdate` *contains* the doctor command, so a second emission
 does not break it.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP/Sources/TillerACP
@@ -437,7 +453,7 @@ The `result` message carries `modelUsage[model].contextWindow`. Today the
 driver instead fires a `get_context_usage` control request after every turn
 (`:376`). Keep that as a fallback for older CLIs; stop treating it as primary.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```swift
     @Test func contextUsageComesFromModelUsageWithoutProbing() async throws {
@@ -468,13 +484,13 @@ driver instead fires a `get_context_usage` control request after every turn
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter contextUsageComesFromModelUsageWithoutProbing`
 Expected: FAIL — the only `usageUpdate` path today is the async
 `get_context_usage` probe, which the mock never answers.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `ClaudeWire.swift`, extend `ClaudeResult` with the fields Task 8 also
 needs:
@@ -552,14 +568,14 @@ Replace the `.result` arm's probe call:
             }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: PASS. `fixtureTurnMapsToCanonicalUpdates` asserts *no*
 `usageUpdate`; its fixture result has no `modelUsage`, so it still takes the
 probe path and stays green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP/Sources/TillerACP
@@ -585,7 +601,7 @@ The `initialize` response reports capabilities per model. Verified shape:
 `default`, `opus[1m]`, `claude-fable-5[1m]` and `sonnet` report five levels;
 **`haiku` reports no effort support at all.**
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```swift
     @Test func modelsCarryTheirEffortLevels() async throws {
@@ -615,12 +631,12 @@ The `initialize` response reports capabilities per model. Verified shape:
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter modelsCarryTheirEffortLevels`
 Expected: FAIL — `ModelInfo` has no `supportedEffortLevels` member.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `ACPTypes.swift`, extend `ModelInfo`. Keep the existing initialiser
 signature working by defaulting the new parameter:
@@ -655,12 +671,12 @@ In `ClaudeStreamJSONDriver.modelState(from:)`, populate it:
                              supportedEffortLevels: levels)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP/Sources/TillerACP
@@ -688,7 +704,17 @@ request carrying `{"effort":"bogus"}` returns `subtype: "success"` exactly
 like a valid one. `success` means *received*, not *applied*. Tiller is the
 only place a bad value can be caught, so validation happens before sending.
 
-- [ ] **Step 1: Write the failing test**
+**Live implementation correction:** `sendControlRequest` waits for the
+correlated control response, while the test fixture intentionally does not
+send one. `setEffort` therefore schedules the already-validated request and
+returns after the line is queued; the driver still records the selected value
+locally and does not claim that Claude applied it.
+
+The launch call site has also moved from the plan's `App/` location to
+`Packages/TillerACP/Sources/TillerACP/AgentDriverFactory.swift`; the package
+caller now passes the stored effort to `launchTransport`.
+
+- [x] **Step 1: Write the failing test**
 
 ```swift
     @Test func effortIsSentAsAFlagSettingAndValidated() async throws {
@@ -767,14 +793,14 @@ only place a bad value can be caught, so validation happens before sending.
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: FAIL on all three — `setEffort` sends nothing,
 `staticEffortOptions` returns a hardcoded three-level list for every model
 including haiku, and the prompt text is prefixed.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add stored capability state to the driver, next to `effort`:
 
@@ -862,13 +888,13 @@ find it with:
 rg -n "launchTransport" App/
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: PASS. Then build the app target to catch the `launchTransport`
 call-site change.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP App
@@ -892,7 +918,7 @@ git commit -m "feat: use claude native effort flag instead of a prompt prefix"
   `ChatSessionStore.swift:257` — so this one case covers all inline output in
   this plan with no new UI.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `TranscriptReducerTests.swift` (create the file with this content if it
 does not exist, using the same `@Suite struct` style as the other suites):
@@ -908,12 +934,12 @@ does not exist, using the same `@Suite struct` style as the other suites):
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter noticeBecomesASystemNoticeItem`
 Expected: FAIL — `.notice` is not a member of `SessionUpdate`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `SessionUpdate.swift`, add the case to the enum:
 
@@ -936,14 +962,14 @@ In `TranscriptReducer.apply(_:)`, add an arm:
             items.append(.systemNotice(id: makeId("notice"), text: text))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test`
 Expected: PASS. Other `switch`es over `SessionUpdate` may now be non-exhaustive;
 build errors will name them. Handle `.notice` explicitly where a case is
 required rather than adding a `default`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP
@@ -964,7 +990,7 @@ git commit -m "feat: add notice session update mapped to system notice items"
   `ClaudeSystemEvent`, `ClaudeRateLimit` (Task 1).
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```swift
     @Test func resultEmitsTurnStats() async throws {
@@ -1027,13 +1053,13 @@ git commit -m "feat: add notice session update mapped to system notice items"
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: FAIL — no `.notice` is ever emitted; `systemEvent` and `rateLimit`
 hit the temporary `break` added in Task 1.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add the formatter and the emitters to the driver:
 
@@ -1098,12 +1124,12 @@ Replace the temporary `break` from Task 1 with real arms:
 (`.commandsChanged` already has its own arm from Task 3; keep that one and
 leave only `.promptSuggestion, .streamEvent` here.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDriverTests`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP
@@ -1128,7 +1154,7 @@ git commit -m "feat: surface claude turn stats, compaction and rate limits inlin
 Wiring only, by explicit scope decision. The signals reach the edge of
 `TillerACP` and stop there.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `ClaudeDiagnosticsTests.swift`:
 
@@ -1168,12 +1194,12 @@ import Foundation
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter ClaudeDiagnosticsTests`
 Expected: FAIL — no such type `ClaudeDiagnostics`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `ClaudeDiagnostics.swift`:
 
@@ -1266,12 +1292,12 @@ and in the `default:` of the `.systemEvent` switch:
 Do **not** add `--include-hook-events` to `launchTransport`. A two-step turn
 produced 55 hook events; it stays opt-in.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP
@@ -1295,7 +1321,7 @@ The rendered `content` carries flattened text; `tool_use_result` carries the
 structured form — `structuredPatch` for Edit, `{filePath, numLines,
 totalLines}` for Read, separated stdout/stderr for Bash.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```swift
     @Test func toolResultCarriesStructuredPayload() async throws {
@@ -1325,13 +1351,13 @@ totalLines}` for Read, separated stdout/stderr for Bash.
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd Packages/TillerACP && swift test --filter toolResultCarriesStructuredPayload`
 Expected: FAIL — `ToolCallUpdate` has no `rawOutput` member, and the driver
 never reads `toolUseResult`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add `rawOutput` to `ToolCallUpdate` in `ToolCall.swift`, mirroring the
 existing `rawInput` property exactly — same optionality, same `CodingKeys`
@@ -1354,12 +1380,12 @@ Then in the driver's `.user` arm, attach the structured payload:
             }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd Packages/TillerACP && swift test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Packages/TillerACP

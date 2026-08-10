@@ -77,6 +77,7 @@ public enum AgentDriverFactory {
             let launch = ClaudeStreamJSONDriver.launchTransport(
                 worktreePath: worktreePath, permissionMode: permissionMode,
                 model: model, resumeSessionId: resumeSessionId,
+                effort: effort,
                 onStderrLine: onStderrLine)
             let driver = ClaudeStreamJSONDriver(
                 transport: launch.transport, permissionMode: permissionMode,
