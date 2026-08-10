@@ -267,8 +267,8 @@ struct ComposerControlBar: View {
     }
 
     /// Context-window meter; always shown so its control-bar position stays
-    /// stable. Empty/dimmed until the agent reports usage. Turns orange past
-    /// the 80% warning threshold.
+    /// stable. Empty/dimmed until the agent reports usage. Turns red past the
+    /// 80% warning threshold so it stays distinct from the agent's accent.
     private var contextUsageIndicator: some View {
         let usage = controller.contextUsage
         let fraction = usage.flatMap { $0.size > 0 ? min(1, max(0, Double($0.used) / Double($0.size))) : nil } ?? 0
@@ -278,7 +278,8 @@ struct ComposerControlBar: View {
             if usage != nil {
                 Circle()
                     .trim(from: 0, to: fraction)
-                    .stroke(warning ? Color.orange : Color.accentColor,
+                    .stroke(Self.contextRingColor(
+                        warning: warning, agentAccentColor: agentAccentColor),
                             style: StrokeStyle(lineWidth: 2, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
@@ -301,6 +302,12 @@ struct ComposerControlBar: View {
     private var agentDisplayName: String {
         AgentCatalog.all.first { $0.id == controller.agentId }?.displayName
             ?? controller.agentId
+    }
+
+    /// Context ring stroke: red past the warning threshold so a nearly-full
+    /// context stays distinguishable from the agent's own accent color.
+    static func contextRingColor(warning: Bool, agentAccentColor: Color) -> Color {
+        warning ? .red : agentAccentColor
     }
 
     @ViewBuilder
@@ -346,7 +353,7 @@ struct ComposerControlBar: View {
             fill: AnyShapeStyle(Self.inactiveActionFill)) {
             ProgressView()
                 .controlSize(.small)
-                .tint(.accentColor)
+                .tint(agentAccentColor)
         }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(presentation.accessibilityLabel)
