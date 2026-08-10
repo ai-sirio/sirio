@@ -41,6 +41,14 @@ struct ChatBottomOverlayHeightPreferenceKey: PreferenceKey {
     }
 }
 
+struct TranscriptViewportWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 extension View {
     func captureChatBottomOverlayHeight() -> some View {
         background {
