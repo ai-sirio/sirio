@@ -102,10 +102,7 @@ struct ToolCallCardView: View {
                     worktree: worktree,
                     appModel: appModel)
             case .content(.text(let text)):
-                Text(text)
-                    .font(AppFont.mono(size: 11))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                textContent(text)
             case .terminal:
                 TerminalOutputView(
                     output: item.terminalOutput ?? "",
@@ -129,6 +126,28 @@ struct ToolCallCardView: View {
                     .foregroundStyle(.tint)
                 }
             }
+        }
+    }
+
+    /// Bounded like `TerminalOutputView`'s tail cap: MCP tool results in
+    /// particular can be huge, and an unconstrained `Text` with selection
+    /// enabled freezes AppKit's layout the moment this row expands.
+    @ViewBuilder
+    private func textContent(_ text: String) -> some View {
+        let display = ChatRowMetrics.truncatedTail(text)
+        VStack(alignment: .leading, spacing: 4) {
+            if display.wasTruncated {
+                Text("Showing last \(ChatRowMetrics.maxRenderedCharacters) characters")
+                    .font(AppFont.caption2)
+                    .foregroundStyle(AppTheme.meta)
+            }
+            ScrollView {
+                Text(display.text)
+                    .font(AppFont.mono(size: 11))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 260)
         }
     }
 

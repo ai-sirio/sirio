@@ -148,4 +148,15 @@ enum ChatRowMetrics {
         guard let text, !text.isEmpty else { return 0 }
         return text.split(separator: "\n", omittingEmptySubsequences: false).count
     }
+
+    /// Character cap (not line cap) because tool content — MCP results in
+    /// particular — can arrive as one huge line with no newlines, which
+    /// would defeat a line-based limit. `Text` + `.textSelection(.enabled)`
+    /// on an unbounded string freezes AppKit's layout on the main thread.
+    static let maxRenderedCharacters = 20_000
+
+    static func truncatedTail(_ text: String, maxCharacters: Int = maxRenderedCharacters) -> (text: String, wasTruncated: Bool) {
+        guard text.count > maxCharacters else { return (text, false) }
+        return (String(text.suffix(maxCharacters)), true)
+    }
 }
