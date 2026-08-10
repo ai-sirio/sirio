@@ -99,4 +99,11 @@ struct ComposerControlBarTests {
         #expect(ComposerControlBar.sendGlyphColor(canSend: false, agentAccentColor: .orange)
                 == .orange)
     }
+
+    @Test func contextRingUsesAgentAccentNormallyAndRedForWarning() {
+        #expect(ComposerControlBar.contextRingColor(warning: false, agentAccentColor: .orange)
+                == .orange)
+        #expect(ComposerControlBar.contextRingColor(warning: true, agentAccentColor: .orange)
+                == .red)
+    }
 }
