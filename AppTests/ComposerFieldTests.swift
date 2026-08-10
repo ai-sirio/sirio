@@ -76,6 +76,16 @@ struct ComposerStyleTests {
         #expect(light.brightnessComponent > dark.brightnessComponent)
     }
 
+    @Test func transcriptHoverIsLighterAndNeutralInDarkAppearance() throws {
+        let hover = resolved(AppTheme.chatRowHover, .darkAqua)
+        let chat = resolved(AppTheme.chatSurface, .darkAqua)
+        #expect(hover.brightnessComponent > chat.brightnessComponent)
+        #expect(hover.blueComponent - hover.redComponent <= 6.0 / 255.0)
+
+        let source = try chatRowChromeSource()
+        #expect(source.contains("AppTheme.chatRowHover"))
+    }
+
     @Test func textViewNoLongerForcesADarkAppKitAppearance() {
         let textView = ChatTextEditor.makeTextView()
         #expect(textView.appearance == nil)
@@ -97,6 +107,14 @@ struct ComposerStyleTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func chatRowChromeSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatRowChrome.swift")
         return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 
