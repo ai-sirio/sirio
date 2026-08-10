@@ -160,6 +160,10 @@ public struct TranscriptReducer: Sendable, Equatable {
         case .usageUpdate(let usage):
             contextUsage = usage
 
+        case .notice(let text):
+            closeOpenStreams()
+            items.append(.systemNotice(id: makeId("notice"), text: text))
+
         case .unknown:
             break
         }

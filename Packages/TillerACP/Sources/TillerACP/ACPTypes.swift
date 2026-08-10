@@ -128,10 +128,16 @@ public struct ModelInfo: Sendable, Equatable, Codable {
     public var modelId: String
     public var name: String
     public var description: String?
-    public init(modelId: String, name: String, description: String? = nil) {
+    /// Effort levels this model accepts, as reported by the agent. `nil`
+    /// means the model reports no effort support and no picker is offered.
+    public var supportedEffortLevels: [String]?
+
+    public init(modelId: String, name: String, description: String? = nil,
+                supportedEffortLevels: [String]? = nil) {
         self.modelId = modelId
         self.name = name
         self.description = description
+        self.supportedEffortLevels = supportedEffortLevels
     }
 }
 

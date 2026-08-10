@@ -40,6 +40,8 @@ public enum SessionUpdate: Sendable, Equatable {
     case availableCommandsUpdate([AvailableCommand])
     case currentModeUpdate(String)
     case usageUpdate(ContextUsage)
+    /// Driver-synthesised inline notice; never sent by the ACP wire.
+    case notice(String)
     case unknown(String)
 }
 

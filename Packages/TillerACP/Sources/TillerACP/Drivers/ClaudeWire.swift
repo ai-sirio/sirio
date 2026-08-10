@@ -3,6 +3,11 @@ import Foundation
 /// A decoded line from Claude Code's `stream-json` protocol.
 public enum ClaudeWireMessage: Decodable, Sendable, Equatable {
     case systemInit(ClaudeInit)
+    case systemEvent(ClaudeSystemEvent)
+    case rateLimit(ClaudeRateLimit)
+    case promptSuggestion(String)
+    case streamEvent(JSONValue)
+    case commandsChanged([JSONValue])
     case assistant(ClaudeAssistantMessage)
     case user(ClaudeUserMessage)
     case result(ClaudeResult)
@@ -17,6 +22,19 @@ public enum ClaudeWireMessage: Decodable, Sendable, Equatable {
         switch type {
         case "system" where value["subtype"]?.stringValue == "init":
             self = .systemInit(try value.decoded(ClaudeInit.self))
+        case "system":
+            self = .systemEvent(ClaudeSystemEvent(
+                subtype: value["subtype"]?.stringValue ?? "",
+                payload: value))
+        case "rate_limit_event":
+            let info = value["rate_limit_info"] ?? value
+            self = .rateLimit(try info.decoded(ClaudeRateLimit.self))
+        case "prompt_suggestion":
+            self = .promptSuggestion(value["suggestion"]?.stringValue ?? "")
+        case "stream_event":
+            self = .streamEvent(value["event"] ?? value)
+        case "commands_changed":
+            self = .commandsChanged(value["commands"]?.arrayValue ?? [])
         case "assistant":
             self = .assistant(try value.decoded(ClaudeAssistantMessage.self))
         case "user":
@@ -60,6 +78,35 @@ public struct ClaudeInit: Decodable, Sendable, Equatable {
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
         tools = try container.decodeIfPresent([String].self, forKey: .tools) ?? []
         slashCommands = try container.decodeIfPresent([String].self, forKey: .slashCommands) ?? []
+    }
+}
+
+/// Any `type: "system"` line that is not the `init` handshake. The subtype
+/// set is open and version-dependent, so the payload stays generic.
+public struct ClaudeSystemEvent: Sendable, Equatable {
+    public let subtype: String
+    public let payload: JSONValue
+
+    public init(subtype: String, payload: JSONValue) {
+        self.subtype = subtype
+        self.payload = payload
+    }
+}
+
+public struct ClaudeRateLimit: Decodable, Sendable, Equatable {
+    public let status: String
+    public let resetsAt: Int?
+    public let rateLimitType: String?
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        resetsAt = try container.decodeIfPresent(Int.self, forKey: .resetsAt)
+        rateLimitType = try container.decodeIfPresent(String.self, forKey: .rateLimitType)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status, resetsAt, rateLimitType
     }
 }
 
@@ -293,11 +340,25 @@ public struct ClaudeResult: Decodable, Sendable, Equatable {
     public let sessionId: String
     public let usage: ClaudeUsage?
     public let isError: Bool
+    public let subtype: String?
+    public let totalCostUsd: Double?
+    public let durationMs: Int?
+    public let ttftMs: Int?
+    public let numTurns: Int?
+    public let modelUsage: JSONValue?
+    public let permissionDenials: [JSONValue]?
 
     enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case usage
         case isError = "is_error"
+        case subtype
+        case totalCostUsd = "total_cost_usd"
+        case durationMs = "duration_ms"
+        case ttftMs = "ttft_ms"
+        case numTurns = "num_turns"
+        case modelUsage
+        case permissionDenials = "permission_denials"
     }
 
     public init(from decoder: Decoder) throws {
@@ -305,6 +366,14 @@ public struct ClaudeResult: Decodable, Sendable, Equatable {
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId) ?? ""
         usage = try container.decodeIfPresent(ClaudeUsage.self, forKey: .usage)
         isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+        subtype = try container.decodeIfPresent(String.self, forKey: .subtype)
+        totalCostUsd = try container.decodeIfPresent(Double.self, forKey: .totalCostUsd)
+        durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs)
+        ttftMs = try container.decodeIfPresent(Int.self, forKey: .ttftMs)
+        numTurns = try container.decodeIfPresent(Int.self, forKey: .numTurns)
+        modelUsage = try container.decodeIfPresent(JSONValue.self, forKey: .modelUsage)
+        permissionDenials = try container.decodeIfPresent([JSONValue].self,
+                                                          forKey: .permissionDenials)
     }
 }
 

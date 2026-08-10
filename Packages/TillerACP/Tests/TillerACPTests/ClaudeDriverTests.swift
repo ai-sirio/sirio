@@ -133,6 +133,164 @@ import Testing
         await driver.stop()
     }
 
+    @Test func commandsChangedRefreshesTheCommandList() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        await mock.emit(#"{"type":"commands_changed","commands":[{"name":"newcmd","description":"Added later"}]}"#)
+
+        let events = await waitForEvent(collector) { event in
+            guard case .update(.availableCommandsUpdate(let commands)) = event else { return false }
+            return commands.contains { $0.name == "newcmd" }
+        }
+        #expect(events.contains { event in
+            guard case .update(.availableCommandsUpdate(let commands)) = event else { return false }
+            return commands.contains { $0.name == "newcmd" }
+        })
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func modelsCarryTheirEffortLevels() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: "sonnet", resumeSessionId: nil)
+        try await driver.start()
+
+        let connectTask = Task {
+            try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        }
+        let sent = try await mock.waitForSent(count: 1)
+        let requestId = try jsonValue(sent[0])["request_id"]?.stringValue ?? ""
+        await mock.emit("""
+        {"type":"control_response","response":{"subtype":"success","request_id":"\(requestId)","response":{"models":[\
+        {"value":"sonnet","displayName":"Sonnet","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]},\
+        {"value":"haiku","displayName":"Haiku"}]}}}
+        """)
+        let handle = try await connectTask.value
+
+        let models = handle.models?.availableModels ?? []
+        #expect(models.first { $0.modelId == "sonnet" }?.supportedEffortLevels
+            == ["low", "medium", "high", "xhigh", "max"])
+        #expect(models.first { $0.modelId == "haiku" }?.supportedEffortLevels == nil)
+
+        await driver.stop()
+    }
+
+    @Test func effortIsSentAsAFlagSettingAndValidated() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: "sonnet", resumeSessionId: nil)
+        try await driver.start()
+
+        let connectTask = Task {
+            try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        }
+        let sent = try await mock.waitForSent(count: 1)
+        let requestId = try jsonValue(sent[0])["request_id"]?.stringValue ?? ""
+        await mock.emit("""
+        {"type":"control_response","response":{"subtype":"success","request_id":"\(requestId)","response":{"models":[\
+        {"value":"sonnet","displayName":"Sonnet","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"]}]}}}
+        """)
+        _ = try await connectTask.value
+
+        await driver.setEffort("xhigh")
+        let afterValid = try await mock.waitForSent(count: 2)
+        let request = try jsonValue(afterValid[1])
+        #expect(request["request"]?["subtype"]?.stringValue == "apply_flag_settings")
+        #expect(request["request"]?["settings"]?["effort"]?.stringValue == "xhigh")
+
+        // Rejected before it reaches the wire: the CLI would answer "success".
+        await driver.setEffort("bogus_level")
+        #expect(await mock.sent.count == 2)
+
+        let options = await driver.staticEffortOptions()
+        #expect(options?.options?.map(\.value)
+            == ["low", "medium", "high", "xhigh", "max"])
+        #expect(options?.currentValue == "xhigh")
+
+        await driver.stop()
+    }
+
+    @Test func modelWithoutEffortSupportOffersNoOptions() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: "haiku", resumeSessionId: nil)
+        try await driver.start()
+
+        let connectTask = Task {
+            try await driver.connect(cwd: "/tmp/w", resumeSessionId: nil, mcpServers: [])
+        }
+        let sent = try await mock.waitForSent(count: 1)
+        let requestId = try jsonValue(sent[0])["request_id"]?.stringValue ?? ""
+        await mock.emit("""
+        {"type":"control_response","response":{"subtype":"success","request_id":"\(requestId)","response":{"models":[\
+        {"value":"haiku","displayName":"Haiku"}]}}}
+        """)
+        _ = try await connectTask.value
+
+        #expect(await driver.staticEffortOptions() == nil)
+        await driver.stop()
+    }
+
+    @Test func promptCarriesNoEffortPrefix() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil,
+                                            effort: "high")
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let promptTask = Task { try await driver.prompt([.text("do the thing")]) }
+        let sent = try await mock.waitForSent(count: 2)
+        let text = try jsonValue(sent[1])["message"]?["content"]?
+            .arrayValue?.first?["text"]?.stringValue
+        #expect(text == "do the thing")
+
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1"}"#)
+        _ = try await promptTask.value
+        await driver.stop()
+    }
+
+    @Test func systemInitDoesNotReplaceRichCommandDescriptions() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let initialEvents = await waitForEvent(collector) { event in
+            guard case .update(.availableCommandsUpdate(let commands)) = event else { return false }
+            return commands.contains {
+                $0.name == "doctor" && !$0.description.isEmpty
+            }
+        }
+        #expect(initialEvents.contains { event in
+            guard case .update(.availableCommandsUpdate(let commands)) = event else { return false }
+            return commands.contains { $0.name == "doctor" && !$0.description.isEmpty }
+        })
+
+        await mock.emit(#"{"type":"system","subtype":"init","session_id":"s1","slash_commands":["doctor"]}"#)
+
+        let events = await waitForEvents(collector, count: 2)
+        let commandUpdates = events.compactMap { event -> [AvailableCommand]? in
+            guard case .update(.availableCommandsUpdate(let commands)) = event else { return nil }
+            return commands
+        }
+        #expect(commandUpdates.last?.allSatisfy { !$0.description.isEmpty } == true)
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
     /// Turn completion has to reach the transcript through the same stream as
     /// the content it closes. Applied out of band it can overtake chunks the
     /// consumer has not read yet, and the tail of a reply lands after the
@@ -221,21 +379,7 @@ import Testing
         await driver.stop()
     }
 
-    @Test func staticEffortOptionsExposesLowMediumHigh() async throws {
-        let mock = MockTransport()
-        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
-                                            model: nil, resumeSessionId: nil)
-        let options = await driver.staticEffortOptions()
-        #expect(options?.id == "effort")
-        #expect(options?.currentValue == nil)
-        #expect(options?.options?.map(\.value) == ["low", "medium", "high"])
-
-        await driver.setEffort("high")
-        let updated = await driver.staticEffortOptions()
-        #expect(updated?.currentValue == "high")
-    }
-
-    @Test func effortPrefixInjectedIntoPrompt() async throws {
+    @Test func contextUsageComesFromModelUsageWithoutProbing() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
                                             model: nil, resumeSessionId: nil)
@@ -243,14 +387,106 @@ import Testing
         let eventTask = collect(driver, into: collector)
         try await driver.start()
         _ = try await connectWithInitializeResponse(driver, mock: mock)
-        await driver.setEffort("high")
+
+        let promptTask = Task { try await driver.prompt([.text("hi")]) }
+        _ = try await mock.waitForSent(count: 2)
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","usage":{"input_tokens":4,"output_tokens":123,"cache_read_input_tokens":83967},"modelUsage":{"claude-sonnet-5":{"contextWindow":1000000}}}"#)
+        _ = try await promptTask.value
+
+        let events = await waitForEvent(collector) { event in
+            if case .update(.usageUpdate) = event { return true }
+            return false
+        }
+        #expect(events.contains { event in
+            guard case .update(.usageUpdate(let usage)) = event else { return false }
+            return usage.size == 1_000_000 && usage.used == 4 + 123 + 83967
+        })
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func resultEmitsTurnStats() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let promptTask = Task { try await driver.prompt([.text("hi")]) }
+        _ = try await mock.waitForSent(count: 2)
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","total_cost_usd":0.408,"duration_ms":11672,"ttft_ms":3794,"num_turns":2,"usage":{"input_tokens":4,"output_tokens":123}}"#)
+        _ = try await promptTask.value
+
+        let events = await waitForEvent(collector) { event in
+            if case .update(.notice) = event { return true }
+            return false
+        }
+        let notice = events.compactMap { event -> String? in
+            guard case .update(.notice(let text)) = event else { return nil }
+            return text
+        }.first
+        #expect(notice?.contains("$0.41") == true)
+        #expect(notice?.contains("11.7s") == true)
+        #expect(notice?.contains("123") == true)
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func compactionAndRateLimitBecomeNotices() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        await mock.emit(#"{"type":"system","subtype":"compact_boundary","session_id":"s1"}"#)
+        await mock.emit(#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}"#)
+        await mock.emit(#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"}}"#)
+
+        _ = await waitForEvent(collector) { event in
+            guard case .update(.notice(let text)) = event else { return false }
+            return text.lowercased().contains("rate limit")
+        }
+        let notices = await collector.snapshot().compactMap { event -> String? in
+            guard case .update(.notice(let text)) = event else { return nil }
+            return text
+        }
+        #expect(notices.contains { $0.lowercased().contains("compact") })
+        // "allowed" is the normal state and must stay silent.
+        #expect(notices.filter { $0.lowercased().contains("rate limit") }.count == 1)
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func effortOptionsRequireModelCapabilities() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        #expect(await driver.staticEffortOptions() == nil)
+    }
+
+    @Test func effortIsNotInjectedIntoPrompt() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
 
         let promptTask = Task { try await driver.prompt([.text("hi")]) }
         let sent = try await mock.waitForSent(count: 2)
         let prompt = try jsonValue(sent[1])
         let content = prompt["message"]?["content"]?.arrayValue
         #expect(content?.first?["text"]?.stringValue
-                == "Reasoning effort for this and following turns: high. hi")
+                == "hi")
 
         await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1"}"#)
         _ = try await promptTask.value
@@ -336,6 +572,27 @@ import Testing
         await driver.stop()
     }
 
+    @Test func unhandledControlRequestsStillGetAResponse() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        await mock.emit(#"{"type":"control_request","request_id":"rq-9","request":{"subtype":"request_user_dialog"}}"#)
+
+        let sent = try await mock.waitForSent(count: 2)
+        let reply = try jsonValue(sent[1])
+        #expect(reply["type"]?.stringValue == "control_response")
+        #expect(reply["response"]?["request_id"]?.stringValue == "rq-9")
+        #expect(reply["response"]?["subtype"]?.stringValue == "error")
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
     @Test func fullAutoAutomaticallyAllowsCanUseTool() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .fullAuto,
@@ -358,6 +615,32 @@ import Testing
         #expect(!events.contains {
             if case .permissionRequested = $0 { true } else { false }
         })
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func toolResultCarriesStructuredPayload() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        await mock.emit(#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"tu-1","type":"tool_result","content":"1\thi\n"}]},"tool_use_result":{"type":"text","file":{"filePath":"/w/f.txt","numLines":2,"totalLines":2}}}"#)
+
+        let events = await waitForEvent(collector) { event in
+            if case .update(.toolCallUpdate) = event { return true }
+            return false
+        }
+        let update = events.compactMap { event -> ToolCallUpdate? in
+            guard case .update(.toolCallUpdate(let update)) = event else { return nil }
+            return update
+        }.first
+        #expect(update?.toolCallId == "tu-1")
+        #expect(update?.rawOutput?["file"]?["numLines"]?.intValue == 2)
+
         eventTask.cancel()
         await driver.stop()
     }
@@ -486,13 +769,14 @@ import Testing
     @Test func launchCommandLine() {
         let resumeLaunch = ClaudeStreamJSONDriver.launchTransport(
             worktreePath: "/tmp/w", permissionMode: .plan,
-            model: "claude-sonnet-5", resumeSessionId: "abc")
+            model: "claude-sonnet-5", resumeSessionId: "abc", effort: "xhigh")
         let resumeCommand = resumeLaunch.transport.arguments.last!
         #expect(resumeCommand.contains("--permission-mode plan"))
         #expect(resumeCommand.contains("--resume abc"))
         #expect(!resumeCommand.contains("--session-id"))
         #expect(resumeLaunch.sessionId == "abc")
         #expect(resumeCommand.contains("--model claude-sonnet-5"))
+        #expect(resumeCommand.contains("--effort xhigh"))
 
         let freshLaunch = ClaudeStreamJSONDriver.launchTransport(
             worktreePath: "/tmp/w", permissionMode: .plan,
