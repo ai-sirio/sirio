@@ -19,6 +19,7 @@ import Foundation
 
     @Test func matchesSubstringCaseInsensitive() throws {
         let root = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
         let hits = FileMentionIndex.candidates(
             worktreePath: root.path, query: "model", limit: 10)
         #expect(hits.contains("App/AppModel.swift"))
@@ -27,6 +28,7 @@ import Foundation
 
     @Test func ranksFilenamePrefixFirstAndRespectsLimit() throws {
         let root = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
         let hits = FileMentionIndex.candidates(
             worktreePath: root.path, query: "chat", limit: 1)
         #expect(hits == ["App/Chat/ChatView.swift"])
@@ -34,6 +36,7 @@ import Foundation
 
     @Test func skipsIgnoredDirectories() throws {
         let root = try makeTree()
+        defer { try? FileManager.default.removeItem(at: root) }
         let hits = FileMentionIndex.candidates(
             worktreePath: root.path, query: "", limit: 100)
         #expect(!hits.contains { $0.hasPrefix(".git/") })
