@@ -305,7 +305,6 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             } else {
                 Task { [weak self] in await self?.probeContextUsage() }
             }
-            if let stats = turnStatsNotice(result) { emitNotice(stats) }
             if let denials = result.permissionDenials, !denials.isEmpty {
                 emitNotice("\(denials.count) permission request(s) denied")
             }
@@ -526,26 +525,6 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             + (usage.cacheCreationInputTokens ?? 0)
         guard used >= 0 else { return nil }
         return ContextUsage(used: used, size: size)
-    }
-
-    private func turnStatsNotice(_ result: ClaudeResult) -> String? {
-        var parts: [String] = []
-        if let duration = result.durationMs {
-            parts.append(String(format: "%.1fs", Double(duration) / 1000))
-        }
-        if let ttft = result.ttftMs {
-            parts.append(String(format: "TTFT %.1fs", Double(ttft) / 1000))
-        }
-        if let cost = result.totalCostUsd {
-            parts.append(String(format: "$%.2f", cost))
-        }
-        if let usage = result.usage {
-            parts.append("\(usage.inputTokens ?? 0)↑ \(usage.outputTokens ?? 0)↓")
-        }
-        if let turns = result.numTurns, turns > 1 {
-            parts.append("\(turns) turns")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func emitNotice(_ text: String) {
