@@ -39,10 +39,10 @@ struct ChatRowSurface<Content: View>: View {
             // already sizes to match the composer below.
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                isActive
-                    ? AnyShapeStyle((activeFill ?? AppTheme.selectionFill.opacity(0.36)))
-                    : hovering
-                        ? AnyShapeStyle(AppTheme.rowHover)
+                    isActive
+                        ? AnyShapeStyle((activeFill ?? AppTheme.selectionFill.opacity(0.36)))
+                        : hovering
+                        ? AnyShapeStyle(AppTheme.chatRowHover)
                         : usesInsetChrome
                             ? AnyShapeStyle(AppTheme.cardFill)
                             : AnyShapeStyle(Color.clear),
