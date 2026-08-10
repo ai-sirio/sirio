@@ -6,6 +6,10 @@
 
 **Architecture:** Keep width and bottom-overlay geometry as pure metrics in `ComposerLayout.swift`, then have `TranscriptView` consume the shared width and a caller-provided bottom inset. `ChatPaneView` owns the full-height transcript/overlay composition, measures the interactive bottom stack through a preference, draws a non-interactive gradient behind it, and feeds the measured inset back into the transcript without observing live scroll geometry.
 
+> **STATUS (2026-08-10):** Tasks 1-3 are implemented and committed (`3431e61`, `7aa07c5`, `e67a714`, `05f017d` plus their follow-ups); the boxes were simply never ticked at the time. Task 4's focused verification and Debug build passed on 2026-08-10 — 36 tests across 6 suites, all `TEST SUCCEEDED`, `BUILD SUCCEEDED`. Only the live visual QA (Task 4, Step 3) is outstanding.
+>
+> **SUPERSEDED — do not re-apply:** the fixed `#20232D` composer surface in this plan's Goal and in Task 1 was deliberately replaced afterwards by `2026-08-09-composer-agent-colors.md`, which uses the adaptive `AppTheme.chatSurface` plus per-agent accent colors. `AppTheme.composerFill` no longer exists and must not be reintroduced; `ComposerStyleTests` correctly asserts the adaptive surface. The Task 4 visual criterion "composer surface is `#20232D`" is stale — read it as "composer surface is the adaptive chat surface with the current agent's accent ring".
+
 **Tech Stack:** Swift 6, SwiftUI `Layout`, `PreferenceKey`, Swift Testing, AppKit `NSHostingView`, XcodeGen, macOS 15+
 
 ---
@@ -37,7 +41,7 @@ The user has explicitly prohibited `Scripts/ci.sh`. Do not run it and do not rep
 - Modify: `AppTests/ComposerLayoutMetricsTests.swift`
 - Modify: `AppTests/ComposerFieldTests.swift`
 
-- [ ] **Step 1: Add failing compact-metric tests**
+- [x] **Step 1: Add failing compact-metric tests**
 
 Append these assertions to `ComposerLayoutMetricsTests`:
 
@@ -48,7 +52,7 @@ Append these assertions to `ComposerLayoutMetricsTests`:
 }
 ```
 
-- [ ] **Step 2: Replace obsolete field-color tests with the failing composer-surface contract**
+- [x] **Step 2: Replace obsolete field-color tests with the failing composer-surface contract**
 
 Keep the existing deterministic `resolved(_:_: )` helper in `ComposerFieldTests.swift`, remove the two `composerFieldFill` tests, and replace them with:
 
@@ -68,7 +72,7 @@ struct ComposerStyleTests {
 }
 ```
 
-- [ ] **Step 3: Regenerate the project and verify both RED failures**
+- [x] **Step 3: Regenerate the project and verify both RED failures**
 
 Run the two selectors in separate commands to avoid the app-hosted multi-test runner issue:
 
@@ -87,7 +91,7 @@ xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
 
 Expected: the first command fails because `editorMinimumHeight` / `editorMaximumHeight` do not exist; the second fails because `AppTheme.composerFill` does not exist. An exit caused only by a selector typo is not a valid RED.
 
-- [ ] **Step 4: Add the compact metrics**
+- [x] **Step 4: Add the compact metrics**
 
 Add these constants beside the width constants in `ComposerLayoutMetrics`:
 
@@ -96,7 +100,7 @@ static let editorMinimumHeight: CGFloat = 56
 static let editorMaximumHeight: CGFloat = 128
 ```
 
-- [ ] **Step 5: Add the composer-only color token and remove the obsolete token**
+- [x] **Step 5: Add the composer-only color token and remove the obsolete token**
 
 In `AppTheme`, add a fixed, non-dynamic token near `cardFill`:
 
@@ -113,7 +117,7 @@ static let composerFill = Color(
 
 Remove `composerFieldFill`; after the unified-card change it has no production call site and its old tests are being replaced by the fixed-surface contract.
 
-- [ ] **Step 6: Apply the compact geometry and exact color to the real composer**
+- [x] **Step 6: Apply the compact geometry and exact color to the real composer**
 
 In `ChatComposerView`:
 
@@ -141,13 +145,13 @@ ChatTextEditor(
 
 Do not modify the blue ring, processing animation, editor padding, control order, 30-point action footprint, chips, slash commands, mentions, or drag/drop behavior.
 
-- [ ] **Step 7: Verify GREEN**
+- [x] **Step 7: Verify GREEN**
 
 Re-run the two focused commands from Step 3 separately.
 
 Expected: `ComposerLayoutMetricsTests` passes all existing width tests plus the compact-height test; `ComposerStyleTests` passes with one test and exact sRGB components in aqua and darkAqua. Treat existing dependency SwiftLint messages separately from the command exit and `TEST SUCCEEDED` result.
 
-- [ ] **Step 8: Commit only Task 1 files**
+- [x] **Step 8: Commit only Task 1 files**
 
 ```bash
 git add App/AppTheme.swift \
@@ -169,7 +173,7 @@ git commit -m "feat: compact chat composer surface"
 - Modify: `AppTests/ComposerLayoutMetricsTests.swift`
 - Modify: `AppTests/TranscriptViewLayoutRegressionTests.swift`
 
-- [ ] **Step 1: Add failing bottom-overlay metric tests**
+- [x] **Step 1: Add failing bottom-overlay metric tests**
 
 Add to `ComposerLayoutMetricsTests`:
 
@@ -187,7 +191,7 @@ Add to `ComposerLayoutMetricsTests`:
 }
 ```
 
-- [ ] **Step 2: Run the metric test to verify RED**
+- [x] **Step 2: Run the metric test to verify RED**
 
 ```bash
 xcodegen generate
@@ -199,7 +203,7 @@ xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
 
 Expected: compile failure because `ChatBottomOverlayMetrics` does not exist.
 
-- [ ] **Step 3: Add pure overlay geometry and the height preference**
+- [x] **Step 3: Add pure overlay geometry and the height preference**
 
 Append to `ComposerLayout.swift`:
 
@@ -239,7 +243,7 @@ extension View {
 }
 ```
 
-- [ ] **Step 4: Add a caller-provided bottom inset and shared centering to TranscriptView**
+- [x] **Step 4: Add a caller-provided bottom inset and shared centering to TranscriptView**
 
 Add the defaulted view input so current call sites keep compiling until Task 3. Keep it as a `var`: Swift's synthesized memberwise initializer includes a defaulted `var`, while a defaulted `let` would not expose the argument that Task 3 passes explicitly.
 
@@ -272,7 +276,7 @@ ScrollView {
 
 Remove the old `.padding(.horizontal, 16)`. The full-width scroll view remains unchanged; only its lazy content receives the 84% / 1440 / 16 shared column.
 
-- [ ] **Step 5: Preserve the no-live-scroll-geometry regression guard**
+- [x] **Step 5: Preserve the no-live-scroll-geometry regression guard**
 
 Extend `TranscriptViewLayoutRegressionTests` with a second source-level contract:
 
@@ -292,7 +296,7 @@ func bottomClearanceAvoidsScrollGeometryFeedback() throws {
 }
 ```
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 ```bash
 xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
@@ -308,7 +312,7 @@ xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
 
 Expected: both focused suites pass; the transcript guard still proves that no live scroll-geometry callback was introduced.
 
-- [ ] **Step 7: Commit only Task 2 files**
+- [x] **Step 7: Commit only Task 2 files**
 
 ```bash
 git add App/Chat/ComposerLayout.swift \
@@ -328,7 +332,7 @@ git commit -m "feat: align transcript with composer column"
 - Modify: `App/Chat/TranscriptView.swift`
 - Modify: `AppTests/ChatControllerTests.swift`
 
-- [ ] **Step 1: Extend the layout probe with failing roles and assertions**
+- [x] **Step 1: Extend the layout probe with failing roles and assertions**
 
 Add these cases to `ChatPaneLayoutRole` in the test compilation path:
 
@@ -380,7 +384,7 @@ let overlayFrame = try #require(capture.frames[.bottomOverlay])
 
 Do not remove the existing 640/2000 expected-width or symmetric-inset assertions.
 
-- [ ] **Step 2: Run the real chat-pane test to verify RED**
+- [x] **Step 2: Run the real chat-pane test to verify RED**
 
 ```bash
 xcodegen generate
@@ -392,7 +396,7 @@ xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
 
 Expected: compile failure for missing layout roles or missing captured frames. Do not accept a failure caused by a malformed selector.
 
-- [ ] **Step 3: Expose the new capture roles in production**
+- [x] **Step 3: Expose the new capture roles in production**
 
 Update `ChatPaneLayoutRole` in `ChatPaneView.swift`:
 
@@ -437,7 +441,7 @@ Capture the scroll viewport after its scrolling modifiers:
 .captureLayout(.transcriptViewport, enabled: layoutCaptureEnabled)
 ```
 
-- [ ] **Step 4: Convert the lower pane to a measured overlay**
+- [x] **Step 4: Convert the lower pane to a measured overlay**
 
 Add state to `ChatPaneView`:
 
@@ -525,13 +529,13 @@ private func bottomOverlay(snapshot: ChatPresentationSnapshot) -> some View {
 
 The gradient must remain below the interactive overlay in Z-stack order, must blend into `AppTheme.chatSurface`, and must not use `AppTheme.composerFill`.
 
-- [ ] **Step 5: Run the layout integration test to verify GREEN**
+- [x] **Step 5: Run the layout integration test to verify GREEN**
 
 Run the exact command from Step 2.
 
 Expected: one test passes at both 640 and 2000 points; approval stays above composer, transcript/composer widths and origins match, the transcript viewport intersects the bottom overlay, and fade/spacer heights track the measured overlay.
 
-- [ ] **Step 6: Run focused interaction regressions**
+- [x] **Step 6: Run focused interaction regressions**
 
 Run each selector in a separate app-hosted process:
 
@@ -554,7 +558,7 @@ xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
 
 Expected: send/document behavior remains green and the transcript still contains no live scroll-geometry observer.
 
-- [ ] **Step 7: Commit only Task 3 files**
+- [x] **Step 7: Commit only Task 3 files**
 
 ```bash
 git add App/Chat/ChatPaneView.swift \
@@ -571,7 +575,7 @@ git commit -m "feat: float composer over transcript"
 **Files:**
 - Verify only; no source changes expected
 
-- [ ] **Step 1: Regenerate the project and run the approved focused suite set**
+- [x] **Step 1: Regenerate the project and run the approved focused suite set**
 
 Run each selector separately to avoid the previously diagnosed Swift Testing app-host sequence hang:
 
@@ -617,7 +621,7 @@ xcodebuild test -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
 
 Expected: every command exits 0 with `TEST SUCCEEDED`. Report dependency SwiftLint and session-restore diagnostics separately; do not reinterpret them as product assertions.
 
-- [ ] **Step 2: Build the Debug app normally**
+- [x] **Step 2: Build the Debug app normally**
 
 ```bash
 xcodebuild build -project Tiller.xcodeproj -scheme Tiller -configuration Debug \
@@ -641,7 +645,7 @@ Open the exact Debug `Tiller.app` produced by Step 2 and verify:
 
 Capture a screenshot if Computer Use permissions are available. Static inspection and layout tests do not count as live visual evidence.
 
-- [ ] **Step 4: Leave the worktree scoped and report validation honestly**
+- [x] **Step 4: Leave the worktree scoped and report validation honestly**
 
 ```bash
 git status --short
