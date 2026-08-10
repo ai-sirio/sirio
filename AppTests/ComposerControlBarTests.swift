@@ -83,4 +83,27 @@ struct ComposerControlBarTests {
             #expect(deltaFromAccent > 0.001)
         }
     }
+
+    @Test func sendFillUsesTheAgentAccentColorWhenSendIsEnabled() {
+        #expect(ComposerControlBar.sendFill(canSend: true, agentAccentColor: .red) == .red)
+    }
+
+    @Test func sendFillUsesTheInactiveFillWhenSendIsDisabled() {
+        #expect(ComposerControlBar.sendFill(canSend: false, agentAccentColor: .red)
+                == ComposerControlBar.inactiveActionFill)
+    }
+
+    @Test func sendGlyphUsesWhiteWhenSendIsEnabledAndAgentAccentWhenDisabled() {
+        #expect(ComposerControlBar.sendGlyphColor(canSend: true, agentAccentColor: .orange)
+                == .white)
+        #expect(ComposerControlBar.sendGlyphColor(canSend: false, agentAccentColor: .orange)
+                == .orange)
+    }
+
+    @Test func contextRingUsesAgentAccentNormallyAndRedForWarning() {
+        #expect(ComposerControlBar.contextRingColor(warning: false, agentAccentColor: .orange)
+                == .orange)
+        #expect(ComposerControlBar.contextRingColor(warning: true, agentAccentColor: .orange)
+                == .red)
+    }
 }

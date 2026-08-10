@@ -59,74 +59,111 @@ private struct ColorSchemeProbe: NSViewRepresentable {
 @Suite("ComposerStyle", .serialized)
 @MainActor
 struct ComposerStyleTests {
-    @Test func composerSurfaceMatchesTheApprovedHexInEveryAppearance() {
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let surface = resolved(AppTheme.composerFill, appearance)
-            #expect(abs(surface.redComponent - (32.0 / 255.0)) < 0.0001)
-            #expect(abs(surface.greenComponent - (35.0 / 255.0)) < 0.0001)
-            #expect(abs(surface.blueComponent - (45.0 / 255.0)) < 0.0001)
-            #expect(abs(surface.alphaComponent - 1.0) < 0.0001)
-        }
+    /// The composer's card fill is the same dynamic surface the transcript
+    /// sits on — that's what makes it blend in instead of standing out as
+    /// its own dark panel. Asserted at the call site, because comparing the
+    /// token to itself would pass even if the card went back to a fixed fill.
+    @Test func composerCardFillIsTheChatTranscriptSurface() throws {
+        let source = try chatComposerViewSource()
+        #expect(source.contains("background(AppTheme.chatSurface"))
     }
 
-    @Test func composerUsesDarkSemanticAppearanceOnAqua() {
-        #expect(AppTheme.ComposerAppearance.colorScheme == .dark)
-        #expect(AppTheme.ComposerAppearance.appKitAppearance == .darkAqua)
+    /// The point of that swap: unlike the fixed `#20232D` it replaced, this
+    /// surface actually follows the app's light/dark theme.
+    @Test func chatSurfaceAdaptsToTheAppearance() {
+        let light = resolved(AppTheme.chatSurface, .aqua)
+        let dark = resolved(AppTheme.chatSurface, .darkAqua)
+        #expect(light.brightnessComponent > dark.brightnessComponent)
+    }
 
+    @Test func transcriptHoverIsLighterAndNeutralInDarkAppearance() throws {
+        let hover = resolved(AppTheme.chatRowHover, .darkAqua)
+        let chat = resolved(AppTheme.chatSurface, .darkAqua)
+        #expect(hover.brightnessComponent > chat.brightnessComponent)
+        #expect(hover.blueComponent - hover.redComponent <= 6.0 / 255.0)
+
+        let source = try chatRowChromeSource()
+        #expect(source.contains("AppTheme.chatRowHover"))
+    }
+
+    @Test func textViewNoLongerForcesADarkAppKitAppearance() {
         let textView = ChatTextEditor.makeTextView()
-        #expect(textView.appearance?.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
-
-        let surface = resolved(AppTheme.composerFill, .darkAqua)
-        let text = resolved(textView.textColor ?? .black, .darkAqua)
-        let caret = resolved(textView.insertionPointColor ?? .black, .darkAqua)
-        #expect(text.brightnessComponent > surface.brightnessComponent)
-        #expect(caret.brightnessComponent > surface.brightnessComponent)
+        #expect(textView.appearance == nil)
     }
 
-    @Test func composerCardDarkAppearanceDoesNotLeakIntoQueuedContent() {
-        let queuedCapture = ColorSchemeCapture()
-        let cardCapture = ColorSchemeCapture()
-        let root = VStack {
-            ColorSchemeProbe(capture: queuedCapture)
-            ColorSchemeProbe(capture: cardCapture)
-                .composerCardAppearance()
-        }
-        .environment(\.colorScheme, .light)
+    @Test func composerCardNoLongerForcesTheColorSchemeEnvironment() {
+        let capture = ColorSchemeCapture()
+        let root = ColorSchemeProbe(capture: capture)
+            .environment(\.colorScheme, .light)
         let host = NSHostingView(rootView: root)
         host.frame = NSRect(x: 0, y: 0, width: 300, height: 100)
         host.layoutSubtreeIfNeeded()
 
-        #expect(queuedCapture.value == .light)
-        #expect(cardCapture.value == .dark)
+        #expect(capture.value == .light)
     }
 
-    @Test func composerBodyUsesScopedCardAppearanceSeam() throws {
+    private func chatComposerViewSource() throws -> String {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
-        let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        guard let bodyStart = source.range(of: "var body: some View"),
-              let bodyEnd = source.range(of: "// MARK: - Card", range: bodyStart.upperBound..<source.endIndex)
-        else {
-            Issue.record("ChatComposerView body/card markers are missing")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    private func chatRowChromeSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatRowChrome.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    @Test func chatComposerViewSourceNoLongerReferencesTheDeletedAppearanceSeam() throws {
+        let source = try chatComposerViewSource()
+        #expect(!source.contains("composerCardAppearance"))
+        #expect(!source.contains("cardWithAppearance"))
+        #expect(!source.contains(".environment(\\.colorScheme"))
+    }
+
+}
+
+@Suite("ComposerBorderView")
+struct ComposerBorderViewTests {
+    @Test func idleBorderIsTheNeutralHairlineAtFullOpacity() {
+        #expect(ComposerBorderView.borderColor(isFocused: false, agentAccentColor: .red)
+                == AppTheme.hairline)
+    }
+
+    @Test func focusedBorderIsTheAgentAccentColor() {
+        #expect(ComposerBorderView.borderColor(isFocused: true, agentAccentColor: .red) == .red)
+    }
+
+    @Test func animatedGradientStartsAndEndsOnTheOpaqueAgentColor() {
+        let colors = ComposerBorderView.animatedGradientColors(agentAccentColor: .red)
+        #expect(colors.count == 5)
+        #expect(colors.first == .red)
+        #expect(colors.last == .red)
+        #expect(colors[2] == Color.red.opacity(0))
+    }
+
+    @Test func animatedBorderLayersOverTheHairlineBase() throws {
+        let source = try composerBorderViewSource()
+        guard let zStack = source.range(of: "ZStack {"),
+              let base = source.range(of: "? AppTheme.hairline"),
+              let gradient = source.range(of: "AngularGradient(") else {
+            #expect(Bool(false))
             return
         }
 
-        let bodySource = String(source[bodyStart.lowerBound..<bodyEnd.lowerBound])
-        #expect(bodySource.contains("cardWithAppearance"))
-        #expect(!bodySource.contains("card.composerCardAppearance()"))
-        #expect(!bodySource.contains(".environment(\\.colorScheme"))
+        #expect(base.lowerBound > zStack.lowerBound)
+        #expect(gradient.lowerBound > zStack.lowerBound)
+    }
 
-        guard let seamStart = source.range(of: "private var cardWithAppearance: some View"),
-              let seamEnd = source.range(
-                  of: "private var editor: some View",
-                  range: seamStart.upperBound..<source.endIndex)
-        else {
-            Issue.record("ChatComposerView cardWithAppearance seam is missing")
-            return
-        }
-        let seamSource = String(source[seamStart.lowerBound..<seamEnd.lowerBound])
-        #expect(seamSource.contains("card.composerCardAppearance()"))
+    private func composerBorderViewSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 }

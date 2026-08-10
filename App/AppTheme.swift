@@ -105,6 +105,13 @@ enum AppTheme {
     static let rowHover = dynamic(
         light: NSColor(srgbRed: 0.90, green: 0.905, blue: 0.93, alpha: 1),
         dark: NSColor(srgbRed: 32.0 / 255.0, green: 36.0 / 255.0, blue: 45.0 / 255.0, alpha: 1))
+    /// Hover fill for transcript rows. Unlike the shared `rowHover`, which is
+    /// tuned against the darker sidebar surface, this sits just above
+    /// `chatSurface` and keeps the design system's neutral +4 red-to-blue
+    /// spread instead of reading blue.
+    static let chatRowHover = dynamic(
+        light: NSColor(srgbRed: 237.0 / 255.0, green: 237.0 / 255.0, blue: 240.0 / 255.0, alpha: 1),
+        dark: NSColor(srgbRed: 48.0 / 255.0, green: 49.0 / 255.0, blue: 53.0 / 255.0, alpha: 1))
     static let selectionFill = dynamic(
         light: NSColor(srgbRed: 0.85, green: 0.86, blue: 0.91, alpha: 1),
         dark: NSColor(srgbRed: 0.169, green: 0.184, blue: 0.227, alpha: 1))
@@ -166,14 +173,6 @@ enum AppTheme {
     static let cardFill = dynamic(
         light: NSColor(srgbRed: 0.91, green: 0.915, blue: 0.94, alpha: 1),
         dark: NSColor(srgbRed: 44.0 / 255.0, green: 47.0 / 255.0, blue: 57.0 / 255.0, alpha: 1))
-    /// Composer-only surface approved from the Codex-inspired visual review (#20232D).
-    static let composerFill = Color(
-        .sRGB,
-        red: 32.0 / 255.0,
-        green: 35.0 / 255.0,
-        blue: 45.0 / 255.0,
-        opacity: 1
-    )
     /// Recessed surface for code and diff content nested inside chat cards.
     static let codeInsetFill = dynamic(
         light: .white,
@@ -182,8 +181,9 @@ enum AppTheme {
                       blue: 16.0 / 255.0,
                       alpha: 1))
     enum ComposerAppearance {
-        static let colorScheme: ColorScheme = .dark
-        static let appKitAppearance = NSAppearance.Name.darkAqua
+        /// Semantic — resolves against whatever appearance the composer's
+        /// text view actually has (now the app's real theme; see
+        /// `ChatTextEditor.makeTextView`).
         static let primaryTextColor = NSColor.textColor
     }
     /// Clickable file paths in the transcript. `.tint` bypasses the tuned

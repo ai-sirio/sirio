@@ -37,7 +37,7 @@ struct ChatComposerView: View {
                 mentionPopup(query: query)
             }
             queuedList
-            cardWithAppearance
+            card
         }
         .padding(.vertical, 10)
     .enableInjection()
@@ -46,27 +46,27 @@ struct ChatComposerView: View {
     // MARK: - Card
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            editor
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-            ComposerControlBar(
-                controller: controller, document: document, onAttach: attachImage,
-                onSend: sendCurrent, canSend: canSend, canInteract: canInteract)
+        AgentAccentColorProvider(agentId: controller.agentId) { agentAccentColor in
+            VStack(alignment: .leading, spacing: 8) {
+                editor
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                ComposerControlBar(
+                    controller: controller, document: document, onAttach: attachImage,
+                    onSend: sendCurrent, canSend: canSend, canInteract: canInteract,
+                    agentAccentColor: agentAccentColor)
+            }
+            .padding(12)
+            .background(AppTheme.chatSurface, in: RoundedRectangle(cornerRadius: 22))
+            .overlay {
+                ComposerBorderView(
+                    isAnimating: isPrompting,
+                    isFocused: document.isFocused,
+                    reduceMotion: reduceMotion,
+                    agentAccentColor: agentAccentColor)
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
         }
-        .padding(12)
-        .background(AppTheme.composerFill, in: RoundedRectangle(cornerRadius: 22))
-        .overlay {
-            ComposerBorderView(
-                isAnimating: isPrompting,
-                isFocused: document.isFocused,
-                reduceMotion: reduceMotion)
-        }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: document.isFocused)
-    }
-
-    private var cardWithAppearance: some View {
-        card.composerCardAppearance()
     }
 
     private var editorPlaceholder: String {
@@ -246,21 +246,16 @@ struct ChatComposerView: View {
     }
 }
 
-extension View {
-    /// Keeps the fixed-dark composer card's semantic labels and controls
-    /// legible without changing the appearance of transparent queued content
-    /// or adaptive popups around it.
-    func composerCardAppearance() -> some View {
-        environment(\.colorScheme, AppTheme.ComposerAppearance.colorScheme)
-    }
-}
-
-/// Accent border for the composer card: static when idle/focused, spinning
-/// conic gradient while the agent is processing a turn.
-private struct ComposerBorderView: View {
+/// Accent border for the composer card: static neutral hairline at rest,
+/// static per-agent accent color when focused, spinning per-agent conic
+/// gradient while the agent is processing a turn. Not `private`: its pure
+/// color-selection functions are covered directly by
+/// `AppTests/ComposerFieldTests.swift`.
+struct ComposerBorderView: View {
     let isAnimating: Bool
     let isFocused: Bool
     let reduceMotion: Bool
+    let agentAccentColor: Color
 
     @State private var phase: Double = 0
 
@@ -268,37 +263,51 @@ private struct ComposerBorderView: View {
     private let lineWidth: CGFloat = 1.5
 
     var body: some View {
-        if isAnimating && !reduceMotion {
-            AngularGradient(
-                colors: [
-                    .accentColor,
-                    .accentColor.opacity(0.15),
-                    .accentColor.opacity(0),
-                    .accentColor.opacity(0.15),
-                    .accentColor
-                ],
-                center: .center
-            )
-            .rotationEffect(.degrees(phase))
-            .mask {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(lineWidth: lineWidth)
-            }
-            .onAppear {
-                withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
-                    phase = 360
-                }
-            }
-        } else {
-            // Idle and focused states use a neutral hairline: an accent ring
-            // around a floating composer reads as a highlight over the
-            // transcript rather than as the edge of the card.
+        ZStack {
             RoundedRectangle(cornerRadius: cornerRadius)
                 .strokeBorder(
-                    AppTheme.hairline.opacity(isFocused ? 0.45 : 0.24),
-                    lineWidth: 1
-                )
+                    isAnimating && !reduceMotion
+                        ? AppTheme.hairline
+                        : Self.borderColor(isFocused: isFocused, agentAccentColor: agentAccentColor),
+                    lineWidth: 1)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isFocused)
+
+            if isAnimating && !reduceMotion {
+                AngularGradient(
+                    colors: Self.animatedGradientColors(agentAccentColor: agentAccentColor),
+                    center: .center
+                )
+                .rotationEffect(.degrees(phase))
+                .mask {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .strokeBorder(lineWidth: lineWidth)
+                }
+                .onAppear {
+                    withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                        phase = 360
+                    }
+                }
+            }
         }
+    }
+
+    /// Idle: the shared neutral hairline, always visible. Focused: the
+    /// active agent's accent color. No opacity fade in either case — the
+    /// border reads as a fixed frame around the card, not a highlight that
+    /// comes and goes.
+    static func borderColor(isFocused: Bool, agentAccentColor: Color) -> Color {
+        isFocused ? agentAccentColor : AppTheme.hairline
+    }
+
+    /// Same 5-stop shape the rotating gradient always used, recolored from
+    /// `Color.accentColor` to the active agent's accent color.
+    static func animatedGradientColors(agentAccentColor: Color) -> [Color] {
+        [
+            agentAccentColor,
+            agentAccentColor.opacity(0.15),
+            agentAccentColor.opacity(0),
+            agentAccentColor.opacity(0.15),
+            agentAccentColor
+        ]
     }
 }

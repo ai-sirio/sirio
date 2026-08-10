@@ -47,13 +47,16 @@ import Testing
     }
 
     @Test func ompIsBuiltIn() throws {
-        let spec = AgentLaunchSpec.resolved(id: "omp", installStore: try tempStore())
+        let store = try tempStore()
+        defer { try? FileManager.default.removeItem(at: store.rootDirectory) }
+        let spec = AgentLaunchSpec.resolved(id: "omp", installStore: store)
         #expect(spec == AgentLaunchSpec(executable: "/bin/zsh",
                                         arguments: ["-lc", "exec omp acp"]))
     }
 
     @Test func legacyPiACPDoesNotResolveThroughACPManifest() throws {
         let store = try tempStore()
+        defer { try? FileManager.default.removeItem(at: store.rootDirectory) }
         try store.write(InstalledAgentManifest(
             id: "pi-acp", version: "0.60.0",
             executable: "/x/pi-acp", arguments: ["--acp"],
@@ -63,6 +66,7 @@ import Testing
 
     @Test func manifestPathsWithSpacesAreQuoted() throws {
         let store = try tempStore()
+        defer { try? FileManager.default.removeItem(at: store.rootDirectory) }
         try store.write(InstalledAgentManifest(
             id: "pi-acp", version: "1.18.4",
             executable: "/Application Support/Tiller/acp-agents/pi-acp/pi-acp",
@@ -73,6 +77,7 @@ import Testing
 
     @Test func nativeIdsDoNotResolveThroughACPManifests() throws {
         let store = try tempStore()
+        defer { try? FileManager.default.removeItem(at: store.rootDirectory) }
         for id in ["claude-acp", "codex-acp", "opencode", "pi", "pi-acp"] {
             try store.write(InstalledAgentManifest(
                 id: id, version: "1.0.0", executable: "/x/\(id)",
@@ -82,8 +87,10 @@ import Testing
     }
 
     @Test func notInstalledResolvesNil() throws {
+        let store = try tempStore()
+        defer { try? FileManager.default.removeItem(at: store.rootDirectory) }
         #expect(AgentLaunchSpec.resolved(id: "codex-acp",
-                                         installStore: try tempStore()) == nil)
+                                         installStore: store) == nil)
     }
 
     @Test func launchEnvironmentMergesManifestEnv() {
