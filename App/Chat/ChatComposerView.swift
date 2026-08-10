@@ -263,28 +263,31 @@ struct ComposerBorderView: View {
     private let lineWidth: CGFloat = 1.5
 
     var body: some View {
-        if isAnimating && !reduceMotion {
-            AngularGradient(
-                colors: Self.animatedGradientColors(agentAccentColor: agentAccentColor),
-                center: .center
-            )
-            .rotationEffect(.degrees(phase))
-            .mask {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(lineWidth: lineWidth)
-            }
-            .onAppear {
-                withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
-                    phase = 360
-                }
-            }
-        } else {
+        ZStack {
             RoundedRectangle(cornerRadius: cornerRadius)
                 .strokeBorder(
-                    Self.borderColor(isFocused: isFocused, agentAccentColor: agentAccentColor),
-                    lineWidth: 1
-                )
+                    isAnimating && !reduceMotion
+                        ? AppTheme.hairline
+                        : Self.borderColor(isFocused: isFocused, agentAccentColor: agentAccentColor),
+                    lineWidth: 1)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isFocused)
+
+            if isAnimating && !reduceMotion {
+                AngularGradient(
+                    colors: Self.animatedGradientColors(agentAccentColor: agentAccentColor),
+                    center: .center
+                )
+                .rotationEffect(.degrees(phase))
+                .mask {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .strokeBorder(lineWidth: lineWidth)
+                }
+                .onAppear {
+                    withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
+                        phase = 360
+                    }
+                }
+            }
         }
     }
 

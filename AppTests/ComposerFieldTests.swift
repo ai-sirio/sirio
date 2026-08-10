@@ -127,4 +127,25 @@ struct ComposerBorderViewTests {
         #expect(colors.last == .red)
         #expect(colors[2] == Color.red.opacity(0))
     }
+
+    @Test func animatedBorderLayersOverTheHairlineBase() throws {
+        let source = try composerBorderViewSource()
+        guard let zStack = source.range(of: "ZStack {"),
+              let base = source.range(of: "? AppTheme.hairline"),
+              let gradient = source.range(of: "AngularGradient(") else {
+            #expect(Bool(false))
+            return
+        }
+
+        #expect(base.lowerBound > zStack.lowerBound)
+        #expect(gradient.lowerBound > zStack.lowerBound)
+    }
+
+    private func composerBorderViewSource() throws -> String {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repositoryRoot.appendingPathComponent("App/Chat/ChatComposerView.swift")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
 }
