@@ -81,4 +81,46 @@ import Foundation
         let message = try JSONDecoder().decode(ClaudeWireMessage.self, from: data)
         guard case .unknown = message else { Issue.record("expected unknown"); return }
     }
+
+    @Test func decodesSystemEventSubtypes() throws {
+        let compact = Data(#"{"type":"system","subtype":"compact_boundary","session_id":"s1"}"#.utf8)
+        guard case .systemEvent(let event) = try JSONDecoder()
+            .decode(ClaudeWireMessage.self, from: compact) else {
+            Issue.record("expected system event"); return
+        }
+        #expect(event.subtype == "compact_boundary")
+
+        let thinking = Data(#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":50,"estimated_tokens_delta":50}"#.utf8)
+        guard case .systemEvent(let tokens) = try JSONDecoder()
+            .decode(ClaudeWireMessage.self, from: thinking) else {
+            Issue.record("expected system event"); return
+        }
+        #expect(tokens.subtype == "thinking_tokens")
+        #expect(tokens.payload["estimated_tokens"]?.intValue == 50)
+    }
+
+    @Test func systemInitStillDecodesAsInit() throws {
+        let data = Data(#"{"type":"system","subtype":"init","session_id":"s1","model":"m","tools":[],"slash_commands":[]}"#.utf8)
+        guard case .systemInit = try JSONDecoder()
+            .decode(ClaudeWireMessage.self, from: data) else {
+            Issue.record("init must not be swallowed by systemEvent"); return
+        }
+    }
+
+    @Test func decodesRateLimitAndPromptSuggestion() throws {
+        let limit = Data(#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1786298400,"rateLimitType":"five_hour"}}"#.utf8)
+        guard case .rateLimit(let info) = try JSONDecoder()
+            .decode(ClaudeWireMessage.self, from: limit) else {
+            Issue.record("expected rate limit"); return
+        }
+        #expect(info.status == "allowed")
+        #expect(info.rateLimitType == "five_hour")
+
+        let suggestion = Data(#"{"type":"prompt_suggestion","suggestion":"delete f.txt"}"#.utf8)
+        guard case .promptSuggestion(let text) = try JSONDecoder()
+            .decode(ClaudeWireMessage.self, from: suggestion) else {
+            Issue.record("expected prompt suggestion"); return
+        }
+        #expect(text == "delete f.txt")
+    }
 }

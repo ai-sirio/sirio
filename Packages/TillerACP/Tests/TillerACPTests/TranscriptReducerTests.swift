@@ -78,6 +78,15 @@ import Testing
         #expect(reducer.contextUsage == ContextUsage(used: 1500, size: 200_000))
     }
 
+    @Test func noticeBecomesASystemNoticeItem() {
+        var reducer = TranscriptReducer()
+        reducer.apply(.notice("Context compacted"))
+        #expect(reducer.items.contains { item in
+            guard case .systemNotice(_, let text) = item else { return false }
+            return text == "Context compacted"
+        })
+    }
+
     @Test func newUserPromptStartsNewAgentMessage() {
         var reducer = TranscriptReducer()
         reducer.apply(.agentMessageChunk(.text("first")))
