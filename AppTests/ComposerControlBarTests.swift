@@ -92,4 +92,11 @@ struct ComposerControlBarTests {
         #expect(ComposerControlBar.sendFill(canSend: false, agentAccentColor: .red)
                 == ComposerControlBar.inactiveActionFill)
     }
+
+    @Test func sendGlyphUsesWhiteWhenSendIsEnabledAndAgentAccentWhenDisabled() {
+        #expect(ComposerControlBar.sendGlyphColor(canSend: true, agentAccentColor: .orange)
+                == .white)
+        #expect(ComposerControlBar.sendGlyphColor(canSend: false, agentAccentColor: .orange)
+                == .orange)
+    }
 }

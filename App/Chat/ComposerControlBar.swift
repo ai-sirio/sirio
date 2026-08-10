@@ -59,6 +59,12 @@ struct ComposerControlBar: View {
         canSend ? agentAccentColor : inactiveActionFill
     }
 
+    /// Send glyph: white on the filled accent circle while a send is
+    /// possible, the agent's accent color on the neutral inactive fill otherwise.
+    static func sendGlyphColor(canSend: Bool, agentAccentColor: Color) -> Color {
+        canSend ? .white : agentAccentColor
+    }
+
     static func primaryActionPresentation(
         for state: ChatController.ChatState
     ) -> PrimaryActionPresentation {
@@ -321,7 +327,8 @@ struct ComposerControlBar: View {
                 if let systemImage = presentation.systemImage {
                     Image(systemName: systemImage)
                         .font(AppFont.system(size: 12, weight: .bold))
-                        .foregroundStyle(canSend ? Color.white : Color.accentColor)
+                        .foregroundStyle(Self.sendGlyphColor(
+                            canSend: canSend, agentAccentColor: agentAccentColor))
                 }
             }
         }
