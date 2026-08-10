@@ -26,13 +26,7 @@ struct ThinkingRowView: View {
                     }
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: "chevron.right")
-                            .font(AppFont.system(size: 10, weight: .semibold))
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         RunningDots(color: AppTheme.meta, dotSize: 3)
-                        Text("Thinking")
-                            .font(AppFont.caption.weight(.semibold))
-                            .foregroundStyle(AppTheme.title)
                         Text(title)
                             .font(AppFont.caption2)
                             .foregroundStyle(AppTheme.meta.opacity(0.82))
