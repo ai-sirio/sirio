@@ -28,6 +28,8 @@ struct ContentView: View {
     /// animation frame / divider-drag event) spammed UserDefaults and
     /// re-invalidated every @AppStorage reader in the window mid-animation.
     @State private var liveRightPanelWidth = CGFloat(AppSettings.defaultRightPanelWidth)
+    @State private var leftSeamHovered = false
+    @State private var rightSeamHovered = false
     @State private var persistRightPanelWidthTask: Task<Void, Never>?
     @AppStorage(AppSettings.rightPanelModeKey)
     private var rightPanelModeRaw = RightPanelMode.files.rawValue
@@ -257,10 +259,10 @@ struct ContentView: View {
             .padding(.bottom, AppTheme.cardGap)
             .overlay(alignment: .leading) {
                 if sidebarVisible {
-                    dividerSeam
+                    dividerSeam(hovered: leftSeamHovered)
                         .offset(x: CardLayout.dividerCenterX(
                             columnWidth: sidebarWidth, gap: AppTheme.cardGap) - 1)
-                    DividerCursorStrip()
+                    DividerCursorStrip(onHoverChange: { leftSeamHovered = $0 })
                         .frame(width: DividerCursorStrip.width)
                         .offset(x: CardLayout.dividerCenterX(
                             columnWidth: sidebarWidth, gap: AppTheme.cardGap)
@@ -269,10 +271,10 @@ struct ContentView: View {
             }
             .overlay(alignment: .trailing) {
                 if rightPanelVisible {
-                    dividerSeam
+                    dividerSeam(hovered: rightSeamHovered)
                         .offset(x: -CardLayout.dividerCenterX(
                             columnWidth: liveRightPanelWidth, gap: AppTheme.cardGap) + 1)
-                    DividerCursorStrip()
+                    DividerCursorStrip(onHoverChange: { rightSeamHovered = $0 })
                         .frame(width: DividerCursorStrip.width)
                         .offset(x: -CardLayout.dividerCenterX(
                             columnWidth: liveRightPanelWidth, gap: AppTheme.cardGap)
@@ -285,13 +287,16 @@ struct ContentView: View {
 
     /// `NSSplitView` draws its own hairline between columns. With the columns
     /// flush that line lands right on the seam, so it gets painted over with
-    /// the central pane's own surface and disappears into the card.
-    private var dividerSeam: some View {
+    /// the central pane's own surface and disappears into the card — and the
+    /// same 2pt strip doubles as the resize affordance, lighting up in the
+    /// shared `hairline` grey while the pointer is on the band.
+    private func dividerSeam(hovered: Bool) -> some View {
         Rectangle()
-            .fill(AppTheme.chatSurface)
+            .fill(hovered ? AppTheme.hairline : AppTheme.chatSurface)
             .frame(width: 2)
             .ignoresSafeArea()
             .allowsHitTesting(false)
+            .animation(.easeInOut(duration: 0.12), value: hovered)
     }
 
     private func splitColumns() -> some View {
