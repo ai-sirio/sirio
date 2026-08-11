@@ -19,6 +19,7 @@ struct ComposerControlBar: View {
     let agentAccentColor: Color
 
     @State private var modelPickerShown = false
+    @State private var contextPopoverShown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     enum TrailingControl: Equatable { case loading, stop, send }
@@ -269,11 +270,13 @@ struct ComposerControlBar: View {
     /// Context-window meter; always shown so its control-bar position stays
     /// stable. Empty/dimmed until the agent reports usage. Turns red past the
     /// 80% warning threshold so it stays distinct from the agent's accent.
+    /// Tapping opens a popover with the full breakdown when the driver
+    /// reports usage; inert otherwise, same as the tooltip-only state today.
     private var contextUsageIndicator: some View {
         let usage = controller.contextUsage
         let fraction = usage.flatMap { $0.size > 0 ? min(1, max(0, Double($0.used) / Double($0.size))) : nil } ?? 0
         let warning = fraction > 0.8
-        return ZStack {
+        let ring = ZStack {
             Circle().stroke(.quaternary, lineWidth: 2)
             if usage != nil {
                 Circle()
@@ -291,6 +294,31 @@ struct ComposerControlBar: View {
             let percent = Int((fraction * 100).rounded())
             return "\(percent)% of context used\n\(usage.used.formatted()) / \(usage.size.formatted()) tokens"
         } ?? "Context usage unavailable")
+
+        return Button {
+            contextPopoverShown = true
+        } label: {
+            ring
+        }
+        .buttonStyle(.plain)
+        .disabled(usage == nil)
+        .popover(isPresented: $contextPopoverShown) {
+            if let usage {
+                let detail = Self.contextUsageDetail(usage)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(detail.percentLine).fontWeight(.semibold)
+                    Text(detail.tokensLine).foregroundStyle(.secondary)
+                    if let costLine = detail.costLine {
+                        Text(costLine)
+                    }
+                    if let breakdownLine = detail.breakdownLine {
+                        Text(breakdownLine).foregroundStyle(.secondary)
+                    }
+                }
+                .font(AppFont.system(size: 12))
+                .padding(12)
+            }
+        }
     }
 
     private func effortLabel(_ effort: SessionConfigOption) -> String {
