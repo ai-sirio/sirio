@@ -524,7 +524,11 @@ public actor ClaudeStreamJSONDriver: AgentDriver {
             + (usage.cacheReadInputTokens ?? 0)
             + (usage.cacheCreationInputTokens ?? 0)
         guard used >= 0 else { return nil }
-        return ContextUsage(used: used, size: size)
+        return ContextUsage(
+            used: used, size: size, costUsd: result.totalCostUsd,
+            inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+            cacheCreationTokens: usage.cacheCreationInputTokens,
+            cacheReadTokens: usage.cacheReadInputTokens)
     }
 
     private func emitNotice(_ text: String) {
