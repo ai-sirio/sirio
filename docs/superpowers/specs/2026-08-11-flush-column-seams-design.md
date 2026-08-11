@@ -56,11 +56,17 @@ through to the real `NSSplitView` divider underneath, governed by
 Move each column's horizontal padding to its outward side only. The split
 container keeps its `.horizontal, cardGap / 2`.
 
-| Column       | leading      | trailing     |
-| ------------ | ------------ | ------------ |
-| sidebar      | `cardGap / 2`| 0            |
-| central pane | 0            | 0            |
-| right panel  | 0            | `cardGap / 2`|
+| Column       | leading                        | trailing                          |
+| ------------ | ------------------------------ | --------------------------------- |
+| sidebar      | `cardGap / 2`                  | 0                                 |
+| central pane | 0 if sidebar visible, else `cardGap / 2` | 0 if right panel visible, else `cardGap / 2` |
+| right panel  | 0                              | `cardGap / 2`                     |
+
+The central pane's padding must be conditional, not flat zero: when a side
+panel is hidden the central card becomes the outermost column, and an
+unconditional zero would halve its margin against the window edge from
+`cardGap` to `cardGap / 2`. The condition is the same one that decides its
+flush edges (§2), so both read from one computed property.
 
 Window edges keep their full `cardGap` margin. The seams collapse to zero
 (plus `NSSplitView`'s own ~1pt divider, handled in §3).
