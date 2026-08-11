@@ -406,6 +406,68 @@ import Testing
         await driver.stop()
     }
 
+    @Test func contextUsageFromModelUsageIncludesCostAndBreakdown() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let promptTask = Task { try await driver.prompt([.text("hi")]) }
+        _ = try await mock.waitForSent(count: 2)
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","total_cost_usd":0.0421,"usage":{"input_tokens":4,"output_tokens":123,"cache_read_input_tokens":83967,"cache_creation_input_tokens":512},"modelUsage":{"claude-sonnet-5":{"contextWindow":1000000}}}"#)
+        _ = try await promptTask.value
+
+        let events = await waitForEvent(collector) { event in
+            if case .update(.usageUpdate) = event { return true }
+            return false
+        }
+        #expect(events.contains { event in
+            guard case .update(.usageUpdate(let usage)) = event else { return false }
+            return usage.costUsd == 0.0421
+                && usage.inputTokens == 4
+                && usage.outputTokens == 123
+                && usage.cacheReadTokens == 83967
+                && usage.cacheCreationTokens == 512
+        })
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
+    @Test func contextUsageOmitsCostAndBreakdownWhenResultLacksThem() async throws {
+        let mock = MockTransport()
+        let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
+                                            model: nil, resumeSessionId: nil)
+        let collector = EventCollector()
+        let eventTask = collect(driver, into: collector)
+        try await driver.start()
+        _ = try await connectWithInitializeResponse(driver, mock: mock)
+
+        let promptTask = Task { try await driver.prompt([.text("hi")]) }
+        _ = try await mock.waitForSent(count: 2)
+        await mock.emit(#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","usage":{"input_tokens":4,"output_tokens":123},"modelUsage":{"claude-sonnet-5":{"contextWindow":1000000}}}"#)
+        _ = try await promptTask.value
+
+        let events = await waitForEvent(collector) { event in
+            if case .update(.usageUpdate) = event { return true }
+            return false
+        }
+        #expect(events.contains { event in
+            guard case .update(.usageUpdate(let usage)) = event else { return false }
+            return usage.costUsd == nil
+                && usage.inputTokens == 4
+                && usage.outputTokens == 123
+                && usage.cacheReadTokens == nil
+                && usage.cacheCreationTokens == nil
+        })
+
+        eventTask.cancel()
+        await driver.stop()
+    }
+
     @Test func resultEmitsTurnStats() async throws {
         let mock = MockTransport()
         let driver = ClaudeStreamJSONDriver(transport: mock, permissionMode: .ask,
