@@ -293,7 +293,7 @@ struct Notify: ParsableCommand {
         // Agent-status mode: unchanged behavior.
         var ref = agentSession
         if ref == nil, stdinJSON {
-            let data = FileHandle.standardInput.readDataToEndOfFile()
+            let data = readBoundedStdin()
             ref = AgentSessionExtractor.sessionRef(fromJSON: data)
         }
         if ref == nil {
