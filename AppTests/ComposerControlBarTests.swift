@@ -113,7 +113,7 @@ struct ComposerControlBarTests {
         let detail = ComposerControlBar.contextUsageDetail(usage)
 
         #expect(detail.percentLine == "1% of context used")
-        #expect(detail.tokensLine == "1,000 / 200,000 tokens")
+        #expect(detail.tokensLine == "\(1000.formatted()) / \(200_000.formatted()) tokens")
         #expect(detail.costLine == nil)
         #expect(detail.breakdownLine == nil)
     }
@@ -125,8 +125,8 @@ struct ComposerControlBarTests {
         let detail = ComposerControlBar.contextUsageDetail(usage)
 
         #expect(detail.percentLine == "62% of context used")
-        #expect(detail.tokensLine == "620,602 / 1,000,000 tokens")
-        #expect(detail.costLine == "Cost: $0.04")
-        #expect(detail.breakdownLine == "Input: 4 · Output: 123 · Cache write: 512 · Cache read: 83,967")
+        #expect(detail.tokensLine == "\(620_602.formatted()) / \(1_000_000.formatted()) tokens")
+        #expect(detail.costLine == "Cost: \(0.0421.formatted(.currency(code: "USD")))")
+        #expect(detail.breakdownLine == "Input: \(4.formatted()) · Output: \(123.formatted()) · Cache write: \(512.formatted()) · Cache read: \(83_967.formatted())")
     }
 }

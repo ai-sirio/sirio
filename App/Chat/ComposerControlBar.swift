@@ -320,26 +320,21 @@ struct ComposerControlBar: View {
     /// Turns a driver's `ContextUsage` into the popover's display strings.
     /// Cost and the token breakdown are Claude-only on the wire today, so
     /// both lines are `nil` for every other agent.
-    ///
-    /// Locale is pinned to `en_US`: the popover's display contract (asserted
-    /// in ComposerControlBarTests) uses en_US grouping/currency, so the
-    /// strings stay deterministic regardless of the machine's locale.
     static func contextUsageDetail(_ usage: ContextUsage) -> ContextUsageDetail {
         let fraction = usage.size > 0 ? min(1, max(0, Double(usage.used) / Double(usage.size))) : 0
         let percent = Int((fraction * 100).rounded())
-        let displayLocale = Locale(identifier: "en_US")
-        let costLine = usage.costUsd.map { "Cost: " + $0.formatted(.currency(code: "USD").locale(displayLocale)) }
+        let costLine = usage.costUsd.map { "Cost: " + $0.formatted(.currency(code: "USD")) }
         let breakdownLine: String? = {
             guard let input = usage.inputTokens, let output = usage.outputTokens else { return nil }
-            var line = "Input: \(input.formatted(.number.locale(displayLocale))) · Output: \(output.formatted(.number.locale(displayLocale)))"
+            var line = "Input: \(input.formatted()) · Output: \(output.formatted())"
             if let write = usage.cacheCreationTokens, let read = usage.cacheReadTokens {
-                line += " · Cache write: \(write.formatted(.number.locale(displayLocale))) · Cache read: \(read.formatted(.number.locale(displayLocale)))"
+                line += " · Cache write: \(write.formatted()) · Cache read: \(read.formatted())"
             }
             return line
         }()
         return ContextUsageDetail(
             percentLine: "\(percent)% of context used",
-            tokensLine: "\(usage.used.formatted(.number.locale(displayLocale))) / \(usage.size.formatted(.number.locale(displayLocale))) tokens",
+            tokensLine: "\(usage.used.formatted()) / \(usage.size.formatted()) tokens",
             costLine: costLine,
             breakdownLine: breakdownLine)
     }
