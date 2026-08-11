@@ -15,7 +15,9 @@ xcodegen generate
 # Open in Xcode and build/run with ⌘R (requires Xcode 16+)
 open Tiller.xcodeproj
 
-# Single verification gate for the whole repo — run before considering any task done
+# Single verification gate for the whole repo. Only run when the user explicitly asks for it —
+# it does a full xcodebuild + AppTests run, which contends for Xcode's shared build service and
+# SwiftPM locks with any other worktree building at the same time, and can look like a hang.
 Scripts/ci.sh    # -> prints "CI OK" if everything passes
 
 # Iterate on one package only
