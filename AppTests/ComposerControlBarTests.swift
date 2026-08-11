@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Testing
+import TillerACP
 
 @testable import Tiller
 
@@ -105,5 +106,27 @@ struct ComposerControlBarTests {
                 == .orange)
         #expect(ComposerControlBar.contextRingColor(warning: true, agentAccentColor: .orange)
                 == .red)
+    }
+
+    @Test func contextUsageDetailOmitsCostAndBreakdownWhenAbsent() {
+        let usage = ContextUsage(used: 1000, size: 200_000)
+        let detail = ComposerControlBar.contextUsageDetail(usage)
+
+        #expect(detail.percentLine == "1% of context used")
+        #expect(detail.tokensLine == "1,000 / 200,000 tokens")
+        #expect(detail.costLine == nil)
+        #expect(detail.breakdownLine == nil)
+    }
+
+    @Test func contextUsageDetailIncludesCostAndBreakdownWhenPresent() {
+        let usage = ContextUsage(used: 620_602, size: 1_000_000, costUsd: 0.0421,
+                                  inputTokens: 4, outputTokens: 123,
+                                  cacheCreationTokens: 512, cacheReadTokens: 83_967)
+        let detail = ComposerControlBar.contextUsageDetail(usage)
+
+        #expect(detail.percentLine == "62% of context used")
+        #expect(detail.tokensLine == "620,602 / 1,000,000 tokens")
+        #expect(detail.costLine == "Cost: $0.04")
+        #expect(detail.breakdownLine == "Input: 4 · Output: 123 · Cache write: 512 · Cache read: 83,967")
     }
 }
