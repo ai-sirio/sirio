@@ -77,3 +77,69 @@ import SwiftUI
 
     #expect(host.fittingSize == CGSize(width: 3 * 24 + 2 * 2, height: 28))
 }
+
+/// A flush edge squares both of its corners. Two rounded corners meeting at a
+/// zero-width seam leave a notch of bare canvas above and below it.
+@Test func cardCornersSquareTheFlushEdge() {
+    let corners = CardLayout.cardCorners(flushEdges: .leading, radius: 6)
+
+    #expect(corners.topLeading == 0)
+    #expect(corners.bottomLeading == 0)
+    #expect(corners.topTrailing == 6)
+    #expect(corners.bottomTrailing == 6)
+}
+
+@Test func cardCornersStayRoundWithNoFlushEdge() {
+    let corners = CardLayout.cardCorners(flushEdges: [], radius: 6)
+
+    #expect(corners.topLeading == 6)
+    #expect(corners.bottomLeading == 6)
+    #expect(corners.topTrailing == 6)
+    #expect(corners.bottomTrailing == 6)
+}
+
+/// The central card is flush on both sides whenever both side panels are open.
+@Test func cardCornersSquareBothVerticalSeams() {
+    let corners = CardLayout.cardCorners(flushEdges: [.leading, .trailing], radius: 6)
+
+    #expect(corners.topLeading == 0)
+    #expect(corners.bottomLeading == 0)
+    #expect(corners.topTrailing == 0)
+    #expect(corners.bottomTrailing == 0)
+}
+
+/// The sideways shadow spill is what makes a zero-width seam read as a black
+/// band, so a flush edge gets no bleed at all.
+@Test func shadowBleedStopsAtAFlushEdge() {
+    let bleed = CardLayout.shadowBleed(flushEdges: .leading, radius: 18)
+
+    #expect(bleed.leading == 0)
+    #expect(bleed.trailing == 36)
+    #expect(bleed.top == 36)
+    #expect(bleed.bottom == 36)
+}
+
+@Test func shadowBleedIsUnboundedWithNoFlushEdge() {
+    let bleed = CardLayout.shadowBleed(flushEdges: [], radius: 18)
+
+    #expect(bleed.leading == 36)
+    #expect(bleed.trailing == 36)
+    #expect(bleed.top == 36)
+    #expect(bleed.bottom == 36)
+}
+
+/// `dividerCenterX` needs no edit when a column's gap padding moves from both
+/// sides to the outward side alone: the column measures half a gap narrower
+/// and the seam moves by exactly that much, so the same expression keeps
+/// landing on the seam. Both offsets in `ContentView` depend on this.
+@Test func seamCentreFollowsThePaddingMovingOutward() {
+    let cardWidth: CGFloat = 240
+    let gap: CGFloat = 10
+
+    let symmetric = CardLayout.dividerCenterX(columnWidth: cardWidth + gap, gap: gap)
+    let outwardOnly = CardLayout.dividerCenterX(columnWidth: cardWidth + gap / 2, gap: gap)
+
+    #expect(symmetric == cardWidth + gap * 1.5)
+    #expect(outwardOnly == cardWidth + gap)
+    #expect(symmetric - outwardOnly == gap / 2)
+}
