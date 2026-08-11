@@ -238,13 +238,26 @@ struct ContentView: View {
         }
     }
 
+    /// The sides of the central card that sit against a neighbouring column.
+    ///
+    /// It drives two things that must agree: which corners the card squares
+    /// off, and which side keeps its half-gap of window margin. Letting them
+    /// drift apart is how the central card ends up with a 5pt margin against
+    /// the window edge when a side panel is hidden.
+    private var centralFlushEdges: Edge.Set {
+        var edges: Edge.Set = []
+        if sidebarVisible { edges.insert(.leading) }
+        if rightPanelVisible { edges.insert(.trailing) }
+        return edges
+    }
+
     private var splitContent: some View {
         splitColumns()
             .padding(.horizontal, AppTheme.cardGap / 2)
             .padding(.bottom, AppTheme.cardGap)
             .overlay(alignment: .leading) {
                 if sidebarVisible {
-                    dividerCover
+                    dividerSeam
                         .offset(x: CardLayout.dividerCenterX(
                             columnWidth: sidebarWidth, gap: AppTheme.cardGap) - 1)
                     DividerCursorStrip()
@@ -256,7 +269,7 @@ struct ContentView: View {
             }
             .overlay(alignment: .trailing) {
                 if rightPanelVisible {
-                    dividerCover
+                    dividerSeam
                         .offset(x: -CardLayout.dividerCenterX(
                             columnWidth: liveRightPanelWidth, gap: AppTheme.cardGap) + 1)
                     DividerCursorStrip()
@@ -270,11 +283,12 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.2), value: rightPanelVisible)
     }
 
-    /// NSSplitView draws its own hairline between columns. Inside a gap that is
-    /// supposed to read as bare canvas, that line is the one thing giving the
-    /// old flush layout away, so it gets painted over.
-    private var dividerCover: some View {
-        CanvasBackground()
+    /// `NSSplitView` draws its own hairline between columns. With the columns
+    /// flush that line lands right on the seam, so it gets painted over with
+    /// the central pane's own surface and disappears into the card.
+    private var dividerSeam: some View {
+        Rectangle()
+            .fill(AppTheme.chatSurface)
             .frame(width: 2)
             .ignoresSafeArea()
             .allowsHitTesting(false)
@@ -284,7 +298,7 @@ struct ContentView: View {
         HSplitView {
             if sidebarVisible {
                 SidebarView(model: model)
-                    .padding(.horizontal, AppTheme.cardGap / 2)
+                    .padding(.leading, AppTheme.cardGap / 2)
                     .frame(
                         minWidth: CGFloat(AppSettings.sidebarWidthRange.lowerBound),
                         idealWidth: CGFloat(AppSettings.defaultSidebarWidth),
@@ -294,7 +308,7 @@ struct ContentView: View {
                         sidebarWidth = $0
                     }
             }
-            FloatingCard {
+            FloatingCard(flushEdges: centralFlushEdges) {
                 VStack(spacing: 0) {
                     if let worktree = model.selectedWorktree {
                         if !workspaceEngineEnabled {
@@ -311,10 +325,11 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, AppTheme.cardGap / 2)
+            .padding(.leading, centralFlushEdges.contains(.leading) ? 0 : AppTheme.cardGap / 2)
+            .padding(.trailing, centralFlushEdges.contains(.trailing) ? 0 : AppTheme.cardGap / 2)
             .frame(minWidth: 320, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity)
             if rightPanelVisible {
-                FloatingCard {
+                FloatingCard(flushEdges: .leading) {
                     RightPanelView(
                         appModel: model,
                         panelModel: rightPanelModel,
@@ -322,7 +337,7 @@ struct ContentView: View {
                         isGitRepository: rightPanelContext.gitProject,
                         onClose: { rightPanelVisible = false })
                 }
-                .padding(.horizontal, AppTheme.cardGap / 2)
+                .padding(.trailing, AppTheme.cardGap / 2)
                 .frame(
                     minWidth: CGFloat(AppSettings.rightPanelWidthRange.lowerBound),
                     idealWidth: CGFloat(AppSettings.clampRightPanelWidth(rightPanelWidth)),
