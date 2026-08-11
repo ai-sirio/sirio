@@ -23,9 +23,21 @@ public struct AvailableCommand: Sendable, Equatable, Codable {
 public struct ContextUsage: Sendable, Equatable, Codable {
     public var used: Int
     public var size: Int
-    public init(used: Int, size: Int) {
+    public var costUsd: Double?
+    public var inputTokens: Int?
+    public var outputTokens: Int?
+    public var cacheCreationTokens: Int?
+    public var cacheReadTokens: Int?
+    public init(used: Int, size: Int, costUsd: Double? = nil,
+                inputTokens: Int? = nil, outputTokens: Int? = nil,
+                cacheCreationTokens: Int? = nil, cacheReadTokens: Int? = nil) {
         self.used = used
         self.size = size
+        self.costUsd = costUsd
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheCreationTokens = cacheCreationTokens
+        self.cacheReadTokens = cacheReadTokens
     }
 }
 
