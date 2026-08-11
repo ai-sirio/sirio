@@ -355,7 +355,8 @@ struct ComposerControlBar: View {
         let breakdownLine: String? = {
             guard let input = usage.inputTokens, let output = usage.outputTokens else { return nil }
             var line = "Input: \(input.formatted()) · Output: \(output.formatted())"
-            if let write = usage.cacheCreationTokens, let read = usage.cacheReadTokens {
+            if let write = usage.cacheCreationTokens, let read = usage.cacheReadTokens,
+               write != 0 || read != 0 {
                 line += " · Cache write: \(write.formatted()) · Cache read: \(read.formatted())"
             }
             return line

@@ -129,4 +129,15 @@ struct ComposerControlBarTests {
         #expect(detail.costLine == "Cost: \(0.0421.formatted(.currency(code: "USD")))")
         #expect(detail.breakdownLine == "Input: \(4.formatted()) · Output: \(123.formatted()) · Cache write: \(512.formatted()) · Cache read: \(83_967.formatted())")
     }
+
+    @Test func contextUsageDetailOmitsCacheRowWhenBothCacheCountsAreZero() {
+        let usage = ContextUsage(used: 10_000, size: 1_000_000, inputTokens: 100,
+                                 outputTokens: 50, cacheCreationTokens: 0, cacheReadTokens: 0)
+        let detail = ComposerControlBar.contextUsageDetail(usage)
+
+        #expect(detail.percentLine == "1% of context used")
+        #expect(detail.tokensLine == "\(10_000.formatted()) / \(1_000_000.formatted()) tokens")
+        #expect(detail.costLine == nil)
+        #expect(detail.breakdownLine == "Input: \(100.formatted()) · Output: \(50.formatted())")
+    }
 }
