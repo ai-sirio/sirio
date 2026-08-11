@@ -72,4 +72,12 @@ struct DividerCursorHitPolicyTests {
         #expect(DividerCursorHitPolicy.acceptsHit(eventType: .leftMouseDragged) == false)
         #expect(DividerCursorHitPolicy.acceptsHit(eventType: nil) == false)
     }
+
+    /// The hover highlight rides on the same target as the resize cursor.
+    /// If enter/exit ever stopped being answered, the strip would keep its
+    /// cursor but silently stop reporting hover.
+    @Test func hoverEnterAndExitAreAnswered() {
+        #expect(DividerCursorHitPolicy.acceptsHit(eventType: .mouseEntered))
+        #expect(DividerCursorHitPolicy.acceptsHit(eventType: .mouseExited))
+    }
 }
