@@ -1,0 +1,9 @@
+[package]
+name = "tiller_git"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# One libc call (killpg) for killing timed-out git process groups.
+libc = "0.2"

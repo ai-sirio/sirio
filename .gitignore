@@ -30,3 +30,5 @@ build/
 skills-lock.json
 .DS_Store
 opencode.json
+/.air/
+/.codex/

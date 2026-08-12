@@ -1,0 +1,28 @@
+[package]
+name = "tiller"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tiller"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+anyhow.workspace = true
+tiller_theme.workspace = true
+tiller_ui.workspace = true
+tiller_terminal.workspace = true
+tiller_agents.workspace = true
+tiller_acp.workspace = true
+tiller_project.workspace = true
+tiller_persistence.workspace = true
+tiller_activity.workspace = true
+
+[dev-dependencies]
+# For tests that hand-corrupt a database (e.g. bumping user_version).
+rusqlite = { version = "0.31", features = ["bundled"] }
+# For the headless window tests (session restore survival).
+gpui = { workspace = true, features = ["test-support"] }

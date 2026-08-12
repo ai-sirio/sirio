@@ -1,0 +1,12 @@
+# Every parallel worktree used to recompile the same 408 dependency crates —
+# GPUI among them — from scratch, which cost ~8 minutes each and left tens of
+# gigabytes of duplicated `target/` directories behind. sccache stores those
+# compilations once and serves them to every checkout.
+#
+# Only the wrapper is set on purpose. Cargo passes `-C incremental` to the
+# workspace's own crates but not to dependencies, so sccache declines to cache
+# the former and caches the latter — which is where the time actually goes.
+# Disabling incremental to widen the cache would slow down the edit-test loop
+# for no real gain.
+[build]
+rustc-wrapper = "sccache"

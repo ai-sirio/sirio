@@ -1,0 +1,58 @@
+//! The model behind Tiller's Changes panel: git status, unified diffs, line
+//! counts, and the stage/unstage/discard mutations.
+//!
+//! This crate is deliberately dependency-free and UI-free: the public API is
+//! plain value types (`Clone`, `Debug`, `PartialEq`, no interior mutability)
+//! and `std::process`-based git shell-out, so the terminal, the control
+//! socket and the GPUI panels can all build on it without inheriting a UI
+//! framework.
+//!
+//! # Status
+//!
+//! [`status::status`] runs `git status --porcelain=v2 -z` and parses it into
+//! a [`status::StatusSnapshot`]: per path, its index (staged) and worktree
+//! states, its rename source, and the derived staged / changes / untracked /
+//! conflicted views the panel shows.
+//!
+//! # Diffs
+//!
+//! [`diff::diff_entry`] loads the unified diff for one status entry into
+//! hunks ([`diff::Hunk`]) of lines ([`diff::DiffLine`]) that carry both line
+//! numbers; [`diff::stats`] returns the per-path added/removed counts the
+//! panel renders as `-3 +25`.
+//!
+//! # Mutations
+//!
+//! [`actions`] stages, unstages and discards a single path or everything at
+//! once, mirroring the Swift app's `GitActions`.
+//!
+//! # Correctness notes
+//!
+//! - Porcelain v2 with `-z` reports the index and worktree states
+//!   independently and keeps paths as raw bytes, so spaces, non-ASCII and
+//!   quoted paths parse without a quoting round-trip.
+//! - Untracked files and unborn-HEAD checkouts have no HEAD version to diff
+//!   against; they are diffed against `/dev/null` and their line counts come
+//!   from disk, exactly as in the Swift app.
+//! - CRLF content lines have their trailing `\r` stripped by the parser.
+//! - Binary files report zero counts with `is_binary` set.
+
+mod actions;
+mod diff;
+mod error;
+mod git;
+mod status;
+mod worktree;
+
+pub use actions::{discard, discard_all, stage, stage_all, unstage};
+pub use diff::{
+    DEFAULT_CONTEXT_LINES, DiffLine, DiffOrigin, DiffStat, FileDiff, Hunk,
+    WHOLE_FILE_CONTEXT_LINES, diff_entry, parse_diff, parse_numstat, stats,
+};
+pub use error::GitError;
+pub use status::{
+    StatusEntry, StatusKind, StatusParseError, StatusSnapshot, has_head, parse_status, status,
+};
+pub use worktree::{
+    WorktreeError, create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
+};
