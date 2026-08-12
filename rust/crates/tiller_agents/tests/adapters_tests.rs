@@ -1,0 +1,375 @@
+//! Adapter tests against real temporary directories: every command line
+//! asserted against what the Swift source specifies, the fake-HOME isolation
+//! invariant, and the Codex TOML round trip.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tiller_agents::{
+    AgentAdapter, ClaudeCodeAdapter, CodexAdapter, OhMyPiAdapter, OpenCodeAdapter, PiAdapter,
+    json_string_literal, shell_quote,
+};
+
+const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
+const TILLERCTL: &str = "/usr/local/bin/tillerctl";
+const WORKTREE: &str = "/Users/me/tiller";
+
+/// A throwaway directory, removed on drop. Canonicalized so paths match what
+/// the adapters report.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "tiller-agents-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        Self(std::fs::canonicalize(&path).expect("canonicalize temp dir"))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Everything under the directory, recursively, as relative paths.
+    fn tree(&self) -> Vec<PathBuf> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read dir") {
+                let entry = entry.expect("entry");
+                let relative = entry
+                    .path()
+                    .strip_prefix(base)
+                    .expect("relative")
+                    .to_path_buf();
+                if entry.file_type().expect("type").is_dir() {
+                    walk(&entry.path(), base, out);
+                } else {
+                    out.push(relative);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.path(), self.path(), &mut out);
+        out.sort();
+        out
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command lines, exactly as the Swift sources specify them
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claude_command_is_bare() {
+    assert_eq!(
+        ClaudeCodeAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
+        "claude"
+    );
+}
+
+#[test]
+fn codex_command_carries_the_notify_override() {
+    // The exact expectation from CodexAdapterTests: slashes unescaped,
+    // whole override single-quoted for the shell.
+    assert_eq!(
+        CodexAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
+        "codex -c 'notify=[\"/usr/local/bin/tillerctl\",\"notify\",\"--session\",\"12345678-1234-1234-1234-123456789abc\",\"--status\",\"needs-input\"]'"
+    );
+}
+
+#[test]
+fn opencode_command_is_bare() {
+    assert_eq!(
+        OpenCodeAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
+        "opencode"
+    );
+}
+
+#[test]
+fn pi_command_is_bare() {
+    assert_eq!(PiAdapter.command(WORKTREE, PANE_ID, TILLERCTL), "pi");
+}
+
+#[test]
+fn omp_command_points_at_the_worktree_local_hook() {
+    assert_eq!(
+        OhMyPiAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
+        "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Resume commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn claude_resume_command() {
+    assert_eq!(
+        ClaudeCodeAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("claude --resume 'sess-abc'".to_string())
+    );
+}
+
+#[test]
+fn codex_resume_command() {
+    assert_eq!(
+        CodexAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some(
+            "codex -c 'notify=[\"/usr/local/bin/tillerctl\",\"notify\",\"--session\",\"12345678-1234-1234-1234-123456789abc\",\"--status\",\"needs-input\"]' resume 'sess-abc'"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn opencode_resume_command() {
+    assert_eq!(
+        OpenCodeAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("opencode --session 'sess-abc'".to_string())
+    );
+}
+
+#[test]
+fn pi_resume_command() {
+    assert_eq!(
+        PiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("pi --session 'sess-abc'".to_string())
+    );
+}
+
+#[test]
+fn omp_resume_command() {
+    assert_eq!(
+        OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
+        Some("omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The Codex TOML trap: slashes must survive unescaped
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_notify_override_survives_shell_and_json_round_trip() {
+    // Mirror of the Swift `verifyCodexRoundTrip`: strip `codex -c `, shell-
+    // unquote the single-quoted value, then decode `notify=[...]` as JSON
+    // and compare with the intended arguments. A `\/`-escaped path would
+    // still JSON-decode here — the failure would happen earlier, in Codex's
+    // TOML parser — so additionally assert no slash escaping anywhere.
+    let cmd = CodexAdapter.command(WORKTREE, PANE_ID, TILLERCTL);
+
+    let after_prefix = cmd.strip_prefix("codex -c ").expect("prefix");
+    assert!(
+        !after_prefix.contains("\\/"),
+        "TOML would reject the override"
+    );
+
+    let inner = shell_unquote(after_prefix);
+    let notify = inner.strip_prefix("notify=").expect("notify= prefix");
+    let args: Vec<String> = serde_json::from_str(notify).expect("override decodes as JSON");
+    assert_eq!(
+        args,
+        vec![
+            TILLERCTL.to_string(),
+            "notify".to_string(),
+            "--session".to_string(),
+            PANE_ID.to_string(),
+            "--status".to_string(),
+            "needs-input".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn codex_override_with_slashy_tillerctl_path_keeps_slashes_unescaped() {
+    let literal = json_string_literal("/Users/John Smith/bin/tillerctl");
+    assert_eq!(literal, "\"/Users/John Smith/bin/tillerctl\"");
+    assert!(!literal.contains("\\/"));
+}
+
+/// Strips the outer single quotes and unescapes embedded `'\''` sequences —
+/// the inverse of [`shell_quote`].
+fn shell_unquote(quoted: &str) -> String {
+    assert!(
+        quoted.starts_with('\'') && quoted.ends_with('\''),
+        "single-quoted: {quoted}"
+    );
+    quoted[1..quoted.len() - 1].replace("'\\''", "'")
+}
+
+#[test]
+fn claude_prepare_writes_worktree_local_settings_with_all_five_hooks() {
+    let worktree = TempDir::new();
+    ClaudeCodeAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+
+    let settings = std::fs::read_to_string(worktree.path().join(".claude/settings.local.json"))
+        .expect("settings.local.json written inside the worktree");
+    let json: serde_json::Value = serde_json::from_str(&settings).expect("valid JSON");
+
+    let hooks = json["hooks"].as_object().expect("hooks object");
+    // Sort explicitly: a JSON object's key order is not semantically
+    // meaningful, and it actually changes here depending on whether cargo's
+    // feature unification has turned on serde_json/preserve_order for the
+    // workspace build (insertion order) or not (BTreeMap order).
+    let mut hook_keys = hooks.keys().collect::<Vec<_>>();
+    hook_keys.sort();
+    assert_eq!(
+        hook_keys,
+        [
+            "Notification",
+            "SessionEnd",
+            "SessionStart",
+            "Stop",
+            "UserPromptSubmit"
+        ],
+        "sorted keys, exactly the five hook events"
+    );
+
+    let command_of = |event: &str| {
+        hooks[event][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command")
+            .to_string()
+    };
+    let quoted = shell_quote(TILLERCTL);
+    assert_eq!(
+        command_of("Stop"),
+        format!("{quoted} notify --session {PANE_ID} --status needs-input --stdin-json")
+    );
+    assert_eq!(
+        command_of("Notification"),
+        format!("{quoted} notify --session {PANE_ID} --status needs-input --stdin-json")
+    );
+    assert_eq!(
+        command_of("SessionStart"),
+        format!("{quoted} notify --session {PANE_ID} --status needs-input --stdin-json")
+    );
+    assert_eq!(
+        command_of("UserPromptSubmit"),
+        format!("{quoted} notify --session {PANE_ID} --status running --stdin-json")
+    );
+    assert_eq!(
+        command_of("SessionEnd"),
+        format!("{quoted} notify --session {PANE_ID} --status done --stdin-json")
+    );
+}
+
+#[test]
+fn claude_prepare_preserves_existing_settings_keys() {
+    let worktree = TempDir::new();
+    let settings_path = worktree.path().join(".claude/settings.local.json");
+    std::fs::create_dir_all(settings_path.parent().expect("parent")).expect("dir");
+    std::fs::write(
+        &settings_path,
+        r#"{
+  "model": "opus",
+  "hooks": {
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "echo old"}]}]
+  }
+}"#,
+    )
+    .expect("seed");
+
+    ClaudeCodeAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).expect("read back"))
+            .expect("valid JSON");
+
+    assert_eq!(json["model"], "opus", "unrelated top-level key preserved");
+    let hooks = json["hooks"].as_object().expect("hooks object");
+    assert_eq!(
+        hooks["PreToolUse"][0]["hooks"][0]["command"], "echo hi",
+        "unrelated hooks key preserved"
+    );
+    assert_ne!(
+        hooks["Stop"][0]["hooks"][0]["command"], "echo old",
+        "the five hook events are replaced"
+    );
+}
+
+#[test]
+fn opencode_prepare_writes_the_session_plugin() {
+    let worktree = TempDir::new();
+    OpenCodeAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+
+    let plugin =
+        std::fs::read_to_string(worktree.path().join(".opencode/plugin/tiller-session.js"))
+            .expect("plugin written inside the worktree");
+    assert!(plugin.contains(&json_string_literal(TILLERCTL)));
+    assert!(plugin.contains(PANE_ID));
+    assert!(plugin.contains("session-ref"));
+    assert!(plugin.contains("export const TillerSession"));
+}
+
+#[test]
+fn omp_prepare_writes_the_hook_file() {
+    let worktree = TempDir::new();
+    OhMyPiAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+
+    let hook = std::fs::read_to_string(worktree.path().join(".tiller/omp-hook.ts"))
+        .expect("hook written inside the worktree");
+    assert!(hook.contains(&json_string_literal(TILLERCTL)));
+    assert!(hook.contains(PANE_ID));
+    assert!(hook.contains("pi.on(\"turn_start\""));
+    assert!(hook.contains("--agent-session"));
+}
+
+#[test]
+fn codex_and_pi_prepare_leave_the_worktree_untouched() {
+    let worktree = TempDir::new();
+    CodexAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+    PiAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+
+    assert!(worktree.tree().is_empty(), "no-op prepares write nothing");
+}
+
+#[test]
+fn each_adapter_prepare_creates_only_its_own_files() {
+    let worktree = TempDir::new();
+    let path = worktree.path().to_str().unwrap();
+    ClaudeCodeAdapter
+        .prepare(path, PANE_ID, TILLERCTL)
+        .expect("claude");
+    OpenCodeAdapter
+        .prepare(path, PANE_ID, TILLERCTL)
+        .expect("opencode");
+    OhMyPiAdapter
+        .prepare(path, PANE_ID, TILLERCTL)
+        .expect("omp");
+    CodexAdapter
+        .prepare(path, PANE_ID, TILLERCTL)
+        .expect("codex");
+    PiAdapter.prepare(path, PANE_ID, TILLERCTL).expect("pi");
+
+    assert_eq!(
+        worktree.tree(),
+        vec![
+            PathBuf::from(".claude/settings.local.json"),
+            PathBuf::from(".opencode/plugin/tiller-session.js"),
+            PathBuf::from(".tiller/omp-hook.ts"),
+        ]
+    );
+}

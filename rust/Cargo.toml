@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tiller",
+    "crates/tiller_theme",
+    "crates/tiller_ui",
+    "crates/tiller_terminal",
+    "crates/tiller_acp",
+    "crates/tiller_project",
+    "crates/tiller_git",
+    "crates/tiller_persistence",
+    "crates/tiller_agents",
+    "crates/tiller_control",
+    "crates/tiller_activity",
+    "crates/tiller_markdown",
+    "crates/tiller_usage",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+gpui = { path = "/Users/enzopiopalmisano/Desktop/Progetti/zed-ref/crates/gpui", default-features = false }
+gpui_platform = { path = "/Users/enzopiopalmisano/Desktop/Progetti/zed-ref/crates/gpui_platform", default-features = false, features = ["font-kit"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+
+tiller_theme = { path = "crates/tiller_theme" }
+tiller_ui = { path = "crates/tiller_ui" }
+tiller_terminal = { path = "crates/tiller_terminal" }
+tiller_acp = { path = "crates/tiller_acp" }
+tiller_project = { path = "crates/tiller_project" }
+tiller_git = { path = "crates/tiller_git" }
+tiller_persistence = { path = "crates/tiller_persistence" }
+tiller_agents = { path = "crates/tiller_agents" }
+tiller_control = { path = "crates/tiller_control" }
+tiller_activity = { path = "crates/tiller_activity" }
+tiller_markdown = { path = "crates/tiller_markdown" }
+tiller_usage = { path = "crates/tiller_usage" }
+
+[profile.dev]
+split-debuginfo = "unpacked"

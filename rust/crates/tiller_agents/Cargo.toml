@@ -1,0 +1,18 @@
+[package]
+name = "tiller_agents"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Deliberately NOT part of the workspace yet (the integrator adds it to
+# rust/Cargo.toml's members). Version/edition are hardcoded on purpose, and
+# there is no `[workspace]` table here: a package that declares its own
+# workspace root stops being a real member once it is added to the parent's
+# members list. Until the member entry lands, build and test from a copy of
+# this directory outside the workspace tree (cargo inside the tree errors
+# with "current package believes it's in a workspace when it's not").
+
+[dependencies]
+# JSON encoding for generated hook files and CLI overrides. Pinned to the
+# version present in the local cargo registry (offline builds work).
+serde_json = "1"
