@@ -72,7 +72,7 @@ fn a_database_truncated_after_close_is_corrupt_and_untouched() {
 }
 
 #[test]
-fn the_database_installs_a_persistent_logical_size_limit() {
+fn each_database_connection_installs_a_logical_size_limit() {
     let dir = TempDir::new();
     let path = dir.db_path("size-limit");
     let _db = AppDatabase::open(&path).expect("open");
@@ -130,7 +130,9 @@ Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tille
 
 Expected: PASS.
 
-Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tiller_persistence --test persistence_integration a_database_truncated_after_close_is_corrupt_and_untouched the_database_installs_a_persistent_logical_size_limit`
+Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tiller_persistence --test persistence_integration a_database_truncated_after_close_is_corrupt_and_untouched`
+
+Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tiller_persistence --test persistence_integration each_database_connection_installs_a_logical_size_limit`
 
 Expected: PASS.
 
@@ -217,7 +219,9 @@ Expected: PASS.
 
 - [ ] **Step 1: Run the session-layer persistence tests.**
 
-Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tiller session::tests::flush_now_writes_even_inside_the_debounce_window session::tests::flush_now_persists_a_new_snapshot_inside_a_later_debounce_window`
+Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tiller session::tests::flush_now_writes_even_inside_the_debounce_window`
+
+Run: `source ~/.cargo/env && cargo test --manifest-path rust/Cargo.toml -p tiller session::tests::flush_now_persists_a_new_snapshot_inside_a_later_debounce_window`
 
 Expected: PASS, confirming the existing `flush_now` seam independently of the package's SQLite writer test.
 
