@@ -95,3 +95,32 @@ proof `right_click_context_menu_dispatches_a_typed_worktree_action` performs a
 real right-button press/release, waits with `run_until_parked()`, clicks the
 drawn New Terminal item, and asserts the typed target/action event. This is the
 menu contract handed to pi rather than a second ad-hoc channel.
+
+The terminal context menu follows the same clicked-surface rule. `TerminalView`
+emits `TerminalContextEvent` for Set Title, Split Right, Split Down, and Close;
+`TillerWorkspace::subscribe_terminal` binds those events to the owning tab and
+pane identity for new, split, and restored terminals. The shell route test
+`terminal_context_app_actions_have_workspace_routes` covers the delegated
+mapping; local copy, ID, and clear actions remain inside `TerminalView`. Linux
+Set Title currently adopts the stable terminal identity as the tab title because
+the GPUI prompt contract has no text-entry payload; independent critic
+verification remains required.
+
+## D2 command palette handoff
+
+The command palette is shell-owned (`tiller/src/command_palette.rs` plus the
+`TillerWorkspace` overlay), so pi does not need to add a second UI command
+surface. It is opened by `Ctrl+Shift+P`; `Ctrl+K` uses the same route only when
+the focused element is not a terminal, preserving readline kill-line in a
+focused terminal. The catalog keeps every typed shell action visible, displays
+the bound chord where one exists, and applies a case-insensitive substring
+filter. An empty filter result is the explicit `No commands match your search`
+row. Ineligible entries remain drawn with their typed disabled reason, including
+the existing `Disabled(NoActiveFile)` and `AlreadyGitProject` families.
+
+The shell proof selectors are `command-palette`,
+`command-palette-filter`, `command-palette-row-toggle-sidebar`,
+`command-palette-row-close-tab`, and
+`command-palette-disabled-no-active-file`. The overlay is not an in-window
+menu-bar strip; title-strip visibility controls remain D-CHROME-01 chrome, and
+the existing sidebar/tab/pane right-click menus remain their own surfaces.

@@ -74,8 +74,8 @@ tab action through the real dispatch path.
 one card, radius 13, `composer` fill, max-w 720, roomy placeholder, a single labelled chip row —
 agent, model (drawn-PASSED), mode, context ring (drawn-PASSED) — and a circular send control that
 **becomes stop while a turn runs** and shows the queued state while typing mid-turn. The 25
-absent F-CHAT entries are built *into* this anatomy, not bolted around it: stop (F-CHAT-21),
-queue (F-CHAT-02), slash / mention / attachment surfaces as popovers above the card.
+absent F-CHAT entries are built *into* this anatomy, not bolted around it: stop (F-CHAT-07),
+queue (F-CHAT-06), slash / mention / attachment surfaces as popovers above the card.
 VERIFY: the existing drawn-test pattern, per entry, plus D-CHAT rows below.
 
 **D4 — Empty states are the front door.** Three designed moments in waku's anatomy (icon, 20px

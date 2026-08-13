@@ -43,6 +43,17 @@ three layers have green suites.
 title-owned panes; a vanished process may clear only process-owned ones. Wiring that lets one layer
 wipe another layer's state reintroduces bugs the model was written to prevent.
 
+## Why this piece and not a larger block
+
+**The queue rule changed today.** A fifth agent, `fable`, was given the design mandate nobody held,
+and its verdict is binding: *the ledger stops being the work queue.* Work is now ordered by
+**journey** — see `docs/linux-rewrite/05-the-design-of-the-program.md` and `DESIGN-LEDGER.md`.
+
+**J1 is the active journey**, and two of its steps are yours: *"done state on the sidebar row"* and
+*"relaunch, the session restores"*. The first is this piece. A sidebar that shows a done state only
+for agents Tiller itself launched is J1 failing at its last step, which is why this outranks any
+larger block you own.
+
 ## The piece
 
 **Yours: `tiller_terminal`, `tiller_activity`, `tiller/src/panes.rs`.**

@@ -276,6 +276,7 @@ find_window() {
 import os
 import re
 import subprocess
+import sys
 
 display = os.environ["DISPLAY_TARGET"]
 want = int(os.environ["APP_PID"])
@@ -288,6 +289,7 @@ except (OSError, subprocess.SubprocessError):
     raise SystemExit(0)
 
 candidates = []
+fallback_candidates = []
 for line in listing.splitlines():
     match = re.match(r"\s+(0x[0-9a-fA-F]+).*?\s(\d+)x(\d+)\+", line)
     if not match:
@@ -305,9 +307,17 @@ for line in listing.splitlines():
     pid = re.search(r"=\s*(\d+)\s*$", prop)
     if pid and int(pid.group(1)) == want:
         candidates.append((width * height, window))
+    else:
+        # The compositor reparents the app window under a frame that does
+        # not carry _NET_WM_PID; remember the geometry as a warned fallback
+        # (the frame and its client share an origin), same as linux-shot.
+        fallback_candidates.append((width * height, window))
 
 if candidates:
     print(max(candidates)[1])
+elif fallback_candidates:
+    print("WARN: no root child advertised the app's _NET_WM_PID; using the largest window", file=sys.stderr)
+    print(max(fallback_candidates)[1])
 PY
 }
 
@@ -347,6 +357,11 @@ supports workspace.list || die "required socket capability missing: workspace.li
 supports workspace.current || die "required socket capability missing: workspace.current"
 supports panel.list || die "required socket capability missing: panel.list"
 run_ctl list-workspaces --json || die "workspace.list failed"
+if supports project.add; then
+    run_ctl project add "$FIXTURE" || die "project.add failed for fixture"
+else
+    record_gap "project.add is absent from system.capabilities; workspace.select alone cannot mount the fixture"
+fi
 run_ctl select-workspace --workspace "$FIXTURE" || die "workspace.select failed for fixture"
 record_state "workspace.select"
 

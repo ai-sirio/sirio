@@ -76,6 +76,50 @@ constructs a webview and asserts it was constructed proves nothing about composi
 entire question. Put the image somewhere durable and reference it by path — **not `/tmp`**, which is
 where the critic's evidence currently goes and why its verdicts are not replayable.
 
+## B-02 decision after the spike
+
+The macOS reference was checked before choosing the Linux composition. `BrowserPermissionStore`'s
+`confirm(origin:)` builds an `NSAlert` and presents it with `beginSheetModal(for:)`: Allow/Deny is a
+sheet attached to the application window, not a doorhanger already living below a browser address
+bar. Linux therefore deliberately adapts that interaction to a browser-style permission doorhanger
+in Tiller's GPUI chrome, between the toolbar and the native WebKit child. It is not painted over
+WebKit pixels.
+
+The inventory count is consequently **0/9 rows requiring GPUI chrome over the webview**. F-BRW-01,
+02, 03, 04, 05, 07, 08, and 09 use the toolbar, adjacent chrome, or the Permissions surface;
+F-BRW-06 uses the GPUI doorhanger above the child-window rectangle. The earlier count of 1/9 was
+the count for the unadapted modal-sheet placement, not a requirement of the chosen design.
+
+B-02 chooses **option 1: the existing X11 native child WebKit view**. Option 2 (an
+override-redirect GPUI popup) is rejected because it would add a second GPUI surface that must track
+the parent on every move and resize for one prompt. Option 3 (offscreen WebKit texture) is rejected
+because it would replace the proven child-window path, add manual input forwarding, and rebuild the
+rendering pipeline for the same one prompt. If the doorhanger cannot be kept visible in the GPUI
+chrome, the fallback is to hide the native child while the prompt is shown and restore it after the
+decision; it is not a new composition architecture.
+
+The durable B-02 grant contract is schema **v11** (`browser_origin_grant`): Allow survives relaunch,
+and the host can revoke one origin or all origins. The view deliberately exposes that contract rather
+than opening a second persistence path. The new `wry` dependency brings GTK/WebKitGTK's native
+event-loop integration; the surface pumps GTK from GPUI as the spike did. It requires the real system
+development packages `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, and `libxdo-dev`.
+The gate should make those prerequisites explicit with a `pkg-config` check beside the cargo check in
+`Scripts/ci-linux.sh` (around line 17), instead of hiding them behind `spike_sysroot` or
+`PKG_CONFIG_PATH`.
+
+The real X11 evidence remains [`reference/linux-progress/p72-browser-spike-xlib-bridge-overlap.png`](../../../reference/linux-progress/p72-browser-spike-xlib-bridge-overlap.png):
+WebKit is a native child above GPUI, so the child owns its pixels and input, while GPUI must update
+its logical bounds on layout changes and keep all interactive chrome outside that rectangle. This
+is the accepted positive spike outcome; it does not claim that GPUI can paint over WebKit.
+
+Integration seam: `tiller_ui/src/lib.rs` is explicitly integrator-owned and remains untouched here.
+The integrator must add `pub mod browser;`, construct `BrowserSurface` for a `TabKind::Browser`,
+forward `BrowserEvent::OpenExternal` to the system-browser path, and connect the Allow return value
+to `AppDatabase::save_browser_origin_grant`. The Permissions surface must load
+`AppDatabase::browser_origin_grants`, pass the snapshot to `BrowserState`, and call the single/all
+revoke methods. Those calls are seams, not claims that the existing `main.rs` or `settings.rs`
+already exposes the feature.
+
 ## Rules
 
 - Work in `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, branch `linux/gpui-waku`. **Your

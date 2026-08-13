@@ -1673,3 +1673,391 @@ property that makes this worth recording: the failure was **deterministic on thi
 invisible on any English one**, so CI elsewhere would have been green forever. Any shell-out that
 parses human-readable git output must pin the locale, and the general rule is: *if you parse a
 program's output, you own its environment.*
+
+---
+
+## Orchestrator entry — 2026-08-13 15:45 — a false PASSED, and the mechanism that made it
+
+`fable` flagged `F-CHAT-08` (*"See connecting, send, and stop primary action states"*, PASSED at
+pass 8) as false. Verified independently: **true, and here is the mechanism.**
+
+`tiller_ui/src/chat.rs:2120-2160` — the composer's primary control is a single `↑` glyph. Its only
+variation is `can_send`, which drives a background and text colour. `can_send` is
+`!streaming && !connecting && !text.is_empty()`, so **while a turn streams the control is merely
+disabled.** It never becomes a stop control. The VERIFY clause asks for three states; two exist and
+neither is stop.
+
+**The mechanism is new and worth a name: verdict by adjacency.** Every noun in the VERIFY clause is
+present *somewhere* in the file — there is a `connecting` flag and a status pill that renders the
+word, there is a `cancel_turn` that really cancels, there is Escape bound to `Cancel`. Three true
+facts about three different things were assembled into one verdict about a control that has never
+existed. Nobody lied and nothing was careless; the parts were checked and the *conjunction* was
+assumed.
+
+This is distinct from the earlier failures. `F-PER-06` was a proof one process too narrow;
+`F-CHAT-24/25` was a mechanism that passed while the feature was absent; the mega-row skipped
+"does it exist". This one **checked existence of every component and never checked that they were the
+same component.**
+
+Consequence, and the reason this is being escalated rather than filed: **146 rows are PASSED, and
+every claim this project makes about progress rests on them.** One is now known false, found by an
+agent that was not looking for it. Nobody has ever audited that bucket — by construction, since the
+critic cannot audit its own verdicts. Routed as FABLE-03.
+
+The cheap defence, adopted into every brief from now on (`fable`'s proposal, FABLE-02): **a claimed
+row must name a replayable proof — a test name or a transcript — so the critic replays rather than
+re-derives.** A row whose evidence cannot be replayed is the row most likely to be false.
+
+---
+
+## Critic pass 11 — the half-proven bucket is gone (2026-08-13T13:26Z snapshot)
+
+All 64 half-proven rows converted: **19 PASSED, 38 FAILED — absent, 5 FAILED —
+defective, 1 NOT EXERCISED — blocked on display**, and `F-CORE-ACT-08` was claimed
+by the P50 builder mid-pass (left as builder-claimed, unverified).
+
+The conversions split exactly along the line the brief predicted: **19 rows' missing
+halves existed and were exercised** (new drawn tests for the remove-project confirmation
+prompt, activity-row click/close, the socket disable effect, usage timeout+PTY-termination;
+live exercises for the missing-CLI launch-error surface, close-cancels-registration,
+scrollback capture->quit->relaunch->replay, $SHELL preference, and the 1MiB wire cap),
+and **38 rows' missing halves are genuinely not built** — most of them one of two
+recurring shapes: *a tested model with zero app callers* (planner, partition, eviction,
+LayoutCommand, view_state, shell-quote, watcher, default_project_base — seven dead
+functions in one pass) and *a control that renders but does nothing* (Copy install
+command, Refresh now, provider visibility, six unpersisted settings).
+
+Five rows became **defective**, all in the control tier, all found live:
+- `F-CTRL-WIRE-02`: the 1 MiB line cap drains complete lines *before* checking the cap,
+  so lines up to 1MiB+64KiB−2 are accepted (pinned live); the Swift server rejects
+  anything over 1MiB.
+- `F-CTRL-SYS-01`: wire answers `{status:"ok"}` vs documented `{pong:true}`; tillerctl
+  prints "pong" unconditionally, so only third-party clients notice.
+- `F-CTRL-CLI-01`: the usage line documents `tillerctl [--socket <path>] <command>` but
+  the parser errors on that placement (rc=2).
+- `F-CTRL-NOTIFY-02`: session+title mode ambiguity resolves to title; the Swift
+  NotifyMode errors `ambiguousMode`.
+- `F-CTRL-WORK-05`: `workspace.close` leaves the pane PTY running (re-verified: `sleep 60`
+  alive after close) — same process-group leak as F-PER-06/F-TERM-08.
+
+**The single biggest gap that is not the display and not the activity-layer wiring:**
+the model layer is complete but dead — seven fully-tested models (activity planner,
+pane partition, eviction, LayoutCommand, WorkspaceTabViewState, shell-quoted file drops,
+the inotify watcher) have **zero non-test callers**, and the settings surface is a
+half-wired control panel: Resume sessions, auto-naming, translucency, retention, mount
+cap and panel widths are computed, clamped and displayed but **never persisted**
+(AppSettings carries 5 of the claimed keys), while Copy install command and Refresh now
+are literal no-op buttons. The inventory cannot be finished by tests alone; the next
+pass's queue is 38 builder rows.
+
+Snapshot notes: pi's composer files and the control crate were moving during the pass;
+rows touching them carry the 13:26Z snapshot time. A machine-wide disk outage invalidated
+some transient build/test results mid-pass; every affected result was re-run green after
+the cleanup (279G reclaimed), and one remaining artifact (the p18-auto worktree the
+scrollback replay used) was deleted by that cleanup after the evidence was captured.
+
+---
+
+## Critic pass 12 — the audit applied, the ledger's arithmetic fixed (2026-08-13, late afternoon)
+
+Applied `PASSED-AUDIT.md` (fable). Snapshot `/tmp/critic-pass12`, shared
+`CARGO_TARGET_DIR=/tmp/critic-target`, `TILLER_SOCKET=/tmp/critic12.sock`; all suites
+run from the snapshot (tiller_ui 140/140 green incl. 3 new critic tests; tiller_git
+57/57 green; tiller_terminal context-menu test green).
+
+**The ten false PASSEDs: 10/10 confirmed, 0 overturned.** Each disproof re-checked
+against the live tree (line numbers moved since the audit; all still valid). The
+mechanism is as fable named it — verdict by adjacency: true facts about several
+different things assembled into a verdict about a thing that does not exist.
+F-CHAT-02 (no auth state anywhere; `auth` appears once, in a test's fake-agent
+script), F-CHAT-08 (one ↑ gated only by `can_send` — never stop; P53's socket-door
+stop transcript preserved in the row, the UI clause re-marked FAILED — absent),
+F-CHAT-16 (no search/no-match/Recommended), F-CHAT-18 (percent+tokens+Cost only,
+no input/output/cache rows), F-CHAT-23 (ToolCall{id,title,status}, static row,
+no expand/links/Dismiss), F-SID-15 (menu ends at New Chat; hover-× removal has
+no confirmation), F-SET-16 (static "Search agents" text; Refresh handler is the
+literal no-op `|_, _, _| {}`), F-SET-21 (exactly one Files icon choice on Linux),
+F-USE-02 (`tooltip` has zero matches in status_bar.rs), F-USE-03 (every
+Unavailable reason renders the same "—"). All ten → FAILED — absent, pass 12.
+
+**The four unreplayable PASSEDs.** F-SID-01/02/04: new named drawn critic tests
+added in the snapshot and green — `projects_header_add_control_and_project_rows_render`,
+`filter_narrows_rows_and_clearing_restores_them`,
+`project_chevron_hides_and_restores_children` (sidebar.rs; a `filter-field` debug
+selector was added to make the filter queryable). Kept PASSED on the new evidence.
+F-USE-01 downgraded FAILED — absent: the refresh control never renders —
+`on_refresh` is a dead builder API with zero call sites; render is gear + three
+hardcoded segments + branch·path; zero tests in status_bar.rs.
+
+**The four doubts.** F-TAB-15 → FAILED — absent (no tab context menu exists; the
+palette "Close Tab" is drawn-tested at main.rs:6313 but is not the clause's
+surface). F-AUTO-06 → FAILED — absent (create/list/clear live; the delivery
+conjunct has no path — F-USE-06's zero callers). F-WIN-01 → FAILED — absent
+(gear/socket settings real; no `ctrl-,` chord in any crate). F-WIN-07 →
+FAILED — absent (restore real; the History-menu route is absent and the row
+disclosed it — a disclosed-absent clause cannot stand as PASSED). F-TAB-10 kept
+PASSED with upgraded evidence: the clause's pane-menu route now exists — drawn
+`right_click_resolves_this_terminal_and_draws_all_context_actions` green
+(tiller_terminal lib.rs:1751) + shell split wiring (main.rs:2325-2341).
+
+**Totals recomputed from the body (all eight buckets):** PASSED 152 · half-proven 0 ·
+FAILED — absent 130 · FAILED — defective 12 · UNREACHABLE 7 · N/A — platform 23 ·
+NOT EXERCISED 38 · NOT EXERCISED — blocked on display 8 · builder-claimed 18 ·
+total 388. Never-judged: 54 (22 builder-claimed + 7 P50 + 25 never claimed).
+
+**F-SID-14 flipped FAILED → PASSED** (drawn context-menu dispatch test green +
+shell/palette wiring code-verified) — the mirror defect of a false PASSED, found
+one of each today. Four more stale FAILEDs in the same class re-marked: the
+terminal context menu now exists (context_menu.rs, 10 items, drawn test green),
+so F-CORE-TERM-02, F-TERM-04, F-TERM-06, F-TERM-UI-01 → NOT EXERCISED (menu
+drawn-proven; per-action clipboard/clear effects not individually exercised),
+and F-TAB-26 + F-TERM-05 → PASSED (drawn menu test + shell routing +
+`terminal_context_app_actions_have_workspace_routes`).
+
+**Six stale F-GIT FAILEDs (routed by fable's FACT) → PASSED.** All six modules
+exist and have named tests, all green in the fresh snapshot:
+streaming runner (`streaming_runner_delivers_stderr_before_the_child_exits`),
+branches, clone (progress + invalid-source failure), remote parsing,
+directory-status precedence, side-by-side pairing (2 tests) — all in
+tests/p41_git_behaviors.rs. Zero app callers for all six — package capability
+proven, wiring owed; same dead-code class as the seven pass-11 models. Negative
+greps were positive-controlled per the FACT's caution.
+
+**Pass-11 findings: already ledger rows.** All seven dead models
+(F-CORE-ACT-24/25/26, F-CORE-DOM-03, F-CORE-WSP-04, F-CORE-WSP-08,
+F-CORE-FILE-03, F-CORE-FILE-06), the six unpersisted settings (F-CORE-SET-01 +
+F-SET-04/05/06/07), the no-op buttons (F-SET-08 Copy install command, F-SET-10
+Refresh now, F-SET-16 agents Refresh — re-marked this pass), and all five
+control-tier defects (F-CTRL-WIRE-02/CLI-01/NOTIFY-02/SYS-01/WORK-05) were made
+FAILED rows in pass 11. Zero-caller claims re-verified in the moved tree with
+positive controls. Convergence noted: fable found the Refresh no-op by reading
+settings.rs:1187; pass 11 found it by exercising the surface — one defect, two
+methods, no coordination.
+
+**Two deterministic P50 test failures** (re-run in isolation, still red; not
+disk-related): `process_refresh_preserves_process_ownership_until_process_gone`
+(panes.rs:636 — passes the test process's own pid as the shell pid; the /proc
+walk finds no agent child and clears the Running state the test expects
+preserved) and `real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second`
+(panes.rs:962 — first OSC title not suppressed inside the 1500ms Layer-A window),
+plus a suite-teardown SIGABRT from a PTY reader thread. These sit under
+F-CORE-ACT-07/09/10/11, which stay builder-claimed. Also observed:
+`a_permission_prompt_answers_both_ways` flaked once under parallel load (green in
+isolation and in the full re-run) — not in FLAKY_TEST_FINDINGS.md.
+
+**Concurrency:** the live tree moved during the pass (P52/P53 moved F-CHAT-01/07/08
+and F-PER-01 to builder-claimed). A green drawn Escape test
+(`escape_cancels_the_stream_and_the_transcript_states_it`, chat.rs:3670)
+contradicts part of P53's "drawn Escape path remains unwired" claim — flagged
+here; the row stays builder-claimed, not PASSED, so no re-mark.
+
+**Backlog:** the 64-row half-proven bucket was fully converted in pass 11 (ENOSPC
+interrupted only the tail of that pass; the conversion landed — 0 half-proven
+rows remain). What remains for future passes: 38 NOT EXERCISED + 18
+builder-claimed rows. EVIDENCE-STANDARD.md did not exist when this pass started;
+the rule from the brief was applied directly: a verdict made by reading code is
+not a verdict — UI rows need a named drawn test, machine rows a named test or
+executed transcript, appearance rows a shot.
+
+**Disk:** `/tmp/critic-pass11` (58G) deleted at end of pass;
+`/tmp/critic-target` (4.1G) shared and reused; `/tmp/critic-pass12` kept for the
+next pass to replay the three new critic sidebar tests.
+
+## PASS 13 — the display is back; the /tmp-proof rule is now law
+
+**Structural rule applied: critic tests land in the live repository.** The three
+pass-12 sidebar tests died with the reboot (`/tmp/critic-pass12`), which made
+F-SID-01/02/04 look proven while being exactly as unreplayable as before. They are
+re-established as live-repo tests and the verdicts cite the new names:
+`projects_header_add_control_and_project_rows_render`,
+`filter_narrows_rows_and_clearing_restores_them`,
+`project_chevron_hides_and_restores_children` (all sidebar.rs, green 15/15).
+The pass-11 remove-project confirmation test had the same /tmp disease (its name
+was cited by F-SID-10 while the test itself was gone); replaced by
+`remove_project_context_item_confirms_before_emitting` (sidebar.rs, green).
+One production line added for testability: the filter field now carries a
+`debug_selector("filter-field")`, matching every other control.
+
+**F-PRJ — the 18-row family, finally judged.** Exercised on the live display with a
+real catalog (socket transcripts + frames in `reference/linux-progress/2026-08-13/`):
+the Add flow is a directory picker and nothing else. F-PRJ-02 PASSED (socket add →
+catalog row → sidebar rows; picker→event drawn-test green). F-PRJ-01/03..18
+FAILED — absent, each with its own reason: no clone form, no create form, no
+non-git prompt, no insertion-error surface (eprintln only), settings sheet is
+read-only (no trash, no name edit, no icon UI, no base/location controls). The
+whole family moved out of "never claimed".
+
+**The 8 display-blocked rows lost their excuse; 0 remain.** F-CHG-02 FAILED — absent
+(exercised: no current workspace + changes.open still serves the last worktree — no
+no-worktree state exists). F-CHG-20 FAILED — absent (builder claim confirmed by
+reading: no running-count/activity element in changes.rs). F-CHG-06 half-proven
+(transcript data half + status dots photographed; no named drawn test for the tree
+decorations). F-SET-19/20 half-proven via the new live-repo drawn test
+`appearance_controls_drive_theme_translucency_and_font_size` (settings.rs, green);
+pixel halves owe a light-theme frame — the XTEST click would not land and the socket
+has no settings write door. F-SET-22 FAILED — absent (agent colour swatches are
+display-only; no choice exists). F-TERM-09 half-proven: `panel state` reports
+running (transcript), but the running→finished transition is pixel-identical
+(AE=0, frames TERM-11/12) — no visible indicator change. F-PER-07 FAILED — absent
+(icon/name editing doesn't exist; no persistence door to exercise).
+
+**F-SID-12 (primary transition) — half-proven.** Catalog half green:
+`set_primary_flips_the_application_level_marker` (session.rs) — siblings cleared
+per project, unknown path errors, other projects untouched. The full-route drawn
+test `worktree_primary_context_transition_reaches_the_catalog` is written (main.rs)
+but the whole tiller-bin gpui suite is currently blocked by a **zbus
+non-determinism flake**: gpui_linux's `listen_for_system_wake` executor wakes during
+any bin gpui test and trips the scheduler's determinism guard — pre-existing
+`probe_escape_dispatch` fails identically when run alone. Needs an owner: the wake
+listener should not run under the test scheduler (or a builder should gate it).
+
+**Harness findings (both fixed in-tree this pass):**
+- `visual-sweep.sh` gap list is stale — it claims no Changes/Settings socket methods
+  while `surface.changes.open/read/...` and `surface.settings.open/select/read` exist
+  (all exercised this pass). The script also predates the catalog-gated
+  `workspace.select` (added `project.add` first) and had a strict-PID-only window
+  finder while the compositor reparents the app under a frame without `_NET_WM_PID`
+  (added the linux-shot warned-geometry fallback). Also: a relative `--out-dir`
+  broke the app-log redirect after the `cd "$FIXTURE"`; absolute paths work.
+- **sccache serves stale rmeta**: a cached pre-cosmic `tiller_theme` rmeta made
+  `tiller_ui` report `unresolved import tiller_theme::cosmic` although the module
+  exists. Deleting the stale artifact (or `RUSTC_WRAPPER=`) fixes it. Worth knowing
+  for every cold-build-on-shared-target session.
+- **XTEST click delivery**: `xdotool click 1` batches press+release so gpui's
+  `on_click` never fires; split `mousedown`/`mouseup` with a delay works. Right-clicks
+  (mouse-down handlers) always worked. The + click opens a real portal
+  (ashpd FileChooser request appears on the D-Bus; the dialog is Wayland-side and
+  invisible to X captures).
+- **Display hygiene**: two stacked instances (a killed-but-alive earlier launch at
+  +2905+235 and a new one at +2905+379) made every click land on the wrong window for
+  a long stretch; geometry-only window discovery is not safe on this shared display,
+  and zombie frames outlive their processes. All frames in the manifest were
+  re-verified single-instance.
+
+**Appearance tier (quantitative, MEASURED.md tokens):** column dividers pure black
+1pt at x325/x1064 — MATCH. Sidebar bg #181818 vs reference canvas #131417; title bar
+#272727 vs #141416 (noticeably lighter); status bar #1A1A1A vs #141416. The
+side-by-side waku comparisons for all five sweep frames are in
+`reference/linux-progress/2026-08-13/visual-sweep/comparisons/`. Typography-level
+debt still needs human eyes; the colour deltas above are measurable now.
+
+**In-flight pieces left untouched per the brief:** chat.rs (pi D1 — its
+`stopping_via_click_with_a_queued_item_still_sends_it` is red mid-TDD), persistence
+(codex11), main.rs chat wiring (codex12). The tiller-ui lib failed to compile at
+several points this pass purely from in-flight edits; my tests were verified in
+green windows between them.
+
+## PASS 14 (pireview, ~20:30–23:00)
+
+- **The goal's acceptance test is exercised and PASSED, for both ACP agents.**
+  Driven through the real UI on :1 (picker → chat tab → composer → Enter): Codex —
+  session JSONL `~/.codex/sessions/2026/08/13/rollout-…22-13-58….jsonl` carries my
+  UI-sent prompt and the reply `CRIT14-CODEX-DONE-3317`; the spawned stack was
+  `codex-acp → codex.js app-server → codex app-server` (q1-ps.txt) — the per-adapter
+  `acp_program` fix is live on the New Chat path. Claude — `~/.claude/projects/
+  -tmp-critic14-cwd/514189c4….jsonl` carries prompt + reply `CRIT14-DONE-8219`, with
+  `claude-agent-acp` on ps. Frames: reference/linux-progress/2026-08-13/pass14/.
+- **The picker gates correctly, live**: `m2-01-picker-open.png` shows exactly two
+  chat rows (Claude Code, Codex) — `is_available() && acp_program().is_some()`
+  (tab_bar.rs:467). Environment had claude/codex/pi on PATH; pi is correctly
+  excluded for ACP.
+- **NEW FINDING (live) — no composer auto-focus, structural**: a freshly opened
+  chat tab does not put the cursor in its own field; keystrokes before the first
+  click are silently swallowed (`s1-02-typed-noclick.png`: typed `NOFOCUS-PROBE-7777`,
+  transcript stayed empty and the placeholder stayed; one click in the field, then
+  the identical send worked and the agent replied). Root shape: `Chat` IS focusable
+  (Focusable → composer_focus, chat.rs:3040) and `select_pane` (main.rs:4339) does
+  resolve+focus it — but `add_chat_tab` (main.rs:3934) takes no `&mut Window`, so
+  creation cannot focus structurally; all four `select_pane` callers are click/key
+  paths, none creation. Owner: pi (chat.rs / add_chat_tab).
+- **GAP 1 confirmed live (restore/resume = Claude default)**: at one app launch,
+  4× `claude-agent-acp` spawned — one per restored chat tab — while the DB held a
+  Codex tab (`n2-ps.txt`; 5 tabs in critic14.sqlite). `TabRecord.agent_id` (P70)
+  exists but every row is NULL — the writer half in main.rs is still open.
+  `resume_chat`/restore call `Chat::launch`, and set `agent_icon/agent_id: None`,
+  so a label check cannot catch it — only process identity can.
+- **Orphaned adapters**: killing the app leaves `npm exec …-acp` node processes
+  alive (observed 4+); no cleanup path.
+- **tiller bin red, owner-named**: 8 failing tests, growing while the author
+  edits: drawn_palette ×2, drawn_disabled_save_row, ctrl_k ×2,
+  escape_closes_the_settings_surface (main.rs — codex12 live), plus
+  process_owned_status_survives…, real_pty_layer_a_debounce… (panes.rs — P50 author).
+  Also the clippy gate is red at cosmic/live.rs:111 and cosmic/theme.rs:88
+  (sonnet fixing) — the orchestrator corrected an earlier all-clear; the gate's
+  own invocation is the only probe that counts. Not reported as build failures.
+- **Display harness lessons (cost ~1h)**: the XTEST pointer on :1 is shared by all
+  agents — clicks race; the import pipeline serves slow/stale captures; and my
+  stage-checker shipped a wrong-path bug (`/tmp/crit14` vs `/tmp/critic14`) that
+  looked like an app defect. The self-correcting click→shot→verify driver
+  (per-stage retries + pointer-position verify) is the pattern that survived.
+- **F-SET-09 re-marked defective**: settings Install Skill button renders with an
+  empty handler `|_, _, _| {}`; the tested provisioner (`tiller_project/skill.rs`)
+  has zero consumers.
+- **F-WIN-06 flipped per the user's scope ruling**: browser is in scope;
+  `NewTabAction::NewBrowser` is an empty match arm yet the menu still offers
+  "New Browser" (silent dead entry) while the socket answers browser.* honestly.
+
+## PASS 15 (pireview, ~22:30–23:55) — FABLE-09 recipes
+
+- **39 recipes → 9 rows converted or refreshed live, 4 verdicts changed**
+  (F-TAB-07, F-CHG-05, F-SET-02, F-CHAT-08 to PASSED; F-TAB-08, F-CHG-03 to
+  half-proven; F-CHG-11, F-TERM-PTY-05 re-evidenced FAILED). Ledger
+  188 → 192 PASSED, 131 → 125 FAILED-absent.
+- **Recipe-vs-screen mismatches (information about the census):** (1) the
+  "status-bar gear" door does not exist — `StatusBar.on_settings` is never
+  wired to a rendered element (status_bar.rs render has no settings button);
+  settings opened via the control socket instead. (2) The tab-strip chip
+  right-click and all right-click recipes are unreachable on this display
+  session (XTEST button 3 produces no app state change; pass 13's session had
+  it working). (3) ctrl-o/Open File goes through the Wayland-side portal
+  picker — invisible to X captures; editor rows rest on drawn tests.
+  (4) F-TERM-PTY-05's recipe drives `sleep 8` — even with input delivered via
+  `tillerctl panel write`, running-vs-done frames are byte-identical: the
+  activity wiring the row says is absent, stays absent.
+- **F-SET-02 split recorded:** Escape closes settings LIVE (634k px) while
+  the workspace drawn test still fails — the palette-test harness cluster in
+  the tiller bin (owners named pass 14) is broken, not the feature.
+- **F-CHAT-08:** live streaming captured (20 bands → 19 after stop click);
+  the agent completed too fast to observe an active-stream cancel — the
+  drawn + socket-door stop tests are the cancel transcript.
+- **Keyboard delivery unlocked:** XTEST key events land only after a real
+  click gives the app X input focus (windowactivate alone does not work on
+  this compositor); inside a focused PTY, chords are swallowed by the shell
+  (mac-only chord candidate, 88193ce).
+- Build note: workspace was red at pass start (codex11's uncommitted P72
+  gtk/wry deps); orchestrator installed the system libs; binary rebuilt at
+  22:41 including P73. All drives after that used the current tree.
+
+## PASS 16 (pireview, ~23:45–00:30)
+
+- **P73 LIVE-PROVEN — the pass-14 "largest remaining gap" is closed.** Codex chat
+  opened via the picker → DB row `agent_id='codex'` (pass 14: all NULL) → quit +
+  relaunch → ps shows exactly ONE codex-acp (the Codex tab) and ONE
+  claude-agent-acp (the generic NULL-agent Chat tab — correct default). No
+  wrong-agent processes; no orphan accumulation at launch. Frames/ps:
+  reference/linux-progress/2026-08-13/pass16/.
+- **Group-0 test replays: 7 of 8 converted.** ACT-05/08/09 PASSED (their cited
+  panes:: tests ok); ACT-27 PASSED (0 ignores, panes:: executes 16/2, terminal
+  suite green); **ACT-06/07/11 → FAILED — defective**: their own cited tests
+  (`process_owned_status_survives_title_and_child_exit_events`,
+  `real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second`) fail
+  reproducibly (pass 14 and 16; panes.rs untouched since 19:39 — stable, not
+  transient). codex12 is verifying whether the tests or the code are wrong —
+  those three verdicts may come back. ACT-10 (no test) rides the kill-9 live
+  half, not reached.
+- **omp re-marked**: the real package ships `oh-my-pi` with no `omp` alias
+  (package.json bin verified); omp.rs:35/65/77 hardcode "omp" →
+  F-AGENT-OMP-01/02/03 = defective-by-name, not environment. OPENCODE-03 →
+  FAILED — absent (no summarizer-command generator exists anywhere in the port;
+  opencode 1.18.18 is installed and runs).
+- **Right-click cap reached** (2 attempts, both with focus-first per the
+  orchestrator's hypothesis): tab-chip and pane context menus do not open on
+  this display session. Chronicle only — ENVIRONMENT.md already states XTEST
+  button 3 does not reach the app under this Wayland session; no rows were
+  marked FAILED on it.
+- **Display degradation**: load ~30 during the late drives; settings-surface
+  clicks produced 0-px deltas (theme segments unresponsive or mis-hit) and the
+  chat-stage clicks missed repeatedly — Group 2 (F-CHAT-03/05/15/20/29/30/33)
+  and F-SET-19/20 remain for the next pass. F-CHG-06 partial: status symbols
+  measured per row (staged green #B3D9B7 vs amber variants); the post-`git add`
+  Refresh click was inconclusive under load.
