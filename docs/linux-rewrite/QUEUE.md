@@ -981,3 +981,48 @@ a file that got generalised into a claim about the app — the identical shape a
 branch was read and a menu inferred from it. Catching it one message later instead of one pass later
 is the only difference, and that difference came from re-reading my own assertion rather than from
 anyone challenging it.
+
+## 23:25 — the construction backlog is 100 rows, and half of it sits behind one builder
+
+Measured, not estimated: the ledger's `FAILED — absent` bucket minus the rows FABLE-08 proved are
+already built. The extraction self-checks — pulling the `already built` rows out of the census's
+generated table yields **39**, exactly the count the census states for itself, so the parse is not
+silently dropping rows. (A first, naive attempt grepped every row id mentioned anywhere in the doc
+and returned "0 of 131 still absent". Absurd on its face, which is why it was safe: an obviously
+wrong number gets checked, a plausible wrong number gets published.)
+
+**100 rows still to build**, by area:
+
+| area | rows | owner |
+|---|---|---|
+| `F-PRJ` | 17 | pi (`sidebar.rs`) |
+| `F-CHAT` | 15 | pi (`chat.rs`) |
+| `F-SET` | 10 | pi (`settings.rs`) |
+| `F-SID` | 6 | pi (`sidebar.rs`) |
+| `F-BRW` | 9 | codex11 — spike in flight |
+| `F-TAB` | 7 | codex12 (`tab_bar.rs`) |
+| the rest | 36 | spread thin: `F-USE` 4, `F-WIN` 3, `F-TERM-PTY` 3, `F-TERM` 3, `F-CORE-FILE` 3, `F-CORE-ACT` 3, … |
+
+**`pi` owns 48 of the 100.** The construction side has the same shape as the adjudication side: one
+agent holding the bulk while others run dry. `F-CHG` and `F-EDIT` have dropped out of the top
+entirely — most of codex11's absent rows turned out to be the stale ones, which is why codex11 keeps
+finishing early.
+
+Two levers, both the user's call rather than a mid-flight re-cut of the ownership map — that map is
+the only reason five builders have run all day without a collision:
+
+1. **Unblock `sonnet`.** It is idle behind an unsent `push it` and already owns the visual layer
+   (`tiller_theme`, `controls.rs`, `titlebar.rs`, `composer.rs`). `F-SET` (10 rows) is the natural
+   transfer: its COSMIC pass already touches that surface.
+2. **Split one of pi's four surfaces.** `settings.rs` and `sidebar.rs` are separable from `chat.rs`,
+   where pi is currently working (F-CHAT-24/25/26/27 — pending-question bar, text answer and cancel,
+   expired-question state, Plan card).
+
+### Worth checking, not acting on: pi is running a flash model
+
+`pi` shows `deepseek-v4-flash`; `pireview` shows `deepseek-v4-pro`. If that is deliberate — many
+small rows, cheaper and faster — fine. If it is the silent reset already recorded in memory (a fresh
+context reverts a pane to the global default and the stronger model is lost without any notice),
+then the builder holding **48 of the 100 remaining rows** is doing GPUI work with drawn tests on the
+weaker model, and nothing anywhere would report it. pi's context is at 7.2% (`↑31k ↓8.7k`, $0.006),
+i.e. freshly reset — which is exactly when that reset happens.
