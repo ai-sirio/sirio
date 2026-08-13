@@ -177,7 +177,7 @@ fn bind_window_keys(cx: &mut App) {
 /// 2pt, or tinted, or offset by a point, it is visible.
 const SIDEBAR_WIDTH: f32 = 325.;
 const RIGHT_PANEL_WIDTH: f32 = 405.;
-const SEAM_WIDTH: f32 = 1.;
+const SEAM_WIDTH: f32 = 6.;
 const TITLE_BAR_HEIGHT: f32 = 32.;
 const STATUS_BAR_HEIGHT: f32 = 40.;
 const TAB_BAR_HEIGHT: f32 = 34.;
@@ -10039,6 +10039,11 @@ mod tests {
     fn browser_tabs_have_shell_icon_and_width() {
         assert_eq!(tab_icon(TabKind::Browser, false, None), Icon::Globe);
         assert_eq!(TillerWorkspace::tab_width(TabKind::Browser), CHAT_TAB_WIDTH);
+    }
+
+    #[test]
+    fn seam_width_matches_reference_divider() {
+        assert_eq!(SEAM_WIDTH, 6.0);
     }
 
     #[test]
