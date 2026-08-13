@@ -1775,3 +1775,26 @@ rows queued on one pane** while `codex11` and `sonnet` generate more Half As.
 Per `SEAMS.md`'s own advice the two mounts go as **one integration pass**, not two dispatches: they
 touch the same files and cost one build cycle instead of two. The deeper fix — that the ownership
 map makes one pane the integrator by construction — is recorded there and not attempted mid-flight.
+
+## 2026-08-14, 03:10 — the codebase defends its own incompleteness
+
+Sizing the browser mount for `P83` turned up two mechanisms that keep a feature dead, beyond the two
+already recorded (a builder wiring nothing, an orchestrator dispatching only Half A). Both are worse,
+because in both cases **the tree actively holds the gap open** and neither is visible from the ledger.
+
+**A test that pins the stub.** `main.rs:9781` asserts each of the ten `BROWSER_METHODS` fails with
+`"unsupported on Linux"`; `main.rs:9817` asserts capabilities advertise none of them. The suite is
+green *because* the browser is absent. Wire it and two tests go red — which reads exactly like a
+regression, and the obvious "fix" is to revert the wiring.
+
+**The shell asserting the feature is impossible.** Three `unreachable!()` calls sit between a browser
+tab and the screen — `tab_icon` (`main.rs:2156`), shell persistence (`:2803`), `tab_width` (`:3904`)
+— one carrying the design claim *"Browser surfaces are external to the shell."* Half true: the page
+pixels genuinely are a native WebKitGTK child window. The false half — that the *tab* is external —
+panics on render, on layout and on save.
+
+**And a correction to how this file has been sizing seams.** `SEAMS.md` estimated the browser mount
+at "often a dozen lines" on the strength of a reference count of zero. That count was right and the
+estimate was wrong: **a reference count tells you a seam is open, not what it costs to close.** The
+same shape as the transplant metric — the aggregate measurement was true and hid the per-file fact.
+Before sizing a mount, grep the consuming file for the variant's own name.

@@ -40,7 +40,7 @@ signature the browser shows today.
 
 | seam | Half A | Half B — owner and change | rows it blocks |
 |---|---|---|---|
-| **Browser mount** | ✅ done. `tiller_ui/src/browser.rs`, 1283 lines: `BrowserState` (address, back/forward/reload/stop, navigation lifecycle, errors, permission allow/deny/revoke, agent-driving, link routing) and `BrowserSurface` with `Render`. `codex11`, 2026-08-13. | 🔴 **`codex12`** — mount `BrowserSurface` as a tab surface in `main.rs`, and route the existing `browser.*` control methods (`main.rs:188-193`) to it instead of their unsupported-error stubs. | `F-BRW-02/03/04/05/07/08` and the rest of the `F-BRW` cluster |
+| **Browser mount** | ✅ done. `tiller_ui/src/browser.rs`, 1283 lines: `BrowserState` (address, back/forward/reload/stop, navigation lifecycle, errors, permission allow/deny/revoke, agent-driving, link routing) and `BrowserSurface` with `Render` at `browser.rs:1011`. `codex11`, 2026-08-13. **6 refs in tree, 0 in app.** | 🔴 **`codex12`, brief `P83`.** Bigger than this row first said — see below. Mount `BrowserSurface`, remove **three `unreachable!()` panics** (`main.rs:2156` icon, `:2803` persistence, `:3904` width), invert **two tests** that pin the stubs (`main.rs:9781`, `:9817`), and route all ten `BROWSER_METHODS` at `main.rs:1668`. | all 9 `F-BRW` rows |
 | **P71 notices** | ✅ `set_notice` exists, 11 references. | 🟡 **`codex12`** — partially done. **34 `eprintln!` remain** across `crates/tiller/src` + `crates/tiller_ui/src`. Each one is a failure only stderr sees. | the `F-*` rows whose evidence is "fails silently" |
 | **Project forms mount** | ✅ done. `tiller_ui/src/project_forms.rs` — `CloneForm` and `CreateForm` with explicit states, double-submit guard, progress, visible errors and retry. `codex11`, P77, committed `da67e8c`. | 🔴 **`codex12`**, handoff verbatim: *"Clone: mount `CloneForm`, listen for `CloneFormEvent::Cloned(path)`, register/load the resulting project. Create: mount `CreateForm`, listen for `CreateFormEvent::Created(path)`, register/load the resulting project."* Plus turn the sidebar `+` (`sidebar.rs:795`, `start_add_project`) into three choices. | `F-PRJ-01`, and makes `F-PRJ-05/06/07/08/09/10` reachable |
 
@@ -50,6 +50,28 @@ signature the browser shows today.
   listed this as open; it is not.
 - **`tiller_markdown` → `file_view.rs`** — `file_view.rs:28` imports `Document`/`parse` and uses
   them. Verified 2026-08-14.
+
+## Two more ways a feature stays dead — found 2026-08-14
+
+Seams were the first mechanism, and the builder's own loop was the second. Auditing the browser mount
+turned up two more, and both are worse because **the codebase actively defends its own
+incompleteness.** Neither is visible from the ledger, and neither shows up as a failing test.
+
+**A test that pins the stub in place.** `main.rs:9781` asserts that every one of the ten
+`BROWSER_METHODS` *fails* with `"unsupported on Linux"`; `main.rs:9817` asserts capabilities
+advertise none of them. **The suite is green precisely because the feature is absent.** A builder who
+wires the browser and sees two tests go red has every reason to read that as a regression and revert
+— the correct move is to invert the assertions, because the test encoded the stub as the contract.
+
+**The shell asserting the feature is impossible.** Three `unreachable!()` calls stand between a
+browser tab and the screen, one of them carrying the design claim *"Browser surfaces are external to
+the shell"*. That claim is half true — the page pixels really are a native WebKitGTK child window —
+and the half that is false, that the *tab* is external, panics on render, on layout and on save.
+
+The lesson for estimating: **a reference count of zero tells you a seam is open, not what it costs to
+close.** `SEAMS.md` guessed the browser mount at "often a dozen lines" on the strength of that count.
+Before sizing a mount, grep the consuming file for the variant's own name — the panics and the tests
+that forbid it are the actual work.
 
 ## The structural problem this exposes
 
