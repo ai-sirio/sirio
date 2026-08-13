@@ -863,3 +863,47 @@ yes. Message out and reply streaming, **never witnessed**.
 Note the reading discipline: in the *menu* frames byte-identity was the signal of **success**
 (opened and stable). In a streaming window it is the opposite. Same observation, opposite meaning,
 decided by context — which is why the frames get read rather than the filenames.
+
+## 22:45 — the composer's focus is mouse-only, and that may be the whole ACP blocker
+
+Read statically, in `chat.rs` (pi's — read only, nothing edited):
+
+- The full input path **exists and is thorough**: `composer_focus` is a real `FocusHandle` with
+  `tab_stop(true)`, `on_composer_key` is wired at `:3078`, character insertion runs through
+  `key_char` at `:1447-1452`, `enter`/`return` → `Send` at `:551-552` in the `ChatComposer` key
+  context, `shift-enter` → newline. This is not an absent feature.
+- **The composer takes focus in exactly one way**: `.on_mouse_down(MouseButton::Left, …)` on its own
+  div at `~:2859`, calling `composer_focus.focus(window, cx)`. That is the only call site in the
+  file. Keystrokes only land inside the `ChatComposer` context, i.e. only once that focus exists.
+- The house tests agree, and say so in their own naming: the helper is `focus_and_type`, and it does
+  `debug_bounds("composer")` → `simulate_click(composer.center())` → `run_until_parked()` →
+  `simulate_input(text)`. **Even the suite does not assume focus; it clicks for it.**
+
+That is a mechanism consistent with the pass-14 frames — chat tab opened, typing sent, placeholder
+`Message…` never cleared, status `idle`, frames byte-identical. **It is not a verdict.** Sent to
+pireview as a place to look, explicitly not as a conclusion, because the last time a code branch was
+read and a UI behaviour inferred from it (GAP 2) the inference was wrong and cost two agents a
+correction.
+
+Two different things fall out, and they must not be merged:
+
+1. **If a click into the composer unblocks it** — the gap is that a freshly opened chat does not put
+   the caret in its input, which every agent CLI does. That is a real finding and it is **pi's**, as
+   the owner of `chat.rs`. It is a UX gap, not a crash, and only the critic may name it as a row.
+2. **If typing still does not land after an explicit click** — the cause is upstream of anything
+   read here, and this note explains nothing. Say so; do not stretch it to fit.
+
+### Named, unverified: five mac-only chords in the chat composer
+
+`chat.rs:562-568` registers `cmd-a` (SelectAll), `cmd-c` (CopyTranscript, in both the transcript and
+composer contexts), `cmd-left` (Home) and `cmd-right` (End) with **no `ctrl-` counterpart**, while
+the workspace registers 22 `ctrl-` bindings elsewhere — so the codebase plainly knows to do this and
+these five did not get it.
+
+**This is a candidate, not a defect**, and the distinction is the point. `on_composer_key` also tests
+`event.keystroke.modifiers.platform` directly (`:790`, `:1388`), so if GPUI maps `platform` to
+Control on the Linux backend, Ctrl+C reaches the handler regardless of what the `KeyBinding` string
+says, and there is no gap at all. **What settles it:** press Ctrl+A / Ctrl+C / Ctrl+Left in the chat
+composer on the running Linux build and report what happens. Until someone does, this row is a
+question, not an accusation — filing it as a defect would be the same error as GAP 2 wearing a
+different hat.
