@@ -1,64 +1,79 @@
 use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Entity, Focusable, FontWeight,
-    InteractiveElement, KeyBinding, MouseButton, PathPromptOptions, PromptLevel, Render,
-    StatefulInteractiveElement, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div,
-    point, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Entity, FocusHandle,
+    Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton,
+    PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tiller_activity::{AgentActivityModel, AgentStatus};
+use tiller_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot};
+use tiller_activity::{
+    AgentActivityModel, AgentStatus, NotificationPayload, NotificationPolicy, Transition,
+};
 use tiller_agents::ALL as AGENT_CATALOG;
 use tiller_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, base64_encode,
 };
 use tiller_git::{GitError, discard, discard_all, init_repository, stage, stage_all, unstage};
-use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
+use tiller_persistence::{
+    AppDatabase, AppSettings, AppearanceMode, ChatEntry, ChatPermissionOutcome, FileIconTheme,
+    TabRecord,
+};
 use tiller_project::{TabKind, current_branch, is_git_repository};
 use tiller_terminal::{
-    TerminalContextAction, TerminalContextEvent, TerminalExitStatus, TerminalIdentity,
-    TerminalShell, TerminalStateSnapshot, TerminalView,
+    TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
+    TerminalIdentity, TerminalShell, TerminalStateSnapshot, TerminalView,
 };
 use tiller_theme::{Theme, ThemeMode};
 use tiller_ui::{
-    changes::{ChangesReport, ChangesTab, ChangesTabEvent},
-    chat::Chat,
+    changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
+    chat::{Chat, acp_agent_command},
     file_view::FileView,
-    right_panel::{ActivityStatus, ActivitySurface, RightPanel, RightPanelEvent},
+    right_panel::{
+        ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
+    },
+    row_reorder::{ReorderScope, RowDrag},
     settings::{Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
         Sidebar, SidebarContextAction, SidebarContextTarget, SidebarEvent, SidebarProject,
-        SidebarTab, SidebarWorktree,
+        SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement},
     },
     status_bar::{StatusBar, UsageBarData},
-    tab_bar::{NewTabAction, TabBar},
+    tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
     titlebar::{Titlebar, TitlebarEvent},
 };
 
+mod command_palette;
 mod panes;
 mod session;
 mod tab_machinery;
 
+use command_palette::{
+    EMPTY_RESULT_LABEL, PaletteCommand, PaletteContext, SidebarPaletteAction, SidebarPaletteTarget,
+    TabCommand, entries as palette_entries, filter_entries as filter_palette_entries,
+};
 use panes::{
     CloseOtherTabs, ClosePane, CloseTab, CloseTabsToRight, CycleTabBackward, CycleTabForward,
     FocusPaneAbove, FocusPaneBelow, FocusPaneLeft, FocusPaneRight, JumpToTab1, JumpToTab2,
     JumpToTab3, JumpToTab4, JumpToTab5, JumpToTab6, JumpToTab7, JumpToTab8, JumpToTab9,
     MoveTabEarlier, MoveTabLater, MoveTabToCurrentPane, MoveTabToOtherPane, OpenAllTabs,
     OpenTabMenu, PaneContent as TabContent, PaneNode, ResumeChat, SplitDirection, SplitPaneDown,
-    SplitPaneRight, TabSelection,
+    SplitPaneRight, SplitPlacement, TabSelection,
 };
 use session::{
     PaneEvent, ProjectCatalog, RestoredSession, SessionLayout, SessionStore, SessionTab,
     SessionTabState,
 };
-use tab_machinery::{MoveDirection, MoveTarget, TabGroup, TabMachinery};
+use tab_machinery::{MoveDirection, MoveTarget, TabGroup, TabMachinery, visible_tab_count};
 
 actions!(
     window_commands,
@@ -70,6 +85,14 @@ actions!(
         ToggleRightPanel,
     ]
 );
+
+// P58, F-SET-02: the shell's Escape closes the settings surface. The
+// binding is global (no key context), so it fires regardless of what holds
+// focus — including the stale focus left behind when the settings surface
+// replaced the main frame. Scoped bindings (the summarizer picker menu, the
+// chat composer) resolve first when their context is focused, so those keep
+// consuming Escape before the shell ever sees it.
+actions!(shell_settings, [CloseSettingsSurface, OpenSettingsShortcut]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowCommand {
@@ -130,6 +153,20 @@ fn bind_window_keys(cx: &mut App) {
                     KeyBinding::new(shortcut, ToggleRightPanel, None)
                 }
             })
+            // F-SET-02: Escape closes the settings surface. Global (no key
+            // context) on purpose — it must fire even when the surface
+            // replaced the previously focused element; scoped bindings
+            // (composer, picker menus) resolve first when focused.
+            .chain(std::iter::once(KeyBinding::new(
+                "escape",
+                CloseSettingsSurface,
+                None,
+            )))
+            .chain(std::iter::once(KeyBinding::new(
+                "ctrl-,",
+                OpenSettingsShortcut,
+                None,
+            )))
             .collect::<Vec<_>>(),
     );
 }
@@ -177,6 +214,10 @@ enum ControlAction {
     },
     SelectWorktree {
         selector: String,
+        reply: ControlReply,
+    },
+    AddProject {
+        path: PathBuf,
         reply: ControlReply,
     },
     CreateWorkspace {
@@ -250,15 +291,23 @@ struct OpenTab {
     focused_pane: usize,
 }
 
+struct TabRename {
+    tab_id: usize,
+    draft: String,
+    focus: FocusHandle,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RetainedChat {
     id: usize,
     title: String,
     transcript: String,
+    agent_id: Option<String>,
 }
 
 enum WorkspaceAction {
     NewTab(NewTabAction),
+    NewChatAgent(&'static str),
     OpenSettings,
     CloseSettings,
 }
@@ -280,6 +329,7 @@ struct ControlWorkspace {
 
 #[derive(Clone)]
 struct ControlState {
+    projects: Vec<session::CatalogProject>,
     workspaces: Vec<ControlWorkspace>,
     current: Option<usize>,
 }
@@ -310,9 +360,55 @@ impl ControlState {
         }
         let current = workspaces.iter().position(|worktree| worktree.selected);
         Self {
+            projects: catalog.projects().to_vec(),
             workspaces,
             current,
         }
+    }
+
+    fn project_rows(&self) -> Vec<BTreeMap<String, String>> {
+        self.projects
+            .iter()
+            .map(|project| {
+                let worktrees: Vec<BTreeMap<String, String>> = project
+                    .worktrees
+                    .iter()
+                    .enumerate()
+                    .map(|(index, worktree)| {
+                        BTreeMap::from([
+                            ("id".to_string(), format!("{}-wt-{index}", project.id)),
+                            ("branch".to_string(), worktree.branch.clone()),
+                            (
+                                "path".to_string(),
+                                worktree.path.to_string_lossy().into_owned(),
+                            ),
+                            ("primary".to_string(), worktree.is_primary.to_string()),
+                        ])
+                    })
+                    .collect();
+                BTreeMap::from([
+                    ("id".to_string(), project.id.clone()),
+                    ("name".to_string(), project.name.clone()),
+                    (
+                        "path".to_string(),
+                        project.root_path.to_string_lossy().into_owned(),
+                    ),
+                    ("isGit".to_string(), project.is_git.to_string()),
+                    (
+                        "worktreeCount".to_string(),
+                        project.worktrees.len().to_string(),
+                    ),
+                    (
+                        "empty".to_string(),
+                        project.worktrees.is_empty().to_string(),
+                    ),
+                    (
+                        "worktrees".to_string(),
+                        tiller_control::protocol::rows::encode(&worktrees),
+                    ),
+                ])
+            })
+            .collect()
     }
 
     fn workspace_rows(&self) -> Vec<BTreeMap<String, String>> {
@@ -500,6 +596,9 @@ struct AppControlHandler {
     session_refs: Arc<Mutex<BTreeMap<String, String>>>,
     session_store: Option<SessionStore>,
     socket_info: ControlSocketInfo,
+    chat_sessions: Arc<Mutex<BTreeMap<String, ChatSession>>>,
+    chat_database_path: PathBuf,
+    chat_command: AgentCommand,
 }
 
 impl AppControlHandler {
@@ -512,6 +611,31 @@ impl AppControlHandler {
         session_store: Option<SessionStore>,
         socket_info: ControlSocketInfo,
     ) -> Self {
+        Self::new_with_chat_config(
+            state,
+            control_actions,
+            panes,
+            notifications,
+            session_refs,
+            session_store,
+            socket_info,
+            session::database_path(),
+            default_chat_command(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_chat_config(
+        state: Arc<Mutex<ControlState>>,
+        control_actions: Arc<Mutex<Vec<ControlAction>>>,
+        panes: Arc<PaneRegistry>,
+        notifications: Arc<Mutex<Vec<ControlNotification>>>,
+        session_refs: Arc<Mutex<BTreeMap<String, String>>>,
+        session_store: Option<SessionStore>,
+        socket_info: ControlSocketInfo,
+        chat_database_path: PathBuf,
+        chat_command: AgentCommand,
+    ) -> Self {
         Self {
             state,
             control_actions,
@@ -520,6 +644,9 @@ impl AppControlHandler {
             session_refs,
             session_store,
             socket_info,
+            chat_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            chat_database_path,
+            chat_command,
         }
     }
 
@@ -631,18 +758,229 @@ impl AppControlHandler {
             Err(error) => ControlResponse::failure(&request.id, error.to_string()),
         }
     }
+
+    fn chat_workspace(&self, selector: Option<&str>) -> Result<ControlWorkspace, String> {
+        let state = self.state();
+        match selector {
+            Some(selector) => state
+                .workspaces
+                .iter()
+                .find(|workspace| {
+                    workspace.mounted && (workspace.id == selector || workspace.path == selector)
+                })
+                .cloned()
+                .ok_or_else(|| format!("unknown worktree: {selector}")),
+            None => state
+                .current_workspace()
+                .filter(|workspace| workspace.mounted)
+                .cloned()
+                .ok_or_else(|| "no current workspace".to_string()),
+        }
+    }
+
+    fn ensure_chat_tab(&self, workspace: &ControlWorkspace) -> Result<String, String> {
+        let database = AppDatabase::open(&self.chat_database_path)
+            .map_err(|error| format!("chat persistence unavailable: {error}"))?;
+        let tabs = database
+            .tabs_of_worktree(&workspace.id)
+            .map_err(|error| format!("chat tabs unavailable: {error}"))?;
+        if let Some(tab) = tabs.iter().find(|tab| tab.kind == "chat") {
+            return Ok(tab.id.clone());
+        }
+
+        let order = tabs.iter().map(|tab| tab.order_idx).max().unwrap_or(-1) + 1;
+        let id = format!("{}-tab-{order}", workspace.id);
+        let mut tab = TabRecord::new(&id, &workspace.id, "Chat", "chat");
+        tab.order_idx = order;
+        database
+            .save_tab(&tab)
+            .map_err(|error| format!("chat tab unavailable: {error}"))?;
+        Ok(id)
+    }
+
+    fn persisted_chat_surface(&self, surface_id: &str) -> Result<(String, PathBuf), String> {
+        let database = AppDatabase::open(&self.chat_database_path)
+            .map_err(|error| format!("chat persistence unavailable: {error}"))?;
+        let tab = database
+            .tabs()
+            .map_err(|error| format!("chat tabs unavailable: {error}"))?
+            .into_iter()
+            .find(|tab| tab.id == surface_id && tab.kind == "chat")
+            .ok_or_else(|| format!("unknown chat surface: {surface_id}"))?;
+        let worktree = database
+            .worktrees()
+            .map_err(|error| format!("chat worktrees unavailable: {error}"))?
+            .into_iter()
+            .find(|worktree| worktree.id == tab.worktree_id)
+            .ok_or_else(|| format!("unknown chat worktree: {}", tab.worktree_id))?;
+        Ok((worktree.id, PathBuf::from(worktree.path)))
+    }
+
+    fn chat_snapshot(&self, surface_id: &str) -> Result<ChatSnapshot, String> {
+        let mut sessions = self
+            .chat_sessions
+            .lock()
+            .map_err(|_| "chat session store unavailable".to_string())?;
+        if !sessions.contains_key(surface_id) {
+            let (worktree_id, _) = self.persisted_chat_surface(surface_id)?;
+            let session = ChatSession::restore(&self.chat_database_path, surface_id, worktree_id)
+                .map_err(|error| format!("chat restore failed: {error}"))?;
+            sessions.insert(surface_id.to_string(), session);
+        }
+        sessions
+            .get(surface_id)
+            .ok_or_else(|| format!("unknown chat surface: {surface_id}"))?
+            .read()
+            .map_err(|error| format!("chat read failed: {error}"))
+    }
+
+    fn open_chat(&self, request: &ControlRequest) -> Result<ChatSnapshot, String> {
+        let workspace = self.chat_workspace(request.params.get("worktree").map(String::as_str))?;
+        let surface_id = self.ensure_chat_tab(&workspace)?;
+        let mut sessions = self
+            .chat_sessions
+            .lock()
+            .map_err(|_| "chat session store unavailable".to_string())?;
+
+        if let Some(session) = sessions.get(&surface_id)
+            && session
+                .read()
+                .map_err(|error| format!("chat read failed: {error}"))?
+                .agent_session_id
+                .is_some()
+        {
+            return session
+                .read()
+                .map_err(|error| format!("chat read failed: {error}"));
+        }
+        sessions.remove(&surface_id);
+
+        let session = ChatSession::launch(ChatSessionConfig::new(
+            &surface_id,
+            &workspace.id,
+            self.chat_command.clone(),
+            &workspace.path,
+            &self.chat_database_path,
+        ))
+        .map_err(|error| format!("chat launch failed: {error}"))?;
+        let snapshot = session
+            .read()
+            .map_err(|error| format!("chat read failed: {error}"))?;
+        sessions.insert(surface_id, session);
+        Ok(snapshot)
+    }
+
+    fn chat_send(&self, request: &ControlRequest) -> Result<ChatSnapshot, String> {
+        let surface_id = request
+            .params
+            .get("surfaceId")
+            .ok_or_else(|| "surface.chat.send requires surfaceId".to_string())?;
+        let text = request
+            .params
+            .get("text")
+            .ok_or_else(|| "surface.chat.send requires text".to_string())?;
+        let sessions = self
+            .chat_sessions
+            .lock()
+            .map_err(|_| "chat session store unavailable".to_string())?;
+        let session = sessions
+            .get(surface_id)
+            .ok_or_else(|| format!("chat surface is not open: {surface_id}"))?;
+        session
+            .send(text)
+            .map_err(|error| format!("chat send failed: {error}"))?;
+        session
+            .read()
+            .map_err(|error| format!("chat read failed: {error}"))
+    }
+
+    fn chat_compose(&self, request: &ControlRequest) -> Result<ChatSnapshot, String> {
+        let surface_id = request
+            .params
+            .get("surfaceId")
+            .ok_or_else(|| "surface.chat.compose requires surfaceId".to_string())?;
+        let text = request
+            .params
+            .get("text")
+            .ok_or_else(|| "surface.chat.compose requires text".to_string())?;
+        let sessions = self
+            .chat_sessions
+            .lock()
+            .map_err(|_| "chat session store unavailable".to_string())?;
+        let session = sessions
+            .get(surface_id)
+            .ok_or_else(|| format!("chat surface is not open: {surface_id}"))?;
+        session
+            .compose(text)
+            .map_err(|error| format!("chat compose failed: {error}"))?;
+        session
+            .read()
+            .map_err(|error| format!("chat read failed: {error}"))
+    }
+
+    fn chat_permission(&self, request: &ControlRequest) -> Result<ChatSnapshot, String> {
+        let surface_id = request
+            .params
+            .get("surfaceId")
+            .ok_or_else(|| "surface.chat.permission requires surfaceId".to_string())?;
+        let request_id = request
+            .params
+            .get("requestId")
+            .ok_or_else(|| "surface.chat.permission requires requestId".to_string())?
+            .parse::<u64>()
+            .map_err(|error| format!("invalid requestId: {error}"))?;
+        let option_id = request
+            .params
+            .get("optionId")
+            .ok_or_else(|| "surface.chat.permission requires optionId".to_string())?;
+        let sessions = self
+            .chat_sessions
+            .lock()
+            .map_err(|_| "chat session store unavailable".to_string())?;
+        let session = sessions
+            .get(surface_id)
+            .ok_or_else(|| format!("chat surface is not open: {surface_id}"))?;
+        session
+            .respond_permission(request_id, option_id)
+            .map_err(|error| format!("chat permission failed: {error}"))?;
+        session
+            .read()
+            .map_err(|error| format!("chat read failed: {error}"))
+    }
+
+    fn chat_stop(&self, request: &ControlRequest) -> Result<ChatSnapshot, String> {
+        let surface_id = request
+            .params
+            .get("surfaceId")
+            .ok_or_else(|| "surface.chat.stop requires surfaceId".to_string())?;
+        let sessions = self
+            .chat_sessions
+            .lock()
+            .map_err(|_| "chat session store unavailable".to_string())?;
+        let session = sessions
+            .get(surface_id)
+            .ok_or_else(|| format!("chat surface is not open: {surface_id}"))?;
+        session
+            .stop()
+            .map_err(|error| format!("chat stop failed: {error}"))?;
+        session
+            .read()
+            .map_err(|error| format!("chat read failed: {error}"))
+    }
 }
 
 impl ControlHandler for AppControlHandler {
     fn handle(&self, request: &ControlRequest) -> ControlResponse {
         match request.method.as_str() {
-            "system.ping" => Self::success(&request.id, [("status".to_string(), "ok".to_string())]),
+            "system.ping" => Self::success(&request.id, [("pong".to_string(), "true".to_string())]),
             "system.capabilities" => {
                 let methods = [
                     "system.ping",
                     "system.capabilities",
                     "system.identify",
                     "system.quit",
+                    "project.list",
+                    "project.add",
                     "workspace.list",
                     "workspace.create",
                     "workspace.select",
@@ -681,6 +1019,12 @@ impl ControlHandler for AppControlHandler {
                     "surface.settings.open",
                     "surface.settings.select",
                     "surface.settings.read",
+                    "surface.chat.open",
+                    "surface.chat.send",
+                    "surface.chat.compose",
+                    "surface.chat.permission",
+                    "surface.chat.stop",
+                    "surface.chat.read",
                 ];
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -756,6 +1100,23 @@ impl ControlHandler for AppControlHandler {
                     tiller_control::protocol::rows::encode(&self.state().workspace_rows()),
                 )],
             ),
+            "project.list" => Self::success(
+                &request.id,
+                [(
+                    "projects".to_string(),
+                    tiller_control::protocol::rows::encode(&self.state().project_rows()),
+                )],
+            ),
+            "project.add" => {
+                let Some(path) = request.params.get("path") else {
+                    return ControlResponse::failure(&request.id, "project.add requires path");
+                };
+                let path = PathBuf::from(path);
+                self.queue_action(request, move |reply| ControlAction::AddProject {
+                    path,
+                    reply,
+                })
+            }
             "workspace.current" => {
                 let state = self.state();
                 let Some(workspace) = state.current_workspace() else {
@@ -817,6 +1178,55 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.settings.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadSettings { reply })
+            }
+            "surface.chat.open" => self
+                .open_chat(request)
+                .map(|snapshot| snapshot_result(&snapshot))
+                .map_or_else(
+                    |error| ControlResponse::failure(&request.id, error),
+                    |result| Self::success(&request.id, result),
+                ),
+            "surface.chat.send" => self
+                .chat_send(request)
+                .map(|snapshot| snapshot_result(&snapshot))
+                .map_or_else(
+                    |error| ControlResponse::failure(&request.id, error),
+                    |result| Self::success(&request.id, result),
+                ),
+            "surface.chat.compose" => self
+                .chat_compose(request)
+                .map(|snapshot| snapshot_result(&snapshot))
+                .map_or_else(
+                    |error| ControlResponse::failure(&request.id, error),
+                    |result| Self::success(&request.id, result),
+                ),
+            "surface.chat.permission" => self
+                .chat_permission(request)
+                .map(|snapshot| snapshot_result(&snapshot))
+                .map_or_else(
+                    |error| ControlResponse::failure(&request.id, error),
+                    |result| Self::success(&request.id, result),
+                ),
+            "surface.chat.stop" => self
+                .chat_stop(request)
+                .map(|snapshot| snapshot_result(&snapshot))
+                .map_or_else(
+                    |error| ControlResponse::failure(&request.id, error),
+                    |result| Self::success(&request.id, result),
+                ),
+            "surface.chat.read" => {
+                let Some(surface_id) = request.params.get("surfaceId") else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.read requires surfaceId",
+                    );
+                };
+                self.chat_snapshot(surface_id)
+                    .map(|snapshot| snapshot_result(&snapshot))
+                    .map_or_else(
+                        |error| ControlResponse::failure(&request.id, error),
+                        |result| Self::success(&request.id, result),
+                    )
             }
             "panel.create" => {
                 let Some(working_directory) = self
@@ -1281,6 +1691,145 @@ fn parse_settings_category(value: &str) -> Result<SettingsCategory, String> {
     Ok(category)
 }
 
+fn default_chat_command() -> AgentCommand {
+    std::env::var_os("TILLER_ACP_PROGRAM")
+        .map(PathBuf::from)
+        .map(AgentCommand::new)
+        .unwrap_or_else(|| {
+            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
+        })
+}
+
+fn post_desktop_notification(payload: &NotificationPayload) {
+    if let Err(error) = Command::new("notify-send")
+        .arg("--app-name=Tiller")
+        .arg(&payload.title)
+        .arg(&payload.body)
+        .spawn()
+    {
+        eprintln!("[notifications] could not deliver desktop notification: {error}");
+    }
+}
+
+/// Resolves persisted chat identity into the command and tab metadata that
+/// can actually be restored. Legacy rows and adapters without an ACP server
+/// use the default chat command but do not retain a misleading agent id.
+fn restored_chat_spec(agent_id: Option<&str>) -> (AgentCommand, Option<Icon>, Option<String>) {
+    let Some(adapter) = agent_id.and_then(|id| {
+        AGENT_CATALOG
+            .iter()
+            .find(|adapter| adapter.id() == id)
+            .copied()
+    }) else {
+        return (default_chat_command(), None, None);
+    };
+    let Some(program) = adapter.acp_program() else {
+        return (default_chat_command(), None, None);
+    };
+    (
+        acp_agent_command(program),
+        Icon::for_agent_id(adapter.id()),
+        Some(adapter.id().to_string()),
+    )
+}
+
+fn snapshot_result(snapshot: &ChatSnapshot) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::from([
+        ("surfaceId".to_string(), snapshot.tab_id.clone()),
+        ("status".to_string(), snapshot.status.as_str().to_string()),
+        ("composerText".to_string(), snapshot.composer_text.clone()),
+        ("queuedText".to_string(), snapshot.queued_text.clone()),
+        (
+            "transcript".to_string(),
+            tiller_control::protocol::rows::encode(
+                &snapshot
+                    .transcript
+                    .turns
+                    .iter()
+                    .flat_map(|turn| turn.entries.iter().map(chat_entry_row))
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+    ]);
+    if let Some(agent_session_id) = &snapshot.agent_session_id {
+        result.insert("agentSessionId".to_string(), agent_session_id.clone());
+    }
+    if let Some(error) = &snapshot.error {
+        result.insert("error".to_string(), error.clone());
+    }
+    result
+}
+
+fn chat_entry_row(entry: &ChatEntry) -> BTreeMap<String, String> {
+    let mut row = BTreeMap::new();
+    match entry {
+        ChatEntry::UserMessage { text } => {
+            row.insert("kind".to_string(), "user".to_string());
+            row.insert("text".to_string(), text.clone());
+        }
+        ChatEntry::AssistantMessage { text } => {
+            row.insert("kind".to_string(), "assistant".to_string());
+            row.insert("text".to_string(), text.clone());
+        }
+        ChatEntry::Thought { text } => {
+            row.insert("kind".to_string(), "thought".to_string());
+            row.insert("text".to_string(), text.clone());
+        }
+        ChatEntry::ToolCall { id, title, status } => {
+            row.insert("kind".to_string(), "tool".to_string());
+            row.insert("id".to_string(), id.clone());
+            row.insert("text".to_string(), title.clone());
+            row.insert("status".to_string(), status.clone());
+        }
+        ChatEntry::Permission {
+            request_id,
+            outcome,
+            ..
+        } => {
+            row.insert("kind".to_string(), "permission".to_string());
+            row.insert("id".to_string(), request_id.to_string());
+            match outcome {
+                ChatPermissionOutcome::Pending => {
+                    row.insert("status".to_string(), "pending".to_string());
+                }
+                ChatPermissionOutcome::Selected { option_id, .. } => {
+                    row.insert("status".to_string(), "selected".to_string());
+                    row.insert("optionId".to_string(), option_id.clone());
+                }
+                ChatPermissionOutcome::Cancelled => {
+                    row.insert("status".to_string(), "cancelled".to_string());
+                }
+                ChatPermissionOutcome::TimedOut => {
+                    row.insert("status".to_string(), "timed_out".to_string());
+                }
+                ChatPermissionOutcome::Expired => {
+                    row.insert("status".to_string(), "expired".to_string());
+                }
+            }
+        }
+        ChatEntry::Plan { entries } => {
+            row.insert("kind".to_string(), "plan".to_string());
+            row.insert(
+                "text".to_string(),
+                entries
+                    .iter()
+                    .map(|entry| format!("{} · {}", entry.status, entry.content))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        ChatEntry::TurnFooter { text } => {
+            row.insert("kind".to_string(), "turn".to_string());
+            row.insert("text".to_string(), text.clone());
+        }
+        ChatEntry::Error { message, .. } => {
+            row.insert("kind".to_string(), "error".to_string());
+            row.insert("text".to_string(), message.clone());
+        }
+    }
+    row
+}
+
 fn panel_state_pairs(snapshot: &PaneStateSnapshot) -> Vec<(String, String)> {
     let mut pairs = vec![
         (
@@ -1579,6 +2128,10 @@ fn tab_has_file(tab: &OpenTab) -> bool {
     has_file
 }
 
+fn file_path_is_already_open(open_paths: &[PathBuf], path: &Path) -> bool {
+    open_paths.iter().any(|open_path| open_path == path)
+}
+
 fn tab_has_terminal(tab: &OpenTab) -> bool {
     let mut has_terminal = false;
     tab.panes.for_each(&mut |_, content| {
@@ -1622,6 +2175,58 @@ fn agent_id_for_action(action: NewTabAction) -> Option<&'static str> {
 
 fn agent_icon_for_action(action: NewTabAction) -> Option<Icon> {
     agent_id_for_action(action).and_then(Icon::for_agent_id)
+}
+
+fn activity_status_for_agent(status: AgentStatus) -> ActivityStatus {
+    match status {
+        AgentStatus::Running => ActivityStatus::Running,
+        AgentStatus::NeedsInput => ActivityStatus::NeedsInput,
+        AgentStatus::Done => ActivityStatus::Done,
+        AgentStatus::Error => ActivityStatus::Error,
+    }
+}
+
+fn tab_status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
+    match status {
+        ActivityStatus::Idle => theme.meta,
+        ActivityStatus::Running => theme.tab_focus_accent,
+        ActivityStatus::NeedsInput => theme.tab_needs_input,
+        ActivityStatus::Done => theme.tab_done,
+        ActivityStatus::Error => theme.tab_error,
+    }
+}
+
+fn tab_status_glyph(status: ActivityStatus) -> &'static str {
+    match status {
+        ActivityStatus::Idle => "○",
+        ActivityStatus::Running => "●",
+        ActivityStatus::NeedsInput => "?",
+        ActivityStatus::Done => "✓",
+        ActivityStatus::Error => "!",
+    }
+}
+
+fn tab_status_name(status: ActivityStatus) -> &'static str {
+    match status {
+        ActivityStatus::Idle => "idle",
+        ActivityStatus::Running => "running",
+        ActivityStatus::NeedsInput => "needs-input",
+        ActivityStatus::Done => "done",
+        ActivityStatus::Error => "error",
+    }
+}
+
+fn chat_tab_identity(
+    adapter: Option<&dyn tiller_agents::AgentAdapter>,
+) -> (String, Option<Icon>, Option<String>) {
+    (
+        adapter.map_or_else(
+            || "Chat".to_string(),
+            |adapter| adapter.display_name().to_string(),
+        ),
+        adapter.and_then(|adapter| Icon::for_agent_id(adapter.id())),
+        adapter.map(|adapter| adapter.id().to_string()),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1727,11 +2332,22 @@ struct DraggedPaneDivider {
     direction: SplitDirection,
 }
 
+const SPLIT_DIVIDER_SIZE: f32 = 6.0;
+const MIN_SPLIT_PANE_SIZE: f32 = 160.0;
+
 fn split_direction_name(direction: SplitDirection) -> &'static str {
     match direction {
         SplitDirection::Horizontal => "horizontal",
         SplitDirection::Vertical => "vertical",
     }
+}
+
+fn split_event_name(direction: SplitDirection, placement: SplitPlacement) -> String {
+    let suffix = match placement {
+        SplitPlacement::Before => "-before",
+        SplitPlacement::After => "",
+    };
+    format!("{}{suffix}", split_direction_name(direction))
 }
 
 fn parse_split_direction(direction: &str) -> Option<SplitDirection> {
@@ -1742,10 +2358,20 @@ fn parse_split_direction(direction: &str) -> Option<SplitDirection> {
     }
 }
 
+fn parse_split_event(direction: &str) -> Option<(SplitDirection, SplitPlacement)> {
+    if let Some(axis) = direction.strip_suffix("-before") {
+        return parse_split_direction(axis).map(|direction| (direction, SplitPlacement::Before));
+    }
+    parse_split_direction(direction).map(|direction| (direction, SplitPlacement::After))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TerminalContextCommand {
     SetTitle,
-    Split(SplitDirection),
+    Split {
+        direction: SplitDirection,
+        placement: SplitPlacement,
+    },
     Close,
 }
 
@@ -1754,12 +2380,22 @@ fn delegated_terminal_context_action(
 ) -> Option<TerminalContextCommand> {
     match action {
         TerminalContextAction::SetTitle => Some(TerminalContextCommand::SetTitle),
-        TerminalContextAction::SplitRight => {
-            Some(TerminalContextCommand::Split(SplitDirection::Horizontal))
-        }
-        TerminalContextAction::SplitDown => {
-            Some(TerminalContextCommand::Split(SplitDirection::Vertical))
-        }
+        TerminalContextAction::SplitLeft => Some(TerminalContextCommand::Split {
+            direction: SplitDirection::Horizontal,
+            placement: SplitPlacement::Before,
+        }),
+        TerminalContextAction::SplitRight => Some(TerminalContextCommand::Split {
+            direction: SplitDirection::Horizontal,
+            placement: SplitPlacement::After,
+        }),
+        TerminalContextAction::SplitAbove => Some(TerminalContextCommand::Split {
+            direction: SplitDirection::Vertical,
+            placement: SplitPlacement::Before,
+        }),
+        TerminalContextAction::SplitDown => Some(TerminalContextCommand::Split {
+            direction: SplitDirection::Vertical,
+            placement: SplitPlacement::After,
+        }),
         TerminalContextAction::CloseTerminal => Some(TerminalContextCommand::Close),
         TerminalContextAction::Copy
         | TerminalContextAction::Paste
@@ -1793,6 +2429,10 @@ struct TillerWorkspace {
     control_state: Arc<Mutex<ControlState>>,
     pending_actions: Arc<Mutex<Vec<WorkspaceAction>>>,
     show_settings: bool,
+    /// Set when settings closes and the main surface must take focus back
+    /// (the settings surface held it while open; a stale focus would leave
+    /// the shell's key handling dead until the user clicks something).
+    restore_focus_pending: bool,
     tabs: Vec<OpenTab>,
     active_tab: usize,
     next_tab_id: usize,
@@ -1809,11 +2449,20 @@ struct TillerWorkspace {
     overflow_menu_open: bool,
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
+    tab_rename: Option<TabRename>,
+    palette_open: bool,
+    palette_query: String,
+    palette_selected: usize,
+    palette_focus: FocusHandle,
+    palette_previous_focus: Option<FocusHandle>,
     /// The single source of truth for agent lifecycle status. Every one of
     /// the sidebar dot, the tab checkmark, and the Activity row reads
     /// through this (or, for a chat pane, through `Chat`'s own state) —
     /// never a second, independently-tracked flag.
     activity: AgentActivityModel,
+    /// Prevents scheduling restored scrollback more than once before the
+    /// first frame mounts the terminal entities.
+    restored_scrollback_scheduled: bool,
 }
 
 impl TillerWorkspace {
@@ -1841,6 +2490,10 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
+        cx.bind_keys([
+            KeyBinding::new("cmd-w", CloseTab, None),
+            KeyBinding::new("ctrl-w", CloseTab, None),
+        ]);
         bind_window_keys(cx);
         // These UI callbacks predate an App-aware callback API. Polling this
         // small queue lets tab actions and shell navigation update the
@@ -1866,17 +2519,21 @@ impl TillerWorkspace {
                     continue;
                 }
                 if this
-                    .update(cx, |workspace, cx| {
+                    .update_in(cx, |workspace, window, cx| {
                         for action in pending {
                             match action {
                                 WorkspaceAction::NewTab(action) => {
-                                    workspace.open_action(action, cx)
+                                    workspace.open_action(action, window, cx)
+                                }
+                                WorkspaceAction::NewChatAgent(id) => {
+                                    workspace.open_chat_agent(id, window, cx);
                                 }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
                                 }
                                 WorkspaceAction::CloseSettings => {
                                     workspace.show_settings = false;
+                                    workspace.restore_focus_pending = true;
                                     cx.notify();
                                 }
                             }
@@ -1888,11 +2545,17 @@ impl TillerWorkspace {
                                     cx.quit();
                                 }
                                 ControlAction::Notify { pane_id, status } => {
-                                    workspace.activity.notify(&pane_id, status, Instant::now());
+                                    let transition =
+                                        workspace.activity.notify(&pane_id, status, Instant::now());
+                                    workspace.post_activity_notification(&transition);
                                     workspace.sync_activity(cx);
                                 }
                                 ControlAction::SelectWorktree { selector, reply } => {
                                     let result = workspace.control_select_worktree(&selector, cx);
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::AddProject { path, reply } => {
+                                    let result = workspace.control_add_project(&path, cx);
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::CreateWorkspace {
@@ -2014,6 +2677,11 @@ impl TillerWorkspace {
                         .sidebar
                         .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
                 }
+                SidebarEvent::Reorder {
+                    drag,
+                    target_id,
+                    before,
+                } => workspace.reorder_sidebar(*drag, *target_id, *before, cx),
                 SidebarEvent::ContextAction { target, action } => {
                     workspace.handle_sidebar_context_action(target, *action, cx)
                 }
@@ -2042,6 +2710,18 @@ impl TillerWorkspace {
             0,
         )
         .expect("restored tabs form one valid pane group");
+        // P58, F-SET-10: the usage bar consumes the settings surface's
+        // visibility toggles and refresh interval. Observing the settings
+        // entity applies every change to the bar live, so a toggle in
+        // settings takes effect without a relaunch.
+        cx.observe(&settings, |workspace, _, cx| {
+            let snapshot = workspace.settings.read(cx).snapshot();
+            let prefs = tiller_ui::status_bar::UsageBarPrefs::from_snapshot(&snapshot);
+            workspace
+                .status_bar
+                .update(cx, |bar, cx| bar.apply_preferences(prefs, cx));
+        })
+        .detach();
         let workspace = Self {
             titlebar,
             sidebar,
@@ -2070,9 +2750,33 @@ impl TillerWorkspace {
             overflow_menu_open: false,
             tab_menu_open: false,
             tab_menu_tab: None,
+            tab_rename: None,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_selected: 0,
+            palette_focus: cx.focus_handle(),
+            palette_previous_focus: None,
             activity: AgentActivityModel::new(),
+            restored_scrollback_scheduled: false,
             show_settings: false,
+            restore_focus_pending: false,
         };
+        // ctrl-shift-p is universal, including while the terminal owns focus.
+        // An element-level listener is too late for embedded terminal input,
+        // so intercept this one chord before GPUI dispatches to the focused
+        // surface. ctrl-k intentionally remains in the shell's capture path
+        // so readline keeps precedence in terminals.
+        let workspace_ref = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, window, app| {
+            let stroke = &event.keystroke;
+            if stroke.key == "p" && stroke.modifiers.control && stroke.modifiers.shift {
+                let _ = workspace_ref.update(app, |workspace, cx| {
+                    workspace.open_command_palette(window, cx);
+                    cx.stop_propagation();
+                });
+            }
+        })
+        .detach();
         workspace.schedule_save(cx);
         workspace.sync_activity(cx);
         workspace
@@ -2102,6 +2806,7 @@ impl TillerWorkspace {
                         TabKind::Diff => "diff",
                     }
                     .to_string(),
+                    agent_id: tab.agent_id.clone(),
                     active: index == self.active_tab,
                 })
                 .collect(),
@@ -2159,6 +2864,21 @@ impl TillerWorkspace {
         });
     }
 
+    fn sync_control_state(&self) {
+        let state_path = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_workspace()
+            .map(|workspace| PathBuf::from(&workspace.path))
+            .unwrap_or_else(|| self.working_directory.clone());
+        *self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            ControlState::from_catalog(&self.project_catalog, &state_path);
+    }
+
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
@@ -2179,6 +2899,13 @@ impl TillerWorkspace {
             },
         )
         .detach();
+        cx.subscribe(
+            right_panel,
+            |workspace, _, event: &RightPanelActionEvent, cx| match event {
+                RightPanelActionEvent::OpenDiff(_path) => workspace.add_changes_tab(cx),
+            },
+        )
+        .detach();
     }
 
     fn bind_terminal(
@@ -2194,6 +2921,8 @@ impl TillerWorkspace {
             ));
         });
         Self::subscribe_terminal(terminal, tab_id, pane_id, cx);
+        Self::subscribe_terminal_activity(terminal, pane_id, cx);
+        Self::start_process_signal_refresh(terminal, tab_id, pane_id, cx);
     }
 
     fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
@@ -2227,8 +2956,13 @@ impl TillerWorkspace {
                         event.target.terminal_id(),
                         cx,
                     ),
-                    Some(TerminalContextCommand::Split(direction)) => {
-                        workspace.split_terminal_at(tab_id, pane_id, direction, None, cx);
+                    Some(TerminalContextCommand::Split {
+                        direction,
+                        placement,
+                    }) => {
+                        workspace.split_terminal_at_with_placement(
+                            tab_id, pane_id, direction, placement, None, cx,
+                        );
                     }
                     Some(TerminalContextCommand::Close) => {
                         workspace.close_terminal_at(tab_id, pane_id, None, cx);
@@ -2238,6 +2972,98 @@ impl TillerWorkspace {
             },
         )
         .detach();
+    }
+
+    fn subscribe_terminal_activity(
+        terminal: &Entity<TerminalView>,
+        pane_id: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let activity_pane_id = format!("pane-{pane_id}");
+        cx.subscribe(
+            terminal,
+            move |workspace, _, event: &TerminalActivityEvent, cx| {
+                let transition = panes::apply_terminal_activity_event(
+                    &mut workspace.activity,
+                    &activity_pane_id,
+                    event,
+                    Instant::now(),
+                );
+                if let Some(transition) = transition {
+                    workspace.post_activity_notification(&transition);
+                }
+                // Terminal exit status is stored on TerminalView even when
+                // no agent activity transition exists. Repaint the shell so
+                // the tab status cell can show the concrete exit/signal.
+                workspace.sync_activity(cx);
+                cx.notify();
+            },
+        )
+        .detach();
+    }
+
+    fn start_process_signal_refresh(
+        terminal: &Entity<TerminalView>,
+        tab_id: usize,
+        pane_id: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let terminal = terminal.clone();
+        let workspace = cx.weak_entity();
+        cx.spawn(async move |_this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(panes::PROCESS_SIGNAL_INTERVAL)
+                    .await;
+
+                let shell_pid = terminal.read_with(cx, |terminal, _| terminal.shell_pid());
+                let terminal_id = terminal.entity_id();
+                let keep_running = match workspace.update(cx, |workspace, cx| {
+                    let Some(bound_terminal) = workspace.terminal_for_pane(tab_id, pane_id) else {
+                        return false;
+                    };
+                    if bound_terminal.entity_id() != terminal_id {
+                        return false;
+                    }
+                    let Some(shell_pid) = shell_pid else {
+                        return true;
+                    };
+                    match panes::refresh_process_signal(
+                        &mut workspace.activity,
+                        &format!("pane-{pane_id}"),
+                        shell_pid,
+                    ) {
+                        Ok(Some(transition)) => {
+                            workspace.post_activity_notification(&transition);
+                            workspace.sync_activity(cx);
+                        }
+                        Ok(None) => workspace.sync_activity(cx),
+                        Err(error) => eprintln!(
+                            "[activity] process refresh failed for pane-{pane_id}: {error}"
+                        ),
+                    }
+                    true
+                }) {
+                    Ok(keep_running) => keep_running,
+                    Err(_) => return,
+                };
+                if !keep_running {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn terminal_for_pane(&self, tab_id: usize, pane_id: usize) -> Option<Entity<TerminalView>> {
+        let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
+        let mut terminal = None;
+        tab.panes.for_each(&mut |candidate_pane_id, content| {
+            if candidate_pane_id == pane_id {
+                terminal = content.terminal();
+            }
+        });
+        terminal
     }
 
     fn set_terminal_title(
@@ -2265,18 +3091,173 @@ impl TillerWorkspace {
         match self.project_catalog.add(&path) {
             Ok(true) => {
                 self.session.schedule_catalog(&self.project_catalog);
+                self.sync_control_state();
                 self.refresh_sidebar(cx);
             }
-            Ok(false) => eprintln!("[projects] already tracked or nested: {}", path.display()),
-            Err(error) => eprintln!("[projects] {error}"),
+            Ok(false) => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_notice(format!("already tracked or nested: {}", path.display()), cx)
+                });
+                cx.notify();
+            }
+            Err(error) => {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
+                cx.notify();
+            }
         }
     }
 
     fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.project_catalog.remove(id) {
             self.session.schedule_catalog(&self.project_catalog);
+            self.sync_control_state();
             self.refresh_sidebar(cx);
         }
+    }
+
+    fn reorder_sidebar(
+        &mut self,
+        drag: RowDrag,
+        target_id: usize,
+        before: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match drag.scope {
+            ReorderScope::Projects => {
+                self.project_catalog
+                    .reorder_projects(drag.id / 1000, target_id / 1000, before)
+            }
+            ReorderScope::Worktrees => {
+                let Some(project_row_id) = drag.group else {
+                    return;
+                };
+                let Some(target_project_row_id) = target_id.checked_div(1000) else {
+                    return;
+                };
+                if project_row_id / 1000 != target_project_row_id {
+                    return;
+                }
+                let Some(from) = drag.id.checked_sub(project_row_id + 1) else {
+                    return;
+                };
+                let Some(target) = target_id.checked_sub(project_row_id + 1) else {
+                    return;
+                };
+                self.project_catalog
+                    .reorder_worktrees(project_row_id / 1000, from, target, before)
+            }
+            ReorderScope::Tabs => {
+                let Some(from_id) = drag.id.checked_sub(TAB_ROW_ID_OFFSET) else {
+                    return;
+                };
+                let Some(target_id) = target_id.checked_sub(TAB_ROW_ID_OFFSET) else {
+                    return;
+                };
+                self.reorder_tabs_by_id(from_id, target_id, before, None)
+            }
+        };
+        if !changed {
+            return;
+        }
+        match drag.scope {
+            ReorderScope::Projects | ReorderScope::Worktrees => {
+                self.session.schedule_catalog(&self.project_catalog);
+                self.sync_control_state();
+                self.refresh_sidebar(cx);
+            }
+            ReorderScope::Tabs => {
+                self.schedule_save(cx);
+                self.sync_activity(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn reorder_tabs_by_id(
+        &mut self,
+        from_id: usize,
+        target_id: usize,
+        before: bool,
+        group: Option<usize>,
+    ) -> bool {
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == from_id) else {
+            return false;
+        };
+        let Some(target) = self.tabs.iter().position(|tab| tab.id == target_id) else {
+            return false;
+        };
+        if from == target
+            || group.is_some_and(|group| {
+                self.tabs[from].group_id != group || self.tabs[target].group_id != group
+            })
+        {
+            return false;
+        }
+        let active_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let tab = self.tabs.remove(from);
+        let target_after_remove = if from < target { target - 1 } else { target };
+        let insert_at = (target_after_remove + usize::from(!before)).min(self.tabs.len());
+        self.tabs.insert(insert_at, tab);
+        self.active_tab = active_id
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or(self.active_tab.min(self.tabs.len().saturating_sub(1)));
+        self.rebuild_tab_machinery();
+        true
+    }
+
+    fn preview_tab_reorder(
+        &mut self,
+        drag: RowDrag,
+        target_id: usize,
+        before: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if drag.scope != ReorderScope::Tabs {
+            return;
+        }
+        if self.reorder_tabs_by_id(drag.id, target_id, before, drag.group) {
+            self.schedule_save(cx);
+            self.sync_activity(cx);
+            cx.notify();
+        }
+    }
+
+    fn control_add_project(
+        &mut self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let added = self.project_catalog.add(path)?;
+        if added {
+            self.session.schedule_catalog(&self.project_catalog);
+            self.sync_control_state();
+            self.refresh_sidebar(cx);
+        }
+        let state = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = path.canonicalize().ok().and_then(|path| {
+            state.projects.iter().find(|project| {
+                project.root_path == path
+                    || project
+                        .worktrees
+                        .iter()
+                        .any(|worktree| worktree.path == path)
+            })
+        });
+        let mut result = vec![("added".to_string(), added.to_string())];
+        if let Some(project) = project {
+            result.extend([
+                ("projectId".to_string(), project.id.clone()),
+                (
+                    "worktreeCount".to_string(),
+                    project.worktrees.len().to_string(),
+                ),
+            ]);
+        }
+        Ok(result)
     }
 
     fn handle_sidebar_context_action(
@@ -2317,6 +3298,7 @@ impl TillerWorkspace {
                                 return;
                             }
                             session.schedule_catalog(&workspace.project_catalog);
+                            workspace.sync_control_state();
                             workspace.refresh_sidebar(cx);
                         }
                         Err(error) => {
@@ -2348,7 +3330,9 @@ impl TillerWorkspace {
                 {
                     return;
                 }
-                self.open_action(action, cx);
+                if let Ok(mut actions) = self.pending_actions.lock() {
+                    actions.push(WorkspaceAction::NewTab(action));
+                }
             }
             (_, SidebarContextAction::RemoveProject) => {}
             (_, SidebarContextAction::SetPrimary | SidebarContextAction::UnsetPrimary) => {}
@@ -2366,6 +3350,7 @@ impl TillerWorkspace {
         match self.project_catalog.set_primary(path, primary) {
             Ok(()) => {
                 self.session.schedule_catalog(&self.project_catalog);
+                self.sync_control_state();
                 self.refresh_sidebar(cx);
             }
             Err(error) => self
@@ -2392,20 +3377,26 @@ impl TillerWorkspace {
                     } else if chat.has_completed_turn() {
                         Some(ActivityStatus::Done)
                     } else {
-                        None
+                        Some(ActivityStatus::Idle)
                     }
                 }
-                TabContent::Terminal { .. } => {
-                    let pane_status = self
-                        .activity
-                        .status(&format!("pane-{pane_id}"))
-                        .or_else(|| self.activity.status(&format!("tab-{}", tab.id)));
-                    match pane_status {
-                        Some(AgentStatus::Running) => Some(ActivityStatus::Running),
-                        Some(AgentStatus::NeedsInput) => Some(ActivityStatus::Idle),
-                        Some(AgentStatus::Done) => Some(ActivityStatus::Done),
-                        Some(AgentStatus::Error) => Some(ActivityStatus::Error),
-                        None => None,
+                TabContent::Terminal { view } => {
+                    let terminal = view.read(cx);
+                    if terminal.is_failed() {
+                        Some(ActivityStatus::Error)
+                    } else if let Some(exit_status) = terminal.exit_status() {
+                        Some(match exit_status {
+                            TerminalExitStatus::Success => ActivityStatus::Done,
+                            TerminalExitStatus::Code(_)
+                            | TerminalExitStatus::Signal(_)
+                            | TerminalExitStatus::Unknown => ActivityStatus::Error,
+                        })
+                    } else {
+                        let pane_status = self
+                            .activity
+                            .status(&format!("pane-{pane_id}"))
+                            .or_else(|| self.activity.status(&format!("tab-{}", tab.id)));
+                        Some(pane_status.map_or(ActivityStatus::Idle, activity_status_for_agent))
                     }
                 }
                 TabContent::File { .. } | TabContent::Changes(_) => None,
@@ -2421,9 +3412,27 @@ impl TillerWorkspace {
         status
     }
 
+    fn terminal_exit_label(tab: &OpenTab, cx: &App) -> Option<String> {
+        let mut label = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Terminal { view } = content
+                && let Some(status) = view.read(cx).exit_status()
+            {
+                label = Some(match status {
+                    TerminalExitStatus::Success => "exit 0".to_string(),
+                    TerminalExitStatus::Code(code) => format!("exit {code}"),
+                    TerminalExitStatus::Signal(signal) => format!("signal {signal}"),
+                    TerminalExitStatus::Unknown => "exit unknown".to_string(),
+                });
+            }
+        });
+        label
+    }
+
     fn status_priority(status: ActivityStatus) -> u8 {
         match status {
             ActivityStatus::Error => 0,
+            ActivityStatus::NeedsInput => 1,
             ActivityStatus::Running => 1,
             ActivityStatus::Idle => 2,
             ActivityStatus::Done => 3,
@@ -2558,12 +3567,19 @@ impl TillerWorkspace {
             branch: context.branch,
             path: context.path,
         };
+        // Rebuilt bars start from the settings surface's current values
+        // (P58, F-SET-10): visibility and interval must survive a worktree
+        // switch, not reset to the defaults.
+        let bar_prefs =
+            tiller_ui::status_bar::UsageBarPrefs::from_snapshot(&self.settings.read(cx).snapshot());
         self.status_bar = cx.new(|_| {
-            StatusBar::new(status_data).on_settings(move || {
-                if let Ok(mut actions) = pending_actions.lock() {
-                    actions.push(WorkspaceAction::OpenSettings);
-                }
-            })
+            StatusBar::new(status_data)
+                .with_preferences(bar_prefs)
+                .on_settings(move || {
+                    if let Ok(mut actions) = pending_actions.lock() {
+                        actions.push(WorkspaceAction::OpenSettings);
+                    }
+                })
         });
 
         let activity = self.activity_surfaces(cx);
@@ -2826,6 +3842,57 @@ impl TillerWorkspace {
         }
     }
 
+    fn post_activity_notification(&self, transition: &Transition) {
+        let Some(agent_id) = self.activity.agent_id(&transition.pane_id) else {
+            return;
+        };
+        let visible = self.tabs.get(self.active_tab).is_some_and(|tab| {
+            let pane_id = transition.pane_id.strip_prefix("pane-");
+            pane_id.is_some_and(|pane_id| {
+                pane_id
+                    .parse::<usize>()
+                    .is_ok_and(|pane_id| tab.panes.contains(pane_id))
+            })
+        });
+        if !NotificationPolicy::should_notify(transition.old, transition.new, true, visible) {
+            return;
+        }
+        let agent_display_name = AGENT_CATALOG
+            .iter()
+            .find(|adapter| adapter.id() == agent_id)
+            .map_or(agent_id, |adapter| adapter.display_name());
+        let context = worktree_context(&self.project_catalog, &self.working_directory);
+        let worktree_id = self
+            .sidebar_worktree_id(&self.working_directory)
+            .map_or_else(
+                || self.working_directory.to_string_lossy().into_owned(),
+                |id| id.to_string(),
+            );
+        let project_name = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == self.working_directory)
+            })
+            .map(|project| project.name.as_str());
+        let Some(payload) = self.activity.build_payload(
+            &transition.pane_id,
+            transition.new,
+            agent_display_name,
+            &worktree_id,
+            &context.branch,
+            project_name,
+            None,
+        ) else {
+            return;
+        };
+        post_desktop_notification(&payload);
+    }
+
     fn seam(&self) -> impl IntoElement {
         div().w(px(SEAM_WIDTH)).h_full().bg(gpui::black())
     }
@@ -2835,6 +3902,14 @@ impl TillerWorkspace {
             TabKind::AgentChat | TabKind::Editor | TabKind::Diff => CHAT_TAB_WIDTH,
             TabKind::Terminal => TERMINAL_TAB_WIDTH,
             TabKind::Browser => unreachable!("Browser surfaces are external to the shell"),
+        }
+    }
+
+    fn tab_render_width(tab: &OpenTab) -> f32 {
+        if tab_has_file(tab) {
+            180.0
+        } else {
+            Self::tab_width(tab.kind)
         }
     }
 
@@ -2952,6 +4027,16 @@ impl TillerWorkspace {
             },
         )
         .detach();
+        cx.subscribe(
+            tab,
+            |workspace, _, event: &ChangesTabActionEvent, cx| match event {
+                ChangesTabActionEvent::OpenDiff(_path) => workspace.add_changes_tab(cx),
+                ChangesTabActionEvent::ResolveInTerminal(path) => {
+                    workspace.add_conflict_terminal_tab(path.clone(), cx)
+                }
+            },
+        )
+        .detach();
     }
 
     fn rebind_changes_tabs(&mut self, cx: &mut Context<Self>) {
@@ -2996,6 +4081,7 @@ impl TillerWorkspace {
                         id: self.next_retained_chat_id,
                         title: tab.title.clone(),
                         transcript: chat.read(cx).transcript_for_resume(),
+                        agent_id: tab.agent_id.clone(),
                     });
                 }
             });
@@ -3171,16 +4257,36 @@ impl TillerWorkspace {
         }
     }
 
-    fn add_chat_tab(&mut self, title: impl Into<String>, cx: &mut Context<Self>) {
-        let title = title.into();
-        let chat = cx.new(Chat::launch);
+    fn add_chat_tab(
+        &mut self,
+        window: &mut Window,
+        adapter: Option<&dyn tiller_agents::AgentAdapter>,
+        cx: &mut Context<Self>,
+    ) {
+        let (title, agent_icon, agent_id) = chat_tab_identity(adapter);
+        let chat = match adapter {
+            Some(adapter) => {
+                let Some(program) = adapter.acp_program() else {
+                    eprintln!(
+                        "[chat] {} has no ACP server; refusing a silent fallback",
+                        adapter.display_name()
+                    );
+                    return;
+                };
+                let command = acp_agent_command(program);
+                let cwd = self.working_directory.clone();
+                cx.new(|cx| Chat::launch_with_command(command, cwd, cx))
+            }
+            None => cx.new(Chat::launch),
+        };
+        let composer_focus = chat.focus_handle(cx);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
             group_id: self.tab_machinery.active_group(),
             title,
             kind: TabKind::AgentChat,
-            agent_icon: None,
-            agent_id: None,
+            agent_icon,
+            agent_id,
             session_state: SessionTabState::with_root(self.next_pane_id),
             panes: PaneNode::leaf(self.next_pane_id, TabContent::Chat(chat)),
             focused_pane: self.next_pane_id,
@@ -3191,10 +4297,20 @@ impl TillerWorkspace {
         self.rebuild_tab_machinery();
         self.schedule_save(cx);
         self.sync_activity(cx);
+        window.focus(&composer_focus, cx);
+        window.on_next_frame(move |window, cx| window.focus(&composer_focus, cx));
         cx.notify();
     }
 
-    fn resume_chat(&mut self, retained_id: usize, cx: &mut Context<Self>) {
+    fn open_chat_agent(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(adapter) = AGENT_CATALOG.iter().find(|adapter| adapter.id() == id) else {
+            eprintln!("[chat] no adapter for action id '{id}'");
+            return;
+        };
+        self.add_chat_tab(window, Some(*adapter), cx);
+    }
+
+    fn resume_chat(&mut self, retained_id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self
             .retained_chats
             .iter()
@@ -3205,19 +4321,22 @@ impl TillerWorkspace {
         let retained = self.retained_chats.remove(index);
         let title = retained.title.clone();
         let transcript = retained.transcript;
+        let (command, agent_icon, agent_id) = restored_chat_spec(retained.agent_id.as_deref());
+        let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
         let chat = cx.new(|cx| {
-            let mut chat = Chat::launch(cx);
+            let mut chat = Chat::launch_with_command(command, cwd, cx);
             chat.restore_transcript(&transcript, cx);
             chat
         });
+        let composer_focus = chat.focus_handle(cx);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
             group_id: self.tab_machinery.active_group(),
             title,
             kind: TabKind::AgentChat,
-            agent_icon: None,
-            agent_id: None,
+            agent_icon,
+            agent_id,
             session_state: SessionTabState::with_root(pane_id),
             panes: PaneNode::leaf(pane_id, TabContent::Chat(chat)),
             focused_pane: pane_id,
@@ -3228,6 +4347,8 @@ impl TillerWorkspace {
         self.rebuild_tab_machinery();
         self.schedule_save(cx);
         self.sync_activity(cx);
+        window.focus(&composer_focus, cx);
+        window.on_next_frame(move |window, cx| window.focus(&composer_focus, cx));
         cx.notify();
     }
 
@@ -3243,8 +4364,6 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let working_directory = self.working_directory.clone();
-        let tab_id = self.next_tab_id;
-        let pane_id = self.next_pane_id;
         let terminal = cx.new(
             |cx| match TerminalView::with_shell(&working_directory, shell, cx) {
                 Ok(view) => view,
@@ -3259,6 +4378,18 @@ impl TillerWorkspace {
                 ),
             },
         );
+        self.insert_terminal_tab(title, terminal, agent_icon, cx);
+    }
+
+    fn insert_terminal_tab(
+        &mut self,
+        title: impl Into<String>,
+        terminal: Entity<TerminalView>,
+        agent_icon: Option<Icon>,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = self.next_tab_id;
+        let pane_id = self.next_pane_id;
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -3280,7 +4411,55 @@ impl TillerWorkspace {
         cx.notify();
     }
 
+    fn add_conflict_terminal_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let working_directory = self.working_directory.clone();
+        let title = format!("Resolve {}", path.display());
+        let terminal = cx.new(|cx| {
+            TerminalView::for_conflict(&working_directory, &path, cx).unwrap_or_else(|error| {
+                TerminalView::failed(
+                    &working_directory,
+                    TerminalShell::System,
+                    format!("{error:#}"),
+                    cx,
+                )
+            })
+        });
+        self.insert_terminal_tab(title, terminal, None, cx);
+    }
+
     fn add_file_tab(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let open_paths = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                let mut paths = Vec::new();
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::File { view } = content {
+                        paths.push(view.read(cx).path().to_path_buf());
+                    }
+                });
+                paths
+            })
+            .collect::<Vec<_>>();
+        if file_path_is_already_open(&open_paths, &path)
+            && let Some(index) = self.tabs.iter().position(|tab| {
+                let mut matches_path = false;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::File { view } = content {
+                        matches_path |= view.read(cx).path() == path.as_path();
+                    }
+                });
+                matches_path
+            })
+        {
+            self.active_tab = index;
+            let tab = &self.tabs[index];
+            self.tab_machinery.select_tab(tab.group_id, tab.id);
+            self.schedule_save(cx);
+            self.sync_activity(cx);
+            cx.notify();
+            return;
+        }
         let title = path.file_name().map_or_else(
             || path.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -3373,9 +4552,9 @@ impl TillerWorkspace {
         self.sync_activity(cx);
     }
 
-    fn open_action(&mut self, action: NewTabAction, cx: &mut Context<Self>) {
+    fn open_action(&mut self, action: NewTabAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            NewTabAction::NewChat => self.add_chat_tab("Chat", cx),
+            NewTabAction::NewChat => self.add_chat_tab(window, None, cx),
             NewTabAction::NewTerminal => self.add_terminal_tab("Terminal", cx),
             NewTabAction::NewChanges => self.add_changes_tab(cx),
             NewTabAction::ClaudeCode
@@ -3412,6 +4591,12 @@ impl TillerWorkspace {
                 .update(cx, |settings, cx| settings.select_category(section, cx));
         }
         self.show_settings = true;
+        // F-SET-02: the Escape handler lives on this workspace's root, which
+        // GPUI only reaches through the focused element's dispatch path. The
+        // settings surface must hold focus while it is open; the request is
+        // fulfilled on the surface's next frame.
+        self.settings
+            .update(cx, |settings, _| settings.request_surface_focus());
         cx.notify();
     }
 
@@ -3443,7 +4628,7 @@ impl TillerWorkspace {
             }
         }
         // This is the same typed action used by the New-tab UI callback.
-        self.open_action(NewTabAction::NewChanges, cx);
+        self.add_changes_tab(cx);
         self.control_read_changes(cx)
     }
 
@@ -3586,6 +4771,25 @@ impl TillerWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        self.split_terminal_at_with_placement(
+            tab_id,
+            focused_pane,
+            direction,
+            SplitPlacement::After,
+            window,
+            cx,
+        );
+    }
+
+    fn split_terminal_at_with_placement(
+        &mut self,
+        tab_id: usize,
+        focused_pane: usize,
+        direction: SplitDirection,
+        placement: SplitPlacement,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let pane_id = self.next_pane_id;
         let working_directory = self.working_directory.clone();
         let terminal = cx.new(|cx| {
@@ -3596,10 +4800,11 @@ impl TillerWorkspace {
             let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                 return;
             };
-            let split = tab.panes.split_focused(
+            let split = tab.panes.split_focused_with_placement(
                 focused_pane,
                 pane_id,
                 direction,
+                placement,
                 TabContent::Terminal {
                     view: terminal.clone(),
                 },
@@ -3615,7 +4820,7 @@ impl TillerWorkspace {
                 tab.session_state.pane_events.push(PaneEvent::Split {
                     focused: focused_pane,
                     new_id: pane_id,
-                    direction: split_direction_name(direction).to_string(),
+                    direction: split_event_name(direction, placement),
                 });
             }
             self.next_pane_id += 1;
@@ -3811,7 +5016,9 @@ impl TillerWorkspace {
                     return div().size_full().into_any_element();
                 };
                 let pane_id = *id;
+                let tab_id = self.tabs[tab_index].id;
                 let entity_for_click = entity.clone();
+                let entity_for_close = entity.clone();
                 let surface = match content {
                     TabContent::Chat(chat) => {
                         div().size_full().child(chat.clone()).into_any_element()
@@ -3830,12 +5037,20 @@ impl TillerWorkspace {
                     .id(format!("pane-{pane_id}"))
                     .relative()
                     .size_full()
-                    .min_w_0()
-                    .min_h_0()
+                    .min_w(px(MIN_SPLIT_PANE_SIZE))
+                    .min_h(px(MIN_SPLIT_PANE_SIZE))
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         entity_for_click.update(cx, |workspace, cx| {
                             workspace.select_pane(pane_id, Some(window), cx)
                         });
+                    })
+                    .capture_key_down(move |event, window, cx| {
+                        if event.keystroke.key == "w" && event.keystroke.modifiers.platform {
+                            cx.stop_propagation();
+                            entity_for_close.update(cx, |workspace, cx| {
+                                workspace.request_close_tab_by_id(tab_id, window, cx)
+                            });
+                        }
                     })
                     .child(surface)
                     .into_any_element()
@@ -3863,16 +5078,16 @@ impl TillerWorkspace {
                 let first_style = |element| {
                     div()
                         .flex_shrink_1()
-                        .min_w_0()
-                        .min_h_0()
+                        .min_w(px(MIN_SPLIT_PANE_SIZE))
+                        .min_h(px(MIN_SPLIT_PANE_SIZE))
                         .flex_basis(DefiniteLength::Fraction(*ratio))
                         .child(element)
                 };
                 let second_style = |element| {
                     div()
                         .flex_shrink_1()
-                        .min_w_0()
-                        .min_h_0()
+                        .min_w(px(MIN_SPLIT_PANE_SIZE))
+                        .min_h(px(MIN_SPLIT_PANE_SIZE))
                         .flex_basis(DefiniteLength::Fraction(1. - *ratio))
                         .child(element)
                 };
@@ -3888,11 +5103,11 @@ impl TillerWorkspace {
                     .relative()
                     .bg(gpui::black())
                     .when(*direction == SplitDirection::Horizontal, |this| {
-                        this.w(px(1.)).h_full().child(
+                        this.w(px(SPLIT_DIVIDER_SIZE)).h_full().child(
                             div()
                                 .id(format!("pane-divider-h-handle-{path:?}"))
                                 .absolute()
-                                .left(px(-4.))
+                                .left(px(-1.5))
                                 .w(px(9.))
                                 .h_full()
                                 .cursor_col_resize()
@@ -3902,11 +5117,11 @@ impl TillerWorkspace {
                         )
                     })
                     .when(*direction == SplitDirection::Vertical, |this| {
-                        this.h(px(1.)).w_full().child(
+                        this.h(px(SPLIT_DIVIDER_SIZE)).w_full().child(
                             div()
                                 .id(format!("pane-divider-v-handle-{path:?}"))
                                 .absolute()
-                                .top(px(-4.))
+                                .top(px(-1.5))
                                 .h(px(9.))
                                 .w_full()
                                 .cursor_row_resize()
@@ -3992,6 +5207,11 @@ impl TillerWorkspace {
         tab: &OpenTab,
         active: bool,
         status: Option<ActivityStatus>,
+        exit_label: Option<String>,
+        dirty: bool,
+        renaming: bool,
+        rename_draft: Option<&str>,
+        rename_focus: Option<FocusHandle>,
         entity: Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -4008,7 +5228,7 @@ impl TillerWorkspace {
             if is_file {
                 theme.file_link
             } else {
-                gpui::rgb(0xca7250)
+                theme.tab_focus_accent
             }
         } else {
             theme.meta
@@ -4020,8 +5240,16 @@ impl TillerWorkspace {
         };
         let close_entity = entity.clone();
         let menu_entity = entity.clone();
+        let rename_entity = entity.clone();
+        let drag_entity = entity.clone();
+        let tab_drag = RowDrag {
+            scope: ReorderScope::Tabs,
+            id,
+            group: Some(tab.group_id),
+        };
         div()
             .id(format!("workspace-tab-{id}"))
+            .debug_selector(move || format!("workspace-tab-{id}"))
             .relative()
             .mt(px(4.0))
             .h(px(30.0))
@@ -4039,6 +5267,14 @@ impl TillerWorkspace {
                 theme.subtitle
             })
             .hover(|style| style.bg(theme.row_hover))
+            .on_drag(tab_drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            .on_drag_move::<RowDrag>(move |event, _, cx| {
+                let drag = *event.drag(cx);
+                let before = event.event.position.x < event.bounds.center().x;
+                drag_entity.update(cx, |workspace, cx| {
+                    workspace.preview_tab_reorder(drag, id, before, cx);
+                });
+            })
             .on_mouse_down(MouseButton::Right, move |_, _, cx| {
                 cx.stop_propagation();
                 menu_entity.update(cx, |this, cx| this.open_tab_menu(id, cx));
@@ -4050,22 +5286,76 @@ impl TillerWorkspace {
                     .text_color(glyph_color)
                     .child(IconElement::new(icon, px(14.0))),
             )
+            .when(!renaming, |this| {
+                this.child(
+                    div()
+                        .font_weight(FontWeight::NORMAL)
+                        .child(tab.title.clone()),
+                )
+            })
+            .when(renaming, |this| {
+                let focus = rename_focus.expect("a renaming tab has a focus handle");
+                let focus_for_click = focus.clone();
+                let draft = rename_draft.unwrap_or_default().to_owned();
+                this.child(
+                    div()
+                        .id("tab-rename-field")
+                        .debug_selector(|| "tab-rename-field".to_owned())
+                        .track_focus(&focus)
+                        .flex_1()
+                        .min_w_0()
+                        .px(theme.spacing.titlebar_control_spacing)
+                        .rounded(theme.radii.control)
+                        .bg(theme.filter_field_bg)
+                        .text_color(theme.title)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            focus_for_click.focus(window, cx);
+                        })
+                        .on_key_down(move |event, window, cx| {
+                            cx.stop_propagation();
+                            rename_entity.update(cx, |workspace, cx| {
+                                workspace.handle_tab_rename_key(event, window, cx)
+                            });
+                        })
+                        .child(draft),
+                )
+            })
             .child(
                 div()
-                    .font_weight(FontWeight::NORMAL)
-                    .child(tab.title.clone()),
-            )
-            .child(
-                div()
-                    .w(px(16.0))
-                    .when(status == Some(ActivityStatus::Done), |this| {
-                        this.text_color(theme.tab_done).child("✓")
+                    .id(format!("workspace-tab-status-{id}"))
+                    .debug_selector(move || format!("workspace-tab-status-{id}"))
+                    .min_w(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .when_some(status, |this, status| {
+                        let status_name = tab_status_name(status);
+                        this.child(
+                            div()
+                                .id(format!("workspace-tab-status-glyph-{id}"))
+                                .debug_selector(move || {
+                                    format!("workspace-tab-status-{status_name}-{id}")
+                                })
+                                .text_color(tab_status_color(status, theme))
+                                .child(tab_status_glyph(status)),
+                        )
+                    })
+                    .when_some(exit_label, |this, label| {
+                        this.child(
+                            div()
+                                .id(format!("workspace-tab-exit-{id}"))
+                                .debug_selector(move || format!("workspace-tab-exit-{id}"))
+                                .text_size(px(9.0))
+                                .text_color(theme.meta)
+                                .child(label),
+                        )
                     }),
             )
             .when(active, |this| {
                 this.child(
                     div()
                         .id(format!("workspace-tab-close-{id}"))
+                        .debug_selector(move || format!("workspace-tab-close-{id}"))
                         .w(px(14.0))
                         .h(px(20.0))
                         .flex()
@@ -4081,6 +5371,17 @@ impl TillerWorkspace {
                             });
                         })
                         .child(IconElement::new(Icon::Close, px(12.0)).text_color(theme.subtitle)),
+                )
+            })
+            .when(dirty, |this| {
+                this.child(
+                    div()
+                        .id(format!("workspace-tab-dirty-{id}"))
+                        .debug_selector(move || format!("workspace-tab-dirty-{id}"))
+                        .w(theme.spacing.titlebar_control_spacing)
+                        .h(theme.spacing.titlebar_control_spacing)
+                        .rounded(theme.radii.control)
+                        .bg(theme.tab_focus_accent),
                 )
             })
             .when(active, |this| {
@@ -4103,6 +5404,10 @@ impl TillerWorkspace {
     }
 
     fn tab_is_dirty(&self, tab: &OpenTab, cx: &App) -> bool {
+        // One predicate feeds both the strip indicator and every close door:
+        // live terminals, streaming chats, and unsaved editors are dirty.
+        // Chat exposes streaming state but no public draft getter, so an
+        // unsent draft remains clean until the chat surface publishes one.
         let mut dirty = false;
         tab.panes.for_each(&mut |_, content| {
             dirty |= match content {
@@ -4155,42 +5460,507 @@ impl TillerWorkspace {
         cx.notify();
     }
 
+    fn tab_context_items(&self) -> Vec<TabContextItem> {
+        let Some(tab_id) = self.tab_menu_tab else {
+            return Vec::new();
+        };
+        let machinery = self.tab_command_machinery();
+        let Some(group) = machinery
+            .groups()
+            .iter()
+            .find(|group| group.tabs.contains(&tab_id))
+        else {
+            return Vec::new();
+        };
+        let Some(position) = group.tabs.iter().position(|id| *id == tab_id) else {
+            return Vec::new();
+        };
+
+        let mut items = vec![
+            TabContextItem::enabled("Open File", "open-file", TabContextAction::OpenFile),
+            TabContextItem::separator(),
+            TabContextItem::enabled("Rename", "rename", TabContextAction::Rename),
+            TabContextItem::separator(),
+            TabContextItem::enabled("Close", "close", TabContextAction::Close),
+            if group.tabs.len() > 1 {
+                TabContextItem::enabled(
+                    "Close Others",
+                    "close-others",
+                    TabContextAction::CloseOthers,
+                )
+            } else {
+                TabContextItem::disabled(
+                    "Close Others",
+                    "close-others",
+                    TabContextAction::CloseOthers,
+                    "no other tab is available",
+                )
+            },
+            if position + 1 < group.tabs.len() {
+                TabContextItem::enabled(
+                    "Close Tabs to the Right",
+                    "close-right",
+                    TabContextAction::CloseTabsToRight,
+                )
+            } else {
+                TabContextItem::disabled(
+                    "Close Tabs to the Right",
+                    "close-right",
+                    TabContextAction::CloseTabsToRight,
+                    "already the last tab",
+                )
+            },
+            TabContextItem::separator(),
+            if position > 0 {
+                TabContextItem::enabled(
+                    "Move Earlier",
+                    "move-earlier",
+                    TabContextAction::MoveEarlier,
+                )
+            } else {
+                TabContextItem::disabled(
+                    "Move Earlier",
+                    "move-earlier",
+                    TabContextAction::MoveEarlier,
+                    "already the first tab",
+                )
+            },
+            if position + 1 < group.tabs.len() {
+                TabContextItem::enabled("Move Later", "move-later", TabContextAction::MoveLater)
+            } else {
+                TabContextItem::disabled(
+                    "Move Later",
+                    "move-later",
+                    TabContextAction::MoveLater,
+                    "already the last tab",
+                )
+            },
+        ];
+
+        let other_groups = machinery
+            .groups()
+            .iter()
+            .filter(|candidate| candidate.id != group.id)
+            .map(|candidate| candidate.id)
+            .collect::<Vec<_>>();
+        items.push(TabContextItem::separator());
+        items.push(TabContextItem::disabled(
+            "Move to This Pane",
+            "move-to-current-pane",
+            TabContextAction::MoveToCurrentPane,
+            "no other tab is available",
+        ));
+        if other_groups.is_empty() {
+            items.push(TabContextItem::disabled(
+                "Move to Other Pane",
+                "move-to-other-pane",
+                TabContextAction::MoveToPane(usize::MAX),
+                "no other pane is available",
+            ));
+        } else {
+            for group_id in other_groups {
+                items.push(TabContextItem::enabled(
+                    format!("Move to Pane {group_id}"),
+                    format!("move-to-pane-{group_id}"),
+                    TabContextAction::MoveToPane(group_id),
+                ));
+            }
+        }
+        items.push(TabContextItem::separator());
+        if self.retained_chats.is_empty() {
+            items.push(TabContextItem::disabled(
+                "Resume Chat",
+                "resume-chat",
+                TabContextAction::ResumeChat,
+                "no retained chat is available",
+            ));
+        } else {
+            items.push(TabContextItem::enabled(
+                "Resume Chat",
+                "resume-chat",
+                TabContextAction::ResumeChat,
+            ));
+        }
+        items
+    }
+
+    fn tab_context_menu_left(&self) -> f32 {
+        let Some(tab_id) = self.tab_menu_tab else {
+            return 0.0;
+        };
+        let active_group = self.tab_machinery.active_group();
+        let mut left = 5.0;
+        for tab in self.tabs.iter().filter(|tab| tab.group_id == active_group) {
+            if tab.id == tab_id {
+                break;
+            }
+            left += Self::tab_width(tab.kind) + 1.0;
+        }
+        left
+    }
+
+    fn render_tab_context_menu(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
+        let action_entity = entity.clone();
+        let on_action = Rc::new(move |action, window: &mut Window, cx: &mut App| {
+            action_entity.update(cx, |workspace, cx| {
+                workspace.handle_tab_context_action(action, window, cx)
+            });
+        });
+        let dismiss_entity = entity;
+        let menu_tab_id = self.tab_menu_tab.unwrap_or_default();
+        div()
+            .id(format!("workspace-tab-menu-{menu_tab_id}"))
+            .debug_selector(move || format!("workspace-tab-menu-{menu_tab_id}"))
+            .absolute()
+            .top(px(TAB_BAR_HEIGHT))
+            .left(px(self.tab_context_menu_left()))
+            .on_mouse_down_out(move |_, _, cx| {
+                dismiss_entity.update(cx, |workspace, cx| workspace.dismiss_tab_menu(cx));
+            })
+            .child(render_tab_context_menu(
+                self.tab_context_items(),
+                on_action,
+                theme,
+            ))
+    }
+
+    fn dismiss_tab_menu(&mut self, cx: &mut Context<Self>) {
+        self.tab_menu_open = false;
+        self.tab_menu_tab = None;
+        cx.notify();
+    }
+
+    fn handle_tab_context_action(
+        &mut self,
+        action: TabContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            TabContextAction::Dismiss => self.dismiss_tab_menu(cx),
+            TabContextAction::OpenFile => {
+                self.handle_open_file(&OpenFile, window, cx);
+                self.dismiss_tab_menu(cx);
+            }
+            TabContextAction::ResumeChat => {
+                self.handle_resume_chat(&ResumeChat, window, cx);
+                self.dismiss_tab_menu(cx);
+            }
+            TabContextAction::Rename => {
+                if let Some(tab_id) = self.tab_menu_tab {
+                    self.begin_tab_rename(tab_id, window, cx);
+                }
+            }
+            TabContextAction::Close => {
+                self.handle_close_tab(&CloseTab, window, cx);
+                self.dismiss_tab_menu(cx);
+            }
+            TabContextAction::CloseOthers => {
+                self.request_close_other_tabs(window, cx);
+                self.dismiss_tab_menu(cx);
+            }
+            TabContextAction::CloseTabsToRight => {
+                self.request_close_tabs_to_right(window, cx);
+                self.dismiss_tab_menu(cx);
+            }
+            TabContextAction::MoveEarlier => {
+                self.move_selected_tab_direction(MoveDirection::Earlier, cx)
+            }
+            TabContextAction::MoveLater => {
+                self.move_selected_tab_direction(MoveDirection::Later, cx)
+            }
+            TabContextAction::MoveToCurrentPane => {
+                self.move_selected_tab(MoveTarget::CurrentPane, cx)
+            }
+            TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
+                self.move_selected_tab(MoveTarget::Group(group_id), cx)
+            }
+            TabContextAction::MoveToPane(_) => {}
+        }
+    }
+
+    fn move_selected_tab_direction(&mut self, direction: MoveDirection, cx: &mut Context<Self>) {
+        let mut machinery = self.tab_command_machinery();
+        if !machinery.move_active_tab(direction) {
+            return;
+        }
+        self.apply_tab_machinery(machinery);
+        self.dismiss_tab_menu(cx);
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+    }
+
+    fn begin_tab_rename(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        let focus = cx.focus_handle().tab_stop(true);
+        focus.focus(window, cx);
+        self.tab_rename = Some(TabRename {
+            tab_id: id,
+            draft: tab.title.clone(),
+            focus,
+        });
+        self.dismiss_tab_menu(cx);
+    }
+
+    fn commit_tab_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(rename) = self.tab_rename.take() else {
+            return;
+        };
+        let title = rename.draft.trim();
+        if !title.is_empty()
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == rename.tab_id)
+        {
+            tab.title = title.to_owned();
+            self.schedule_save(cx);
+            self.sync_activity(cx);
+        }
+        cx.notify();
+    }
+
+    fn handle_tab_rename_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        match key {
+            "enter" | "return" => self.commit_tab_rename(cx),
+            "escape" => {
+                self.tab_rename = None;
+                cx.notify();
+            }
+            "backspace" | "delete" => {
+                if let Some(rename) = self.tab_rename.as_mut() {
+                    rename.draft.pop();
+                }
+                cx.notify();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                    && let Some(rename) = self.tab_rename.as_mut()
+                {
+                    rename.draft.push_str(character);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
     /// This shell overlay owns the visible tabs. The UI crate's TabBar remains
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
-    fn render_open_tabs(&self, theme: Theme, entity: Entity<Self>, cx: &App) -> impl IntoElement {
+    fn tab_strip_available_width(&self, window: &Window, theme: Theme) -> f32 {
+        let mut width = f32::from(window.bounds().size.width);
+        if self.sidebar_visible {
+            width -= SIDEBAR_WIDTH + SEAM_WIDTH;
+        }
+        if self.right_panel_visible {
+            width -= RIGHT_PANEL_WIDTH + SEAM_WIDTH;
+        }
+        width - f32::from(theme.spacing.titlebar_control_frame.width)
+    }
+
+    fn render_overflow_menu(
+        &self,
+        tabs: &[&OpenTab],
+        active_tab_id: Option<usize>,
+        entity: Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let dismiss_entity = entity.clone();
+        let mut menu = div()
+            .id("tab-overflow-menu")
+            .debug_selector(|| "tab-overflow-menu".to_owned())
+            .absolute()
+            .right_0()
+            .top(theme.spacing.titlebar_control_frame.height)
+            .w(theme.spacing.menu_width)
+            .p(theme.spacing.titlebar_control_spacing)
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.titlebar_control_spacing)
+            .rounded(theme.radii.user_pill)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .shadow_lg()
+            .on_mouse_down_out(move |_, _, cx| {
+                dismiss_entity.update(cx, |workspace, cx| {
+                    workspace.overflow_menu_open = false;
+                    cx.notify();
+                });
+            });
+
+        for tab in tabs {
+            let id = tab.id;
+            let active = active_tab_id == Some(id);
+            let select_entity = entity.clone();
+            let selector = format!("tab-overflow-item-{id}");
+            let selector_for_debug = selector.clone();
+            let selected_selector = format!("tab-overflow-selected-{id}");
+            let row = div()
+                .id(selector)
+                .debug_selector(move || selector_for_debug.clone())
+                .w_full()
+                .min_h(theme.typography.ui_line_height)
+                .px(theme.spacing.card_gap)
+                .py(theme.spacing.titlebar_control_spacing)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(theme.spacing.titlebar_control_spacing)
+                .rounded(theme.radii.control)
+                .text_size(theme.typography.footnote)
+                .text_color(if active { theme.title } else { theme.subtitle })
+                .hover(|style| style.bg(theme.row_hover))
+                .on_click(move |_, _, cx| {
+                    select_entity.update(cx, |workspace, cx| {
+                        workspace.select_tab(id, cx);
+                        workspace.overflow_menu_open = false;
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .child(tab.title.clone()),
+                )
+                .when(active, |this| {
+                    this.child(
+                        div()
+                            .id(selected_selector.clone())
+                            .debug_selector(move || selected_selector.clone())
+                            .text_color(theme.tab_focus_accent)
+                            .child("✓"),
+                    )
+                });
+            menu = menu.child(row);
+        }
+        menu
+    }
+
+    fn render_open_tabs(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
+        let active_group = self.tab_command_machinery().active_group();
+        let group_tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.group_id == active_group)
+            .collect::<Vec<_>>();
+        let tab_widths = group_tabs
+            .iter()
+            .map(|tab| Self::tab_render_width(tab))
+            .collect::<Vec<_>>();
+        let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
+        let available_width = self.tab_strip_available_width(window, theme);
+        let visible_count = visible_tab_count(&tab_widths, available_width, overflow_width);
+        let has_overflow = visible_count < group_tabs.len();
+        let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let mut tabs = div()
             .absolute()
             .left_0()
             .top_0()
             .h_full()
-            .right(px(26.0))
+            .right(theme.spacing.titlebar_control_frame.width)
             .pl(px(5.0))
             .flex()
             .items_start()
             .gap(px(1.0))
             .bg(theme.background);
-        let active_group = self.tab_command_machinery().active_group();
-        for (index, tab) in self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(_, tab)| tab.group_id == active_group)
-        {
+        if has_overflow {
+            tabs = tabs.pr(theme.spacing.titlebar_control_frame.width);
+        }
+        for (index, tab) in group_tabs.iter().take(visible_count).enumerate() {
+            let renaming = self
+                .tab_rename
+                .as_ref()
+                .is_some_and(|rename| rename.tab_id == tab.id);
+            let rename_draft = self
+                .tab_rename
+                .as_ref()
+                .filter(|rename| rename.tab_id == tab.id)
+                .map(|rename| rename.draft.as_str());
+            let rename_focus = self
+                .tab_rename
+                .as_ref()
+                .filter(|rename| rename.tab_id == tab.id)
+                .map(|rename| rename.focus.clone());
             tabs = tabs.child(Self::render_open_tab(
                 tab,
                 index == self.active_tab,
                 self.tab_status(tab, cx),
+                Self::terminal_exit_label(tab, cx),
+                self.tab_is_dirty(tab, cx),
+                renaming,
+                rename_draft,
+                rename_focus,
                 entity.clone(),
                 theme,
             ));
+        }
+        if has_overflow {
+            let overflow_entity = entity.clone();
+            let menu_tabs = group_tabs.clone();
+            let overflow_button = div()
+                .id("tab-overflow-button")
+                .debug_selector(|| "tab-overflow-button".to_owned())
+                .absolute()
+                .right_0()
+                .top(theme.spacing.titlebar_control_spacing)
+                .w(theme.spacing.titlebar_control_frame.width)
+                .h(theme.spacing.titlebar_control_frame.height)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radii.control)
+                .text_color(theme.meta)
+                .hover(|style| style.bg(theme.row_hover))
+                .on_click(move |_, _, cx| {
+                    overflow_entity.update(cx, |workspace, cx| {
+                        workspace.overflow_menu_open = !workspace.overflow_menu_open;
+                        workspace.tab_menu_open = false;
+                        cx.notify();
+                    });
+                })
+                .child(
+                    IconElement::new(Icon::ChevronDown, theme.spacing.title_strip_icon_size)
+                        .text_color(theme.meta),
+                );
+            tabs = tabs.child(overflow_button);
+            if self.overflow_menu_open {
+                tabs = tabs.child(self.render_overflow_menu(
+                    &menu_tabs,
+                    active_tab_id,
+                    entity.clone(),
+                    theme,
+                ));
+            }
         }
         tabs
     }
 
     /// The three columns. Content entities are mounted selectively, while
     /// their owning entities remain in `tabs` above.
-    fn columns(&self, theme: &Theme, entity: Entity<Self>, cx: &App) -> impl IntoElement {
+    fn columns(
+        &self,
+        theme: &Theme,
+        entity: Entity<Self>,
+        cx: &App,
+        window: &Window,
+    ) -> impl IntoElement {
         let mut columns = div().flex().flex_row().size_full();
 
         if self.sidebar_visible {
@@ -4218,7 +5988,10 @@ impl TillerWorkspace {
                         .h(px(TAB_BAR_HEIGHT))
                         .w_full()
                         .child(self.tab_bar.clone())
-                        .child(self.render_open_tabs(*theme, entity.clone(), cx)),
+                        .child(self.render_open_tabs(*theme, entity.clone(), window, cx))
+                        .when(self.tab_menu_open, |this| {
+                            this.child(self.render_tab_context_menu(*theme, entity.clone()))
+                        }),
                 )
                 .child(
                     div()
@@ -4266,10 +6039,10 @@ impl TillerWorkspace {
     fn handle_new_terminal_tab(
         &mut self,
         _: &NewTerminalTab,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_action(NewTabAction::NewTerminal, cx);
+        self.open_action(NewTabAction::NewTerminal, window, cx);
     }
 
     fn handle_open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
@@ -4289,7 +6062,12 @@ impl TillerWorkspace {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    eprintln!("[files] could not open the file picker: {error}");
+                    workspace.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.set_notice(
+                            format!("[files] could not open the file picker: {error}"),
+                            cx,
+                        )
+                    });
                 }
                 Err(_) => {}
             });
@@ -4320,7 +6098,9 @@ impl TillerWorkspace {
             .unwrap_or_default();
         for view in views {
             if let Err(error) = view.update(cx, |view, cx| view.save(cx)) {
-                eprintln!("[files] save failed: {error}");
+                view.update(cx, |view, cx| {
+                    view.set_notice(format!("[files] save failed: {error}"), cx)
+                });
             }
         }
     }
@@ -4568,15 +6348,563 @@ impl TillerWorkspace {
         self.move_selected_tab(MoveTarget::Group(target), cx);
     }
 
-    fn handle_resume_chat(&mut self, _: &ResumeChat, _: &mut Window, cx: &mut Context<Self>) {
+    fn handle_resume_chat(&mut self, _: &ResumeChat, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.retained_chats.first().map(|chat| chat.id) {
-            self.resume_chat(id, cx);
+            self.resume_chat(id, window, cx);
         }
+    }
+
+    fn palette_context(&self) -> PaletteContext {
+        let sidebar_target = self.project_catalog.projects().iter().find_map(|project| {
+            project
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.path == self.working_directory)
+                .map(|worktree| SidebarPaletteTarget {
+                    project_id: project.id.clone(),
+                    project_path: project.root_path.clone(),
+                    project_is_git: project.is_git,
+                    worktree_path: worktree.path.clone(),
+                    worktree_is_primary: worktree.is_primary,
+                })
+                .or_else(|| {
+                    (project.root_path == self.working_directory).then(|| SidebarPaletteTarget {
+                        project_id: project.id.clone(),
+                        project_path: project.root_path.clone(),
+                        project_is_git: project.is_git,
+                        worktree_path: self.working_directory.clone(),
+                        worktree_is_primary: true,
+                    })
+                })
+        });
+        PaletteContext {
+            active_tab_kind: self.tabs.get(self.active_tab).map(|tab| tab.kind),
+            has_retained_chat: !self.retained_chats.is_empty(),
+            has_other_pane: self.tab_machinery.groups().len() > 1,
+            sidebar_target,
+        }
+    }
+
+    fn focused_terminal(&self, window: &Window, cx: &App) -> bool {
+        let Some(focused) = window.focused(cx) else {
+            return false;
+        };
+        let mut terminal_focused = false;
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    terminal_focused |= view.focus_handle(cx) == focused;
+                }
+            });
+            if terminal_focused {
+                break;
+            }
+        }
+        terminal_focused
+    }
+
+    fn handle_root_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette_open {
+            self.handle_palette_key(event, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+        // GPUI's platform modifier is the cross-platform spelling of ⌘ on
+        // macOS and the Super key on Linux. The universal palette chord is
+        // intercepted at the app boundary; this capture-phase handler keeps
+        // the fallback for surfaces whose focus is still inside the shell.
+        let close_tab_chord =
+            modifiers.platform || (cfg!(target_os = "linux") && modifiers.control);
+        if !self.show_settings && key == "w" && close_tab_chord {
+            self.handle_close_tab(&CloseTab, window, cx);
+            return;
+        }
+        let universal = key == "p" && modifiers.control && modifiers.shift;
+        let readline_safe = key == "k" && modifiers.control && !modifiers.shift;
+        if universal {
+            self.open_command_palette(window, cx);
+            cx.stop_propagation();
+        } else if readline_safe && !self.focused_terminal(window, cx) {
+            self.open_command_palette(window, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    /// F-SET-02: Escape closes the settings surface, the same way Back
+    /// does. The global binding dispatches here regardless of what holds
+    /// focus; Back routes through the CloseSettings action. Focus returns
+    /// to the sidebar immediately (it is rendered again on the next frame),
+    /// so the shell's ctrl-k handling keeps working without a click.
+    fn handle_close_settings_surface(
+        &mut self,
+        _: &CloseSettingsSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.show_settings {
+            return;
+        }
+        self.show_settings = false;
+        if self.sidebar_visible {
+            let focus = self.sidebar.focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn handle_open_settings_shortcut(
+        &mut self,
+        _: &OpenSettingsShortcut,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(None, cx);
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return;
+        }
+        self.palette_previous_focus = window.focused(cx);
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.palette_open = true;
+        let focus = self.palette_focus.clone();
+        window.focus(&focus, cx);
+        window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            return;
+        }
+        self.palette_open = false;
+        let previous_focus = self.palette_previous_focus.take();
+        if let Some(previous_focus) = previous_focus {
+            window.focus(&previous_focus, cx);
+            window.on_next_frame(move |window, cx| window.focus(&previous_focus, cx));
+        }
+        cx.notify();
+    }
+
+    fn handle_palette_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.close_command_palette(window, cx);
+            return;
+        }
+        let context = self.palette_context();
+        let entries = palette_entries(&context);
+        let filtered = filter_palette_entries(&entries, &self.palette_query);
+        match key {
+            "backspace" | "delete" => {
+                self.palette_query.pop();
+                self.palette_selected = 0;
+                cx.notify();
+            }
+            "up" => {
+                self.palette_selected = self.palette_selected.saturating_sub(1);
+                cx.notify();
+            }
+            "down" => {
+                if !filtered.is_empty() {
+                    self.palette_selected = (self.palette_selected + 1).min(filtered.len() - 1);
+                    cx.notify();
+                }
+            }
+            "enter" | "return" => {
+                if let Some(entry) = filtered.get(self.palette_selected).copied()
+                    && entry.is_enabled()
+                {
+                    self.dispatch_palette_command(entry.command, window, cx);
+                }
+            }
+            _ if !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && event
+                    .keystroke
+                    .key_char
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty()) =>
+            {
+                self.palette_query
+                    .push_str(event.keystroke.key_char.as_deref().unwrap_or_default());
+                self.palette_selected = 0;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_palette_command(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaletteCommand::Window(command) => match command {
+                WindowCommand::NewTerminalTab => {
+                    window.dispatch_action(Box::new(NewTerminalTab), cx)
+                }
+                WindowCommand::OpenFile => window.dispatch_action(Box::new(OpenFile), cx),
+                WindowCommand::SaveFile => window.dispatch_action(Box::new(SaveFile), cx),
+                WindowCommand::ToggleSidebar => window.dispatch_action(Box::new(ToggleSidebar), cx),
+                WindowCommand::ToggleRightPanel => {
+                    window.dispatch_action(Box::new(ToggleRightPanel), cx)
+                }
+            },
+            PaletteCommand::Tab(command) => match command {
+                TabCommand::FocusPane(direction, forward) => match (direction, forward) {
+                    (SplitDirection::Horizontal, false) => {
+                        window.dispatch_action(Box::new(FocusPaneLeft), cx)
+                    }
+                    (SplitDirection::Horizontal, true) => {
+                        window.dispatch_action(Box::new(FocusPaneRight), cx)
+                    }
+                    (SplitDirection::Vertical, false) => {
+                        window.dispatch_action(Box::new(FocusPaneAbove), cx)
+                    }
+                    (SplitDirection::Vertical, true) => {
+                        window.dispatch_action(Box::new(FocusPaneBelow), cx)
+                    }
+                },
+                TabCommand::SplitPane(SplitDirection::Horizontal) => {
+                    window.dispatch_action(Box::new(SplitPaneRight), cx)
+                }
+                TabCommand::SplitPane(SplitDirection::Vertical) => {
+                    window.dispatch_action(Box::new(SplitPaneDown), cx)
+                }
+                TabCommand::ClosePane => window.dispatch_action(Box::new(ClosePane), cx),
+                TabCommand::CycleTab(true) => window.dispatch_action(Box::new(CycleTabForward), cx),
+                TabCommand::CycleTab(false) => {
+                    window.dispatch_action(Box::new(CycleTabBackward), cx)
+                }
+                TabCommand::JumpToTab(position) => match position {
+                    1 => window.dispatch_action(Box::new(JumpToTab1), cx),
+                    2 => window.dispatch_action(Box::new(JumpToTab2), cx),
+                    3 => window.dispatch_action(Box::new(JumpToTab3), cx),
+                    4 => window.dispatch_action(Box::new(JumpToTab4), cx),
+                    5 => window.dispatch_action(Box::new(JumpToTab5), cx),
+                    6 => window.dispatch_action(Box::new(JumpToTab6), cx),
+                    7 => window.dispatch_action(Box::new(JumpToTab7), cx),
+                    8 => window.dispatch_action(Box::new(JumpToTab8), cx),
+                    9 => window.dispatch_action(Box::new(JumpToTab9), cx),
+                    _ => {}
+                },
+                TabCommand::OpenAllTabs => window.dispatch_action(Box::new(OpenAllTabs), cx),
+                TabCommand::OpenTabMenu => window.dispatch_action(Box::new(OpenTabMenu), cx),
+                TabCommand::CloseTab => window.dispatch_action(Box::new(CloseTab), cx),
+                TabCommand::CloseOtherTabs => window.dispatch_action(Box::new(CloseOtherTabs), cx),
+                TabCommand::CloseTabsToRight => {
+                    window.dispatch_action(Box::new(CloseTabsToRight), cx)
+                }
+                TabCommand::MoveTabEarlier => window.dispatch_action(Box::new(MoveTabEarlier), cx),
+                TabCommand::MoveTabLater => window.dispatch_action(Box::new(MoveTabLater), cx),
+                TabCommand::MoveTabToCurrentPane => {
+                    window.dispatch_action(Box::new(MoveTabToCurrentPane), cx)
+                }
+                TabCommand::MoveTabToOtherPane => {
+                    window.dispatch_action(Box::new(MoveTabToOtherPane), cx)
+                }
+                TabCommand::ResumeChat => window.dispatch_action(Box::new(ResumeChat), cx),
+            },
+            PaletteCommand::NewTab(action) => {
+                if let Ok(mut actions) = self.pending_actions.lock() {
+                    actions.push(WorkspaceAction::NewTab(action));
+                }
+            }
+            PaletteCommand::Sidebar(action) => self.dispatch_sidebar_palette_action(action, cx),
+        }
+        self.close_command_palette(window, cx);
+    }
+
+    fn dispatch_sidebar_palette_action(
+        &mut self,
+        action: SidebarPaletteAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.palette_context().sidebar_target else {
+            return;
+        };
+        match action {
+            SidebarPaletteAction::ProjectSettings => self.sidebar.update(cx, |_, cx| {
+                cx.emit(SidebarEvent::OpenProjectSettings(target.project_id.clone()))
+            }),
+            SidebarPaletteAction::InitializeGit
+            | SidebarPaletteAction::RevealInFileManager
+            | SidebarPaletteAction::RemoveProject => {
+                let action = match action {
+                    SidebarPaletteAction::InitializeGit => SidebarContextAction::InitializeGit,
+                    SidebarPaletteAction::RevealInFileManager => {
+                        SidebarContextAction::RevealInFileManager
+                    }
+                    SidebarPaletteAction::RemoveProject => SidebarContextAction::RemoveProject,
+                    _ => unreachable!(),
+                };
+                self.sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::ContextAction {
+                        target: SidebarContextTarget::Project {
+                            id: target.project_id.clone(),
+                            path: target.project_path.clone(),
+                            is_git: target.project_is_git,
+                        },
+                        action,
+                    })
+                });
+            }
+            SidebarPaletteAction::SetPrimary
+            | SidebarPaletteAction::UnsetPrimary
+            | SidebarPaletteAction::NewTab(_) => {
+                let action = match action {
+                    SidebarPaletteAction::SetPrimary => SidebarContextAction::SetPrimary,
+                    SidebarPaletteAction::UnsetPrimary => SidebarContextAction::UnsetPrimary,
+                    SidebarPaletteAction::NewTab(action) => SidebarContextAction::NewTab(action),
+                    _ => unreachable!(),
+                };
+                self.sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::ContextAction {
+                        target: SidebarContextTarget::Worktree {
+                            path: target.worktree_path.clone(),
+                            is_primary: target.worktree_is_primary,
+                        },
+                        action,
+                    })
+                });
+            }
+        }
+    }
+
+    fn palette_selector(label: &str) -> String {
+        format!(
+            "command-palette-row-{}",
+            label
+                .to_ascii_lowercase()
+                .chars()
+                .map(|character| if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '-'
+                })
+                .collect::<String>()
+        )
+    }
+
+    fn render_command_palette(&self, theme: Theme, entity: Entity<Self>) -> AnyElement {
+        let context = self.palette_context();
+        let entries = palette_entries(&context);
+        let filtered = filter_palette_entries(&entries, &self.palette_query);
+        let selected = self.palette_selected.min(filtered.len().saturating_sub(1));
+        let query = self.palette_query.clone();
+        let focus = self.palette_focus.clone();
+        let focus_entity = entity.clone();
+        let key_entity = entity.clone();
+        let mut rows = div()
+            .id("command-palette-rows")
+            .flex()
+            .flex_col()
+            .gap(px(1.0));
+
+        for (index, entry) in filtered.iter().copied().enumerate() {
+            let active = index == selected;
+            let entity = entity.clone();
+            let selector = Self::palette_selector(entry.label);
+            rows = rows.child(
+                div()
+                    .id(selector.clone())
+                    .debug_selector(move || selector.clone())
+                    .h(px(31.0))
+                    .w_full()
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.footnote)
+                    .text_color(if entry.is_enabled() {
+                        if active {
+                            theme.title_selected
+                        } else {
+                            theme.title
+                        }
+                    } else {
+                        theme.meta
+                    })
+                    .when(active && entry.is_enabled(), |this| {
+                        this.bg(theme.selected_fill)
+                    })
+                    .when(entry.is_enabled(), move |this| {
+                        this.hover(|style| style.bg(theme.row_hover)).on_click(
+                            move |_, window, cx| {
+                                entity.update(cx, |workspace, cx| {
+                                    workspace.dispatch_palette_command(entry.command, window, cx)
+                                });
+                            },
+                        )
+                    })
+                    .child(entry.label)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_color(theme.meta)
+                            .child(entry.shortcut.unwrap_or(""))
+                            .when_some(entry.disabled_reason, |this, reason| {
+                                this.child(
+                                    div()
+                                        .debug_selector(move || {
+                                            format!(
+                                                "command-palette-disabled-{}",
+                                                reason
+                                                    .label()
+                                                    .to_ascii_lowercase()
+                                                    .replace(' ', "-")
+                                            )
+                                        })
+                                        .child(format!("({})", reason.label())),
+                                )
+                            }),
+                    ),
+            );
+        }
+
+        let body = if filtered.is_empty() {
+            div()
+                .id("command-palette-empty")
+                .debug_selector(|| "command-palette-empty".to_owned())
+                .h(px(31.0))
+                .w_full()
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.meta)
+                .child(EMPTY_RESULT_LABEL)
+                .into_any_element()
+        } else {
+            rows.into_any_element()
+        };
+
+        div()
+            .id("command-palette")
+            .debug_selector(|| "command-palette".to_owned())
+            .key_context("CommandPalette")
+            .track_focus(&focus)
+            .capture_key_down(move |event, window, cx| {
+                key_entity.update(cx, |workspace, cx| {
+                    if workspace.palette_open {
+                        workspace.handle_palette_key(event, window, cx);
+                        cx.stop_propagation();
+                    }
+                });
+            })
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                focus_entity.update(cx, |workspace, cx| {
+                    workspace.palette_focus.focus(window, cx);
+                });
+            })
+            .absolute()
+            .top(px(56.0))
+            .left(px(220.0))
+            .w(px(620.0))
+            .h(px(470.0))
+            .p(px(8.0))
+            .rounded(theme.radii.user_pill)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .shadow_lg()
+            .child(
+                div()
+                    .id("command-palette-filter")
+                    .debug_selector(|| "command-palette-filter".to_owned())
+                    .h(px(34.0))
+                    .w_full()
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(theme.radii.control)
+                    .bg(theme.filter_field_bg)
+                    .border_1()
+                    .border_color(theme.selection_ring)
+                    .text_size(theme.typography.headline)
+                    .text_color(if query.is_empty() {
+                        theme.meta
+                    } else {
+                        theme.title
+                    })
+                    .child(if query.is_empty() {
+                        "Type to filter commands".to_owned()
+                    } else {
+                        query
+                    }),
+            )
+            .child(
+                div()
+                    .mt(px(8.0))
+                    .mb(px(5.0))
+                    .px(px(10.0))
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.meta)
+                    .child("Commands · substring filter"),
+            )
+            .child(div().flex_1().child(body))
+            .into_any_element()
+    }
+}
+
+impl TillerWorkspace {
+    fn schedule_restored_scrollback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.restored_scrollback_scheduled
+            || !self
+                .tabs
+                .iter()
+                .any(|tab| !tab.session_state.scrollback.is_empty())
+        {
+            return;
+        }
+        self.restored_scrollback_scheduled = true;
+        cx.defer_in(window, |workspace, _window, cx| {
+            replay_persisted_terminal_scrollback(&mut workspace.tabs, cx);
+            cx.notify();
+        });
+    }
+}
+
+fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
+    for tab in tabs {
+        let persisted = std::mem::take(&mut tab.session_state.scrollback);
+        if persisted.is_empty() {
+            continue;
+        }
+        tab.panes.for_each(&mut |pane_id, content| {
+            if let TabContent::Terminal { view } = content
+                && let Some(bytes) = persisted.get(&pane_id)
+            {
+                view.update(cx, |terminal, _| terminal.replay_scrollback(bytes));
+            }
+        });
     }
 }
 
 impl Render for TillerWorkspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Fetched fresh every frame from the global, so a change of appearance
         // is picked up without the workspace holding a stale copy.
         let theme = *Theme::get(cx);
@@ -4592,27 +6920,49 @@ impl Render for TillerWorkspace {
 
         if self.show_settings {
             return div()
+                .relative()
                 .flex()
                 .flex_col()
                 .size_full()
                 .bg(theme.canvas)
+                .capture_key_down(cx.listener(Self::handle_root_key_down))
+                .on_action(cx.listener(Self::handle_close_settings_surface))
                 .child(
                     div()
                         .h(px(TITLE_BAR_HEIGHT))
                         .w_full()
                         .child(self.titlebar.clone()),
                 )
-                .child(div().flex_1().w_full().child(self.settings.clone()));
+                .child(div().flex_1().w_full().child(self.settings.clone()))
+                .when(self.palette_open, |this| {
+                    this.child(self.render_command_palette(theme, cx.entity()))
+                });
+        }
+
+        self.schedule_restored_scrollback(window, cx);
+
+        // Settings closed: hand focus back to a surface that is actually in
+        // this frame, so the shell's key handling (ctrl-k, Escape…) keeps
+        // working without an extra click.
+        if self.restore_focus_pending {
+            self.restore_focus_pending = false;
+            if self.sidebar_visible {
+                let focus = self.sidebar.focus_handle(cx);
+                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+            }
         }
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.canvas)
+            .capture_key_down(cx.listener(Self::handle_root_key_down))
             .on_action(cx.listener(Self::handle_new_terminal_tab))
             .on_action(cx.listener(Self::handle_open_file))
             .on_action(cx.listener(Self::handle_save_file))
+            .on_action(cx.listener(Self::handle_open_settings_shortcut))
             .on_action(cx.listener(|workspace, _: &ToggleSidebar, _, cx| {
                 workspace.toggle_sidebar(cx);
             }))
@@ -4657,7 +7007,7 @@ impl Render for TillerWorkspace {
                 div()
                     .flex_1()
                     .w_full()
-                    .child(self.columns(&theme, cx.entity(), cx)),
+                    .child(self.columns(&theme, cx.entity(), cx, window)),
             )
             .child(
                 div()
@@ -4665,6 +7015,9 @@ impl Render for TillerWorkspace {
                     .w_full()
                     .child(self.status_bar.clone()),
             )
+            .when(self.palette_open, |this| {
+                this.child(self.render_command_palette(theme, cx.entity()))
+            })
     }
 }
 
@@ -4722,11 +7075,17 @@ fn replay_pane_events<T>(
                 new_id,
                 direction,
             } => {
-                let Some(direction) = parse_split_direction(direction) else {
+                let Some((direction, placement)) = parse_split_event(direction) else {
                     continue;
                 };
                 if tree.contains(*focused) {
-                    let _ = tree.split_focused(*focused, *new_id, direction, new_content(*new_id));
+                    let _ = tree.split_focused_with_placement(
+                        *focused,
+                        *new_id,
+                        direction,
+                        placement,
+                        new_content(*new_id),
+                    );
                 }
             }
             PaneEvent::SetRatio { path, ratio_millis } => {
@@ -4759,8 +7118,24 @@ fn restore_tabs(
             .cloned()
             .unwrap_or_default();
         let pane_id = tab_state.root_id.unwrap_or(id);
+        let (command, agent_icon, agent_id) = if tab.kind == "chat" {
+            let (command, icon, agent_id) = restored_chat_spec(tab.agent_id.as_deref());
+            (Some(command), icon, agent_id)
+        } else {
+            (
+                None,
+                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
+                tab.agent_id.clone(),
+            )
+        };
         let content = match tab.kind.as_str() {
-            "chat" => TabContent::Chat(cx.new(Chat::launch)),
+            "chat" => TabContent::Chat(cx.new(|cx| {
+                Chat::launch_with_command(
+                    command.expect("chat restoration always has a fallback command"),
+                    working_directory.to_path_buf(),
+                    cx,
+                )
+            })),
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let view = cx.new(|cx| match TerminalView::new(&cwd, cx) {
@@ -4816,14 +7191,6 @@ fn restore_tabs(
                 }
             }),
         };
-        let persisted_scrollback = &tab_state.scrollback;
-        panes.for_each(&mut |pane_id, content| {
-            if let TabContent::Terminal { view } = content
-                && let Some(bytes) = persisted_scrollback.get(&pane_id)
-            {
-                view.update(cx, |terminal, _| terminal.replay_scrollback(bytes));
-            }
-        });
         tabs.push(OpenTab {
             id,
             group_id: 0,
@@ -4833,8 +7200,8 @@ fn restore_tabs(
                 "diff" => TabKind::Diff,
                 _ => TabKind::Terminal,
             },
-            agent_icon: None,
-            agent_id: None,
+            agent_icon,
+            agent_id,
             session_state: tab_state,
             panes,
             focused_pane: pane_id,
@@ -4865,8 +7232,24 @@ fn restore_tabs_in_workspace(
         let pane_id = tab_state
             .root_id
             .unwrap_or_else(|| pane_id_start + tabs.len());
+        let (command, agent_icon, agent_id) = if tab.kind == "chat" {
+            let (command, icon, agent_id) = restored_chat_spec(tab.agent_id.as_deref());
+            (Some(command), icon, agent_id)
+        } else {
+            (
+                None,
+                tab.agent_id.as_deref().and_then(Icon::for_agent_id),
+                tab.agent_id.clone(),
+            )
+        };
         let content = match tab.kind.as_str() {
-            "chat" => TabContent::Chat(cx.new(Chat::launch)),
+            "chat" => TabContent::Chat(cx.new(|cx| {
+                Chat::launch_with_command(
+                    command.expect("chat restoration always has a fallback command"),
+                    working_directory.to_path_buf(),
+                    cx,
+                )
+            })),
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
                 let view = cx.new(|cx| match TerminalView::new(&cwd, cx) {
@@ -4893,14 +7276,6 @@ fn restore_tabs_in_workspace(
                 }),
             }
         });
-        let persisted_scrollback = &tab_state.scrollback;
-        panes.for_each(&mut |pane_id, content| {
-            if let TabContent::Terminal { view } = content
-                && let Some(bytes) = persisted_scrollback.get(&pane_id)
-            {
-                view.update(cx, |terminal, _| terminal.replay_scrollback(bytes));
-            }
-        });
         tabs.push(OpenTab {
             id,
             group_id: 0,
@@ -4912,8 +7287,8 @@ fn restore_tabs_in_workspace(
             } else {
                 TabKind::Terminal
             },
-            agent_icon: None,
-            agent_id: None,
+            agent_icon,
+            agent_id,
             session_state: tab_state,
             panes,
             focused_pane: pane_id,
@@ -4994,6 +7369,14 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         },
         control_socket_enabled: settings.control_socket_enabled,
         socket_path: String::new(),
+        // P58: the remaining snapshot fields (resume_agent_sessions,
+        // auto_naming, retention, mount cap, summarizer, usage-bar
+        // visibility/interval) start at their defaults until the persisted
+        // schema carries them — the `tiller_persistence` extension decided
+        // in P58 lands as codex11's piece, and this mapping then grows to
+        // cover it. Until then the defaults are exactly what the surface
+        // drew on every launch anyway.
+        ..Default::default()
     }
 }
 
@@ -5011,7 +7394,20 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
             tiller_ui::settings::FileIconChoice::Material => FileIconTheme::Material,
         },
         control_socket_enabled: snapshot.control_socket_enabled,
+        ..AppSettings::default()
     }
+}
+
+/// Applies the deployment override to the persisted settings exactly once,
+/// before the boot controller decides whether to bind the control socket.
+fn app_settings_with_environment_override(mut settings: AppSettings) -> AppSettings {
+    let policy = tiller_project::SettingsPolicy {
+        control_socket_enabled: settings.control_socket_enabled,
+        ..Default::default()
+    }
+    .with_environment_override();
+    settings.control_socket_enabled = policy.control_socket_enabled;
+    settings
 }
 
 fn main() {
@@ -5035,18 +7431,15 @@ fn main() {
         for diagnostic in &restored_catalog.diagnostics {
             eprintln!("[session] {diagnostic}");
         }
-        let mut project_catalog = ProjectCatalog::from_projects(restored_catalog.projects);
-        if project_catalog.projects().is_empty() {
-            let _ = project_catalog.add(&working_directory);
-        }
+        let project_catalog = ProjectCatalog::from_projects(restored_catalog.projects);
         let session_store = SessionStore::open(&database_path);
         // Restore is tolerant of old path-based project ids; rewrite the
         // canonical catalog immediately so every later layout save sees one
         // project/worktree id convention.
         session_store.schedule_catalog(&project_catalog);
-        let saved_settings = session_store.load_settings();
+        let saved_settings = app_settings_with_environment_override(session_store.load_settings());
         Theme::set_mode(
-            settings_snapshot_from_app_settings(saved_settings).theme,
+            settings_snapshot_from_app_settings(saved_settings.clone()).theme,
             cx,
         );
         let context = worktree_context(&project_catalog, &working_directory);
@@ -5127,19 +7520,30 @@ fn main() {
                     })
                     .collect();
                 let catalog_for_sidebar = sidebar_projects(&project_catalog);
+                let pending_for_chat_agent = pending_for_tab_bar.clone();
                 let tab_bar = cx.new(|cx| {
-                    TabBar::new(cx).on_new_tab(move |action| {
-                        if let Ok(mut actions) = pending_for_tab_bar.lock() {
-                            actions.push(WorkspaceAction::NewTab(action));
-                        }
-                    })
+                    TabBar::new(cx)
+                        .on_new_tab(move |action| {
+                            if let Ok(mut actions) = pending_for_tab_bar.lock() {
+                                actions.push(WorkspaceAction::NewTab(action));
+                            }
+                        })
+                        .on_chat_agent(move |id| {
+                            if let Ok(mut actions) = pending_for_chat_agent.lock() {
+                                actions.push(WorkspaceAction::NewChatAgent(id));
+                            }
+                        })
                 });
                 let status_bar = cx.new(|_| {
-                    StatusBar::new(status_data.clone()).on_settings(move || {
-                        if let Ok(mut actions) = pending_for_status_bar.lock() {
-                            actions.push(WorkspaceAction::OpenSettings);
-                        }
-                    })
+                    StatusBar::new(status_data.clone())
+                        .with_preferences(tiller_ui::status_bar::UsageBarPrefs::from_snapshot(
+                            &settings_snapshot,
+                        ))
+                        .on_settings(move || {
+                            if let Ok(mut actions) = pending_for_status_bar.lock() {
+                                actions.push(WorkspaceAction::OpenSettings);
+                            }
+                        })
                 });
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
@@ -5234,10 +7638,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{FocusHandle, Render, TestAppContext, VisualTestContext};
+    use gpui::{
+        FocusHandle, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
+        TestAppContext, VisualTestContext,
+    };
     use std::cell::RefCell;
     use std::rc::Rc;
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
+
+    struct TerminalReplayFixture {
+        terminal: Entity<TerminalView>,
+    }
+
+    impl Render for TerminalReplayFixture {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.terminal.clone())
+        }
+    }
 
     struct WindowCommandFixture {
         fired: Rc<RefCell<Vec<WindowCommand>>>,
@@ -5287,6 +7704,1357 @@ mod tests {
                 }))
                 .child("window command fixture")
         }
+    }
+
+    fn palette_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
+        palette_test_workspace_with_tab_count(cx, 1)
+    }
+
+    fn test_workspace_for_repo(
+        cx: &mut Context<TillerWorkspace>,
+        repo: PathBuf,
+        with_changes_tab: bool,
+    ) -> TillerWorkspace {
+        let mut workspace = palette_test_workspace(cx);
+        workspace.working_directory = repo.clone();
+        workspace.right_panel = cx.new(|_| RightPanel::new(repo));
+        let right_panel = workspace.right_panel.clone();
+        TillerWorkspace::subscribe_right_panel(&right_panel, cx);
+        if with_changes_tab {
+            workspace.add_changes_tab(cx);
+        }
+        workspace
+    }
+
+    fn git_test(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn test_repo(tag: &str) -> PathBuf {
+        let repo = std::env::temp_dir().join(format!("tiller-p67-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).expect("create P67 git fixture");
+        git_test(&repo, &["init", "-q", "-b", "main"]);
+        git_test(&repo, &["config", "user.email", "tests@example.invalid"]);
+        git_test(&repo, &["config", "user.name", "Tiller tests"]);
+        repo
+    }
+
+    fn changed_test_repo(tag: &str) -> PathBuf {
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("changed.md"), "before\n").expect("seed changed fixture");
+        git_test(&repo, &["add", "changed.md"]);
+        git_test(
+            &repo,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "seed"],
+        );
+        std::fs::write(repo.join("changed.md"), "after\n").expect("modify changed fixture");
+        repo
+    }
+
+    fn conflicted_test_repo(tag: &str) -> PathBuf {
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("conflicted.txt"), "base\n").expect("seed conflict fixture");
+        git_test(&repo, &["add", "conflicted.txt"]);
+        git_test(
+            &repo,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "base"],
+        );
+        git_test(&repo, &["checkout", "-q", "-b", "theirs"]);
+        std::fs::write(repo.join("conflicted.txt"), "theirs\n").expect("write theirs fixture");
+        git_test(&repo, &["add", "conflicted.txt"]);
+        git_test(
+            &repo,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "theirs"],
+        );
+        git_test(&repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("conflicted.txt"), "ours\n").expect("write ours fixture");
+        git_test(&repo, &["add", "conflicted.txt"]);
+        git_test(
+            &repo,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "ours"],
+        );
+        let output = Command::new("git")
+            .args(["merge", "theirs"])
+            .current_dir(&repo)
+            .output()
+            .expect("run conflict merge");
+        assert!(!output.status.success(), "the fixture merge must conflict");
+        repo
+    }
+
+    fn wait_for_drawn(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<gpui::Pixels> {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if let Some(bounds) = cx.debug_bounds(selector) {
+                return bounds;
+            }
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+        }
+        panic!("{selector} was not drawn");
+    }
+
+    fn palette_test_workspace_with_tab_count(
+        cx: &mut Context<TillerWorkspace>,
+        tab_count: usize,
+    ) -> TillerWorkspace {
+        let working_directory = PathBuf::from("/tmp/tiller-command-palette");
+        std::fs::create_dir_all(&working_directory).expect("create palette test worktree");
+        let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "palette-project".into(),
+            name: "Palette Project".into(),
+            root_path: working_directory.clone(),
+            is_git: true,
+            worktrees: vec![session::CatalogWorktree {
+                branch: "main".into(),
+                path: working_directory.clone(),
+                is_primary: true,
+            }],
+        }]);
+        let terminal = cx.new(|cx| {
+            TerminalView::failed(
+                &working_directory,
+                TerminalShell::System,
+                "headless palette test terminal",
+                cx,
+            )
+        });
+        let tabs = (0..tab_count)
+            .map(|id| OpenTab {
+                id,
+                group_id: 0,
+                title: if id == 0 {
+                    "Terminal".into()
+                } else {
+                    format!("Terminal {id}")
+                },
+                kind: TabKind::Terminal,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(id),
+                panes: PaneNode::leaf(
+                    id,
+                    TabContent::Terminal {
+                        view: if id == 0 {
+                            terminal.clone()
+                        } else {
+                            cx.new(|cx| {
+                                TerminalView::failed(
+                                    &working_directory,
+                                    TerminalShell::System,
+                                    "headless palette test terminal",
+                                    cx,
+                                )
+                            })
+                        },
+                    },
+                ),
+                focused_pane: id,
+            })
+            .collect();
+        let pending_actions = Arc::new(Mutex::new(Vec::new()));
+        let control_actions = Arc::new(Mutex::new(Vec::new()));
+        let panes = Arc::new(PaneRegistry::new());
+        let state = Arc::new(Mutex::new(ControlState::from_catalog(
+            &project_catalog,
+            &working_directory,
+        )));
+        let session_path =
+            std::env::temp_dir().join(format!("tiller-command-palette-{}.db", std::process::id()));
+        let session = SessionStore::open(&session_path);
+        let titlebar = cx.new(Titlebar::new);
+        let sidebar = cx.new(|cx| Sidebar::from_projects(sidebar_projects(&project_catalog), cx));
+        let tab_bar = cx.new(|cx| TabBar::new(cx));
+        let status_bar = cx.new(|_| {
+            StatusBar::new(UsageBarData {
+                branch: "main".into(),
+                path: working_directory.to_string_lossy().into_owned(),
+            })
+        });
+        let settings = cx.new(|cx| Settings::new(cx));
+        let right_panel = cx.new(|_| RightPanel::new(working_directory.clone()));
+        TillerWorkspace::new(
+            titlebar,
+            sidebar,
+            tab_bar,
+            status_bar,
+            settings,
+            right_panel,
+            panes,
+            state,
+            tabs,
+            0,
+            working_directory.clone(),
+            pending_actions.clone(),
+            pending_actions,
+            control_actions,
+            session,
+            project_catalog,
+            "Palette Project/main".into(),
+            "in test shell".into(),
+            RestoredSession {
+                working_directory,
+                tabs: Vec::new(),
+                tab_states: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            cx,
+        )
+    }
+
+    fn palette_test_terminal_focus(
+        workspace: &Entity<TillerWorkspace>,
+        cx: &VisualTestContext,
+    ) -> FocusHandle {
+        workspace.read_with(&cx.cx, |workspace, app| {
+            let mut focus = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    focus = Some(view.focus_handle(app));
+                }
+            });
+            focus.expect("palette test has a terminal focus handle")
+        })
+    }
+
+    fn activity_test_workspace(
+        terminal: Entity<TerminalView>,
+        working_directory: PathBuf,
+        cx: &mut Context<TillerWorkspace>,
+    ) -> TillerWorkspace {
+        let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "activity-project".into(),
+            name: "Activity Project".into(),
+            root_path: working_directory.clone(),
+            is_git: false,
+            worktrees: vec![session::CatalogWorktree {
+                branch: "main".into(),
+                path: working_directory.clone(),
+                is_primary: true,
+            }],
+        }]);
+        let tabs = vec![OpenTab {
+            id: 0,
+            group_id: 0,
+            title: "Terminal".into(),
+            kind: TabKind::Terminal,
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(0),
+            panes: PaneNode::leaf(0, TabContent::Terminal { view: terminal }),
+            focused_pane: 0,
+        }];
+        let pending_actions = Arc::new(Mutex::new(Vec::new()));
+        let control_actions = Arc::new(Mutex::new(Vec::new()));
+        let panes = Arc::new(PaneRegistry::new());
+        let state = Arc::new(Mutex::new(ControlState::from_catalog(
+            &project_catalog,
+            &working_directory,
+        )));
+        let session_path =
+            std::env::temp_dir().join(format!("tiller-activity-wiring-{}.db", std::process::id()));
+        let session = SessionStore::open(&session_path);
+        TillerWorkspace::new(
+            cx.new(Titlebar::new),
+            cx.new(|cx| Sidebar::from_projects(sidebar_projects(&project_catalog), cx)),
+            cx.new(TabBar::new),
+            cx.new(|_| {
+                StatusBar::new(UsageBarData {
+                    branch: "main".into(),
+                    path: working_directory.to_string_lossy().into_owned(),
+                })
+            }),
+            cx.new(Settings::new),
+            cx.new(|_| RightPanel::new(working_directory.clone())),
+            panes,
+            state,
+            tabs,
+            0,
+            working_directory.clone(),
+            pending_actions.clone(),
+            pending_actions,
+            control_actions,
+            session,
+            project_catalog,
+            "Activity Project/main".into(),
+            "in test shell".into(),
+            RestoredSession {
+                working_directory,
+                tabs: Vec::new(),
+                tab_states: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            cx,
+        )
+    }
+
+    fn activity_status(
+        workspace: &Entity<TillerWorkspace>,
+        cx: &VisualTestContext,
+    ) -> Option<AgentStatus> {
+        workspace.read_with(&cx.cx, |workspace, _| workspace.activity.status("pane-0"))
+    }
+
+    #[gpui::test]
+    async fn workspace_wires_real_osc_title_into_activity_model(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-activity-wiring-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create activity test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '\\033]0;. working\\007'; exec sleep 1".into(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn activity test terminal")
+        });
+        let workspace = cx.update(|_, app| {
+            app.new(|cx| activity_test_workspace(terminal.clone(), working_directory.clone(), cx))
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if activity_status(&workspace, &cx) == Some(AgentStatus::Running) {
+                terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+                cx.run_until_parked();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "the app-level terminal subscription never applied the real OSC title; status was {:?}",
+            activity_status(&workspace, &cx)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    async fn workspace_wires_real_process_signal_without_title_clobber(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-activity-process-wiring-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create process test directory");
+        let agent = working_directory.join("codex");
+        std::fs::copy("/bin/sleep", &agent).expect("create matching agent binary");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!("printf '\\033]0;zsh\\007'; {} 30", agent.to_string_lossy()),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn process activity test terminal")
+        });
+        let workspace = cx.update(|_, app| {
+            app.new(|cx| activity_test_workspace(terminal.clone(), working_directory.clone(), cx))
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if activity_status(&workspace, &cx) == Some(AgentStatus::Running) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            activity_status(&workspace, &cx),
+            Some(AgentStatus::Running),
+            "the app-level process refresh must identify the real codex child"
+        );
+        assert!(workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.activity.is_process_owned("pane-0")
+        }));
+
+        terminal.update(&mut cx.cx, |_, cx| {
+            cx.emit(TerminalActivityEvent::OscTitle("zsh".into()));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            activity_status(&workspace, &cx),
+            Some(AgentStatus::Running),
+            "an unrelated title must not clear process-owned activity"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    fn palette_test_sidebar_focus(
+        workspace: &Entity<TillerWorkspace>,
+        cx: &VisualTestContext,
+    ) -> FocusHandle {
+        workspace.read_with(&cx.cx, |workspace, app| workspace.sidebar.focus_handle(app))
+    }
+
+    fn open_palette_for_test(cx: &mut VisualTestContext, workspace: &Entity<TillerWorkspace>) {
+        let focus = palette_test_terminal_focus(workspace, cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-shift-p");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("command-palette").is_some());
+    }
+
+    #[gpui::test]
+    async fn drawn_palette_filters_and_dispatches_sidebar_action_through_shell_route(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        open_palette_for_test(&mut cx, &workspace);
+        cx.simulate_input("toggle side");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("command-palette-row-toggle-sidebar")
+                .is_some()
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(!workspace.read_with(&cx.cx, |workspace, _| workspace.sidebar_visible));
+        assert!(cx.debug_bounds("command-palette").is_none());
+    }
+
+    #[gpui::test]
+    async fn drawn_palette_filters_and_dispatches_tab_action_through_dirty_close_route(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        open_palette_for_test(&mut cx, &workspace);
+        cx.simulate_input("close tab");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("command-palette-row-close-tab").is_some());
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.is_empty()));
+        assert!(cx.debug_bounds("command-palette").is_none());
+    }
+
+    fn right_click_tab(cx: &mut VisualTestContext, tab_id: usize) {
+        let selector = match tab_id {
+            0 => "workspace-tab-0",
+            1 => "workspace-tab-1",
+            2 => "workspace-tab-2",
+            _ => panic!("test tab selector is not defined"),
+        };
+        let bounds = cx.debug_bounds(selector).expect("the tab is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: bounds.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: bounds.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-context-menu").is_some());
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_context_menu_invokes_close_other_and_close_right_routes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert!(cx.debug_bounds("workspace-tab-0").is_some());
+        assert!(cx.debug_bounds("workspace-tab-1").is_some());
+        assert!(cx.debug_bounds("workspace-tab-2").is_some());
+
+        right_click_tab(&mut cx, 1);
+        let close_right = cx
+            .debug_bounds("tab-command-close-right")
+            .expect("close-right is reachable from the tab menu");
+        cx.simulate_click(close_right.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            vec![0, 1]
+        );
+
+        right_click_tab(&mut cx, 1);
+        let close_others = cx
+            .debug_bounds("tab-command-close-others")
+            .expect("close-others is reachable from the tab menu");
+        cx.simulate_click(close_others.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len() == 1));
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_context_menu_moves_and_renames_the_selected_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        right_click_tab(&mut cx, 1);
+        let move_earlier = cx
+            .debug_bounds("tab-command-move-earlier")
+            .expect("move earlier is reachable from the tab menu");
+        cx.simulate_click(move_earlier.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            vec![1, 0, 2]
+        );
+
+        right_click_tab(&mut cx, 1);
+        let rename = cx
+            .debug_bounds("tab-command-rename")
+            .expect("rename is reachable from the tab menu");
+        cx.simulate_click(rename.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-rename-field").is_some());
+        cx.simulate_input(" renamed");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs[0].title.clone()),
+            "Terminal 1 renamed"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_drag_reorders_the_live_tab_strip(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("tab workspace root")
+        });
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source tab is drawn");
+        let target = cx
+            .debug_bounds("workspace-tab-2")
+            .expect("target tab is drawn");
+
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            vec![1, 2, 0],
+            "the drawn tab drag must update the live strip order"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_sidebar_drag_persists_worktree_order_in_the_catalog(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("sidebar workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            let mut projects = workspace.project_catalog.projects().to_vec();
+            projects[0].worktrees.extend([
+                session::CatalogWorktree {
+                    branch: "branch-1".into(),
+                    path: PathBuf::from("/tmp/tiller-command-palette-branch-1"),
+                    is_primary: false,
+                },
+                session::CatalogWorktree {
+                    branch: "branch-2".into(),
+                    path: PathBuf::from("/tmp/tiller-command-palette-branch-2"),
+                    is_primary: false,
+                },
+            ]);
+            workspace.project_catalog = ProjectCatalog::from_projects(projects);
+            workspace.refresh_sidebar(cx);
+        });
+        cx.run_until_parked();
+
+        let source = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("first worktree row");
+        let target = cx
+            .debug_bounds("sidebar-row-3")
+            .expect("third worktree row");
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.project_catalog.projects()[0]
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree.branch.clone())
+                    .collect::<Vec<_>>()
+            }),
+            vec!["branch-1", "branch-2", "main"]
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_status_cell_renders_idle_and_running_states(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-tab-status-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create status test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn status test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        let initial_status = workspace.read_with(&cx.cx, |workspace, app| {
+            workspace.tab_status(&workspace.tabs[0], app)
+        });
+        assert_eq!(initial_status, Some(ActivityStatus::Idle));
+        assert!(cx.debug_bounds("workspace-tab-0").is_some());
+        assert!(cx.debug_bounds("workspace-tab-status-0").is_some());
+        assert!(cx.debug_bounds("workspace-tab-status-idle-0").is_some());
+
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .activity
+                .agent_spawned("pane-0", "codex", Instant::now());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("workspace-tab-status-running-0").is_some());
+
+        terminal.update(cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_status_cell_labels_a_nonzero_terminal_exit(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-tab-exit-status-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create exit test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exit 3".into()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn exit status test terminal")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal.clone(), working_directory.clone(), cx)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(50));
+            cx.run_until_parked();
+            if cx.debug_bounds("workspace-tab-exit-0").is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs[0].panes.contains(0)
+                    && workspace.tabs[0].panes.leaf_ids().contains(&0)
+            }),
+            "the exit fixture keeps its terminal tab mounted"
+        );
+        let status_cell = cx.debug_bounds("workspace-tab-status-0").is_some();
+        let error_marker = cx.debug_bounds("workspace-tab-status-error-0").is_some();
+        let exit_marker = cx.debug_bounds("workspace-tab-exit-0").is_some();
+        assert!(
+            status_cell && error_marker && exit_marker,
+            "a nonzero exit is rendered as an error status; status={:?}, exit={:?}, cell={status_cell}, error={error_marker}, exit_label={exit_marker}",
+            workspace.read_with(&cx.cx, |workspace, app| {
+                workspace.tab_status(&workspace.tabs[0], app)
+            }),
+            terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status())
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-exit-0").is_some(),
+            "the tab exposes the concrete exit status"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_context_menu_moves_a_tab_to_another_pane_group(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[2].group_id = 1;
+            workspace.tab_machinery = TabMachinery::new(
+                vec![
+                    TabGroup::new(0, vec![0, 1], Some(0)),
+                    TabGroup::new(1, vec![2], Some(2)),
+                ],
+                0,
+            )
+            .expect("test groups are valid");
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        right_click_tab(&mut cx, 1);
+        let move_to_pane = cx
+            .debug_bounds("tab-command-move-to-pane-1")
+            .expect("the other pane destination is drawn");
+        cx.simulate_click(move_to_pane.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.id == 1)
+                .is_some_and(|tab| tab.group_id == 1)
+        }));
+    }
+
+    #[gpui::test]
+    async fn ctrl_w_uses_the_same_dirty_close_door_as_the_tab_menu(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let focus = palette_test_sidebar_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-w");
+        cx.run_until_parked();
+        assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.is_empty()));
+    }
+
+    #[gpui::test]
+    async fn ctrl_comma_opens_the_settings_surface(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let focus = palette_test_sidebar_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-,");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-category-General").is_some(),
+            "Linux ctrl-, must open the settings surface"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_all_tabs_overflow_lists_every_hidden_tab_and_marks_the_active_one(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 10));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(900.0), px(600.0)));
+        cx.run_until_parked();
+
+        let overflow = cx
+            .debug_bounds("tab-overflow-button")
+            .expect("the strip exposes overflow when tabs do not fit");
+        assert!(
+            cx.debug_bounds("workspace-tab-9").is_none(),
+            "tabs beyond the visible budget must be hidden from the strip"
+        );
+        cx.simulate_click(overflow.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("tab-overflow-menu").is_some());
+        assert!(cx.debug_bounds("tab-overflow-item-0").is_some());
+        assert!(cx.debug_bounds("tab-overflow-item-9").is_some());
+        assert!(cx.debug_bounds("tab-overflow-selected-0").is_some());
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_context_open_file_uses_the_picker_and_adds_an_editor_tab(
+        cx: &mut TestAppContext,
+    ) {
+        let path =
+            std::env::temp_dir().join(format!("tiller-open-file-menu-{}.md", std::process::id()));
+        std::fs::write(&path, "# opened from tab menu\n").expect("write picker fixture");
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        right_click_tab(&mut cx, 0);
+        let open_file = cx
+            .debug_bounds("tab-command-open-file")
+            .expect("the tab menu exposes Open File");
+        cx.simulate_click(open_file.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.cx
+            .simulate_path_prompt_response(|_| Some(vec![path.clone()]));
+        cx.run_until_parked();
+
+        let opened = workspace.read_with(&cx.cx, |workspace, app| {
+            workspace.tabs.iter().any(|tab| {
+                if tab.kind != TabKind::Editor {
+                    return false;
+                }
+                let mut found = false;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::File { view } = content {
+                        found |= view.read(app).path() == path.as_path();
+                    }
+                });
+                found
+            })
+        });
+        assert!(opened, "the picker result must create a file-backed tab");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_context_resume_chat_reopens_the_retained_session(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let chat = cx.update(|_, app| {
+            app.new(|cx| {
+                Chat::launch_with_command(
+                    AgentCommand::new("/bin/false"),
+                    PathBuf::from("/tmp"),
+                    cx,
+                )
+            })
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.push(OpenTab {
+                id: 1,
+                group_id: 0,
+                title: "Resumed chat".into(),
+                kind: TabKind::AgentChat,
+                agent_icon: Some(Icon::Codex),
+                agent_id: Some("codex".into()),
+                session_state: SessionTabState::with_root(1),
+                panes: PaneNode::leaf(1, TabContent::Chat(chat)),
+                focused_pane: 1,
+            });
+            workspace.active_tab = 1;
+            workspace.next_tab_id = 2;
+            workspace.next_pane_id = 2;
+            workspace.rebuild_tab_machinery();
+            workspace.close_tab(1, cx);
+            workspace.tab_menu_tab = Some(0);
+            workspace.tab_menu_open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let resume = cx
+            .debug_bounds("tab-command-resume-chat")
+            .expect("the tab menu exposes Resume Chat when a session is retained");
+        cx.simulate_click(resume.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.tabs.iter().any(|tab| {
+                tab.title == "Resumed chat"
+                    && tab.kind == TabKind::AgentChat
+                    && tab.agent_id.as_deref() == Some("codex")
+                    && tab.agent_icon == Some(Icon::Codex)
+            })
+        }));
+        // The resumed Chat owns a real ACP worker; permit its channel
+        // teardown to notify the test scheduler from that worker thread.
+    }
+
+    #[gpui::test]
+    async fn drawn_add_project_duplicate_shows_sidebar_notice(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let path = workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        let project_count = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.project_catalog.projects().len()
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_project(path.clone(), cx);
+        });
+        cx.run_until_parked();
+        let notice = workspace.read_with(&cx.cx, |workspace, cx| {
+            workspace.sidebar.read(cx).notice().map(str::to_owned)
+        });
+        assert!(
+            notice.is_some(),
+            "duplicate project insertion must update the rendered sidebar state"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.project_catalog.projects().len()
+            }),
+            project_count,
+            "a duplicate insertion must not add a second project"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_save_failure_surfaces_file_notice(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let path = PathBuf::from("/proc/self/status");
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let file_view = cx.update(|_, cx| cx.new(|cx| FileView::new(path.clone(), cx)));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[0].title = "status".into();
+            workspace.tabs[0].kind = TabKind::Editor;
+            workspace.tabs[0].panes = PaneNode::leaf(
+                0,
+                TabContent::File {
+                    view: file_view.clone(),
+                },
+            );
+            workspace.sync_activity(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            file_view.read_with(&cx.cx, |view, _| view.editor().is_some()),
+            "the procfs fixture must load as an editor before the save attempt"
+        );
+        cx.update(|window, app| {
+            workspace.update(app, |workspace, cx| {
+                workspace.handle_save_file(&SaveFile, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("file-view-notice").is_some(),
+            "a real read-only procfs save failure must be visible in the file view"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_dirty_file_tab_uses_the_shared_dirty_predicate_for_its_indicator(
+        cx: &mut TestAppContext,
+    ) {
+        let path =
+            std::env::temp_dir().join(format!("tiller-dirty-tab-{}.txt", std::process::id()));
+        std::fs::write(&path, "clean\n").expect("write dirty-tab fixture");
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let file_view = cx.update(|_, app| app.new(|cx| FileView::new(path.clone(), cx)));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[0].title = "Note".into();
+            workspace.tabs[0].kind = TabKind::Editor;
+            workspace.tabs[0].panes = PaneNode::leaf(
+                0,
+                TabContent::File {
+                    view: file_view.clone(),
+                },
+            );
+            workspace.sync_activity(cx);
+            cx.notify();
+        });
+        for _ in 0..20 {
+            cx.run_until_parked();
+            if file_view.read_with(&cx.cx, |view, _| view.editor().is_some()) {
+                break;
+            }
+        }
+        file_view.update(&mut cx, |view, cx| {
+            let editor = view.editor_mut().expect("file editor loaded");
+            let end = editor.buffer().len();
+            editor.insert(end, "dirty").expect("edit fixture buffer");
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("workspace-tab-dirty-0").is_some());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    async fn ctrl_k_in_a_focused_terminal_does_not_open_the_palette(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+        let focus = palette_test_terminal_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-palette").is_none());
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    async fn ctrl_k_opens_the_palette_when_a_non_terminal_surface_is_focused(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+        let focus = palette_test_sidebar_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-palette").is_some());
+    }
+
+    #[gpui::test]
+    async fn escape_closes_the_palette_and_returns_focus_to_the_terminal(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+        let focus = palette_test_terminal_focus(&workspace, &cx);
+
+        open_palette_for_test(&mut cx, &workspace);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-palette").is_none());
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+    }
+
+    /// P58, F-SET-02: Escape closes the settings surface, the same way Back
+    /// does. The shell's root key handler is attached to the settings
+    /// branch, so the binding needs no new machinery — this test proves the
+    /// full drawn round trip: open via the workspace action, close with the
+    /// key.
+    #[gpui::test]
+    async fn escape_closes_the_settings_surface(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| workspace.open_settings(None, cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("settings-category-General").is_some(),
+            "settings opens"
+        );
+        // The surface takes focus on the next frame after opening (focus
+        // cannot move during render); the shell's Escape handler sits on
+        // the focused surface's dispatch path, so the focus must land
+        // first.
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("settings-category-General").is_none(),
+            "Escape returns to the workspace, exactly like Back"
+        );
+        let focus = palette_test_sidebar_focus(&workspace, &cx);
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "closing returns focus to a surface in the main frame, so ctrl-k keeps working"
+        );
+    }
+
+    #[gpui::test]
+    async fn settings_visibility_toggles_reach_the_usage_bar(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_some(),
+            "the bar starts with Claude visible per the contract defaults"
+        );
+        assert!(
+            cx.debug_bounds("OpenCode Go-usage-text").is_none(),
+            "the bar starts with OpenCode Go hidden per the contract defaults"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| workspace.open_settings(None, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+        let toggle = cx
+            .debug_bounds("provider-claude-visibility")
+            .expect("Claude's Show in usage bar toggle renders");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // The real Back route is queued through the workspace's polling loop;
+        // hide the overlay directly here so the assertion inspects the bar,
+        // rather than the settings surface covering it.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.show_settings = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_none(),
+            "hiding Claude in settings removes its usage segment"
+        );
+        assert!(
+            cx.debug_bounds("Codex-usage-text").is_some(),
+            "the other visible providers stay"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_disabled_save_row_shows_reason_and_does_not_dispatch(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+
+        open_palette_for_test(&mut cx, &workspace);
+        cx.simulate_input("save file");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("command-palette-disabled-no-active-file")
+                .is_some()
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("command-palette").is_some());
+    }
+
+    #[gpui::test]
+    async fn resting_frame_has_context_menu_surfaces_but_no_in_window_menu_bar(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("command-palette").is_none());
+        assert!(cx.debug_bounds("command-menu-bar").is_none());
     }
 
     #[gpui::test]
@@ -5344,11 +9112,31 @@ mod tests {
         );
         assert_eq!(
             delegated_terminal_context_action(TerminalContextAction::SplitRight),
-            Some(TerminalContextCommand::Split(SplitDirection::Horizontal))
+            Some(TerminalContextCommand::Split {
+                direction: SplitDirection::Horizontal,
+                placement: SplitPlacement::After,
+            })
         );
         assert_eq!(
             delegated_terminal_context_action(TerminalContextAction::SplitDown),
-            Some(TerminalContextCommand::Split(SplitDirection::Vertical))
+            Some(TerminalContextCommand::Split {
+                direction: SplitDirection::Vertical,
+                placement: SplitPlacement::After,
+            })
+        );
+        assert_eq!(
+            delegated_terminal_context_action(TerminalContextAction::SplitLeft),
+            Some(TerminalContextCommand::Split {
+                direction: SplitDirection::Horizontal,
+                placement: SplitPlacement::Before,
+            })
+        );
+        assert_eq!(
+            delegated_terminal_context_action(TerminalContextAction::SplitAbove),
+            Some(TerminalContextCommand::Split {
+                direction: SplitDirection::Vertical,
+                placement: SplitPlacement::Before,
+            })
         );
         assert_eq!(
             delegated_terminal_context_action(TerminalContextAction::CloseTerminal),
@@ -5358,6 +9146,16 @@ mod tests {
             delegated_terminal_context_action(TerminalContextAction::Copy),
             None
         );
+        assert_eq!(
+            split_event_name(SplitDirection::Horizontal, SplitPlacement::Before),
+            "horizontal-before"
+        );
+        assert_eq!(
+            parse_split_event("vertical-before"),
+            Some((SplitDirection::Vertical, SplitPlacement::Before))
+        );
+        assert_eq!(SPLIT_DIVIDER_SIZE, 6.0);
+        assert_eq!(MIN_SPLIT_PANE_SIZE, 160.0);
     }
 
     #[test]
@@ -5380,9 +9178,10 @@ mod tests {
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
+            ..AppSettings::default()
         };
 
-        let snapshot = settings_snapshot_from_app_settings(persisted);
+        let snapshot = settings_snapshot_from_app_settings(persisted.clone());
         assert_eq!(snapshot.theme, tiller_theme::ThemeMode::Dark);
         assert_eq!(snapshot.interface_font_size, 17);
         assert_eq!(snapshot.terminal_font_size, 19);
@@ -5392,6 +9191,24 @@ mod tests {
         );
         assert!(!snapshot.control_socket_enabled);
         assert_eq!(app_settings_from_snapshot(snapshot), persisted);
+
+        // P58: the surface-settings values (resume sessions, auto-naming,
+        // retention, mount cap, summarizer, usage-bar visibility/interval)
+        // are in the persistence contract but the persisted schema does not
+        // carry them yet — that extension is codex11's piece (P58 handoff).
+        // Until it lands, a loaded snapshot starts them at their defaults,
+        // which is exactly what every launch did before P58.
+        let defaults = settings_snapshot_from_app_settings(AppSettings::default());
+        assert!(defaults.resume_agent_sessions);
+        assert!(!defaults.auto_naming);
+        assert_eq!(defaults.chat_retention, 100);
+        assert_eq!(defaults.mounted_worktrees, 6);
+        assert_eq!(
+            defaults.summarizer_agent,
+            tiller_ui::settings::SummarizerChoice::Claude
+        );
+        assert!(defaults.claude_show_in_bar);
+        assert_eq!(defaults.refresh_interval, 5);
     }
 
     #[test]
@@ -5400,17 +9217,20 @@ mod tests {
             SessionTab {
                 title: "Chat".into(),
                 kind: "chat".into(),
+                agent_id: None,
                 active: false,
             },
             SessionTab {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
+                agent_id: None,
                 active: true,
             },
         ];
         let current = vec![SessionTab {
             title: "Changes".into(),
             kind: "diff".into(),
+            agent_id: None,
             active: true,
         }];
 
@@ -5506,6 +9326,93 @@ mod tests {
         );
         assert_eq!(agent_icon_for_action(NewTabAction::NewTerminal), None);
         assert_eq!(agent_icon_for_action(NewTabAction::NewChat), None);
+    }
+
+    #[test]
+    fn boot_settings_honor_tiller_socket_enable_environment_override() {
+        let previous = std::env::var_os("TILLER_SOCKET_ENABLE");
+        let settings = AppSettings::default();
+
+        unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", "off") };
+        assert!(
+            !app_settings_with_environment_override(settings.clone()).control_socket_enabled,
+            "the boot settings used by control_socket.set_enabled must observe off"
+        );
+
+        unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", "on") };
+        assert!(app_settings_with_environment_override(settings).control_socket_enabled);
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("TILLER_SOCKET_ENABLE", value) },
+            None => unsafe { std::env::remove_var("TILLER_SOCKET_ENABLE") },
+        }
+    }
+
+    #[test]
+    fn needs_input_agent_status_reaches_the_dedicated_activity_state() {
+        assert_eq!(
+            activity_status_for_agent(AgentStatus::NeedsInput),
+            ActivityStatus::NeedsInput
+        );
+    }
+
+    #[test]
+    fn opening_the_same_file_twice_reuses_one_editor_tab_path() {
+        let open_paths = vec![PathBuf::from("/tmp/notes.md")];
+        assert!(file_path_is_already_open(
+            &open_paths,
+            Path::new("/tmp/notes.md")
+        ));
+        assert!(!file_path_is_already_open(
+            &open_paths,
+            Path::new("/tmp/other.md")
+        ));
+    }
+
+    #[test]
+    fn selected_chat_adapter_is_copied_to_the_new_tab_identity() {
+        let adapter = AGENT_CATALOG
+            .iter()
+            .find(|adapter| adapter.id() == "codex")
+            .copied()
+            .expect("Codex is in the fixed catalog");
+        assert_eq!(
+            chat_tab_identity(Some(adapter)),
+            (
+                "Codex".to_string(),
+                Some(Icon::Codex),
+                Some("codex".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn restored_codex_chat_uses_codex_command_and_identity() {
+        let (command, icon, agent_id) = restored_chat_spec(Some("codex"));
+        assert_eq!(command.program, PathBuf::from("npx"));
+        assert_eq!(
+            command.args,
+            ["-y", "@agentclientprotocol/codex-acp@latest"]
+        );
+        assert_eq!(icon, Some(Icon::Codex));
+        assert_eq!(agent_id.as_deref(), Some("codex"));
+
+        let (claude_command, _, _) = restored_chat_spec(Some("claude"));
+        assert_ne!(
+            command.args, claude_command.args,
+            "restoration must preserve the selected adapter's ACP command"
+        );
+    }
+
+    #[test]
+    fn restored_unknown_or_absent_chat_identity_falls_back_without_claiming_an_agent() {
+        let (default_command, default_icon, default_id) = restored_chat_spec(None);
+        let (unknown_command, unknown_icon, unknown_id) = restored_chat_spec(Some("unknown-agent"));
+        assert_eq!(unknown_command, default_command);
+        assert_eq!(unknown_icon, None);
+        assert_eq!(unknown_id, None);
+        assert_eq!(default_icon, None);
+        assert_eq!(default_id, None);
     }
 
     #[test]
@@ -5646,6 +9553,32 @@ mod tests {
     }
 
     #[test]
+    fn control_state_exposes_empty_and_discovered_project_rows() {
+        let empty = ControlState::from_catalog(&ProjectCatalog::default(), Path::new("/tmp"));
+        assert!(empty.project_rows().is_empty());
+
+        let root = PathBuf::from("/tmp/tiller-project-row");
+        let catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "project-1".into(),
+            name: "Tiller".into(),
+            root_path: root.clone(),
+            is_git: true,
+            worktrees: vec![session::CatalogWorktree {
+                branch: "main".into(),
+                path: root.clone(),
+                is_primary: true,
+            }],
+        }]);
+        let state = ControlState::from_catalog(&catalog, &root);
+        let rows = state.project_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("id").map(String::as_str), Some("project-1"));
+        assert_eq!(rows[0].get("name").map(String::as_str), Some("Tiller"));
+        assert_eq!(rows[0].get("worktreeCount").map(String::as_str), Some("1"));
+        assert_eq!(rows[0].get("empty").map(String::as_str), Some("false"));
+    }
+
+    #[test]
     fn control_state_can_associate_a_session_and_comment_with_a_worktree() {
         let path = PathBuf::from("/tmp/tiller-control-association");
         let catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
@@ -5704,8 +9637,41 @@ mod tests {
     }
 
     #[test]
+    fn control_ping_returns_the_documented_pong_result() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-ping-test.sock")),
+        );
+        let response = handler.handle(&ControlRequest {
+            id: "ping-test".into(),
+            method: "system.ping".into(),
+            params: BTreeMap::new(),
+        });
+
+        assert!(response.ok);
+        assert_eq!(
+            response
+                .result
+                .as_ref()
+                .and_then(|result| result.get("pong"))
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
     fn raw_notify_accepts_user_title_and_body() {
         let state = Arc::new(Mutex::new(ControlState {
+            projects: Vec::new(),
             workspaces: Vec::new(),
             current: None,
         }));
@@ -5763,6 +9729,7 @@ mod tests {
         let store = SessionStore::open(&database);
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -5797,6 +9764,7 @@ mod tests {
     #[test]
     fn browser_methods_return_specific_linux_unsupported_errors_and_are_not_advertised() {
         let state = Arc::new(Mutex::new(ControlState {
+            projects: Vec::new(),
             workspaces: Vec::new(),
             current: None,
         }));
@@ -5856,6 +9824,7 @@ mod tests {
     fn surface_methods_are_advertised_by_capabilities() {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -5879,6 +9848,8 @@ mod tests {
             .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
             .expect("capability rows");
         for method in [
+            "project.list",
+            "project.add",
             "panel.state",
             "panel.scrollback",
             "surface.changes.open",
@@ -5902,9 +9873,397 @@ mod tests {
     }
 
     #[test]
+    fn chat_surface_methods_are_advertised_and_reach_the_app_handler() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-chat-dispatch-test.sock")),
+        );
+
+        let capabilities = handler.handle(&ControlRequest {
+            id: "capabilities".into(),
+            method: "system.capabilities".into(),
+            params: BTreeMap::new(),
+        });
+        let methods = capabilities
+            .result
+            .as_ref()
+            .and_then(|result| result.get("methods"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("capability rows");
+        for method in [
+            "surface.chat.open",
+            "surface.chat.send",
+            "surface.chat.compose",
+            "surface.chat.permission",
+            "surface.chat.stop",
+            "surface.chat.read",
+        ] {
+            assert!(
+                methods
+                    .iter()
+                    .any(|row| row.get("method").map(String::as_str) == Some(method)),
+                "{method} must be advertised"
+            );
+        }
+
+        for (index, method) in [
+            "surface.chat.send",
+            "surface.chat.compose",
+            "surface.chat.permission",
+            "surface.chat.stop",
+            "surface.chat.read",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut params = BTreeMap::from([(String::from("surfaceId"), String::from("missing"))]);
+            match method {
+                "surface.chat.send" | "surface.chat.compose" => {
+                    params.insert("text".into(), "input".into());
+                }
+                "surface.chat.permission" => {
+                    params.insert("requestId".into(), "1".into());
+                    params.insert("optionId".into(), "deny".into());
+                }
+                "surface.chat.stop" | "surface.chat.read" => {}
+                _ => unreachable!("chat dispatch test method is exhaustive"),
+            }
+            let response = handler.handle(&ControlRequest {
+                id: format!("chat-dispatch-{index}"),
+                method: method.into(),
+                params,
+            });
+            assert!(!response.ok, "unopened {method} must fail");
+            let expected_error = if method == "surface.chat.read" {
+                "unknown chat surface: missing"
+            } else {
+                "chat surface is not open: missing"
+            };
+            assert!(
+                response
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error == expected_error),
+                "{method} must report an unopened surface: {response:?}"
+            );
+            assert_ne!(
+                response.error.as_deref(),
+                Some(format!("unknown control method: {method}").as_str()),
+                "{method} must reach its chat handler"
+            );
+        }
+    }
+
+    fn app_chat_read(socket_path: &Path, surface_id: &str) -> BTreeMap<String, String> {
+        let response = tiller_control::round_trip(
+            socket_path,
+            &tiller_control::protocol::request::chat_read(surface_id),
+            Duration::from_secs(5),
+        )
+        .expect("chat read round trip");
+        assert!(response.ok, "chat read failed: {response:?}");
+        response.result.expect("chat read result")
+    }
+
+    fn wait_for_app_chat_read<F>(
+        socket_path: &Path,
+        surface_id: &str,
+        mut predicate: F,
+    ) -> BTreeMap<String, String>
+    where
+        F: FnMut(&BTreeMap<String, String>) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = app_chat_read(socket_path, surface_id);
+            if predicate(&result) {
+                return result;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "chat state did not settle: {result:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn app_chat_surface_streams_stops_and_restores_over_a_real_socket() {
+        let root =
+            std::env::temp_dir().join(format!("tiller-main-chat-door-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let worktree_path = root.join("worktree");
+        std::fs::create_dir_all(&worktree_path).expect("create chat worktree");
+        let database_path = root.join("chat.sqlite");
+        let socket_path = root.join("chat.sock");
+        let worktree_id = "project-chat-wt-0";
+        let surface_id = "project-chat-wt-0-tab-0";
+
+        let database = AppDatabase::open(&database_path).expect("open chat database");
+        database
+            .save_project(&tiller_persistence::ProjectRecord::new(
+                "project-chat",
+                "fixture",
+                worktree_path.to_string_lossy(),
+            ))
+            .expect("save chat project");
+        database
+            .save_worktree(&tiller_persistence::WorktreeRecord::new(
+                worktree_id,
+                "project-chat",
+                "main",
+                worktree_path.to_string_lossy(),
+            ))
+            .expect("save chat worktree");
+        database
+            .save_tab(&TabRecord::new(surface_id, worktree_id, "Chat", "chat"))
+            .expect("save chat tab");
+        drop(database);
+
+        let catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "project-chat".into(),
+            name: "fixture".into(),
+            root_path: worktree_path.clone(),
+            is_git: false,
+            worktrees: vec![session::CatalogWorktree {
+                branch: "main".into(),
+                path: worktree_path.clone(),
+                is_primary: true,
+            }],
+        }]);
+        let state = Arc::new(Mutex::new(ControlState::from_catalog(
+            &catalog,
+            &worktree_path,
+        )));
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../tiller_acp/tests/fixtures/acp_fixture.py");
+        let normal_command = AgentCommand::new("python3")
+            .arg(fixture.to_string_lossy().into_owned())
+            .arg("normal");
+        let normal_handler = Arc::new(AppControlHandler::new_with_chat_config(
+            state.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(socket_path.clone()),
+            database_path.clone(),
+            normal_command,
+        ));
+        let server = ControlServer::new(socket_path.clone(), normal_handler.clone());
+        server.start().expect("start chat control server");
+
+        let round_trip = |request: ControlRequest| {
+            tiller_control::round_trip(&socket_path, &request, Duration::from_secs(5))
+                .expect("chat control round trip")
+        };
+        let opened = round_trip(tiller_control::protocol::request::chat_open(Some(
+            worktree_id,
+        )));
+        assert!(opened.ok, "chat open failed: {opened:?}");
+        assert_eq!(
+            opened
+                .result
+                .as_ref()
+                .and_then(|result| result.get("status")),
+            Some(&"idle".to_string())
+        );
+
+        let composed = round_trip(tiller_control::protocol::request::chat_compose(
+            surface_id,
+            "queued after this turn",
+        ));
+        assert!(composed.ok, "chat compose failed: {composed:?}");
+        assert_eq!(
+            composed
+                .result
+                .as_ref()
+                .and_then(|result| result.get("composerText")),
+            Some(&"queued after this turn".to_string())
+        );
+
+        let sent = round_trip(tiller_control::protocol::request::chat_send(
+            surface_id,
+            "exercise the app chat door",
+        ));
+        assert!(sent.ok, "chat send failed: {sent:?}");
+        assert_eq!(
+            sent.result.as_ref().and_then(|result| result.get("status")),
+            Some(&"streaming".to_string())
+        );
+
+        let pending = wait_for_app_chat_read(&socket_path, surface_id, |result| {
+            tiller_control::protocol::rows::decode(result.get("transcript").expect("transcript"))
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row.get("kind").map(String::as_str) == Some("permission")
+                            && row.get("status").map(String::as_str) == Some("pending")
+                    })
+                })
+        });
+        assert_eq!(pending.get("status").map(String::as_str), Some("streaming"));
+
+        let permission = round_trip(tiller_control::protocol::request::chat_permission(
+            surface_id, 1, "deny",
+        ));
+        assert!(permission.ok, "chat permission failed: {permission:?}");
+        let completed = wait_for_app_chat_read(&socket_path, surface_id, |result| {
+            result.get("status").map(String::as_str) == Some("completed")
+        });
+        let completed_transcript = completed.get("transcript").cloned().expect("transcript");
+
+        server.stop();
+        drop(server);
+        drop(normal_handler);
+
+        let cancel_command = AgentCommand::new("python3")
+            .arg(fixture.to_string_lossy().into_owned())
+            .arg("cancel");
+        let restored_handler = Arc::new(AppControlHandler::new_with_chat_config(
+            state,
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(socket_path.clone()),
+            database_path.clone(),
+            cancel_command,
+        ));
+        let restored_server = ControlServer::new(socket_path.clone(), restored_handler.clone());
+        restored_server
+            .start()
+            .expect("restart chat control server");
+
+        let restored = app_chat_read(&socket_path, surface_id);
+        assert_eq!(
+            restored.get("status").map(String::as_str),
+            Some("completed")
+        );
+        assert_eq!(restored.get("transcript"), Some(&completed_transcript));
+
+        let reopened = round_trip(tiller_control::protocol::request::chat_open(Some(
+            worktree_id,
+        )));
+        assert!(reopened.ok, "reopen chat failed: {reopened:?}");
+        round_trip(tiller_control::protocol::request::chat_send(
+            surface_id,
+            "stop this turn",
+        ));
+        wait_for_app_chat_read(&socket_path, surface_id, |result| {
+            result.get("status").map(String::as_str) == Some("streaming")
+                && tiller_control::protocol::rows::decode(
+                    result.get("transcript").expect("transcript"),
+                )
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row.get("kind").map(String::as_str) == Some("assistant")
+                            && row.get("text").map(String::as_str) == Some("partial")
+                    })
+                })
+        });
+        let stopped_request = round_trip(tiller_control::protocol::request::chat_stop(surface_id));
+        assert!(stopped_request.ok, "chat stop failed: {stopped_request:?}");
+        let stopped = wait_for_app_chat_read(&socket_path, surface_id, |result| {
+            result.get("status").map(String::as_str) == Some("stopped")
+                && tiller_control::protocol::rows::decode(
+                    result.get("transcript").expect("transcript"),
+                )
+                .is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row.get("kind").map(String::as_str) == Some("turn")
+                            && row.get("text").map(String::as_str) == Some("Cancelled")
+                    })
+                })
+        });
+        assert_eq!(stopped.get("status").map(String::as_str), Some("stopped"));
+
+        restored_server.stop();
+        drop(restored_server);
+        drop(restored_handler);
+        let relaunch_handler = Arc::new(AppControlHandler::new_with_chat_config(
+            Arc::new(Mutex::new(ControlState::from_catalog(
+                &catalog,
+                &worktree_path,
+            ))),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(socket_path.clone()),
+            database_path,
+            AgentCommand::new("python3"),
+        ));
+        let relaunch_server = ControlServer::new(socket_path.clone(), relaunch_handler.clone());
+        relaunch_server.start().expect("start relaunch chat server");
+        let relaunched = { app_chat_read(&socket_path, surface_id) };
+        assert_eq!(
+            relaunched.get("status").map(String::as_str),
+            Some("stopped")
+        );
+        assert!(
+            tiller_control::protocol::rows::decode(
+                relaunched.get("transcript").expect("relaunch transcript")
+            )
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("kind").map(String::as_str) == Some("turn")
+                        && row.get("text").map(String::as_str) == Some("Cancelled")
+                })
+            })
+        );
+        relaunch_server.stop();
+        drop(relaunch_server);
+        drop(relaunch_handler);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_list_is_an_observable_empty_state() {
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-project-list-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::project_list());
+        assert!(response.ok, "project.list failed: {:?}", response.error);
+        let rows = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("projects"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("project rows");
+        assert!(
+            rows.is_empty(),
+            "clean launch must expose an empty project list"
+        );
+    }
+
+    #[test]
     fn changes_mutations_validate_path_and_worktree_before_git() {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -5951,6 +10310,7 @@ mod tests {
         let info = ControlSocketInfo::new(socket_path.clone());
         let handler = Arc::new(AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -5993,11 +10353,13 @@ mod tests {
                 session::SessionTab {
                     title: "Chat".into(),
                     kind: "chat".into(),
+                    agent_id: None,
                     active: false,
                 },
                 session::SessionTab {
                     title: "Terminal".into(),
                     kind: "terminal".into(),
+                    agent_id: None,
                     active: true,
                 },
             ],
@@ -6044,7 +10406,174 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn drawn_restore_round_trips_codex_identity_through_quit_and_relaunch(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-p73-codex-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&working_directory);
+        std::fs::create_dir_all(&working_directory).expect("create restore worktree");
+        let database_path = working_directory.join("session.sqlite");
+        let store = SessionStore::open(&database_path);
+        store.schedule(SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                title: "Codex".into(),
+                kind: "chat".into(),
+                agent_id: Some("codex".into()),
+                active: true,
+            }],
+            tab_states: vec![SessionTabState::default()],
+        });
+        store.flush_now();
+        let restored = session::restore(&database_path, &working_directory);
+
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let (tabs, active) = cx.update(|_, cx| restore_tabs(&restored, &working_directory, cx));
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs = tabs;
+            workspace.active_tab = active;
+            workspace.rebuild_tab_machinery();
+            workspace.sync_activity(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.tabs.iter().any(|tab| {
+                tab.kind == TabKind::AgentChat
+                    && tab.agent_id.as_deref() == Some("codex")
+                    && tab.agent_icon == Some(Icon::Codex)
+            })
+        }));
+        let _ = std::fs::remove_dir_all(&working_directory);
+    }
+
+    #[gpui::test]
+    async fn drawn_changes_open_diff_action_opens_a_diff_tab_in_the_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = changed_test_repo("changes-open-diff");
+        let window = cx.add_window({
+            let repo = repo.clone();
+            move |_window, cx| test_workspace_for_repo(cx, repo, true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let row = wait_for_drawn(&mut cx, "changes-file-row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        let open_diff = wait_for_drawn(&mut cx, "changes-open-diff");
+        cx.simulate_click(open_diff.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.kind == TabKind::Diff)
+                    .count()
+            }),
+            2,
+            "the host subscriber opens a new Diff tab after the drawn action"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_right_panel_open_diff_action_opens_a_diff_tab_in_the_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = changed_test_repo("right-panel-open-diff");
+        let window = cx.add_window({
+            let repo = repo.clone();
+            move |_window, cx| test_workspace_for_repo(cx, repo, false)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let open_diff = wait_for_drawn(&mut cx, "file-open-diff");
+        cx.simulate_click(open_diff.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().any(|tab| tab.kind == TabKind::Diff)
+            }),
+            "the right-panel action subscriber opens a Diff tab"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_conflict_resolve_action_opens_terminal_with_the_exact_path(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = conflicted_test_repo("resolve-conflict");
+        let window = cx.add_window({
+            let repo = repo.clone();
+            move |_window, cx| test_workspace_for_repo(cx, repo, true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let row = wait_for_drawn(&mut cx, "changes-file-row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        let resolve = wait_for_drawn(&mut cx, "changes-resolve");
+        cx.simulate_click(resolve.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, app| {
+                workspace.tabs.iter().any(|tab| {
+                    if tab.kind != TabKind::Terminal {
+                        return false;
+                    }
+                    let mut matches_path = false;
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Terminal { view } = content
+                            && let TerminalShell::WithArguments { args, .. } =
+                                view.read(app).launch_shell()
+                        {
+                            matches_path = args.iter().any(|arg| arg.contains("conflicted.txt"));
+                        }
+                    });
+                    matches_path
+                })
+            }),
+            "the conflict action must create a terminal prepared for conflicted.txt"
+        );
+    }
+
+    #[gpui::test]
     async fn restore_replays_persisted_terminal_scrollback(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
         let working_directory = std::env::current_dir().expect("current directory");
         let nonce = b"F-PER-01_RESTORE_NONCE\n".to_vec();
         let needle = b"F-PER-01_RESTORE_NONCE";
@@ -6053,6 +10582,7 @@ mod tests {
             tabs: vec![session::SessionTab {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
+                agent_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState {
@@ -6063,16 +10593,36 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let (tabs, _) = cx.update(|cx| restore_tabs(&restored, &working_directory, cx));
-        let snapshot = cx.update(|cx| {
-            let mut snapshot = None;
-            tabs[0].panes.for_each(&mut |_, content| {
-                if let TabContent::Terminal { view } = content {
-                    snapshot = Some(view.read(cx).snapshot());
-                }
-            });
-            snapshot.expect("restored terminal pane")
+        let (mut tabs, _) = cx.update(|cx| restore_tabs(&restored, &working_directory, cx));
+        let terminal = cx.update(|cx| {
+            cx.new(|cx| {
+                TerminalView::with_shell(
+                    &working_directory,
+                    TerminalShell::WithArguments {
+                        program: "/bin/sh".into(),
+                        args: vec!["-c".into(), "exec sleep 1".into()],
+                    },
+                    cx,
+                )
+                .expect("create deterministic restore test terminal")
+            })
         });
+        tabs[0].panes = PaneNode::leaf(
+            0,
+            TabContent::Terminal {
+                view: terminal.clone(),
+            },
+        );
+        let window = cx.add_window({
+            let terminal = terminal.clone();
+            move |_window, _cx| TerminalReplayFixture { terminal }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|_, app| replay_persisted_terminal_scrollback(&mut tabs, app));
+        let snapshot = terminal.read_with(&cx.cx, |terminal, _| terminal.snapshot());
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
         assert!(
             snapshot
                 .scrollback
@@ -6090,6 +10640,7 @@ mod tests {
             tabs: vec![session::SessionTab {
                 title: "Changes".into(),
                 kind: "diff".into(),
+                agent_id: None,
                 active: true,
             }],
             tab_states: vec![session::SessionTabState::default()],
@@ -6111,5 +10662,111 @@ mod tests {
             mounted,
             "the application shell mounts ChangesTab as pane content"
         );
+    }
+
+    #[gpui::test]
+    async fn probe_escape_dispatch(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let focus = palette_test_sidebar_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        // Main branch, escape:
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        eprintln!("PROBE main-branch escape done");
+
+        workspace.update(&mut cx, |workspace, cx| workspace.open_settings(None, cx));
+        cx.run_until_parked();
+        eprintln!(
+            "PROBE settings open: {:?}",
+            cx.debug_bounds("settings-category-General").is_some()
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        eprintln!(
+            "PROBE settings-branch escape done, closed={:?}",
+            cx.debug_bounds("settings-category-General").is_none()
+        );
+    }
+
+    /// F-SID-12: the worktree context menu's primary transitions reach the
+    /// shell's catalog through the real click path — Unset Primary flips
+    /// the fixture's primary worktree off (drawn menu, real click, typed
+    /// event, shell handler, catalog mutation), Set Primary flips it back
+    /// on, and the sidebar row follows the catalog both ways.
+    #[gpui::test]
+    async fn worktree_primary_context_transition_reaches_the_catalog(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let primary = |cx: &mut VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.project_catalog.projects()[0].worktrees[0].is_primary
+            })
+        };
+        assert!(primary(&mut cx), "the fixture worktree starts primary");
+
+        // Unset Primary: the menu offers it because the worktree is primary.
+        right_click_sidebar_row(&mut cx);
+        let unset = cx
+            .debug_bounds("sidebar-context-item-unset-primary")
+            .expect("Unset Primary is offered for the primary worktree");
+        cx.simulate_click(unset.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !primary(&mut cx),
+            "Unset Primary flips the catalog marker off"
+        );
+
+        // Set Primary: the menu now offers Set, and it flips back on.
+        right_click_sidebar_row(&mut cx);
+        let set = cx
+            .debug_bounds("sidebar-context-item-set-primary")
+            .expect("Set Primary is offered for the unset worktree");
+        cx.simulate_click(set.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            primary(&mut cx),
+            "Set Primary flips the catalog marker back on"
+        );
+    }
+
+    /// Right-clicks the fixture's first worktree row (id 1) and parks.
+    fn right_click_sidebar_row(cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: bounds.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: bounds.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
     }
 }

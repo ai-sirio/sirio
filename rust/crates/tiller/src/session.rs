@@ -288,6 +288,8 @@ pub struct SessionTab {
     pub title: String,
     /// Surface kind: "chat", "terminal", or "diff" (the shell's `TabKind`).
     pub kind: String,
+    /// Stable adapter identity for an agent-backed tab.
+    pub agent_id: Option<String>,
     /// Whether this tab is the active one.
     pub active: bool,
 }
@@ -316,11 +318,13 @@ impl SessionLayout {
                 SessionTab {
                     title: "Chat".into(),
                     kind: "chat".into(),
+                    agent_id: None,
                     active: false,
                 },
                 SessionTab {
                     title: "Terminal".into(),
                     kind: "terminal".into(),
+                    agent_id: None,
                     active: true,
                 },
             ],
@@ -377,6 +381,27 @@ impl ProjectCatalog {
 
     pub fn projects(&self) -> &[CatalogProject] {
         &self.projects
+    }
+
+    /// Moves a project in catalog order. The sidebar keeps each project's
+    /// worktrees attached to its project block; only the host catalog owns
+    /// the durable order.
+    pub fn reorder_projects(&mut self, from: usize, target: usize, before: bool) -> bool {
+        reorder_item(&mut self.projects, from, target, before)
+    }
+
+    /// Moves one worktree within its owning project. Cross-project movement
+    /// is intentionally not representable through this API.
+    pub fn reorder_worktrees(
+        &mut self,
+        project_index: usize,
+        from: usize,
+        target: usize,
+        before: bool,
+    ) -> bool {
+        self.projects
+            .get_mut(project_index)
+            .is_some_and(|project| reorder_item(&mut project.worktrees, from, target, before))
     }
 
     pub fn add(&mut self, path: &Path) -> Result<bool, String> {
@@ -451,6 +476,17 @@ impl ProjectCatalog {
         self.projects[project_index].worktrees[worktree_index].is_primary = primary;
         Ok(())
     }
+}
+
+fn reorder_item<T>(items: &mut Vec<T>, from: usize, target: usize, before: bool) -> bool {
+    if from >= items.len() || target >= items.len() || from == target {
+        return false;
+    }
+    let item = items.remove(from);
+    let target_after_remove = if from < target { target - 1 } else { target };
+    let insert_at = target_after_remove + usize::from(!before);
+    items.insert(insert_at.min(items.len()), item);
+    true
 }
 
 fn catalog_project(root_path: &Path, discovered: DiscoveredProject) -> CatalogProject {
@@ -591,6 +627,7 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
             worktree_id: worktree_id.clone(),
             title: tab.title.clone(),
             kind: tab.kind.clone(),
+            agent_id: tab.agent_id.clone(),
             order_idx: index as i64,
             is_active: tab.active,
         })
@@ -803,6 +840,7 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
         tabs.push(SessionTab {
             title: record.title,
             kind: record.kind,
+            agent_id: record.agent_id,
             active: record.is_active,
         });
         let tab_title = tabs
@@ -1178,19 +1216,43 @@ mod tests {
             SessionTab {
                 title: "Chat".into(),
                 kind: "chat".into(),
+                agent_id: None,
                 active: false,
             },
             SessionTab {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
+                agent_id: None,
                 active: false,
             },
             SessionTab {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
+                agent_id: None,
                 active: true,
             },
         ]
+    }
+
+    #[test]
+    fn a_codex_agent_identity_round_trips_through_session_store() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("agent-identity-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let tabs = vec![SessionTab {
+            title: "Codex".into(),
+            kind: "chat".into(),
+            active: true,
+            agent_id: Some("codex".into()),
+        }];
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&working_directory, tabs));
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
+        assert_eq!(restored.tabs[0].agent_id, Some("codex".into()));
     }
 
     #[test]
@@ -1242,6 +1304,7 @@ mod tests {
             tabs: vec![SessionTab {
                 title: "Terminal".into(),
                 kind: "terminal".into(),
+                agent_id: None,
                 active: true,
             }],
             tab_states: vec![state.clone()],
@@ -1275,6 +1338,7 @@ mod tests {
             SessionTab {
                 title: "Changes".into(),
                 kind: "diff".into(),
+                agent_id: None,
                 active: false,
             },
         );
@@ -1297,6 +1361,7 @@ mod tests {
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
+            ..AppSettings::default()
         };
 
         {
@@ -1320,7 +1385,18 @@ mod tests {
                 ("appearance.terminalFontSize".into(), "19".into()),
                 ("appearance.theme".into(), "dark".into()),
                 ("appearance.uiFontSize".into(), "17".into()),
+                ("chat.limitHistory".into(), "true".into()),
+                ("chat.retentionCount".into(), "100".into()),
                 ("controlSocket.enabled".into(), "false".into()),
+                ("general.autoNaming".into(), "false".into()),
+                ("general.summarizerAgent".into(), "claude".into()),
+                ("session.resumeAgentSessions".into(), "true".into()),
+                ("usage.claudeVisible".into(), "true".into()),
+                ("usage.codexVisible".into(), "true".into()),
+                ("usage.opencodeVisible".into(), "false".into()),
+                ("usage.refreshIntervalMin".into(), "5".into()),
+                ("worktrees.limitMounted".into(), "false".into()),
+                ("worktrees.mountedCount".into(), "6".into()),
             ]
         );
         println!("sqlite setting rows: {rows:?}");
@@ -1528,6 +1604,82 @@ mod tests {
         assert!(!catalog.projects()[0].worktrees.is_empty());
         assert!(!catalog.projects()[1].is_git);
         assert!(catalog.projects()[1].worktrees.is_empty());
+    }
+
+    /// F-SID-12 (catalog half): setting one worktree primary clears its
+    /// project siblings, unsetting leaves none, and an unknown path is a
+    /// named error — the transition the context menu drives. Primary is
+    /// per-project: another project's marker is untouched.
+    #[test]
+    fn set_primary_flips_the_application_level_marker() {
+        let dir = TempDir::new();
+        let make_worktree = |branch: &str, primary: bool| CatalogWorktree {
+            branch: branch.to_string(),
+            path: dir.0.join(branch),
+            is_primary: primary,
+        };
+        let project = |id: &str, worktrees: Vec<CatalogWorktree>| CatalogProject {
+            id: id.to_string(),
+            name: id.to_string(),
+            root_path: dir.0.join(id),
+            is_git: true,
+            worktrees,
+        };
+
+        let mut catalog = ProjectCatalog::from_projects(vec![
+            project(
+                "alpha",
+                vec![
+                    make_worktree("alpha-main", true),
+                    make_worktree("alpha-feat", false),
+                ],
+            ),
+            project("beta", vec![make_worktree("beta-main", false)]),
+        ]);
+
+        // Set the sibling: alpha-main's marker clears, alpha-feat's comes on.
+        let feat_path = dir.0.join("alpha-feat");
+        catalog
+            .set_primary(&feat_path, true)
+            .expect("known worktree set");
+        assert!(
+            !catalog.projects()[0].worktrees[0].is_primary,
+            "sibling cleared"
+        );
+        assert!(catalog.projects()[0].worktrees[1].is_primary);
+
+        // Unset: the marker goes off, nothing else moves.
+        catalog
+            .set_primary(&feat_path, false)
+            .expect("known worktree unset");
+        assert!(!catalog.projects()[0].worktrees[0].is_primary);
+        assert!(!catalog.projects()[0].worktrees[1].is_primary);
+
+        // Set back on the original worktree.
+        let main_path = dir.0.join("alpha-main");
+        catalog
+            .set_primary(&main_path, true)
+            .expect("known worktree set");
+        assert!(catalog.projects()[0].worktrees[0].is_primary);
+        assert!(!catalog.projects()[0].worktrees[1].is_primary);
+
+        // An unknown path is a named error, not a silent no-op.
+        assert!(
+            catalog
+                .set_primary(&dir.0.join("not-a-worktree"), true)
+                .is_err(),
+            "a path outside the catalog must be rejected"
+        );
+
+        // Primary is per-project: beta's transition leaves alpha alone.
+        catalog
+            .set_primary(&dir.0.join("beta-main"), true)
+            .expect("known other worktree set");
+        assert!(
+            catalog.projects()[0].worktrees[0].is_primary,
+            "other project untouched"
+        );
+        assert!(catalog.projects()[1].worktrees[0].is_primary);
     }
 
     #[test]

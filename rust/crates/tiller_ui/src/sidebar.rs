@@ -15,8 +15,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, prelude::*, px, rgb,
+    App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div,
+    prelude::*, px, rgb,
 };
 use tiller_git::{
     create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
@@ -24,6 +25,7 @@ use tiller_git::{
 use tiller_project::TabKind;
 use tiller_theme::Theme;
 
+use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
 
 #[path = "icons.rs"]
@@ -37,7 +39,7 @@ use crate::right_panel::ActivityStatus;
 /// hand- and index-assigned ids both start low, so without an offset a tab
 /// row could collide with — and be toggled by clicking — an unrelated row.
 /// The offset is far past anything a session will reach.
-const TAB_ROW_ID_OFFSET: usize = 1_000_000;
+pub const TAB_ROW_ID_OFFSET: usize = 1_000_000;
 
 /// One open tab, as the host (`main.rs`) knows it. This is the same fact the
 /// tab bar and the Activity panel already render — the sidebar's tab rows
@@ -229,6 +231,13 @@ pub enum SidebarEvent {
         target: SidebarContextTarget,
         action: SidebarContextAction,
     },
+    /// The row order is already updated locally while dragging. The host
+    /// receives only the final gesture so it can persist the same order.
+    Reorder {
+        drag: RowDrag,
+        target_id: usize,
+        before: bool,
+    },
 }
 
 /// The kinds of rows rendered by [`Sidebar`].
@@ -274,6 +283,7 @@ pub struct Sidebar {
     notice: Option<String>,
     context_menu: Option<OpenContextMenu>,
     project_settings: Option<ProjectSettingsCard>,
+    pending_reorder: Option<(RowDrag, usize, bool)>,
 }
 
 impl Sidebar {
@@ -365,6 +375,7 @@ impl Sidebar {
             notice: None,
             context_menu: None,
             project_settings: None,
+            pending_reorder: None,
         }
     }
 
@@ -441,6 +452,7 @@ impl Sidebar {
             notice: None,
             context_menu: None,
             project_settings: None,
+            pending_reorder: None,
         }
     }
 
@@ -450,7 +462,154 @@ impl Sidebar {
         self.rows = replacement.rows;
         self.project_ids = replacement.project_ids;
         self.filter = filter;
+        self.pending_reorder = None;
         cx.notify();
+    }
+
+    fn reorder_group_for_row(&self, row_id: usize, kind: RowKind) -> Option<usize> {
+        let row_index = self.rows.iter().position(|row| row.id == row_id)?;
+        match kind {
+            RowKind::Project => None,
+            RowKind::Worktree => self.rows[..=row_index]
+                .iter()
+                .rposition(|row| row.kind == RowKind::Project)
+                .map(|index| self.rows[index].id),
+            RowKind::Tab => self.rows[..=row_index]
+                .iter()
+                .rposition(|row| row.kind == RowKind::Worktree)
+                .map(|index| self.rows[index].id),
+            RowKind::NewWorktree => None,
+        }
+    }
+
+    fn row_drag(&self, row: &SidebarRow) -> Option<RowDrag> {
+        let scope = match row.kind {
+            RowKind::Project => ReorderScope::Projects,
+            RowKind::Worktree => ReorderScope::Worktrees,
+            RowKind::Tab => ReorderScope::Tabs,
+            RowKind::NewWorktree => return None,
+        };
+        Some(RowDrag {
+            scope,
+            id: row.id,
+            group: self.reorder_group_for_row(row.id, row.kind),
+        })
+    }
+
+    fn reorder_rows(&mut self, drag: RowDrag, target_id: usize, before: bool) -> bool {
+        let Some(target_index) = self.rows.iter().position(|row| row.id == target_id) else {
+            return false;
+        };
+        let Some(source_index) = self.rows.iter().position(|row| row.id == drag.id) else {
+            return false;
+        };
+        let target_kind = self.rows[target_index].kind;
+        if !accepts_drop(
+            drag,
+            match target_kind {
+                RowKind::Project => ReorderScope::Projects,
+                RowKind::Worktree => ReorderScope::Worktrees,
+                RowKind::Tab => ReorderScope::Tabs,
+                RowKind::NewWorktree => return false,
+            },
+            self.reorder_group_for_row(target_id, target_kind),
+        ) {
+            return false;
+        }
+        if drag.scope == ReorderScope::Projects {
+            if drag.id == target_id {
+                return false;
+            }
+            let source_end = self.rows[source_index + 1..]
+                .iter()
+                .position(|row| row.kind == RowKind::Project)
+                .map_or(self.rows.len(), |offset| source_index + 1 + offset);
+            let block: Vec<_> = self.rows.drain(source_index..source_end).collect();
+            let Some(target_index) = self.rows.iter().position(|row| row.id == target_id) else {
+                return false;
+            };
+            let target_end = self.rows[target_index + 1..]
+                .iter()
+                .position(|row| row.kind == RowKind::Project)
+                .map_or(self.rows.len(), |offset| target_index + 1 + offset);
+            let insert_at = if before { target_index } else { target_end };
+            self.rows.splice(insert_at..insert_at, block);
+            return true;
+        }
+
+        let current_indices: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.kind == target_kind
+                    && self.reorder_group_for_row(row.id, row.kind)
+                        == self.reorder_group_for_row(target_id, target_kind)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let Some(source_position) = current_indices
+            .iter()
+            .position(|index| *index == source_index)
+        else {
+            return false;
+        };
+        let Some(target_position) = current_indices
+            .iter()
+            .position(|index| *index == target_index)
+        else {
+            return false;
+        };
+        let Some(insert_position) = insertion_index(
+            current_indices.len(),
+            source_position,
+            target_position,
+            before,
+        ) else {
+            return false;
+        };
+        let row = self.rows.remove(source_index);
+        let remaining_indices: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                candidate.kind == target_kind
+                    && self.reorder_group_for_row(candidate.id, candidate.kind)
+                        == self.reorder_group_for_row(target_id, target_kind)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let insert_at = remaining_indices
+            .get(insert_position.min(remaining_indices.len()))
+            .copied()
+            .unwrap_or(self.rows.len());
+        self.rows.insert(insert_at, row);
+        true
+    }
+
+    fn preview_reorder(
+        &mut self,
+        drag: RowDrag,
+        target_id: usize,
+        before: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reorder_rows(drag, target_id, before) {
+            self.pending_reorder = Some((drag, target_id, before));
+            cx.notify();
+        }
+    }
+
+    fn confirm_reorder(&mut self, cx: &mut Context<Self>) {
+        let Some((drag, target_id, before)) = self.pending_reorder.take() else {
+            return;
+        };
+        cx.emit(SidebarEvent::Reorder {
+            drag,
+            target_id,
+            before,
+        });
     }
 
     /// Returns the complete context menu contract for a project or worktree.
@@ -613,6 +772,10 @@ impl Sidebar {
     pub fn set_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
         self.notice = Some(notice.into());
         cx.notify();
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     fn dispatch_context_action(
@@ -1427,6 +1590,7 @@ impl Sidebar {
     fn render_row(
         row: SidebarRow,
         project_id: Option<String>,
+        drag: Option<RowDrag>,
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
@@ -1461,6 +1625,7 @@ impl Sidebar {
                 ActivityStatus::Done => Some(theme.tab_done),
                 ActivityStatus::Error => Some(theme.tab_error),
                 ActivityStatus::Idle => Some(theme.tab_needs_input),
+                ActivityStatus::NeedsInput => Some(theme.tab_needs_input),
                 ActivityStatus::Running => None,
             });
         let glyph = Self::row_icon(&row);
@@ -1503,10 +1668,10 @@ impl Sidebar {
             .px(px(8.0))
             .py(px(ROW_V_PADDING))
             .rounded(theme.radii.control)
-            // Rows are clickable, never draggable: project order belongs to
-            // the host's catalog, there is no reorder gesture to install,
-            // and a pointer cursor would invite a drag the program cannot
-            // perform (P19). Pin the default arrow — waku's convention.
+            // Rows remain arrow-cursor controls until the pointer crosses the
+            // drag threshold; the typed drag payload is installed below so a
+            // project block, worktree, or tab can only reorder inside its
+            // own scope.
             .cursor_default()
             .text_size(px(13.5))
             .text_color(text_color)
@@ -1543,6 +1708,27 @@ impl Sidebar {
             cx.stop_propagation();
             context_entity.update(cx, |sidebar, cx| sidebar.open_context_menu(row_id, cx));
         });
+
+        if let Some(drag) = drag {
+            let drag_entity = entity.clone();
+            let move_entity = entity.clone();
+            let drop_entity = entity.clone();
+            row_view = row_view
+                .on_drag(drag, move |_, _, _, cx| {
+                    drag_entity.update(cx, |sidebar, _| sidebar.pending_reorder = None);
+                    cx.new(|_| gpui::Empty)
+                })
+                .on_drag_move::<RowDrag>(move |event: &DragMoveEvent<RowDrag>, _, cx| {
+                    let drag = *event.drag(cx);
+                    let before = event.event.position.y < event.bounds.center().y;
+                    move_entity.update(cx, |sidebar, cx| {
+                        sidebar.preview_reorder(drag, row_id, before, cx);
+                    });
+                })
+                .on_drop::<RowDrag>(move |_, _, cx| {
+                    drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
+                });
+        }
 
         if selected {
             row_view = row_view.bg(theme.selected_fill);
@@ -1740,6 +1926,10 @@ impl Render for Sidebar {
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
         let project_ids = self.project_ids.clone();
+        let row_drags = rows
+            .iter()
+            .filter_map(|row| self.row_drag(row).map(|drag| (row.id, drag)))
+            .collect::<std::collections::HashMap<_, _>>();
         let filter_focus = self.filter_focus.clone();
         let filter_is_focused = filter_focus.is_focused(window);
         let filter_text = self.filter.clone();
@@ -1747,6 +1937,7 @@ impl Render for Sidebar {
         let notice = self.notice.clone();
         let context_menu = self.context_menu.clone();
         let project_settings = self.project_settings.clone();
+        let reorder_drop_entity = entity.clone();
         div()
             .relative()
             .flex()
@@ -1791,6 +1982,7 @@ impl Render for Sidebar {
             .child(
                 div()
                     .id("filter-field")
+                    .debug_selector(|| "filter-field".to_string())
                     .track_focus(&filter_focus)
                     .relative()
                     .ml(px(FILTER_LEFT_INSET))
@@ -1843,11 +2035,20 @@ impl Render for Sidebar {
                     .flex()
                     .flex_col()
                     .overflow_y_scroll()
+                    // Rows reorder during the drag, so the row originally
+                    // under the pointer may be a different entity by
+                    // mouse-up. Commit against this stable drop surface;
+                    // `pending_reorder` still contains the typed target
+                    // selected by the last drag-move event.
+                    .on_drop::<RowDrag>(move |_, _, cx| {
+                        reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
+                    })
                     .children(rows.into_iter().map({
                         let entity = entity.clone();
                         move |row| {
                             let project_id = project_ids.get(&row.id).cloned();
-                            Self::render_row(row, project_id, entity.clone(), theme)
+                            let drag = row_drags.get(&row.id).copied();
+                            Self::render_row(row, project_id, drag, entity.clone(), theme)
                         }
                     })),
             )
@@ -1972,7 +2173,10 @@ impl Render for Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point};
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, VisualTestContext,
+        point,
+    };
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2478,16 +2682,33 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn dragging_across_rows_does_not_reorder_the_sidebar(cx: &mut gpui::TestAppContext) {
-        // P19: rows used to invite drag-to-reorder without any handler — an
-        // affordance that promises something the program cannot do. There is
-        // no reorder (project order belongs to the host's catalog and its
-        // persistence; the reference app and waku have no drag-reorder
-        // either), so the affordance is removed: rows install no drag
-        // gesture, and a drag-shaped interaction must leave the row order
-        // untouched.
+    async fn dragging_project_rows_reorders_the_live_sidebar_block(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
-        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let projects = vec![
+            SidebarProject {
+                id: "first".into(),
+                name: "First".into(),
+                is_git: false,
+                root_path: PathBuf::from("/repo/first"),
+                worktrees: vec![SidebarWorktree {
+                    branch: "main".into(),
+                    path: PathBuf::from("/repo/first"),
+                    is_primary: true,
+                }],
+            },
+            SidebarProject {
+                id: "second".into(),
+                name: "Second".into(),
+                is_git: false,
+                root_path: PathBuf::from("/repo/second"),
+                worktrees: vec![SidebarWorktree {
+                    branch: "main".into(),
+                    path: PathBuf::from("/repo/second"),
+                    is_primary: true,
+                }],
+            },
+        ];
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(projects, cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -2504,23 +2725,194 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        let before = row_ids(&mut cx);
-
-        // A drag-shaped motion: sweep from the first row to the last and
-        // release there. Without a drag handler this is an ordinary hover
-        // plus a click — the order must not change and nothing may panic.
-        let first = cx.debug_bounds("sidebar-row-0").expect("first row");
-        let last = cx.debug_bounds("sidebar-row-7").expect("last row");
-        cx.simulate_mouse_move(first.center(), None, Modifiers::none());
-        cx.run_until_parked();
-        cx.simulate_click(last.center(), Modifiers::none());
+        let first = cx.debug_bounds("sidebar-row-0").expect("first project row");
+        let second = cx
+            .debug_bounds("sidebar-row-1000")
+            .expect("second project row");
+        cx.simulate_event(MouseDownEvent {
+            position: first.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(first.center().x + px(30.0), first.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: second.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: second.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
         cx.run_until_parked();
 
         let after = row_ids(&mut cx);
-        assert_eq!(
-            before, after,
-            "a drag-shaped interaction must not reorder sidebar rows"
-        );
+        assert_eq!(after.first().copied(), Some(1000));
+        assert_eq!(after.get(2).copied(), Some(0));
+    }
+
+    #[gpui::test]
+    async fn dragging_worktree_rows_reorders_only_their_project_group(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let project = SidebarProject {
+            id: "project".into(),
+            name: "Project".into(),
+            is_git: false,
+            root_path: PathBuf::from("/repo/project"),
+            worktrees: (0..3)
+                .map(|index| SidebarWorktree {
+                    branch: format!("branch-{index}"),
+                    path: PathBuf::from(format!("/repo/project-{index}")),
+                    is_primary: index == 0,
+                })
+                .collect(),
+        };
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(vec![project], cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let source = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("first worktree row");
+        let target = cx
+            .debug_bounds("sidebar-row-3")
+            .expect("third worktree row");
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let worktrees = cx.update(|window, cx| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+                .read(cx)
+                .rows
+                .iter()
+                .filter(|row| row.kind == RowKind::Worktree)
+                .map(|row| row.title.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(worktrees, vec!["branch-1", "branch-2", "branch-0"]);
+    }
+
+    #[gpui::test]
+    async fn dragging_tab_rows_reorders_only_their_worktree_group(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let project = SidebarProject {
+            id: "project".into(),
+            name: "Project".into(),
+            is_git: false,
+            root_path: PathBuf::from("/repo/project"),
+            worktrees: vec![SidebarWorktree {
+                branch: "main".into(),
+                path: PathBuf::from("/repo/project"),
+                is_primary: true,
+            }],
+        };
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(vec![project], cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        sidebar.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(
+                1,
+                vec![
+                    SidebarTab {
+                        id: 42,
+                        title: "First".into(),
+                        selected: true,
+                        kind: TabKind::Terminal,
+                        agent_icon: None,
+                    },
+                    SidebarTab {
+                        id: 43,
+                        title: "Second".into(),
+                        selected: false,
+                        kind: TabKind::Terminal,
+                        agent_icon: None,
+                    },
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let source_selector: &'static str =
+            Box::leak(format!("sidebar-row-{}", TAB_ROW_ID_OFFSET + 42).into_boxed_str());
+        let target_selector: &'static str =
+            Box::leak(format!("sidebar-row-{}", TAB_ROW_ID_OFFSET + 43).into_boxed_str());
+        let source = cx.debug_bounds(&source_selector).expect("first tab row");
+        let target = cx.debug_bounds(&target_selector).expect("second tab row");
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let tab_ids = cx.update(|window, cx| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+                .read(cx)
+                .rows
+                .iter()
+                .filter_map(|row| row.tab_id)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tab_ids, vec![43, 42]);
     }
 
     /// F-TAB-15: a host-owned tab row's close control is drawn, hover-
@@ -2596,6 +2988,244 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, SidebarEvent::SelectTab(_))),
             "the close control must not also select the tab"
+        );
+    }
+
+    /// F-SID-01: the sidebar draws its Projects header's Add Project control
+    /// and every project row, and the control is a real control — clicking it
+    /// opens the platform folder picker.
+    #[gpui::test]
+    async fn projects_header_add_control_and_project_rows_render(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // The header's + control is drawn.
+        let plus = cx
+            .debug_bounds("add-project")
+            .expect("the + Add Project control is drawn");
+
+        // All four fixture project rows are drawn (ids 0, 4, 7, 8).
+        for id in [0, 4, 7, 8] {
+            let selector: &'static str = Box::leak(format!("sidebar-row-{id}").into_boxed_str());
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "project row {id} is drawn"
+            );
+        }
+
+        // And it dispatches the real event: the picker opens.
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.did_prompt_for_paths(),
+            "clicking + must open the platform folder picker"
+        );
+    }
+
+    /// F-SID-02: typing in the Filter field narrows the drawn rows to the
+    /// matching project, and clearing the filter restores every row.
+    #[gpui::test]
+    async fn filter_narrows_rows_and_clearing_restores_them(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // Focus the filter field the way a user does: click it.
+        let filter = cx
+            .debug_bounds("filter-field")
+            .expect("the Filter field is drawn");
+        cx.simulate_click(filter.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Type text matching exactly one project of the four.
+        cx.simulate_input("tracker");
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let typed = cx.read(|cx| sidebar_entity.read(cx).filter.clone());
+        assert_eq!(typed, "tracker", "the keystrokes reached the filter state");
+
+        // Only Project-Tracker's row remains drawn; every other project row
+        // and the first project's expanded children disappear.
+        for id in [0, 1, 2, 3, 4, 5, 6, 8] {
+            let selector: &'static str = Box::leak(format!("sidebar-row-{id}").into_boxed_str());
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "row {id} must be filtered out while the filter reads 'tracker'"
+            );
+        }
+        assert!(
+            cx.debug_bounds("sidebar-row-7").is_some(),
+            "the matching project row stays drawn"
+        );
+
+        // Clearing the filter restores every project row.
+        cx.simulate_keystrokes(
+            "backspace backspace backspace backspace backspace backspace backspace",
+        );
+        cx.run_until_parked();
+        for id in [0, 4, 7, 8] {
+            let selector: &'static str = Box::leak(format!("sidebar-row-{id}").into_boxed_str());
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "project row {id} returns after the filter is cleared"
+            );
+        }
+    }
+
+    /// F-SID-04: clicking a project row's chevron reveals a collapsed
+    /// project's worktree/tab rows, and a second click hides them again.
+    #[gpui::test]
+    async fn project_chevron_hides_and_restores_children(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // Project row 4 (the long fixture name) starts collapsed: its
+        // worktree row (5) and tab row (6) are not drawn.
+        assert!(
+            cx.debug_bounds("sidebar-row-5").is_none(),
+            "a collapsed project's worktree row is hidden"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-row-6").is_none(),
+            "a collapsed project's tab row is hidden"
+        );
+
+        // Click the disclosure chevron: it rides in the row's leading 12px
+        // slot (8px row padding + 6px into the slot).
+        let row4 = cx
+            .debug_bounds("sidebar-row-4")
+            .expect("the collapsed project row is drawn");
+        let chevron = point(row4.origin.x + px(8.0) + px(6.0), row4.center().y);
+        cx.simulate_click(chevron, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-5").is_some(),
+            "the chevron click reveals the project's worktree row"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-row-6").is_some(),
+            "the chevron click reveals the project's tab row"
+        );
+
+        // And the second click hides them again.
+        cx.simulate_click(chevron, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-row-5").is_none(),
+            "the second chevron click hides the worktree row again"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-row-6").is_none(),
+            "the second chevron click hides the tab row again"
+        );
+    }
+
+    /// F-SID-10: the context menu's Remove Project asks the platform for
+    /// confirmation before emitting anything — accepting emits RemoveProject
+    /// with the project's id; cancelling emits nothing.
+    #[gpui::test]
+    async fn remove_project_context_item_confirms_before_emitting(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("remove-project");
+
+        cx.update(Theme::init);
+        let projects = vec![SidebarProject {
+            id: "proj-1".to_string(),
+            name: "scratch".to_string(),
+            is_git: true,
+            root_path: repo.clone(),
+            worktrees: vec![],
+        }];
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(projects, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        // Open the project's context menu and choose Remove Project.
+        let remove_item = cx
+            .debug_bounds("sidebar-row-0")
+            .expect("the project row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: remove_item.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: remove_item.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        let item = cx
+            .debug_bounds("sidebar-context-item-remove-project")
+            .expect("the context menu exposes Remove Project");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // The platform prompt is up and nothing has been emitted yet.
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        assert!(
+            events.borrow().is_empty(),
+            "nothing may be emitted before the user answers"
+        );
+
+        // Cancelling emits nothing.
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(
+            events.borrow().is_empty(),
+            "cancelling the prompt emits nothing, got {:?}",
+            events.borrow()
+        );
+
+        // Accepting emits RemoveProject with the project's id.
+        cx.simulate_event(MouseDownEvent {
+            position: remove_item.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: remove_item.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        let item = cx
+            .debug_bounds("sidebar-context-item-remove-project")
+            .expect("the context menu exposes Remove Project again");
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        cx.simulate_prompt_answer("Remove from Tiller");
+        cx.run_until_parked();
+        let emitted = events.borrow();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::RemoveProject(id) if id == "proj-1")),
+            "accepting the prompt emits RemoveProject with the project's id, got {emitted:?}"
         );
     }
 }

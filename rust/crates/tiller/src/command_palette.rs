@@ -1,0 +1,572 @@
+//! Shell-owned command palette catalog and filtering seam.
+//!
+//! Rendering and dispatch stay with `TillerWorkspace`; this module owns the
+//! value-level command inventory so the overlay cannot grow a second command
+//! model that drifts from the shell's typed routes.
+
+use std::path::PathBuf;
+
+use tiller_project::TabKind;
+use tiller_ui::{sidebar::SidebarDisabledReason, tab_bar::NewTabAction};
+
+use crate::{WindowCommand, WindowCommandDisabledReason, panes::SplitDirection};
+
+/// A command that the shell can route through an existing typed action or
+/// typed UI event. The palette stores this value; it never stores a closure
+/// that could become a second implementation of the transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaletteCommand {
+    Window(WindowCommand),
+    Tab(TabCommand),
+    NewTab(NewTabAction),
+    Sidebar(SidebarPaletteAction),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabCommand {
+    FocusPane(SplitDirection, bool),
+    SplitPane(SplitDirection),
+    ClosePane,
+    CycleTab(bool),
+    JumpToTab(usize),
+    OpenAllTabs,
+    OpenTabMenu,
+    CloseTab,
+    CloseOtherTabs,
+    CloseTabsToRight,
+    MoveTabEarlier,
+    MoveTabLater,
+    MoveTabToCurrentPane,
+    MoveTabToOtherPane,
+    ResumeChat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarPaletteAction {
+    ProjectSettings,
+    InitializeGit,
+    RevealInFileManager,
+    RemoveProject,
+    SetPrimary,
+    UnsetPrimary,
+    NewTab(NewTabAction),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SidebarPaletteTarget {
+    pub project_id: String,
+    pub project_path: PathBuf,
+    pub project_is_git: bool,
+    pub worktree_path: PathBuf,
+    pub worktree_is_primary: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaletteContext {
+    pub active_tab_kind: Option<TabKind>,
+    pub has_retained_chat: bool,
+    pub has_other_pane: bool,
+    pub sidebar_target: Option<SidebarPaletteTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaletteDisabledReason {
+    Window(WindowCommandDisabledReason),
+    Sidebar(SidebarDisabledReason),
+    NoActiveTab,
+    NoRetainedChat,
+    NoOtherPane,
+    NoSelectedProject,
+    NoSelectedWorktree,
+    AlreadyPrimary,
+    NotPrimary,
+    UnsupportedSurface,
+}
+
+impl PaletteDisabledReason {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Window(WindowCommandDisabledReason::NoActiveFile) => "No active file",
+            Self::Sidebar(SidebarDisabledReason::AlreadyGitProject) => "Git is already initialized",
+            Self::NoActiveTab => "No active tab",
+            Self::NoRetainedChat => "No retained chat sessions",
+            Self::NoOtherPane => "No other pane is available",
+            Self::NoSelectedProject => "No selected project",
+            Self::NoSelectedWorktree => "No selected worktree",
+            Self::AlreadyPrimary => "Already the primary worktree",
+            Self::NotPrimary => "Worktree is not primary",
+            Self::UnsupportedSurface => "Browser surfaces are unavailable on Linux",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaletteEntry {
+    pub command: PaletteCommand,
+    pub label: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub disabled_reason: Option<PaletteDisabledReason>,
+}
+
+impl PaletteEntry {
+    fn enabled(
+        command: PaletteCommand,
+        label: &'static str,
+        shortcut: Option<&'static str>,
+    ) -> Self {
+        Self {
+            command,
+            label,
+            shortcut,
+            disabled_reason: None,
+        }
+    }
+
+    fn disabled(
+        command: PaletteCommand,
+        label: &'static str,
+        shortcut: Option<&'static str>,
+        reason: PaletteDisabledReason,
+    ) -> Self {
+        Self {
+            command,
+            label,
+            shortcut,
+            disabled_reason: Some(reason),
+        }
+    }
+
+    pub(crate) fn is_enabled(self) -> bool {
+        self.disabled_reason.is_none()
+    }
+}
+
+pub(crate) const EMPTY_RESULT_LABEL: &str = "No commands match your search";
+
+fn window_entry(
+    command: WindowCommand,
+    label: &'static str,
+    shortcut: Option<&'static str>,
+    context: &PaletteContext,
+) -> PaletteEntry {
+    match crate::window_command_availability(command, context.active_tab_kind) {
+        crate::WindowCommandAvailability::Enabled => {
+            PaletteEntry::enabled(PaletteCommand::Window(command), label, shortcut)
+        }
+        crate::WindowCommandAvailability::Disabled(reason) => PaletteEntry::disabled(
+            PaletteCommand::Window(command),
+            label,
+            shortcut,
+            PaletteDisabledReason::Window(reason),
+        ),
+    }
+}
+
+fn sidebar_target_reason(context: &PaletteContext, project: bool) -> Option<PaletteDisabledReason> {
+    match (project, context.sidebar_target.is_some()) {
+        (true, false) => Some(PaletteDisabledReason::NoSelectedProject),
+        (false, false) => Some(PaletteDisabledReason::NoSelectedWorktree),
+        _ => None,
+    }
+}
+
+fn sidebar_entry(
+    action: SidebarPaletteAction,
+    label: &'static str,
+    context: &PaletteContext,
+    reason: Option<PaletteDisabledReason>,
+) -> PaletteEntry {
+    let reason = reason.or_else(|| {
+        let project = matches!(
+            action,
+            SidebarPaletteAction::ProjectSettings
+                | SidebarPaletteAction::InitializeGit
+                | SidebarPaletteAction::RevealInFileManager
+                | SidebarPaletteAction::RemoveProject
+        );
+        sidebar_target_reason(context, project)
+    });
+    match reason {
+        Some(reason) => {
+            PaletteEntry::disabled(PaletteCommand::Sidebar(action), label, None, reason)
+        }
+        None => PaletteEntry::enabled(PaletteCommand::Sidebar(action), label, None),
+    }
+}
+
+fn new_tab_entry(action: NewTabAction, label: &'static str) -> PaletteEntry {
+    PaletteEntry::enabled(PaletteCommand::NewTab(action), label, None)
+}
+
+/// The complete command catalog for the current shell. Filtering is applied
+/// after this eligibility pass so unavailable operations remain discoverable.
+pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
+    let mut entries = vec![
+        window_entry(
+            WindowCommand::NewTerminalTab,
+            "New Terminal Tab",
+            Some("Ctrl+T"),
+            context,
+        ),
+        window_entry(
+            WindowCommand::OpenFile,
+            "Open File",
+            Some("Ctrl+O"),
+            context,
+        ),
+        window_entry(
+            WindowCommand::SaveFile,
+            "Save File",
+            Some("Ctrl+S"),
+            context,
+        ),
+        window_entry(
+            WindowCommand::ToggleSidebar,
+            "Toggle Sidebar",
+            Some("Ctrl+Shift+S"),
+            context,
+        ),
+        window_entry(
+            WindowCommand::ToggleRightPanel,
+            "Toggle Right Panel",
+            Some("Ctrl+Shift+I"),
+            context,
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::FocusPane(SplitDirection::Horizontal, false)),
+            "Focus Pane Left",
+            Some("Ctrl+Alt+Left"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::FocusPane(SplitDirection::Horizontal, true)),
+            "Focus Pane Right",
+            Some("Ctrl+Alt+Right"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::FocusPane(SplitDirection::Vertical, false)),
+            "Focus Pane Above",
+            Some("Ctrl+Alt+Up"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::FocusPane(SplitDirection::Vertical, true)),
+            "Focus Pane Below",
+            Some("Ctrl+Alt+Down"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::SplitPane(SplitDirection::Horizontal)),
+            "Split Pane Right",
+            Some("Ctrl+Alt+Shift+Right"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::SplitPane(SplitDirection::Vertical)),
+            "Split Pane Down",
+            Some("Ctrl+Alt+Shift+Down"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::ClosePane),
+            "Close Pane",
+            Some("Ctrl+Alt+W"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::CycleTab(true)),
+            "Next Tab",
+            Some("Ctrl+Tab"),
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::CycleTab(false)),
+            "Previous Tab",
+            Some("Ctrl+Shift+Tab"),
+        ),
+    ];
+
+    const JUMP_LABELS: [&str; 9] = [
+        "Jump to Tab 1",
+        "Jump to Tab 2",
+        "Jump to Tab 3",
+        "Jump to Tab 4",
+        "Jump to Tab 5",
+        "Jump to Tab 6",
+        "Jump to Tab 7",
+        "Jump to Tab 8",
+        "Jump to Tab 9",
+    ];
+    for position in 1..=9 {
+        entries.push(PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::JumpToTab(position)),
+            JUMP_LABELS[position - 1],
+            Some(match position {
+                1 => "Ctrl+1",
+                2 => "Ctrl+2",
+                3 => "Ctrl+3",
+                4 => "Ctrl+4",
+                5 => "Ctrl+5",
+                6 => "Ctrl+6",
+                7 => "Ctrl+7",
+                8 => "Ctrl+8",
+                _ => "Ctrl+9",
+            }),
+        ));
+    }
+
+    entries.extend([
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::OpenAllTabs),
+            "Open All Tabs",
+            None,
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::OpenTabMenu),
+            "Open Tab Menu",
+            None,
+        ),
+        if context.active_tab_kind.is_some() {
+            PaletteEntry::enabled(
+                PaletteCommand::Tab(TabCommand::CloseTab),
+                "Close Tab",
+                Some("Ctrl+W"),
+            )
+        } else {
+            PaletteEntry::disabled(
+                PaletteCommand::Tab(TabCommand::CloseTab),
+                "Close Tab",
+                Some("Ctrl+W"),
+                PaletteDisabledReason::NoActiveTab,
+            )
+        },
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::CloseOtherTabs),
+            "Close Other Tabs",
+            None,
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::CloseTabsToRight),
+            "Close Tabs to the Right",
+            None,
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::MoveTabEarlier),
+            "Move Tab Earlier",
+            None,
+        ),
+        PaletteEntry::enabled(
+            PaletteCommand::Tab(TabCommand::MoveTabLater),
+            "Move Tab Later",
+            None,
+        ),
+        if context.has_other_pane {
+            PaletteEntry::enabled(
+                PaletteCommand::Tab(TabCommand::MoveTabToCurrentPane),
+                "Move Tab to This Pane",
+                None,
+            )
+        } else {
+            PaletteEntry::disabled(
+                PaletteCommand::Tab(TabCommand::MoveTabToCurrentPane),
+                "Move Tab to This Pane",
+                None,
+                PaletteDisabledReason::NoOtherPane,
+            )
+        },
+        if context.has_other_pane {
+            PaletteEntry::enabled(
+                PaletteCommand::Tab(TabCommand::MoveTabToOtherPane),
+                "Move Tab to Other Pane",
+                None,
+            )
+        } else {
+            PaletteEntry::disabled(
+                PaletteCommand::Tab(TabCommand::MoveTabToOtherPane),
+                "Move Tab to Other Pane",
+                None,
+                PaletteDisabledReason::NoOtherPane,
+            )
+        },
+        if context.has_retained_chat {
+            PaletteEntry::enabled(
+                PaletteCommand::Tab(TabCommand::ResumeChat),
+                "Resume Chat",
+                None,
+            )
+        } else {
+            PaletteEntry::disabled(
+                PaletteCommand::Tab(TabCommand::ResumeChat),
+                "Resume Chat",
+                None,
+                PaletteDisabledReason::NoRetainedChat,
+            )
+        },
+        new_tab_entry(NewTabAction::NewTerminal, "New Terminal"),
+        new_tab_entry(NewTabAction::NewChanges, "Changes"),
+        new_tab_entry(NewTabAction::ClaudeCode, "Claude Code"),
+        new_tab_entry(NewTabAction::Codex, "Codex"),
+        new_tab_entry(NewTabAction::OpenCode, "OpenCode"),
+        new_tab_entry(NewTabAction::Pi, "Pi"),
+        new_tab_entry(NewTabAction::OhMyPi, "Oh-My-Pi"),
+        new_tab_entry(NewTabAction::SplitClaudeCode, "Split Claude Code"),
+        new_tab_entry(NewTabAction::NewChat, "New Chat"),
+        PaletteEntry::disabled(
+            PaletteCommand::NewTab(NewTabAction::NewBrowser),
+            "New Browser",
+            None,
+            PaletteDisabledReason::UnsupportedSurface,
+        ),
+        sidebar_entry(
+            SidebarPaletteAction::ProjectSettings,
+            "Project Settings",
+            context,
+            None,
+        ),
+        sidebar_entry(
+            SidebarPaletteAction::InitializeGit,
+            "Initialize Git",
+            context,
+            context.sidebar_target.as_ref().and_then(|target| {
+                target
+                    .project_is_git
+                    .then_some(PaletteDisabledReason::Sidebar(
+                        SidebarDisabledReason::AlreadyGitProject,
+                    ))
+            }),
+        ),
+        sidebar_entry(
+            SidebarPaletteAction::RevealInFileManager,
+            "Reveal in File Manager",
+            context,
+            None,
+        ),
+        sidebar_entry(
+            SidebarPaletteAction::RemoveProject,
+            "Remove Project",
+            context,
+            None,
+        ),
+    ]);
+
+    if let Some(target) = &context.sidebar_target {
+        entries.push(sidebar_entry(
+            SidebarPaletteAction::SetPrimary,
+            "Set Primary Worktree",
+            context,
+            target
+                .worktree_is_primary
+                .then_some(PaletteDisabledReason::AlreadyPrimary),
+        ));
+        entries.push(sidebar_entry(
+            SidebarPaletteAction::UnsetPrimary,
+            "Unset Primary Worktree",
+            context,
+            (!target.worktree_is_primary).then_some(PaletteDisabledReason::NotPrimary),
+        ));
+    } else {
+        entries.push(sidebar_entry(
+            SidebarPaletteAction::SetPrimary,
+            "Set Primary Worktree",
+            context,
+            Some(PaletteDisabledReason::NoSelectedWorktree),
+        ));
+        entries.push(sidebar_entry(
+            SidebarPaletteAction::UnsetPrimary,
+            "Unset Primary Worktree",
+            context,
+            Some(PaletteDisabledReason::NoSelectedWorktree),
+        ));
+    }
+
+    for (action, label) in [
+        (NewTabAction::NewTerminal, "New Terminal Here"),
+        (NewTabAction::ClaudeCode, "Claude Code Here"),
+        (NewTabAction::Codex, "Codex Here"),
+        (NewTabAction::OpenCode, "OpenCode Here"),
+        (NewTabAction::Pi, "Pi Here"),
+        (NewTabAction::OhMyPi, "Oh-My-Pi Here"),
+        (NewTabAction::NewChat, "New Chat Here"),
+    ] {
+        entries.push(sidebar_entry(
+            SidebarPaletteAction::NewTab(action),
+            label,
+            context,
+            sidebar_target_reason(context, false),
+        ));
+    }
+
+    entries
+}
+
+/// Minimum filtering promised by D2: a case-insensitive substring over the
+/// visible label, with no fuzzy ranking that could make a command disappear.
+pub(crate) fn filter_entries<'a>(entries: &'a [PaletteEntry], query: &str) -> Vec<PaletteEntry> {
+    let query = query.trim().to_ascii_lowercase();
+    entries
+        .iter()
+        .copied()
+        .filter(|entry| query.is_empty() || entry.label.to_ascii_lowercase().contains(&query))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{WindowCommand, WindowCommandDisabledReason};
+    use super::*;
+    use std::path::PathBuf;
+    use tiller_project::TabKind;
+
+    fn context() -> PaletteContext {
+        PaletteContext {
+            active_tab_kind: Some(TabKind::Terminal),
+            has_retained_chat: true,
+            has_other_pane: true,
+            sidebar_target: Some(SidebarPaletteTarget {
+                project_id: "tiller".into(),
+                project_path: PathBuf::from("/tmp/tiller"),
+                project_is_git: true,
+                worktree_path: PathBuf::from("/tmp/tiller"),
+                worktree_is_primary: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn catalog_contains_window_tab_sidebar_and_agent_commands() {
+        let commands = entries(&context());
+        assert!(commands.iter().any(|entry| {
+            entry.label == "Toggle Sidebar"
+                && entry.command == PaletteCommand::Window(WindowCommand::ToggleSidebar)
+        }));
+        assert!(commands.iter().any(|entry| entry.label == "Close Tab"));
+        assert!(
+            commands
+                .iter()
+                .any(|entry| entry.label == "Project Settings")
+        );
+        assert!(commands.iter().any(|entry| entry.label == "Codex"));
+        assert!(commands.iter().any(|entry| entry.label == "Oh-My-Pi"));
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_substring_and_reports_empty_state() {
+        let commands = entries(&context());
+        let filtered = filter_entries(&commands, "side");
+        assert_eq!(
+            filtered.iter().map(|entry| entry.label).collect::<Vec<_>>(),
+            ["Toggle Sidebar",]
+        );
+        assert!(filter_entries(&commands, "no command has this text").is_empty());
+        assert_eq!(EMPTY_RESULT_LABEL, "No commands match your search");
+    }
+
+    #[test]
+    fn disabled_rows_keep_the_existing_typed_reason() {
+        let mut unavailable = context();
+        unavailable.active_tab_kind = None;
+        let save = entries(&unavailable)
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::Window(WindowCommand::SaveFile))
+            .expect("Save File is always listed");
+        assert_eq!(
+            save.disabled_reason,
+            Some(PaletteDisabledReason::Window(
+                WindowCommandDisabledReason::NoActiveFile
+            ))
+        );
+    }
+}
