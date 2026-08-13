@@ -40,8 +40,8 @@
 //! human surface is the honest one.
 
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FontWeight, InteractiveElement, PromptLevel, Render,
-    Rgba, Task, Window, div, prelude::*, px,
+    AnyElement, App, AppContext, Context, EventEmitter, FontWeight, InteractiveElement,
+    PromptLevel, Render, Rgba, Task, Window, div, prelude::*, px,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -73,11 +73,25 @@ const BAND_ROW_HEIGHT: f32 = 24.0;
 const CONTEXT_BAND_MIN: usize = 4;
 
 /// Events emitted to the shell.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangesTabEvent {
     /// Open a file from the diff's per-file action row in a new tab.
     OpenFile(PathBuf),
 }
+
+/// Actions that need a host-owned surface beyond the existing file-open door.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangesTabActionEvent {
+    /// Ask the host to open the path in a dedicated Diff tab.
+    OpenDiff(PathBuf),
+    /// Ask the host to create/focus a terminal prepared for this conflict.
+    ResolveInTerminal(PathBuf),
+}
+
+/// The cross-crate GPUI drag payload: repo-relative path plus unified text.
+/// The terminal crate consumes this same structural payload without a
+/// dependency back on the UI crate.
+type DiffPayload = (PathBuf, String);
 
 /// The file-level facts the Changes surface displays for one status bucket.
 /// This is intentionally UI-owned data: the control socket reads this report
@@ -154,6 +168,13 @@ impl ChangeSection {
             ChangeSection::Changed | ChangeSection::Untracked => "Stage",
         }
     }
+
+    fn batch_action_label(self) -> &'static str {
+        match self {
+            ChangeSection::Staged => "Unstage all",
+            ChangeSection::Changed | ChangeSection::Untracked => "Stage all",
+        }
+    }
 }
 
 /// One section of the changes list: its header metadata and the rows under
@@ -179,6 +200,8 @@ enum ChangeRow {
         /// `None` when the counts are unknown; the row renders `·` instead
         /// of a confident +0 −0.
         stat: Option<DiffStat>,
+        /// The parsed textual diff carried by this row's drag source.
+        drag_payload: Option<DiffPayload>,
         expanded: bool,
     },
     Hunk {
@@ -414,6 +437,48 @@ impl ChangesTab {
         self.start_operation(move |repo| unstage(repo, &path), cx);
     }
 
+    fn section_action(&mut self, section: ChangeSection, cx: &mut Context<Self>) {
+        if self.git_task.is_some() {
+            return;
+        }
+        let snapshot = StatusSnapshot {
+            entries: self.entries.clone(),
+        };
+        let paths = match section {
+            ChangeSection::Staged => snapshot
+                .staged()
+                .into_iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            ChangeSection::Changed => snapshot
+                .changes()
+                .into_iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            ChangeSection::Untracked => snapshot
+                .untracked()
+                .into_iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let operation: fn(&Path, &Path) -> Result<(), GitError> = match section {
+            ChangeSection::Staged => unstage,
+            ChangeSection::Changed | ChangeSection::Untracked => stage,
+        };
+        self.start_operation(
+            move |repo| {
+                for path in paths {
+                    operation(repo, &path)?;
+                }
+                Ok(())
+            },
+            cx,
+        );
+    }
+
     fn confirm_discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.git_task.is_some() {
             return;
@@ -583,6 +648,7 @@ impl ChangesTab {
                         // diff also failed): the row then renders `·`
                         // instead of a confident +0 −0.
                         stat: self.stats.get(&entry.path).copied(),
+                        drag_payload: self.diffs.get(&entry.path).and_then(diff_payload),
                         expanded,
                     });
                     if expanded {
@@ -685,9 +751,18 @@ impl ChangesTab {
                 section,
                 entry,
                 stat,
+                drag_payload,
                 expanded,
-            } => Self::render_change_file(section, entry, stat, expanded, entity, theme)
-                .into_any_element(),
+            } => Self::render_change_file(
+                section,
+                entry,
+                stat,
+                drag_payload,
+                expanded,
+                entity,
+                theme,
+            )
+            .into_any_element(),
             ChangeRow::Hunk {
                 section,
                 path,
@@ -813,6 +888,9 @@ impl ChangesTab {
         theme: Theme,
     ) -> impl IntoElement {
         let entity_for_toggle = entity.clone();
+        let entity_for_action = entity.clone();
+        let action_label = section.batch_action_label();
+        let action_id = format!("changes-section-{}-all", section.slug());
         div()
             .id(format!("changes-section-{}", section.slug()))
             .debug_selector(|| "changes-section-header".into())
@@ -848,12 +926,22 @@ impl ChangesTab {
                     .child(section.label()),
             )
             .child(div().text_color(theme.meta).child(format!("({count})")))
+            .child(div().flex_1())
+            .child(section_action_button(
+                action_label,
+                action_id,
+                theme,
+                move |cx| {
+                    entity_for_action.update(cx, |tab, cx| tab.section_action(section, cx));
+                },
+            ))
     }
 
     fn render_change_file(
         section: ChangeSection,
         entry: StatusEntry,
         stat: Option<DiffStat>,
+        drag_payload: Option<DiffPayload>,
         expanded: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
@@ -883,6 +971,10 @@ impl ChangesTab {
         let entity_for_stage = entity.clone();
         let entity_for_discard = entity.clone();
         let entity_for_open = entity.clone();
+        let entity_for_open_diff = entity.clone();
+        let entity_for_resolve = entity.clone();
+        let open_diff_path = path.clone();
+        let conflict_path = path.clone();
         div()
             .id(format!("change-{}-{}", section.slug(), path.display()))
             .debug_selector(|| "changes-file-row".into())
@@ -897,6 +989,11 @@ impl ChangesTab {
             // The path is neutral text — the +/− counts carry the status.
             .text_color(theme.title)
             .hover(|style| style.bg(theme.row_hover))
+            .when_some(drag_payload, |this, payload| {
+                this.on_drag(payload, move |_, _, _, cx| {
+                    cx.new(|_| DiffDragPreview { theme })
+                })
+            })
             .on_click(move |_, _, cx| {
                 entity_for_toggle.update(cx, |tab, cx| {
                     tab.toggle_change(section, &path_for_toggle, cx)
@@ -968,6 +1065,32 @@ impl ChangesTab {
                                 });
                             },
                         ))
+                        .child(action_text_button(
+                            "Open diff",
+                            format!("changes-open-diff-{}-{}", section.slug(), path.display()),
+                            theme,
+                            move |cx| {
+                                entity_for_open_diff.update(cx, |_, cx| {
+                                    cx.emit(ChangesTabActionEvent::OpenDiff(
+                                        open_diff_path.clone(),
+                                    ));
+                                });
+                            },
+                        ))
+                        .when(entry.is_conflicted(), |this| {
+                            this.child(action_text_button(
+                                "Resolve in terminal",
+                                format!("resolve-{}-{}", section.slug(), path.display()),
+                                theme,
+                                move |cx| {
+                                    entity_for_resolve.update(cx, |_, cx| {
+                                        cx.emit(ChangesTabActionEvent::ResolveInTerminal(
+                                            conflict_path.clone(),
+                                        ));
+                                    });
+                                },
+                            ))
+                        })
                         .child(
                             div()
                                 .id(format!("open-{}-{}", section.slug(), path.display()))
@@ -1105,6 +1228,7 @@ impl ChangesTab {
 }
 
 impl EventEmitter<ChangesTabEvent> for ChangesTab {}
+impl EventEmitter<ChangesTabActionEvent> for ChangesTab {}
 
 /// The collapsed-context runs of one diff, as `(key, count)` pairs — the
 /// same walk `expand_diff` performs when rendering, so Expand All and the
@@ -1268,6 +1392,49 @@ fn file_glyph(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// Convert one parsed file diff into the textual payload a terminal or chat
+/// pane can receive. Binary files have no meaningful textual payload and do
+/// not advertise a drag source.
+fn diff_payload(diff: &FileDiff) -> Option<DiffPayload> {
+    if diff.is_binary {
+        return None;
+    }
+    let mut text = String::new();
+    for hunk in &diff.hunks {
+        text.push_str(&hunk.header);
+        text.push('\n');
+        for line in &hunk.lines {
+            let marker = match line.origin {
+                DiffOrigin::Context => ' ',
+                DiffOrigin::Addition => '+',
+                DiffOrigin::Deletion => '-',
+            };
+            text.push(marker);
+            text.push_str(&line.content);
+            text.push('\n');
+        }
+    }
+    Some((diff.path.clone(), text))
+}
+
+/// Minimal drag preview required by GPUI. The typed payload remains the
+/// source of truth; the preview carries no second copy of the diff text.
+struct DiffDragPreview {
+    theme: Theme,
+}
+
+impl Render for DiffDragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(self.theme.spacing.titlebar_control_spacing)
+            .py(self.theme.spacing.titlebar_control_spacing)
+            .rounded(self.theme.radii.control)
+            .bg(self.theme.primary_pill_bg)
+            .text_color(self.theme.title)
+            .child("Diff")
+    }
+}
+
 fn action_text_button(
     label: &'static str,
     id: String,
@@ -1285,14 +1452,40 @@ fn action_text_button(
             "Stage all" => "changes-stage-all".to_owned(),
             "Expand All" => "changes-expand-all".to_owned(),
             "Collapse All" => "changes-collapse-all".to_owned(),
+            "Open diff" => "changes-open-diff".to_owned(),
+            "Resolve in terminal" => "changes-resolve".to_owned(),
             _ => format!("changes-action-{label}"),
         })
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
-        .text_size(px(11.5))
+        .px(theme.spacing.titlebar_control_spacing)
+        .py(theme.spacing.titlebar_control_spacing)
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.caption2)
         .text_color(theme.title)
         .hover(|style| style.bg(theme.row_hover))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            on_click(cx);
+        })
+        .child(label)
+}
+
+fn section_action_button(
+    label: &'static str,
+    id: String,
+    theme: Theme,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id.clone())
+        .debug_selector(move || id.clone())
+        // The token layer has no compact-section-action padding yet; use its
+        // titlebar spacing as the nearest COSMIC control rhythm.
+        .px(theme.spacing.titlebar_control_spacing)
+        .py(theme.spacing.titlebar_control_spacing)
+        .rounded(theme.radii.control)
+        .text_size(px(10.5))
+        .text_color(theme.subtitle)
+        .hover(|style| style.bg(theme.row_hover).text_color(theme.title))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             on_click(cx);
@@ -2129,6 +2322,36 @@ mod tests {
         );
     }
 
+    /// F-CHG-11: the Staged section owns an Unstage all action, and that
+    /// action uses the same free per-path `tiller_git::unstage` API as rows.
+    #[gpui::test]
+    async fn drawn_staged_section_unstage_all_moves_every_file_back(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("first.txt"), "first\n").expect("write first file");
+        std::fs::write(dir.0.join("second.txt"), "second\n").expect("write second file");
+        git(&dir.0, &["add", "-A"]);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Staged") == 2);
+        cx.cx.run_until_parked();
+        let unstage_all = cx
+            .debug_bounds("changes-section-staged-all")
+            .expect("the Staged section draws Unstage all");
+        cx.simulate_click(unstage_all.center(), Modifiers::none());
+        wait_for_tab(&cx, &tab, |tab| {
+            section_count(tab, "Staged") == 0 && section_count(tab, "Untracked") == 2
+        });
+
+        assert!(
+            status(&dir.0)
+                .expect("status after Unstage all")
+                .staged()
+                .is_empty(),
+            "Unstage all moves every staged file back to the worktree"
+        );
+    }
+
     /// Expand All / Collapse All (orca's diff-header affordance): both are
     /// drawn toolbar buttons that drive the whole list — every file row
     /// opens its diff (including its collapsed-context bands) and then
@@ -2321,6 +2544,146 @@ mod tests {
                         && message.contains("fatal: no such file")
             ),
             "the expanded row names the failure instead of rendering nothing"
+        );
+    }
+
+    /// F-CHG-18: textual diffs expose the exact path and unified text that a
+    /// terminal drop target receives; binary diffs deliberately do not.
+    #[test]
+    fn a_textual_diff_builds_the_terminal_drag_payload() {
+        let diff = FileDiff {
+            path: PathBuf::from("src/conflicted file.txt"),
+            hunks: vec![tiller_git::Hunk {
+                header: "@@ -1 +1 @@".to_string(),
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![
+                    DiffLine {
+                        origin: DiffOrigin::Deletion,
+                        old_line_number: Some(1),
+                        new_line_number: None,
+                        content: "old".to_string(),
+                    },
+                    DiffLine {
+                        origin: DiffOrigin::Addition,
+                        old_line_number: None,
+                        new_line_number: Some(1),
+                        content: "new".to_string(),
+                    },
+                ],
+            }],
+            additions: 1,
+            deletions: 1,
+            is_binary: false,
+            is_submodule: false,
+        };
+
+        assert_eq!(
+            diff_payload(&diff),
+            Some((
+                PathBuf::from("src/conflicted file.txt"),
+                "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            ))
+        );
+    }
+
+    /// F-CHG-13: an expanded changed-file row exposes Open diff as a typed
+    /// host action instead of silently duplicating the inline expansion.
+    #[gpui::test]
+    async fn clicking_a_drawn_open_diff_action_emits_the_changed_path(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&tab, move |_, event: &ChangesTabActionEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let open_diff = cx
+            .debug_bounds("changes-open-diff")
+            .expect("Open diff is drawn in the expanded row");
+        cx.simulate_click(open_diff.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[ChangesTabActionEvent::OpenDiff(PathBuf::from(
+                "tracked.txt"
+            ))],
+            "Open diff emits the repo-relative changed path"
+        );
+    }
+
+    /// F-CHG-16: the conflict action emits the exact path that the host must
+    /// pass to `TerminalView::for_conflict`.
+    #[gpui::test]
+    async fn clicking_a_drawn_conflict_resolve_action_emits_the_exact_path(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let path = PathBuf::from("src/conflicted file.txt");
+        let window = cx.add_window(|_window, _cx| ChangesTab {
+            repo_root: PathBuf::from("/repo"),
+            entries: vec![StatusEntry {
+                path: path.clone(),
+                original_path: None,
+                index_status: Some(StatusKind::Unmerged),
+                worktree_status: Some(StatusKind::Unmerged),
+            }],
+            diffs: HashMap::new(),
+            stats: HashMap::new(),
+            expanded_changes: HashSet::from([
+                (ChangeSection::Staged, path.clone()),
+                (ChangeSection::Changed, path.clone()),
+            ]),
+            collapsed_sections: HashSet::new(),
+            expanded_bands: HashSet::new(),
+            git_task: None,
+            git_error: None,
+            diff_errors: HashMap::new(),
+            refresh_started: false,
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, _| {
+            window
+                .root::<ChangesTab>()
+                .flatten()
+                .expect("changes tab root")
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&tab, move |_, event: &ChangesTabActionEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+
+        let resolve = cx
+            .debug_bounds("changes-resolve")
+            .expect("conflicted file draws Resolve in terminal");
+        cx.simulate_click(resolve.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[ChangesTabActionEvent::ResolveInTerminal(path)],
+            "the terminal seam receives the exact conflicted path"
         );
     }
 }

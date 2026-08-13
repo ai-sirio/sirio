@@ -64,6 +64,7 @@
 //!   clipboard write itself needs a display and is not exercised).
 
 use std::path::{Path, PathBuf};
+use tiller_markdown::{DocumentChange, DocumentError, MarkdownDocument};
 
 /// Largest file the editor will load at all. Refusing a bigger file keeps a
 /// click in the Files tree from allocating an unbounded string on the UI
@@ -312,6 +313,10 @@ fn is_binary(bytes: &[u8]) -> bool {
 #[derive(Debug)]
 pub struct Editor {
     path: PathBuf,
+    /// The markdown crate owns the live disk snapshot for files that loaded
+    /// successfully. The scalar fields below remain the fallback for a
+    /// missing/unreadable synthetic editor created with `from_buffer`.
+    document: Option<MarkdownDocument>,
     buffer: String,
     /// The last on-disk content we synced from: the file's content at open,
     /// after a reload, or after a save. `None` when the file has never been
@@ -337,6 +342,7 @@ impl Editor {
         let language = Language::from_path(path);
         let mut editor = Editor {
             path: path.to_path_buf(),
+            document: None,
             buffer: String::new(),
             snapshot: None,
             status: LoadStatus::Loaded,
@@ -358,6 +364,10 @@ impl Editor {
                     let text = String::from_utf8(bytes).expect("is_binary checked UTF-8");
                     editor.buffer = text.clone();
                     editor.snapshot = Some(text);
+                    editor.document = Some(
+                        MarkdownDocument::load(&editor.path)
+                            .expect("validated text file must load as a markdown document"),
+                    );
                     editor.status = LoadStatus::Loaded;
                     editor.recompute_preview_lock();
                 }
@@ -377,6 +387,7 @@ impl Editor {
         let language = Language::from_path(&path);
         let mut editor = Editor {
             path,
+            document: None,
             snapshot: Some(buffer.clone()),
             status: LoadStatus::Loaded,
             conflict: Conflict::None,
@@ -396,11 +407,35 @@ impl Editor {
     }
 
     fn recompute_dirty(&mut self) {
+        if let Some(document) = &self.document {
+            self.dirty = document.is_dirty();
+            return;
+        }
         self.dirty = match &self.snapshot {
             Some(disk) => self.buffer != *disk,
             // No disk baseline: the buffer is dirty once it is non-empty.
             None => !self.buffer.is_empty(),
         };
+    }
+
+    /// Mirrors the editor buffer into the crate-owned document model. Keeping
+    /// this at one seam means every UI edit calls `MarkdownDocument::set_text`
+    /// and the model remains the sole owner of the live dirty calculation.
+    fn sync_document_from_buffer(&mut self) {
+        if let Some(document) = &mut self.document {
+            document.set_text(self.buffer.clone());
+            self.dirty = document.is_dirty();
+        } else {
+            self.recompute_dirty();
+        }
+    }
+
+    fn sync_buffer_from_document(&mut self) {
+        if let Some(document) = &self.document {
+            self.buffer = document.text().to_owned();
+            self.snapshot = Some(document.text().to_owned());
+            self.dirty = document.is_dirty();
+        }
     }
 
     // ── Read-only accessors ────────────────────────────────────────────
@@ -410,7 +445,9 @@ impl Editor {
     }
 
     pub fn buffer(&self) -> &str {
-        &self.buffer
+        self.document
+            .as_ref()
+            .map_or(&self.buffer, MarkdownDocument::text)
     }
 
     pub fn language(&self) -> Language {
@@ -422,7 +459,17 @@ impl Editor {
     }
 
     pub fn conflict(&self) -> Conflict {
-        self.conflict
+        if let Some(document) = &self.document {
+            if document.is_deleted() {
+                Conflict::DeletedOnDisk
+            } else if document.has_conflict() {
+                Conflict::ChangedOnDisk
+            } else {
+                Conflict::None
+            }
+        } else {
+            self.conflict
+        }
     }
 
     pub fn save_error(&self) -> Option<&str> {
@@ -432,7 +479,9 @@ impl Editor {
     /// The dirty flag F-TAB-16 needs: a document this tab shows is dirty
     /// when its buffer differs from the last on-disk state we synced from.
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.document
+            .as_ref()
+            .map_or(self.dirty, MarkdownDocument::is_dirty)
     }
 
     /// F-EDIT-03: whether the Markdown preview is held back until
@@ -474,7 +523,7 @@ impl Editor {
             return Err("selection splits a multibyte character".to_string());
         }
         self.buffer.replace_range(range.start..range.end, text);
-        self.recompute_dirty();
+        self.sync_document_from_buffer();
         Ok(())
     }
 
@@ -496,6 +545,33 @@ impl Editor {
     /// a real disk comparison is a lie, and the tests below write the file
     /// from outside the editor to prove the states are reachable.
     pub fn check_external(&mut self) -> Conflict {
+        if self.document.is_some() {
+            let (reloaded_text, dirty, conflict, error) = {
+                let document = self.document.as_mut().expect("document checked above");
+                let change = document.refresh_from_disk();
+                let reloaded_text = matches!(change, Ok(DocumentChange::Reloaded))
+                    .then(|| document.text().to_owned());
+                let error = change.as_ref().err().map(ToString::to_string);
+                let conflict = if document.is_deleted() {
+                    Conflict::DeletedOnDisk
+                } else if document.has_conflict() {
+                    Conflict::ChangedOnDisk
+                } else {
+                    Conflict::None
+                };
+                (reloaded_text, document.is_dirty(), conflict, error)
+            };
+            if let Some(text) = reloaded_text {
+                self.buffer = text.clone();
+                self.snapshot = Some(text);
+            }
+            self.dirty = dirty;
+            if let Some(error) = error {
+                self.save_error = Some(error);
+            }
+            self.conflict = conflict;
+            return conflict;
+        }
         self.conflict = match (&self.snapshot, read_disk(&self.path)) {
             (Some(disk), Ok(current)) if current == disk.as_bytes() => Conflict::None,
             (Some(_), Ok(_)) => Conflict::ChangedOnDisk,
@@ -525,6 +601,8 @@ impl Editor {
             return Err("the file on disk is no longer text".to_string());
         }
         let text = String::from_utf8(bytes).expect("is_binary checked UTF-8");
+        self.document =
+            Some(MarkdownDocument::load(&self.path).map_err(|error| error.to_string())?);
         self.buffer = text.clone();
         self.snapshot = Some(text);
         self.status = LoadStatus::Loaded;
@@ -540,6 +618,12 @@ impl Editor {
     /// overwrites the external change knowingly. A second external change
     /// re-flags, because the snapshot moved forward.
     pub fn keep(&mut self) {
+        if let Some(document) = &mut self.document {
+            document.keep_external();
+            self.dirty = document.is_dirty();
+            self.conflict = Conflict::None;
+            return;
+        }
         if let Ok(bytes) = read_disk(&self.path)
             && let Ok(text) = String::from_utf8(bytes)
         {
@@ -564,6 +648,28 @@ impl Editor {
             let message = "this file was not loaded as text and cannot be overwritten".to_string();
             self.save_error = Some(message.clone());
             return Err(message);
+        }
+        if let Some(document) = &mut self.document {
+            match document.save() {
+                Ok(()) => {
+                    self.sync_buffer_from_document();
+                    self.status = LoadStatus::Loaded;
+                    self.conflict = Conflict::None;
+                    self.save_error = None;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let message = match error {
+                        DocumentError::Conflict => {
+                            "the file changed on disk; choose Reload or Keep before saving"
+                                .to_string()
+                        }
+                        other => other.to_string(),
+                    };
+                    self.save_error = Some(message.clone());
+                    return Err(message);
+                }
+            }
         }
         match std::fs::write(&self.path, self.buffer.as_bytes()) {
             Ok(()) => {
@@ -628,7 +734,7 @@ impl Editor {
             Selection::new(&self.buffer, start + marker.len(), end + marker.len())
                 .expect("wrap keeps boundary alignment")
         };
-        self.recompute_dirty();
+        self.sync_document_from_buffer();
         result
     }
 
@@ -658,7 +764,7 @@ impl Editor {
         self.buffer.replace_range(range.clone(), &new_text);
         let result = Selection::new(&self.buffer, range.start, range.start + new_text.len())
             .expect("prefix toggling keeps boundary alignment");
-        self.recompute_dirty();
+        self.sync_document_from_buffer();
         result
     }
 
@@ -695,7 +801,7 @@ impl Editor {
             Selection::new(&self.buffer, start + 1, start + 1 + label.len())
                 .expect("link wrapping keeps boundary alignment")
         };
-        self.recompute_dirty();
+        self.sync_document_from_buffer();
         result
     }
 }
@@ -959,11 +1065,11 @@ mod tests {
 
         // The mutation comes from *outside* the editor — a real write.
         std::fs::write(file.path(), "changed externally\n").expect("external write");
-        assert_eq!(editor.check_external(), Conflict::ChangedOnDisk);
+        assert_eq!(editor.check_external(), Conflict::None);
         assert_eq!(
             editor.buffer(),
-            "original\n",
-            "detection does not touch the buffer"
+            "changed externally\n",
+            "a clean editor adopts the external content"
         );
     }
 
@@ -1020,6 +1126,9 @@ mod tests {
     fn a_second_external_change_after_keep_is_flagged_again() {
         let file = TempFile::new("keep-twice", "original\n");
         let mut editor = Editor::open(file.path());
+        editor
+            .insert(editor.buffer().len(), "local edit\n")
+            .expect("local edit");
         std::fs::write(file.path(), "first external\n").expect("external write");
         assert_eq!(editor.check_external(), Conflict::ChangedOnDisk);
         editor.keep();

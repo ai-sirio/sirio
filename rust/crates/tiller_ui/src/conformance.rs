@@ -48,6 +48,10 @@
 //!   reference freezes the range, not a default.
 //! - **Icons are sized by the iconography scale (9–16px), not the type
 //!   scale**: glyph `text_size` calls are not type-scale members.
+//! - **The top bar is 38px (`BrowserChrome::bar_height`), not the 48px
+//!   `spacing.title_strip_height`** (P76): comet's own measured row, not
+//!   waku's. `title_strip_height` is unchanged and still governs the other
+//!   48px app bars; the top bar simply is not one of them anymore.
 //!
 //! # Drift fixed in P32 (was in the code, nobody had decided it)
 //!
@@ -73,7 +77,6 @@ use crate::sidebar::{
     ROW_V_PADDING,
 };
 use crate::status_bar;
-use crate::titlebar::{CONTROL_GAP, CONTROL_SIZE, HEIGHT, TRAFFIC_LIGHT_INSET};
 
 /// Channel-wise compare against a `0xRRGGBB` opaque hex, tight epsilon.
 fn expect_hex(actual: Rgba, hex: u32, label: &str) {
@@ -172,15 +175,45 @@ fn radii_come_from_the_measured_token_set() {
 /// the density scale.
 #[test]
 fn bars_and_rows_use_the_measured_density() {
-    let spacing = Theme::dark().spacing;
+    let theme = Theme::dark();
+    let spacing = theme.spacing;
+    let chrome = theme.browser_chrome;
 
     assert_eq!(spacing.title_strip_height, px(48.0), "48px app bars");
-    assert_eq!(HEIGHT, 48.0, "titlebar is the 48px bar");
-    assert_eq!(CONTROL_SIZE, 26.0, "header controls 26px");
-    assert_eq!(CONTROL_GAP, 6.0, "header gaps 6px");
     assert_eq!(
-        TRAFFIC_LIGHT_INSET, 14.0,
-        "waku's header inset (no traffic lights on Linux)"
+        chrome.bar_height,
+        px(38.0),
+        "the top bar is comet's measured 38px row, not waku's 48px (P76)"
+    );
+    assert_eq!(
+        spacing.compact_action,
+        px(24.0),
+        "cluster buttons are the 24px compact-action token"
+    );
+    assert_eq!(
+        chrome.cluster_button_gap,
+        px(2.0),
+        "cluster button gap is comet's own CLUSTER_BUTTONS_WIDTH measurement"
+    );
+    assert_eq!(
+        chrome.traffic_light_diameter,
+        px(12.0),
+        "traffic lights are 12px circles, independently derived from bar_height"
+    );
+    assert_eq!(
+        chrome.traffic_light_gap,
+        px(8.0),
+        "12+8=20px pitch between lights"
+    );
+    assert_eq!(
+        chrome.traffic_light_inset,
+        px(10.0),
+        "traffic-light inset reuses comet's own non-macOS cluster-start baseline, not macOS's 14px"
+    );
+    assert_eq!(
+        chrome.cluster_start(),
+        px(70.0),
+        "cluster start is derived (10 + 3*12 + 2*8 + 8), between comet's own 10px (no lights) and 88px (macOS lights) boundary numbers, not copied from either"
     );
 
     assert_eq!(spacing.bottom_bar_height, px(40.0), "waku's 40px footer");

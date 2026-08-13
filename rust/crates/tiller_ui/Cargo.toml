@@ -15,11 +15,15 @@ tiller_markdown.workspace = true
 tiller_project.workspace = true
 tiller_agents.workspace = true
 tiller_usage = { path = "../tiller_usage" }
+base64 = "0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Same crates gpui uses, at the same versions, so a `RenderImage` can be
 # built here without a second copy of the types.
 image = { version = "0.25.10", default-features = false }
 smallvec.workspace = true
+# F-PRJ-16: grapheme-cluster-correct single-emoji validation. Already
+# resolved transitively at this version; promoted to a direct dependency.
+unicode-segmentation = "1.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # SF Symbol rasterization (NSImage -> bitmap); macOS-only, so the rest of
@@ -37,6 +41,14 @@ objc2-foundation = { version = "0.3", features = [
     "NSGeometry",
     "objc2-core-foundation",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# B-02 browser surface: WebKitGTK in a native X11 child window. GTK/WebKit
+# development headers are an explicit Linux build prerequisite; no custom
+# PKG_CONFIG_PATH or repository-local sysroot is supported.
+gtk = "0.18.2"
+raw-window-handle = "0.6.2"
+wry = "0.56.1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

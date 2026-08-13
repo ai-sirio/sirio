@@ -56,53 +56,81 @@ mod sfsymbol;
 /// [`TillerAssets`]; `svg` is the embedded byte payload; on macOS
 /// [`Icon::system_symbol`] additionally names the SF Symbol that replaces
 /// the SVG for that icon.
+///
+/// # P76 — comet replaces Phosphor as the generic-icon source
+///
+/// `docs/linux-rewrite/tasks/P76-the-comet-top-bar-and-icon-set.md` swaps 14
+/// of these from Tiller's original vendored Phosphor *thin* set to
+/// `rust/assets/icons/comet/` (63 SVGs, MIT, Copyright (c) 2026 Wing,
+/// `assets/icons/comet/ATTRIBUTION.md`) — a *replacement*, not an addition:
+/// mixing the two families reads as an unfinished port. Three variants keep
+/// their Phosphor SVG because comet ships no equivalent shape at all
+/// (`Sparkles`, `Shield`, `SunMoon` — no sparkle/shield/sun glyph anywhere
+/// in the 63); two more keep their existing brand-mark asset on purpose —
+/// see `has_own_colours` and each variant's own doc comment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
-    /// A project directory (SF `folder.fill`, Phosphor `folder-fill`).
+    /// A project directory (SF `folder.fill`, comet `folder`).
     FolderFill,
-    /// A git worktree (Phosphor `git-branch-thin`; no SF equivalent in the
+    /// A git worktree (comet `git-branch`; no SF equivalent in the
     /// reference app).
     GitBranch,
-    /// A chat surface (SF `bubble.left`, Phosphor `chat-circle-thin`).
+    /// A chat surface (SF `bubble.left`, comet `chat-round-line`).
     MessageSquare,
-    /// A terminal surface (SF `terminal`, Phosphor `terminal-window-thin`).
+    /// A terminal surface (SF `terminal`, comet `terminal`).
     SquareTerminal,
-    /// Close (SF `xmark`, Phosphor `x-thin`).
+    /// Close (SF `xmark`, comet `close`).
     Close,
-    /// Collapse (SF `chevron.down`, Phosphor `caret-down-thin`).
+    /// Collapse (SF `chevron.down`, comet `alt-arrow-down`).
     ChevronDown,
-    /// Expand (SF `chevron.right`, Phosphor `caret-right-thin`).
+    /// Expand (SF `chevron.right`, comet `alt-arrow-right`).
     ChevronRight,
-    /// Back (SF `chevron.left`, Phosphor `caret-left-thin`).
+    /// Back (SF `chevron.left`, comet `alt-arrow-left`).
     ChevronLeft,
-    /// Settings gear (SF `gearshape`, Phosphor `gear-thin`).
+    /// Settings gear (SF `gearshape`, comet `settings-minimalistic`).
     Settings,
-    /// Refresh (SF `arrow.clockwise`, Phosphor `arrow-clockwise-thin`).
+    /// Refresh (SF `arrow.clockwise`, comet `refresh`).
     RefreshCw,
-    /// Add (SF `plus`, Phosphor `plus-thin`).
+    /// Add (SF `plus`, comet `plus`).
     Plus,
-    /// A generic file (SF `doc.text`, Phosphor `file-thin`).
+    /// A generic file (SF `doc.text`, comet `document`).
     File,
-    /// AI providers (Phosphor `sparkle-thin`).
+    /// AI providers. **No comet equivalent** (no sparkle glyph in the
+    /// 63-icon set) — stays Phosphor `sparkle-thin`, declared, not a silent
+    /// leftover.
     Sparkles,
-    /// Permissions (Phosphor `shield-thin`).
+    /// Permissions. **No comet equivalent** — stays Phosphor `shield-thin`.
     Shield,
-    /// Appearance (Phosphor `sun-dim-thin`).
+    /// Appearance. **No comet equivalent** — stays Phosphor `sun-dim-thin`.
     SunMoon,
-    /// A browser surface (SF `globe`, Phosphor `globe-thin`).
+    /// A browser surface (SF `globe`, comet `global`).
     Globe,
-    /// Anthropic's sunburst mark (SVG Logos, CC0) — full colour.
+    /// Anthropic's mark — comet's `claude-mark.svg`, `fill="currentColor"`
+    /// (monochrome, unlike Tiller's old chromatic sunburst asset it
+    /// replaces) — see `has_own_colours`.
     ClaudeCode,
-    /// OpenAI's knot mark (SVG Logos, CC0) — monochrome, like the Swift
-    /// app's `.primary` rendering.
+    /// OpenAI's mark — comet's `openai-mark.svg`, monochrome, like the
+    /// Swift app's `.primary` rendering.
     Codex,
-    /// OpenCode's mark (simple-icons, CC0) — monochrome.
+    /// OpenCode's mark (simple-icons, CC0) — monochrome. **No comet
+    /// equivalent** (comet ships no opencode mark) — brand identity, not
+    /// set iconography, so it stays put rather than being dropped.
     OpenCode,
-    /// Pi's monogram, ported from `App/AgentIcon.swift` — monochrome.
+    /// Pi's monogram — comet's `pi-mark.svg`, monochrome.
     Pi,
     /// Oh-My-Pi's mark with the pink→purple→cyan gradient, ported from
-    /// `App/AgentIcon.swift` — full colour.
+    /// `App/AgentIcon.swift` — full colour. **No comet equivalent** (comet
+    /// ships no omp mark) — kept for the same brand-identity reason as
+    /// `OpenCode`.
     OhMyPi,
+    /// Left-sidebar toggle (comet `sidebar-minimalistic-left` — "the exact
+    /// sidebar toggle in the screenshot"; P76's titlebar cluster). No SF
+    /// mapping: this variant did not exist before P76.
+    SidebarLeft,
+    /// Right-panel toggle (comet `sidebar-minimalistic`, the same shape
+    /// mirrored — its divider sits on the opposite side, see the SVG diff
+    /// in the P76 report). No SF mapping.
+    PanelRight,
 }
 
 /// The SF Symbol that replaces this icon's SVG on macOS, if any. This is
@@ -131,7 +159,9 @@ pub fn system_symbol(icon: Icon) -> Option<&'static str> {
         | Icon::Codex
         | Icon::OpenCode
         | Icon::Pi
-        | Icon::OhMyPi => None,
+        | Icon::OhMyPi
+        | Icon::SidebarLeft
+        | Icon::PanelRight => None,
     }
 }
 
@@ -139,56 +169,68 @@ impl Icon {
     /// The asset path (also the file name inside `rust/assets/icons`).
     pub fn path(self) -> &'static str {
         match self {
-            Icon::FolderFill => "icons/folder-fill.svg",
-            Icon::GitBranch => "icons/git-branch-thin.svg",
-            Icon::MessageSquare => "icons/chat-circle-thin.svg",
-            Icon::SquareTerminal => "icons/terminal-window-thin.svg",
-            Icon::Close => "icons/x-thin.svg",
-            Icon::ChevronDown => "icons/caret-down-thin.svg",
-            Icon::ChevronRight => "icons/caret-right-thin.svg",
-            Icon::ChevronLeft => "icons/caret-left-thin.svg",
-            Icon::Settings => "icons/gear-thin.svg",
-            Icon::RefreshCw => "icons/arrow-clockwise-thin.svg",
-            Icon::Plus => "icons/plus-thin.svg",
-            Icon::File => "icons/file-thin.svg",
+            Icon::FolderFill => "icons/comet/folder.svg",
+            Icon::GitBranch => "icons/comet/git-branch.svg",
+            Icon::MessageSquare => "icons/comet/chat-round-line.svg",
+            Icon::SquareTerminal => "icons/comet/terminal.svg",
+            Icon::Close => "icons/comet/close.svg",
+            Icon::ChevronDown => "icons/comet/alt-arrow-down.svg",
+            Icon::ChevronRight => "icons/comet/alt-arrow-right.svg",
+            Icon::ChevronLeft => "icons/comet/alt-arrow-left.svg",
+            Icon::Settings => "icons/comet/settings-minimalistic.svg",
+            Icon::RefreshCw => "icons/comet/refresh.svg",
+            Icon::Plus => "icons/comet/plus.svg",
+            Icon::File => "icons/comet/document.svg",
             Icon::Sparkles => "icons/sparkle-thin.svg",
             Icon::Shield => "icons/shield-thin.svg",
             Icon::SunMoon => "icons/sun-dim-thin.svg",
-            Icon::Globe => "icons/globe-thin.svg",
-            Icon::ClaudeCode => "icons/agent-claude.svg",
-            Icon::Codex => "icons/agent-codex.svg",
+            Icon::Globe => "icons/comet/global.svg",
+            Icon::ClaudeCode => "icons/comet/claude-mark.svg",
+            Icon::Codex => "icons/comet/openai-mark.svg",
             Icon::OpenCode => "icons/agent-opencode.svg",
-            Icon::Pi => "icons/agent-pi.svg",
+            Icon::Pi => "icons/comet/pi-mark.svg",
             Icon::OhMyPi => "icons/agent-omp.svg",
+            Icon::SidebarLeft => "icons/comet/sidebar-minimalistic-left.svg",
+            Icon::PanelRight => "icons/comet/sidebar-minimalistic.svg",
         }
     }
 
     /// The embedded SVG payload.
     pub fn svg(self) -> &'static [u8] {
         match self {
-            Icon::FolderFill => include_bytes!("../../../assets/icons/folder-fill.svg"),
-            Icon::GitBranch => include_bytes!("../../../assets/icons/git-branch-thin.svg"),
-            Icon::MessageSquare => include_bytes!("../../../assets/icons/chat-circle-thin.svg"),
-            Icon::SquareTerminal => {
-                include_bytes!("../../../assets/icons/terminal-window-thin.svg")
+            Icon::FolderFill => include_bytes!("../../../assets/icons/comet/folder.svg"),
+            Icon::GitBranch => include_bytes!("../../../assets/icons/comet/git-branch.svg"),
+            Icon::MessageSquare => {
+                include_bytes!("../../../assets/icons/comet/chat-round-line.svg")
             }
-            Icon::Close => include_bytes!("../../../assets/icons/x-thin.svg"),
-            Icon::ChevronDown => include_bytes!("../../../assets/icons/caret-down-thin.svg"),
-            Icon::ChevronRight => include_bytes!("../../../assets/icons/caret-right-thin.svg"),
-            Icon::ChevronLeft => include_bytes!("../../../assets/icons/caret-left-thin.svg"),
-            Icon::Settings => include_bytes!("../../../assets/icons/gear-thin.svg"),
-            Icon::RefreshCw => include_bytes!("../../../assets/icons/arrow-clockwise-thin.svg"),
-            Icon::Plus => include_bytes!("../../../assets/icons/plus-thin.svg"),
-            Icon::File => include_bytes!("../../../assets/icons/file-thin.svg"),
+            Icon::SquareTerminal => include_bytes!("../../../assets/icons/comet/terminal.svg"),
+            Icon::Close => include_bytes!("../../../assets/icons/comet/close.svg"),
+            Icon::ChevronDown => include_bytes!("../../../assets/icons/comet/alt-arrow-down.svg"),
+            Icon::ChevronRight => {
+                include_bytes!("../../../assets/icons/comet/alt-arrow-right.svg")
+            }
+            Icon::ChevronLeft => include_bytes!("../../../assets/icons/comet/alt-arrow-left.svg"),
+            Icon::Settings => {
+                include_bytes!("../../../assets/icons/comet/settings-minimalistic.svg")
+            }
+            Icon::RefreshCw => include_bytes!("../../../assets/icons/comet/refresh.svg"),
+            Icon::Plus => include_bytes!("../../../assets/icons/comet/plus.svg"),
+            Icon::File => include_bytes!("../../../assets/icons/comet/document.svg"),
             Icon::Sparkles => include_bytes!("../../../assets/icons/sparkle-thin.svg"),
             Icon::Shield => include_bytes!("../../../assets/icons/shield-thin.svg"),
             Icon::SunMoon => include_bytes!("../../../assets/icons/sun-dim-thin.svg"),
-            Icon::Globe => include_bytes!("../../../assets/icons/globe-thin.svg"),
-            Icon::ClaudeCode => include_bytes!("../../../assets/icons/agent-claude.svg"),
-            Icon::Codex => include_bytes!("../../../assets/icons/agent-codex.svg"),
+            Icon::Globe => include_bytes!("../../../assets/icons/comet/global.svg"),
+            Icon::ClaudeCode => include_bytes!("../../../assets/icons/comet/claude-mark.svg"),
+            Icon::Codex => include_bytes!("../../../assets/icons/comet/openai-mark.svg"),
             Icon::OpenCode => include_bytes!("../../../assets/icons/agent-opencode.svg"),
-            Icon::Pi => include_bytes!("../../../assets/icons/agent-pi.svg"),
+            Icon::Pi => include_bytes!("../../../assets/icons/comet/pi-mark.svg"),
             Icon::OhMyPi => include_bytes!("../../../assets/icons/agent-omp.svg"),
+            Icon::SidebarLeft => {
+                include_bytes!("../../../assets/icons/comet/sidebar-minimalistic-left.svg")
+            }
+            Icon::PanelRight => {
+                include_bytes!("../../../assets/icons/comet/sidebar-minimalistic.svg")
+            }
         }
     }
 
@@ -202,13 +244,18 @@ impl Icon {
         )
     }
 
-    /// Whether the mark carries its own chromatic colours (the Anthropic
-    /// sunburst, omp's gradient). Such marks are painted full-colour and
-    /// never tinted by the theme; the remaining marks are monochrome by
-    /// design and follow the tinted path, exactly as the Swift app renders
-    /// them with `.primary`.
+    /// Whether the mark carries its own chromatic colours (omp's gradient).
+    /// Such marks are painted full-colour and never tinted by the theme;
+    /// the remaining marks are monochrome by design and follow the tinted
+    /// path, exactly as the Swift app renders them with `.primary`.
+    ///
+    /// `ClaudeCode` **left this set in P76**: comet's `claude-mark.svg` is
+    /// `fill="currentColor"` — monochrome, unlike Tiller's old chromatic
+    /// Anthropic-sunburst asset it replaces — so it now tints like `Codex`
+    /// and `Pi` instead of painting full-colour. `OhMyPi` keeps its
+    /// original chromatic asset (comet ships no omp mark) and stays here.
     pub fn has_own_colours(self) -> bool {
-        matches!(self, Icon::ClaudeCode | Icon::OhMyPi)
+        matches!(self, Icon::OhMyPi)
     }
 
     /// Resolves the stable icon for a catalog agent id.
@@ -517,27 +564,29 @@ pub struct TillerAssets;
 impl AssetSource for TillerAssets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
         let icon = match path {
-            "icons/folder-fill.svg" => Icon::FolderFill,
-            "icons/git-branch-thin.svg" => Icon::GitBranch,
-            "icons/chat-circle-thin.svg" => Icon::MessageSquare,
-            "icons/terminal-window-thin.svg" => Icon::SquareTerminal,
-            "icons/x-thin.svg" => Icon::Close,
-            "icons/caret-down-thin.svg" => Icon::ChevronDown,
-            "icons/caret-right-thin.svg" => Icon::ChevronRight,
-            "icons/caret-left-thin.svg" => Icon::ChevronLeft,
-            "icons/gear-thin.svg" => Icon::Settings,
-            "icons/arrow-clockwise-thin.svg" => Icon::RefreshCw,
-            "icons/plus-thin.svg" => Icon::Plus,
-            "icons/file-thin.svg" => Icon::File,
+            "icons/comet/folder.svg" => Icon::FolderFill,
+            "icons/comet/git-branch.svg" => Icon::GitBranch,
+            "icons/comet/chat-round-line.svg" => Icon::MessageSquare,
+            "icons/comet/terminal.svg" => Icon::SquareTerminal,
+            "icons/comet/close.svg" => Icon::Close,
+            "icons/comet/alt-arrow-down.svg" => Icon::ChevronDown,
+            "icons/comet/alt-arrow-right.svg" => Icon::ChevronRight,
+            "icons/comet/alt-arrow-left.svg" => Icon::ChevronLeft,
+            "icons/comet/settings-minimalistic.svg" => Icon::Settings,
+            "icons/comet/refresh.svg" => Icon::RefreshCw,
+            "icons/comet/plus.svg" => Icon::Plus,
+            "icons/comet/document.svg" => Icon::File,
             "icons/sparkle-thin.svg" => Icon::Sparkles,
             "icons/shield-thin.svg" => Icon::Shield,
             "icons/sun-dim-thin.svg" => Icon::SunMoon,
-            "icons/globe-thin.svg" => Icon::Globe,
-            "icons/agent-claude.svg" => Icon::ClaudeCode,
-            "icons/agent-codex.svg" => Icon::Codex,
+            "icons/comet/global.svg" => Icon::Globe,
+            "icons/comet/claude-mark.svg" => Icon::ClaudeCode,
+            "icons/comet/openai-mark.svg" => Icon::Codex,
             "icons/agent-opencode.svg" => Icon::OpenCode,
-            "icons/agent-pi.svg" => Icon::Pi,
+            "icons/comet/pi-mark.svg" => Icon::Pi,
             "icons/agent-omp.svg" => Icon::OhMyPi,
+            "icons/comet/sidebar-minimalistic-left.svg" => Icon::SidebarLeft,
+            "icons/comet/sidebar-minimalistic.svg" => Icon::PanelRight,
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(icon.svg())))
@@ -553,7 +602,7 @@ impl AssetSource for TillerAssets {
 }
 
 /// Every icon, used by [`TillerAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 21] = [
+pub const ALL_ICONS: [Icon; 23] = [
     Icon::FolderFill,
     Icon::GitBranch,
     Icon::MessageSquare,
@@ -575,6 +624,8 @@ pub const ALL_ICONS: [Icon; 21] = [
     Icon::OpenCode,
     Icon::Pi,
     Icon::OhMyPi,
+    Icon::SidebarLeft,
+    Icon::PanelRight,
 ];
 
 #[cfg(test)]
@@ -645,20 +696,11 @@ mod tests {
 
     #[test]
     fn chromatic_marks_carry_their_own_colours() {
-        // The Anthropic sunburst and omp's gradient must be baked into the
-        // SVG, never resolved through currentColor: a theme tint must not
-        // be able to recolour a brand mark. The monochrome marks (Codex,
-        // OpenCode, Pi) are exempt by design — the Swift app renders those
-        // with `.primary`.
-        let claude = std::str::from_utf8(Icon::ClaudeCode.svg()).expect("utf-8");
-        assert!(
-            claude.contains("#d97757"),
-            "the sunburst carries the Anthropic orange"
-        );
-        assert!(
-            !claude.contains("currentColor"),
-            "the sunburst must not resolve through the theme tint"
-        );
+        // Only omp's gradient stays chromatic post-P76: comet ships no omp
+        // mark, so it keeps the original full-colour asset, baked in and
+        // never resolved through currentColor. ClaudeCode left this group
+        // in P76 — comet's claude-mark.svg is `fill="currentColor"`,
+        // monochrome — see `monochrome_marks_keep_the_reference_shapes`.
         let omp = std::str::from_utf8(Icon::OhMyPi.svg()).expect("utf-8");
         assert!(omp.contains("linearGradient"), "omp is a gradient mark");
         assert!(omp.contains("#ED4ABF") && omp.contains("#9B4DFF") && omp.contains("#5AD8E6"));
@@ -666,21 +708,38 @@ mod tests {
             !omp.contains("currentColor"),
             "omp must not resolve through the theme tint"
         );
+        assert!(
+            !Icon::ClaudeCode.has_own_colours(),
+            "claude-mark.svg is monochrome — must not take the full-colour path"
+        );
     }
 
     #[test]
     fn monochrome_marks_keep_the_reference_shapes() {
-        // Codex's knot and OpenCode's frame must not accidentally become
-        // the currentColor-tinted generic glyphs they replaced.
+        // Codex, ClaudeCode and Pi resolve through currentColor and must
+        // not carry a baked-in colour that would fight the theme tint.
+        let claude = std::str::from_utf8(Icon::ClaudeCode.svg()).expect("utf-8");
+        assert!(
+            claude.contains("currentColor"),
+            "comet's claude-mark.svg tints like Codex and Pi"
+        );
+        assert!(
+            claude.contains("viewBox=\"0 0 256 257\""),
+            "claude-mark's own viewBox"
+        );
         let codex = std::str::from_utf8(Icon::Codex.svg()).expect("utf-8");
         assert!(
-            codex.contains("viewBox=\"-19 0 139 155\""),
-            "the knot is cropped from the wordmark logo"
+            codex.contains("currentColor"),
+            "comet's openai-mark.svg tints, unlike the wordmark knot it replaced"
+        );
+        assert!(
+            codex.contains("viewBox=\"0 0 256 260\""),
+            "openai-mark's own viewBox"
         );
         let pi = std::str::from_utf8(Icon::Pi.svg()).expect("utf-8");
         assert!(
             pi.contains("viewBox=\"0 0 800 800\""),
-            "Pi keeps the Swift shape's viewBox"
+            "comet's pi-mark.svg happens to keep the same 800x800 viewBox"
         );
     }
 
@@ -708,13 +767,33 @@ mod tests {
     #[test]
     fn view_box_size_parses_embedded_svgs() {
         assert!(
-            (view_box_size(Icon::FolderFill) - 256.0).abs() < 1.0,
-            "phosphor viewBox"
-        );
-        assert!(
-            (view_box_size(Icon::ClaudeCode) - 110.0).abs() < 1.0,
-            "sunburst viewBox"
+            (view_box_size(Icon::FolderFill) - 24.0).abs() < 1.0,
+            "comet's 24x24 home format"
         );
         assert!((view_box_size(Icon::Pi) - 800.0).abs() < 1.0, "pi viewBox");
+    }
+
+    /// P76 orchestrator correction: the 63 comet SVGs are not one uniform
+    /// format. 52 are 24x24 at `stroke-width="1.5"` (the majority, and the
+    /// unmodified home format); the 3 directly-mapped 16x16 line icons
+    /// (`close`, `plus`, `terminal`) were `stroke-width="1.25"` as shipped,
+    /// which renders ~25% heavier than the 24x24 set at the same pixel box
+    /// (1.25/16 vs 1.5/24 effective weight) — exactly the Phosphor/Solar
+    /// mixed-weight defect P76 exists to avoid, just recreated inside the
+    /// new set. Normalized to `1.0` (1.0/16 == 1.5*(16/24)/16) instead of
+    /// normalizing the 52-icon majority down to 16x16.
+    #[test]
+    fn directly_mapped_16px_icons_match_the_24px_sets_effective_stroke_weight() {
+        for icon in [Icon::Close, Icon::Plus, Icon::SquareTerminal] {
+            let svg = std::str::from_utf8(icon.svg()).expect("utf-8");
+            assert!(
+                svg.contains("stroke-width=\"1.0\""),
+                "{icon:?} must be re-weighted to 1.0 to match the 24x24 set, got: {svg}"
+            );
+            assert!(
+                !svg.contains("stroke-width=\"1.25\"") && !svg.contains("stroke-width=\"1.6\""),
+                "{icon:?} must not keep its original heavier weight"
+            );
+        }
     }
 }

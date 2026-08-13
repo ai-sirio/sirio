@@ -1,37 +1,53 @@
-//! The transparent, GPUI-owned controls that sit beside macOS traffic lights.
+//! The top bar — comet's row shape (P76), COSMIC's tokens.
 //!
-//! Heights and sizes follow waku's measured scale: a 48px bar, 26px
-//! controls, 14px glyphs. On Linux nothing occupies the macOS traffic-light
-//! zone, so the first control starts at waku's own header inset (14px)
-//! instead of the 78px traffic-light clearance; a later macOS pass can
-//! restore the clearance behind a `cfg`. `HEIGHT`, `CONTROL_SIZE`,
-//! `CONTROL_GAP` and `TRAFFIC_LIGHT_INSET` are pinned by
-//! `conformance.rs`'s `bars_and_rows_use_the_measured_density` and stay
-//! exactly as measured — this surface's *geometry* is waku's, its *color,
-//! hierarchy and radius* are COSMIC's.
+//! `docs/linux-rewrite/tasks/P76-the-comet-top-bar-and-icon-set.md`: the
+//! user's screenshot wins on this surface specifically where it and COSMIC
+//! disagree; COSMIC stays the system everywhere else. The one fact that
+//! shapes this file: **neither comet nor Tiller draws traffic lights on
+//! Linux** — both are OS-native macOS decorations, and GPUI on X11 hands us
+//! a bare window. The three traffic lights below are drawn, real, circular
+//! controls — close/minimize/maximize — not a macOS-only convenience and
+//! not COSMIC's square window controls.
 //!
-//! This is Tiller's COSMIC-01/02 reference surface (see
-//! `docs/linux-rewrite/COSMIC-DESIGN.md`): it reads `Theme::get(cx).cosmic`,
-//! demonstrating the container hierarchy (the bar is a `primary` layer over
-//! the window's `background`, with a hairline `divider` marking the seam),
-//! the semantic `icon_button` component for its two ghost controls, the
-//! corner-radius scale, and one live spacing step (the trailing inset).
-//! Before COSMIC-02 this read a second, standalone `CosmicTheme` global of
-//! its own; that seam is retired (`Theme` carries `cosmic` directly now),
-//! so this surface reads the same global every other surface does.
+//! Geometry comes from [`tiller_theme::BrowserChrome`] (bar height, light
+//! size/gap/inset, `BrowserChrome::cluster_start` for the derivation of
+//! where the light group hands off to the button cluster) and
+//! `Spacing::compact_action` (the 24px cluster-button frame). Colour comes
+//! from `Theme::get(cx).cosmic`: the bar sits on `containers.background`
+//! (not `primary` — a deliberate override of COSMIC's usual raised-bar
+//! placement, because the screenshot wants **one continuous surface**, no
+//! seam between chrome and content), the lights are COSMIC's own
+//! `destructive`/`warning`/`success` semantic colours (already red/amber/
+//! green — no new colour tokens needed), and the cluster buttons use
+//! `semantic.icon_button` like the surface's original two controls did.
+//!
+//! Row layout, left to right: traffic lights → cluster (sidebar toggle,
+//! back, forward, `+`) → accent dot + title → muted subtitle → (spacer) →
+//! right-panel toggle. The far-right scope/branch pills and collapse/
+//! expand controls from the screenshot are **not built** — see the P76
+//! report for why.
+//!
+//! Back/forward/`+` have no data to act on from inside this crate (no
+//! navigation history, no new-tab concept lives here) — rather than ship
+//! live-looking dead buttons, they render muted and inert until a host
+//! injects a handler via [`Titlebar::on_back`] / [`Titlebar::on_forward`] /
+//! [`Titlebar::on_new_tab`]. That is the seam left for `codex12`; wiring it
+//! needs no change to this file or to `main.rs`'s `TitlebarEvent` match —
+//! these are plain closures, not a widened enum.
 
 use gpui::{
-    Context, EventEmitter, FontWeight, MouseButton, Render, Window, WindowControlArea, div,
-    prelude::*, px, text,
+    App, Context, EventEmitter, FontWeight, MouseButton, Render, SharedString, Window,
+    WindowControlArea, div, prelude::*, px,
 };
+use std::rc::Rc;
 use tiller_theme::Theme;
+use tiller_theme::cosmic::CosmicComponent;
 
-pub(crate) const HEIGHT: f32 = 48.0;
-pub(crate) const TRAFFIC_LIGHT_INSET: f32 = 14.0;
-pub(crate) const CONTROL_SIZE: f32 = 26.0;
-pub(crate) const CONTROL_GAP: f32 = 6.0;
+use crate::sidebar::icons::Icon;
 
-/// The small title-strip control set used by the window shell.
+/// The small title-strip control set used by the window shell. Unrelated to
+/// the traffic lights and cluster buttons below, which act directly through
+/// injected closures rather than this event — see the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TitlebarEvent {
     ToggleSidebar,
@@ -40,6 +56,14 @@ pub enum TitlebarEvent {
 
 pub struct Titlebar {
     should_move: bool,
+    on_close: Rc<dyn Fn(&mut Window)>,
+    on_minimize: Rc<dyn Fn(&mut Window)>,
+    on_maximize: Rc<dyn Fn(&mut Window)>,
+    on_back: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_forward: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_new_tab: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    title: Option<SharedString>,
+    subtitle: Option<SharedString>,
 }
 
 impl Titlebar {
@@ -47,55 +71,280 @@ impl Titlebar {
     ///
     /// Installs [`Theme`] if nothing has installed it yet, so this surface
     /// renders correctly whether it is opened standalone (a test,
-    /// `chrome_demo`) or inside the app shell.
+    /// `chrome_demo`) or inside the app shell. The three window controls
+    /// default to the real GPUI operations — `remove_window` is safe to
+    /// call under `TestWindow` (it only flips a `removed` flag), but
+    /// `minimize_window`/`zoom_window` call into `TestWindow::minimize`/
+    /// `::zoom`, both `unimplemented!()` in GPUI's test platform backend;
+    /// drawn tests for those two MUST override with
+    /// [`Self::with_minimize_handler`]/[`Self::with_maximize_handler`]
+    /// rather than exercise the real default.
     pub fn new(cx: &mut Context<Self>) -> Self {
         if !cx.has_global::<Theme>() {
             Theme::init(cx);
         }
-        Self { should_move: false }
+        Self {
+            should_move: false,
+            on_close: Rc::new(|window| window.remove_window()),
+            on_minimize: Rc::new(|window| window.minimize_window()),
+            on_maximize: Rc::new(|window| window.zoom_window()),
+            on_back: None,
+            on_forward: None,
+            on_new_tab: None,
+            title: None,
+            subtitle: None,
+        }
+    }
+
+    /// Test/host override for the close control.
+    pub fn with_close_handler(mut self, handler: impl Fn(&mut Window) + 'static) -> Self {
+        self.on_close = Rc::new(handler);
+        self
+    }
+
+    /// Test/host override for the minimize control — see [`Self::new`] for
+    /// why a drawn test must supply one rather than exercise the default.
+    pub fn with_minimize_handler(mut self, handler: impl Fn(&mut Window) + 'static) -> Self {
+        self.on_minimize = Rc::new(handler);
+        self
+    }
+
+    /// Test/host override for the maximize control — same constraint as
+    /// [`Self::with_minimize_handler`].
+    pub fn with_maximize_handler(mut self, handler: impl Fn(&mut Window) + 'static) -> Self {
+        self.on_maximize = Rc::new(handler);
+        self
+    }
+
+    /// Wires the cluster's back control. Unset (the default), it renders
+    /// muted and does not respond to clicks — see the module docs.
+    pub fn on_back(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_back = Some(Rc::new(handler));
+        self
+    }
+
+    /// The forward counterpart to [`Self::on_back`].
+    pub fn on_forward(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_forward = Some(Rc::new(handler));
+        self
+    }
+
+    /// Wires the cluster's trailing `+`. Unset, it renders muted for the
+    /// same reason as [`Self::on_back`].
+    pub fn on_new_tab(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_new_tab = Some(Rc::new(handler));
+        self
+    }
+
+    /// Sets the title shown after the accent dot (row 3 of the screenshot).
+    /// Unset, that section does not render — no placeholder text stands in
+    /// for data this surface does not have.
+    pub fn with_title(mut self, title: impl Into<SharedString>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Sets the muted secondary string beside the title (row 4, e.g.
+    /// `project @ worktree`). Unset, that section does not render.
+    pub fn with_subtitle(mut self, subtitle: impl Into<SharedString>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
     }
 }
 
 impl EventEmitter<TitlebarEvent> for Titlebar {}
 
+/// One traffic-light dot: a real, circular window control, not a decoration.
+/// `component` supplies COSMIC's own semantic colour for the action
+/// (`destructive`/`warning`/`success` — already red/amber/green, so this
+/// needs no new colour tokens).
+fn traffic_light(
+    id: &'static str,
+    area: WindowControlArea,
+    diameter: gpui::Pixels,
+    component: CosmicComponent,
+    handler: Rc<dyn Fn(&mut Window)>,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .window_control_area(area)
+        .w(diameter)
+        .h(diameter)
+        .rounded(diameter * 0.5)
+        .bg(component.base)
+        .hover(|style| style.bg(component.hover))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, window, _| handler(window))
+}
+
+/// One cluster-style icon button (sidebar toggle, back, forward, `+`, the
+/// right-panel toggle). `handler` absent means "no seam wired yet": the
+/// button still draws, at the same size and position the screenshot shows,
+/// but dims and does not respond to clicks — an honest "not yet" rather
+/// than a live-looking dead control.
+fn cluster_button(
+    id: &'static str,
+    icon: Icon,
+    size: gpui::Pixels,
+    radius: gpui::Pixels,
+    icon_button: CosmicComponent,
+    handler: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+) -> impl IntoElement {
+    let enabled = handler.is_some();
+    let color = if enabled {
+        icon_button.on
+    } else {
+        icon_button.on.opacity(0.35)
+    };
+    let mut element = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .w(size)
+        .h(size)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(radius)
+        .child(icon.element(px(14.0)).text_color(color));
+    if let Some(handler) = handler {
+        element = element
+            .hover(|style| style.bg(icon_button.hover))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| handler(window, cx));
+    }
+    element
+}
+
 impl Render for Titlebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let cosmic = Theme::get(cx).cosmic;
-        let bar = cosmic.containers.primary;
+        let theme = Theme::get(cx);
+        let cosmic = theme.cosmic;
+        let chrome = theme.browser_chrome;
+        let bar = cosmic.containers.background;
         let icon_button = cosmic.semantic.icon_button;
         let control_radius = px(cosmic.radii.radius_xs[0]);
+        let button_size = theme.spacing.compact_action;
         let trailing_inset = px(cosmic.spacing.xs as f32);
         let entity = cx.entity();
 
-        let control = |id: &'static str, glyph: &'static str| {
+        let on_close = self.on_close.clone();
+        let on_minimize = self.on_minimize.clone();
+        let on_maximize = self.on_maximize.clone();
+        let on_back = self.on_back.clone();
+        let on_forward = self.on_forward.clone();
+        let on_new_tab = self.on_new_tab.clone();
+        let title = self.title.clone();
+        let subtitle = self.subtitle.clone();
+
+        let sidebar_entity = entity.clone();
+        let on_sidebar: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+            sidebar_entity.update(cx, |_, cx| cx.emit(TitlebarEvent::ToggleSidebar));
+        });
+        let right_panel_entity = entity.clone();
+        let on_right_panel: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |_, cx| {
+            right_panel_entity.update(cx, |_, cx| cx.emit(TitlebarEvent::ToggleRightPanel));
+        });
+
+        let traffic_lights = div()
+            .id("titlebar-traffic-lights")
+            .pl(chrome.traffic_light_inset)
+            .flex()
+            .items_center()
+            .gap(chrome.traffic_light_gap)
+            .child(traffic_light(
+                "titlebar-close",
+                WindowControlArea::Close,
+                chrome.traffic_light_diameter,
+                cosmic.semantic.destructive,
+                on_close,
+            ))
+            .child(traffic_light(
+                "titlebar-minimize",
+                WindowControlArea::Min,
+                chrome.traffic_light_diameter,
+                cosmic.semantic.warning,
+                on_minimize,
+            ))
+            .child(traffic_light(
+                "titlebar-maximize",
+                WindowControlArea::Max,
+                chrome.traffic_light_diameter,
+                cosmic.semantic.success,
+                on_maximize,
+            ));
+
+        let cluster = div()
+            .id("titlebar-cluster")
+            .pl(chrome.traffic_light_cluster_gap)
+            .flex()
+            .items_center()
+            .gap(chrome.cluster_button_gap)
+            .child(cluster_button(
+                "titlebar-sidebar",
+                Icon::SidebarLeft,
+                button_size,
+                control_radius,
+                icon_button,
+                Some(on_sidebar),
+            ))
+            .child(cluster_button(
+                "titlebar-back",
+                Icon::ChevronLeft,
+                button_size,
+                control_radius,
+                icon_button,
+                on_back,
+            ))
+            .child(cluster_button(
+                "titlebar-forward",
+                Icon::ChevronRight,
+                button_size,
+                control_radius,
+                icon_button,
+                on_forward,
+            ))
+            .child(cluster_button(
+                "titlebar-new-tab",
+                Icon::Plus,
+                button_size,
+                control_radius,
+                icon_button,
+                on_new_tab,
+            ));
+
+        let title_row = title.map(|title| {
             div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .w(px(CONTROL_SIZE))
-                .h(px(CONTROL_SIZE))
+                .id("titlebar-title")
+                .debug_selector(|| "titlebar-title".to_owned())
+                .pl(px(10.0))
                 .flex()
                 .items_center()
-                .justify_center()
-                .rounded(control_radius)
-                .text_size(px(14.0))
-                .text_color(icon_button.on)
-                .hover(|style| style.bg(icon_button.hover))
-                .child(text!(id = format!("titlebar-glyph-{id}"), glyph))
-        };
-
-        let sidebar = entity.clone();
-        let right_panel = entity.clone();
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded(px(3.0))
+                        .bg(cosmic.semantic.accent.base),
+                )
+                .child(div().text_color(bar.on).text_size(px(12.5)).child(title))
+                .children(subtitle.map(|subtitle| {
+                    div()
+                        .text_color(bar.on.opacity(0.55))
+                        .text_size(px(12.5))
+                        .child(subtitle)
+                }))
+        });
 
         div()
             .id("tiller-titlebar")
             .window_control_area(WindowControlArea::Drag)
             .w_full()
-            .h(px(HEIGHT))
+            .h(chrome.bar_height)
             .flex()
             .items_center()
             .bg(bar.base)
-            .border_b(px(1.0))
-            .border_color(bar.divider)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.should_move = true),
@@ -110,36 +359,23 @@ impl Render for Titlebar {
                     window.start_window_move();
                 }
             }))
-            .child(
-                div()
-                    .pl(px(TRAFFIC_LIGHT_INSET))
-                    .w(px(TRAFFIC_LIGHT_INSET + CONTROL_SIZE))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .child(
-                        control("titlebar-sidebar", "◧")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, cx| {
-                                sidebar.update(cx, |_, cx| cx.emit(TitlebarEvent::ToggleSidebar));
-                            }),
-                    ),
-            )
+            .child(traffic_lights)
+            .child(cluster)
+            .children(title_row)
             .child(div().flex_1().h_full())
             .child(
                 div()
                     .pr(trailing_inset)
                     .flex()
-                    .gap(px(CONTROL_GAP))
                     .items_center()
-                    .child(
-                        control("titlebar-right-panel", "◨")
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, _, cx| {
-                                right_panel
-                                    .update(cx, |_, cx| cx.emit(TitlebarEvent::ToggleRightPanel));
-                            }),
-                    ),
+                    .child(cluster_button(
+                        "titlebar-right-panel",
+                        Icon::PanelRight,
+                        button_size,
+                        control_radius,
+                        icon_button,
+                        Some(on_right_panel),
+                    )),
             )
             .font_weight(FontWeight::NORMAL)
     }
@@ -150,13 +386,10 @@ mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::cell::RefCell;
-    use std::rc::Rc;
     use tiller_theme::ThemeMode;
 
     #[gpui::test]
     async fn titlebar_controls_emit_shell_visibility_events(cx: &mut TestAppContext) {
-        // `Titlebar::new` self-installs `CosmicTheme` when nothing else has;
-        // no explicit init call needed here.
         let window = cx.add_window(|_window, cx| Titlebar::new(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -191,13 +424,173 @@ mod tests {
         );
     }
 
-    /// UI-tier evidence for the dark half of the COSMIC restyle: installs
-    /// `Theme` explicitly *before* the entity exists, so `Titlebar`'s lazy
-    /// bootstrap in `new` is a no-op and this only passes if `render` truly
-    /// reads back the already-installed global's `cosmic` field rather than
-    /// a hardcoded value.
+    /// The close control's production wiring, exercised for real — no spy.
+    /// `Window::remove_window` only flips a `removed` flag even under
+    /// `TestWindow`, and GPUI's own `update_window_id` drops a removed
+    /// window from `cx.windows()` after the update runs, so a shrinking
+    /// window count is a real, observable post-condition of the *actual*
+    /// close path, not a mechanism-only proxy for it (`P75`'s repeated
+    /// lesson: drive the control, not the function behind it).
     #[gpui::test]
-    async fn titlebar_draws_the_cosmic_primary_container_in_dark_mode(cx: &mut TestAppContext) {
+    async fn the_close_control_closes_the_real_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_window, cx| Titlebar::new(cx));
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.run_until_parked();
+
+        let before = vcx.cx.windows().len();
+
+        let close = vcx
+            .debug_bounds("titlebar-close")
+            .expect("close control is drawn");
+        vcx.simulate_click(close.center(), Modifiers::none());
+        vcx.run_until_parked();
+
+        // The window is gone now, so `vcx.update` (which targets this
+        // specific, now-removed window) would panic on its own `.unwrap()`
+        // — read the app-wide window list off `TestAppContext` directly.
+        let after = vcx.cx.windows().len();
+        assert_eq!(
+            after,
+            before - 1,
+            "closing the window drops it from cx.windows()"
+        );
+    }
+
+    /// Minimize/maximize call into `TestWindow::minimize`/`::zoom`, both
+    /// `unimplemented!()` in GPUI's test platform backend — so unlike
+    /// close, these two are driven through the control with an injected
+    /// spy standing in for the real platform call, not the real default.
+    #[gpui::test]
+    async fn the_minimize_control_invokes_its_wired_handler(cx: &mut TestAppContext) {
+        let called = Rc::new(RefCell::new(false));
+        let spy = called.clone();
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx).with_minimize_handler(move |_window| {
+                *spy.borrow_mut() = true;
+            })
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let minimize = cx
+            .debug_bounds("titlebar-minimize")
+            .expect("minimize control is drawn");
+        cx.simulate_click(minimize.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(*called.borrow(), "clicking minimize invoked the handler");
+    }
+
+    /// The maximize counterpart to the minimize test above, for the same
+    /// `TestWindow::zoom` `unimplemented!()` reason.
+    #[gpui::test]
+    async fn the_maximize_control_invokes_its_wired_handler(cx: &mut TestAppContext) {
+        let called = Rc::new(RefCell::new(false));
+        let spy = called.clone();
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx).with_maximize_handler(move |_window| {
+                *spy.borrow_mut() = true;
+            })
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let maximize = cx
+            .debug_bounds("titlebar-maximize")
+            .expect("maximize control is drawn");
+        cx.simulate_click(maximize.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(*called.borrow(), "clicking maximize invoked the handler");
+    }
+
+    /// Back/forward/`+` must not be dead-looking controls: unwired (the
+    /// default), a click must not silently succeed at nothing observable —
+    /// there is nothing to observe because no `on_click` is attached at
+    /// all when no handler is set. This test drives the *wired* case
+    /// instead, the same way the minimize/maximize tests do, and a
+    /// companion assertion below confirms the unwired case never panics
+    /// merely from being clicked.
+    #[gpui::test]
+    async fn the_cluster_seams_invoke_their_wired_handlers(cx: &mut TestAppContext) {
+        let back_called = Rc::new(RefCell::new(false));
+        let forward_called = Rc::new(RefCell::new(false));
+        let new_tab_called = Rc::new(RefCell::new(false));
+        let (back_spy, forward_spy, new_tab_spy) = (
+            back_called.clone(),
+            forward_called.clone(),
+            new_tab_called.clone(),
+        );
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx)
+                .on_back(move |_, _| *back_spy.borrow_mut() = true)
+                .on_forward(move |_, _| *forward_spy.borrow_mut() = true)
+                .on_new_tab(move |_, _| *new_tab_spy.borrow_mut() = true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        for (selector, flag) in [
+            ("titlebar-back", &back_called),
+            ("titlebar-forward", &forward_called),
+            ("titlebar-new-tab", &new_tab_called),
+        ] {
+            let bounds = cx.debug_bounds(selector).expect("cluster seam is drawn");
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+            assert!(*flag.borrow(), "{selector} invoked its wired handler");
+        }
+    }
+
+    /// Unwired back/forward/`+` (the default state) must render — the
+    /// screenshot's row shape stays intact — but a click must not panic or
+    /// emit anything: no handler is attached to click at all.
+    #[gpui::test]
+    async fn unwired_cluster_seams_render_but_do_not_panic_on_click(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_window, cx| Titlebar::new(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        for selector in ["titlebar-back", "titlebar-forward", "titlebar-new-tab"] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn even unwired"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    async fn title_and_subtitle_render_only_when_set(cx: &mut TestAppContext) {
+        let unset_window = cx.add_window(|_window, cx| Titlebar::new(cx));
+        let mut unset_cx = VisualTestContext::from_window(unset_window.into(), cx);
+        unset_cx.run_until_parked();
+        assert!(
+            unset_cx.debug_bounds("titlebar-title").is_none(),
+            "no placeholder title when unset"
+        );
+
+        let set_window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx)
+                .with_title("Tiller")
+                .with_subtitle("tiller-linux @ linux/gpui-waku")
+        });
+        let mut set_cx = VisualTestContext::from_window(set_window.into(), cx);
+        set_cx.run_until_parked();
+        assert!(
+            set_cx.debug_bounds("titlebar-title").is_some(),
+            "title row is drawn once set"
+        );
+    }
+
+    /// UI-tier evidence for the P76 restyle: installs `Theme` explicitly
+    /// *before* the entity exists, so `Titlebar`'s lazy bootstrap in `new`
+    /// is a no-op and this only passes if `render` truly reads back the
+    /// already-installed global's tokens rather than a hardcoded value.
+    #[gpui::test]
+    async fn titlebar_draws_the_continuous_background_surface_in_dark_mode(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(|cx| Theme::install(ThemeMode::Dark, cx));
         let window = cx.add_window(|_window, cx| Titlebar::new(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -206,21 +599,23 @@ mod tests {
         let resolved = cx.update(|_, cx| Theme::get(cx).cosmic);
         assert!(resolved.is_dark, "installed Dark must resolve to is_dark");
 
-        let sidebar = cx
-            .debug_bounds("titlebar-sidebar")
-            .expect("sidebar control is drawn under the dark cosmic theme");
-        let right_panel = cx
-            .debug_bounds("titlebar-right-panel")
-            .expect("right-panel control is drawn under the dark cosmic theme");
-        assert_eq!(sidebar.size.height, px(CONTROL_SIZE));
-        assert_eq!(right_panel.size.height, px(CONTROL_SIZE));
+        let bar_height = cx.update(|_, cx| Theme::get(cx).browser_chrome.bar_height);
+        let close = cx
+            .debug_bounds("titlebar-close")
+            .expect("close control is drawn under the dark cosmic theme");
+        assert_eq!(
+            close.size.height,
+            cx.update(|_, cx| Theme::get(cx).browser_chrome.traffic_light_diameter)
+        );
+        let _ = bar_height;
     }
 
-    /// The light half of the same proof — the brief is explicit that a
-    /// dark-only pass is "half a design system", so this is a distinct
-    /// named test, not a variant of the dark one.
+    /// The light half of the same proof — a dark-only pass is "half a
+    /// design system", so this is a distinct named test, not a variant.
     #[gpui::test]
-    async fn titlebar_draws_the_cosmic_primary_container_in_light_mode(cx: &mut TestAppContext) {
+    async fn titlebar_draws_the_continuous_background_surface_in_light_mode(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(|cx| Theme::install(ThemeMode::Light, cx));
         let window = cx.add_window(|_window, cx| Titlebar::new(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -232,18 +627,17 @@ mod tests {
             "installed Light must resolve to is_dark == false"
         );
         assert_ne!(
-            resolved.containers.primary.base,
-            Theme::dark().cosmic.containers.primary.base,
-            "light and dark primary containers must not collapse to the same fill"
+            resolved.containers.background.base,
+            Theme::dark().cosmic.containers.background.base,
+            "light and dark background containers must not collapse to the same fill"
         );
 
-        let sidebar = cx
-            .debug_bounds("titlebar-sidebar")
-            .expect("sidebar control is drawn under the light cosmic theme");
-        let right_panel = cx
-            .debug_bounds("titlebar-right-panel")
-            .expect("right-panel control is drawn under the light cosmic theme");
-        assert_eq!(sidebar.size.height, px(CONTROL_SIZE));
-        assert_eq!(right_panel.size.height, px(CONTROL_SIZE));
+        let close = cx
+            .debug_bounds("titlebar-close")
+            .expect("close control is drawn under the light cosmic theme");
+        assert_eq!(
+            close.size.height,
+            cx.update(|_, cx| Theme::get(cx).browser_chrome.traffic_light_diameter)
+        );
     }
 }
