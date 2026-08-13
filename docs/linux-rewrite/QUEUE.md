@@ -1527,3 +1527,48 @@ asserts `None` now, and a real e2e test below it spawns an actual child.
 It stays. But it nearly cost real time: `codex12` had just been dispatched to investigate that exact
 test and would have redone it, or worse, reverted it. Both panes have been told. **The rule stands —
 say so before entering a file that is not yours.**
+
+## 01:05 — a second reason the gate has never printed CI OK
+
+`Scripts/ci-linux.sh` fingerprints every `rust/` file at line 120 and again at line 321, and fails
+the run if anything changed in between:
+
+```
+FAILED: new Rust worktree drift appeared during the gate
+```
+
+The intent is right — a verdict about a tree that moved underneath it is worth nothing. But this is a
+**shared worktree with three builders writing continuously.** Measured at 01:05:
+
+| window | `.rs` files written |
+|---|---|
+| last 5 minutes | 4 (`main.rs`, `sidebar.rs`, `settings.rs`, `panes.rs` — three different authors) |
+| last 15 minutes | 5 |
+
+A `cargo test --workspace` run spans minutes. At that write rate the fingerprint window almost never
+stays still, so **the gate is unpassable by construction while the roster works** — and the check
+sits at the very end, so a full expensive run is spent before it dies on the last line.
+
+This matters because it is *independent* of the five failing binary tests. Fixing those would not
+have turned the gate green, and whoever fixed them would have been left hunting a phantom.
+
+### The fix is a distinction, not a deletion
+
+```
+FAILED  = the code is broken. Go find the bug.
+VOID    = the measurement is invalid because the tree moved. Re-run; there is nothing to find.
+```
+
+Recommended to `codex12` (which owns the gate tonight, so the file was deliberately **not** edited
+under it): a distinct message, a distinct exit code (`75`/`EX_TEMPFAIL`) so callers can tell them
+apart, and a list of *which* files drifted rather than a fingerprint diff, so whoever re-runs knows
+whether the drift was theirs.
+
+The script's own sccache comment already states the principle it is now violating: *an agent that
+can never reach a green gate learns to ignore the gate.* That happened here for a different reason.
+**A `FAILED` that actually means "try again" is worse than no gate**, because it sends people hunting
+bugs that do not exist.
+
+**Stated honestly to `codex12`:** this was measured, not observed. The write-rate is real and the
+code path is plain, but nobody has yet watched the gate die on this specific line — so it was sent
+as a diagnosis to confirm or refute, not as an instruction.
