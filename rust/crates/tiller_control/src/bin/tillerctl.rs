@@ -42,6 +42,7 @@ fn main() {
 
     let result = match subcommand.as_str() {
         "ping" => cmd_ping(socket, &parsed),
+        "quit" => cmd_quit(socket, &parsed),
         "capabilities" => cmd_capabilities(socket, &parsed),
         "identify" => cmd_identify(socket, &parsed, &environment),
         "list-workspaces" => cmd_list_workspaces(socket, &parsed),
@@ -49,10 +50,16 @@ fn main() {
         "select-workspace" => cmd_select_workspace(socket, &parsed),
         "current-workspace" => cmd_current_workspace(socket, &parsed),
         "close-workspace" => cmd_close_workspace(socket, &parsed),
+        "worktree-set" => cmd_worktree_set(socket, &parsed),
+        "restore-session" => cmd_restore_session(socket, &parsed),
         "list-notifications" => cmd_list_notifications(socket, &parsed),
         "clear-notifications" => cmd_clear_notifications(socket, &parsed),
         "notify" => cmd_notify(socket, &parsed),
         "session-ref" => cmd_session_ref(socket, &parsed),
+        "pane" => cmd_pane(socket, &parsed),
+        "tab" => cmd_tab(socket, &parsed),
+        "panel" => cmd_panel(socket, &parsed),
+        "surface" => cmd_surface(socket, &parsed),
         _ => {
             eprintln!("tillerctl: unknown command '{subcommand}'");
             usage();
@@ -77,6 +84,7 @@ fn usage() {
          \n\
          commands:\n\
          \x20 ping                              check that Tiller is running\n\
+         \x20 quit                              gracefully quit Tiller\n\
          \x20 capabilities [--json]             list available socket methods\n\
          \x20 identify [--json]                 show the current workspace/surface context\n\
          \x20 list-workspaces [--json]          list all worktrees\n\
@@ -84,6 +92,31 @@ fn usage() {
          \x20 select-workspace --workspace <w>  select a worktree in the sidebar\n\
          \x20 current-workspace [--json]        show the selected worktree\n\
          \x20 close-workspace --workspace <w>   unmount a worktree's terminals\n\
+         \x20 worktree-set --worktree <w> [--comment c] [--session s]\n\
+         \x20 restore-session                   restore the launch snapshot\n\
+         \x20 pane split <right|down>            split the focused application pane\n\
+         \x20 pane focus <left|right|up|down>   focus a neighboring application pane\n\
+         \x20 pane close                        close the focused application pane\n\
+         \x20 tab cycle [forward|backward]      cycle application tabs\n\
+         \x20 tab select <index>                select a 1-based application tab\n\
+         \x20 surface changes open [--worktree w]\n\
+         \x20 surface changes read              read the mounted Changes surface\n\
+         \x20 surface changes stage <path> [--worktree w]\n\
+         \x20 surface changes unstage <path> [--worktree w]\n\
+         \x20 surface changes discard <path> [--worktree w]\n\
+         \x20 surface changes stage-all [--worktree w]\n\
+         \x20 surface changes discard-all [--worktree w]\n\
+         \x20 surface settings open [--section s]\n\
+         \x20 surface settings select <section>\n\
+         \x20 surface settings read             read the mounted Settings section\n\
+         \x20 panel state <id> [--json]         read terminal state and scrollback\n\
+         \x20 panel scrollback <id> [--max-bytes n] [--json]\n\
+         \x20 panel create [--worktree w] [--cmd c]\n\
+         \x20 panel split <dir> --from <id> [--cmd c]\n\
+         \x20 panel list [--worktree w]         list control panes\n\
+         \x20 panel write <id> --input s [--enter]\n\
+         \x20 panel key <id> --key k\n\
+         \x20 panel read|wait|focus|close <id>\n\
          \x20 list-notifications [--json]       list delivered notifications\n\
          \x20 clear-notifications               clear delivered notifications\n\
          \x20 notify [--session s] [--status st] [--agent-session r] [--stdin-json] [--title t] [--subtitle s] [--body b] [extra...]\n\
@@ -179,7 +212,10 @@ fn require_ok(socket: PathBuf, request: &ControlRequest) -> ControlResponse {
     if !response.ok {
         eprintln!(
             "tillerctl: {}",
-            response.error.clone().unwrap_or_else(|| request.method.clone())
+            response
+                .error
+                .clone()
+                .unwrap_or_else(|| request.method.clone())
         );
         exit(1);
     }
@@ -189,7 +225,12 @@ fn require_ok(socket: PathBuf, request: &ControlRequest) -> ControlResponse {
 /// Prints a rows result: `--json` prints the embedded JSON array verbatim;
 /// otherwise one line per row, tab-separated in `columns` order.
 fn print_rows(response: &ControlResponse, key: &str, columns: &[&str], as_json: bool) {
-    let raw = response.result.as_ref().and_then(|r| r.get(key)).cloned().unwrap_or_else(|| "[]".to_string());
+    let raw = response
+        .result
+        .as_ref()
+        .and_then(|r| r.get(key))
+        .cloned()
+        .unwrap_or_else(|| "[]".to_string());
     if as_json {
         println!("{raw}");
         return;
@@ -231,8 +272,16 @@ fn cmd_ping(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_quit(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), String> {
+    let _ = require_ok(socket, &tiller_control::protocol::request::system_quit());
+    Ok(())
+}
+
 fn cmd_capabilities(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
-    let response = require_ok(socket, &tiller_control::protocol::request::system_capabilities());
+    let response = require_ok(
+        socket,
+        &tiller_control::protocol::request::system_capabilities(),
+    );
     print_rows(&response, "methods", &["method"], parsed.flag("json"));
     Ok(())
 }
@@ -290,7 +339,10 @@ fn cmd_select_workspace(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), Stri
 }
 
 fn cmd_current_workspace(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
-    let response = require_ok(socket, &tiller_control::protocol::request::workspace_current());
+    let response = require_ok(
+        socket,
+        &tiller_control::protocol::request::workspace_current(),
+    );
     print_result(
         &response,
         &["project", "branch", "path", "id"],
@@ -308,8 +360,363 @@ fn cmd_close_workspace(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), Strin
     Ok(())
 }
 
+fn cmd_worktree_set(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let worktree = parsed.require("worktree")?;
+    let response = require_ok(
+        socket,
+        &tiller_control::protocol::request::worktree_set(
+            &worktree,
+            parsed.value("comment"),
+            parsed.value("session"),
+        ),
+    );
+    print_result(
+        &response,
+        &["id", "path", "comment", "session"],
+        parsed.flag("json"),
+    );
+    Ok(())
+}
+
+fn cmd_restore_session(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), String> {
+    let _ = require_ok(
+        socket,
+        &tiller_control::protocol::request::session_restore(),
+    );
+    Ok(())
+}
+
+fn cmd_pane(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let action = parsed
+        .positional
+        .first()
+        .ok_or_else(|| "Missing pane action".to_string())?;
+    match action.as_str() {
+        "split" => {
+            let direction = parsed
+                .value("direction")
+                .or_else(|| parsed.positional.get(1).map(String::as_str))
+                .ok_or_else(|| "Missing split direction".to_string())?;
+            let _ = require_ok(
+                socket,
+                &tiller_control::protocol::request::pane_split(direction),
+            );
+            Ok(())
+        }
+        "focus" => {
+            let direction = parsed
+                .value("direction")
+                .or_else(|| parsed.positional.get(1).map(String::as_str))
+                .ok_or_else(|| "Missing focus direction".to_string())?;
+            let _ = require_ok(
+                socket,
+                &tiller_control::protocol::request::pane_focus(direction),
+            );
+            Ok(())
+        }
+        "close" => {
+            let _ = require_ok(socket, &tiller_control::protocol::request::pane_close());
+            Ok(())
+        }
+        other => Err(format!("unknown pane action '{other}'")),
+    }
+}
+
+fn cmd_tab(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let action = parsed
+        .positional
+        .first()
+        .ok_or_else(|| "Missing tab action".to_string())?;
+    match action.as_str() {
+        "cycle" => {
+            let direction = parsed
+                .value("direction")
+                .or_else(|| parsed.positional.get(1).map(String::as_str))
+                .unwrap_or("forward");
+            let forward = match direction {
+                "forward" | "next" => true,
+                "backward" | "previous" => false,
+                other => return Err(format!("unknown tab cycle direction '{other}'")),
+            };
+            let _ = require_ok(
+                socket,
+                &tiller_control::protocol::request::tab_cycle(forward),
+            );
+            Ok(())
+        }
+        "select" => {
+            let position = parsed
+                .value("index")
+                .or_else(|| parsed.positional.get(1).map(String::as_str))
+                .ok_or_else(|| "Missing tab index".to_string())?
+                .parse::<usize>()
+                .map_err(|_| "Tab index must be a positive integer".to_string())?;
+            if position == 0 {
+                return Err("Tab index must be a positive integer".to_string());
+            }
+            let _ = require_ok(
+                socket,
+                &tiller_control::protocol::request::tab_select(position),
+            );
+            Ok(())
+        }
+        other => Err(format!("unknown tab action '{other}'")),
+    }
+}
+
+fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let action = parsed
+        .positional
+        .first()
+        .ok_or_else(|| "Missing panel action".to_string())?;
+    match action.as_str() {
+        "create" => {
+            let response = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_create(
+                    parsed.value("worktree"),
+                    parsed.value("cmd"),
+                ),
+            );
+            print_result(&response, &["id"], parsed.flag("json"));
+            Ok(())
+        }
+        "split" => {
+            let direction = parsed
+                .value("direction")
+                .or_else(|| parsed.positional.get(1).map(String::as_str))
+                .ok_or_else(|| "Missing split direction".to_string())?;
+            let from = parsed.require("from")?;
+            let response = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_split(
+                    &from,
+                    direction,
+                    parsed.value("cmd"),
+                ),
+            );
+            print_result(&response, &["id"], parsed.flag("json"));
+            Ok(())
+        }
+        "list" => {
+            let response = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_list(parsed.value("worktree")),
+            );
+            print_rows(
+                &response,
+                "panels",
+                &["id", "tab", "title", "agent", "active"],
+                parsed.flag("json"),
+            );
+            Ok(())
+        }
+        "write" => {
+            let id = panel_id(parsed)?;
+            let mut input = parsed.require("input")?;
+            if parsed.flag("enter") {
+                input.push('\r');
+            }
+            let _ = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_write(&id, &input),
+            );
+            Ok(())
+        }
+        "key" => {
+            let id = panel_id(parsed)?;
+            let key = parsed.require("key")?;
+            let _ = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_key(&id, &key),
+            );
+            Ok(())
+        }
+        "read" => {
+            let id = panel_id(parsed)?;
+            let response = require_ok(socket, &tiller_control::protocol::request::panel_read(&id));
+            print_result(&response, &["data"], parsed.flag("json"));
+            Ok(())
+        }
+        "state" => {
+            let id = panel_id(parsed)?;
+            let response = require_ok(socket, &tiller_control::protocol::request::panel_state(&id));
+            print_result(
+                &response,
+                &[
+                    "workingDirectory",
+                    "exitStatus",
+                    "exitCode",
+                    "scrollbackBytes",
+                ],
+                parsed.flag("json"),
+            );
+            Ok(())
+        }
+        "scrollback" => {
+            let id = panel_id(parsed)?;
+            let max_bytes = parsed
+                .value("max-bytes")
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "--max-bytes must be a nonnegative integer".to_string())
+                })
+                .transpose()?;
+            let response = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_scrollback(&id, max_bytes),
+            );
+            print_result(&response, &["data", "bytes"], parsed.flag("json"));
+            Ok(())
+        }
+        "wait" => {
+            let id = panel_id(parsed)?;
+            let timeout_ms = parsed
+                .value("timeout-ms")
+                .map(|value| {
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "--timeout-ms must be a nonnegative integer".to_string())
+                })
+                .transpose()?;
+            let response = require_ok(
+                socket,
+                &tiller_control::protocol::request::panel_wait(&id, timeout_ms),
+            );
+            print_result(&response, &["exitCode"], parsed.flag("json"));
+            Ok(())
+        }
+        "focus" => {
+            let id = panel_id(parsed)?;
+            let _ = require_ok(socket, &tiller_control::protocol::request::panel_focus(&id));
+            Ok(())
+        }
+        "close" => {
+            let id = panel_id(parsed)?;
+            let _ = require_ok(socket, &tiller_control::protocol::request::panel_close(&id));
+            Ok(())
+        }
+        other => Err(format!("unknown panel action '{other}'")),
+    }
+}
+
+fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let surface = parsed
+        .positional
+        .first()
+        .ok_or_else(|| "Missing surface name".to_string())?;
+    let action = parsed
+        .positional
+        .get(1)
+        .ok_or_else(|| "Missing surface action".to_string())?;
+    let response = match (surface.as_str(), action.as_str()) {
+        ("changes", "open") => require_ok(
+            socket,
+            &tiller_control::protocol::request::changes_open(parsed.value("worktree")),
+        ),
+        ("changes", "read") => {
+            require_ok(socket, &tiller_control::protocol::request::changes_read())
+        }
+        ("changes", "stage") => {
+            let path = parsed
+                .positional
+                .get(2)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "Missing changes path".to_string())?;
+            require_ok(
+                socket,
+                &tiller_control::protocol::request::changes_stage(
+                    path,
+                    parsed.value("worktree"),
+                ),
+            )
+        }
+        ("changes", "unstage") => {
+            let path = parsed
+                .positional
+                .get(2)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "Missing changes path".to_string())?;
+            require_ok(
+                socket,
+                &tiller_control::protocol::request::changes_unstage(
+                    path,
+                    parsed.value("worktree"),
+                ),
+            )
+        }
+        ("changes", "discard") => {
+            let path = parsed
+                .positional
+                .get(2)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "Missing changes path".to_string())?;
+            require_ok(
+                socket,
+                &tiller_control::protocol::request::changes_discard(
+                    path,
+                    parsed.value("worktree"),
+                ),
+            )
+        }
+        ("changes", "stage-all") => require_ok(
+            socket,
+            &tiller_control::protocol::request::changes_stage_all(parsed.value("worktree")),
+        ),
+        ("changes", "discard-all") => require_ok(
+            socket,
+            &tiller_control::protocol::request::changes_discard_all(parsed.value("worktree")),
+        ),
+        ("settings", "open") => require_ok(
+            socket,
+            &tiller_control::protocol::request::settings_open(parsed.value("section")),
+        ),
+        ("settings", "select") => {
+            let section = parsed
+                .value("section")
+                .or_else(|| parsed.positional.get(2).map(String::as_str))
+                .ok_or_else(|| "Missing settings section".to_string())?;
+            require_ok(
+                socket,
+                &tiller_control::protocol::request::settings_select(section),
+            )
+        }
+        ("settings", "read") => {
+            require_ok(socket, &tiller_control::protocol::request::settings_read())
+        }
+        _ => return Err(format!("unknown surface action '{surface} {action}'")),
+    };
+    print_result(
+        &response,
+        &[
+            "surfaceId",
+            "section",
+            "worktree",
+            "stagedCount",
+            "changedCount",
+            "untrackedCount",
+            "ready",
+        ],
+        parsed.flag("json"),
+    );
+    Ok(())
+}
+
+fn panel_id(parsed: &ParsedArgs) -> Result<String, String> {
+    parsed
+        .value("id")
+        .or_else(|| parsed.positional.get(1).map(String::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Missing required panel id (use '<id>' or '--id <id>)".to_string())
+}
+
 fn cmd_list_notifications(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
-    let response = require_ok(socket, &tiller_control::protocol::request::notification_list());
+    let response = require_ok(
+        socket,
+        &tiller_control::protocol::request::notification_list(),
+    );
     print_rows(
         &response,
         "notifications",
@@ -320,7 +727,10 @@ fn cmd_list_notifications(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), St
 }
 
 fn cmd_clear_notifications(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), String> {
-    let _ = require_ok(socket, &tiller_control::protocol::request::notification_clear());
+    let _ = require_ok(
+        socket,
+        &tiller_control::protocol::request::notification_clear(),
+    );
     Ok(())
 }
 

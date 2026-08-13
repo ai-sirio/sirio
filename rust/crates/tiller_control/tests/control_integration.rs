@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use tiller_control::protocol::rows;
 use tiller_control::{
-    ControlHandler, ControlRequest, ControlResponse, ControlServer, protocol::request, round_trip,
+    ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
+    PaneInfo, PaneRegistry, PaneStateSnapshot, protocol::request, round_trip,
 };
 
 struct TempDir(PathBuf);
@@ -29,10 +30,7 @@ impl TempDir {
         // pushed bind() past the limit once the test counter reached two
         // digits, so it passed alone and failed in the suite.
         let _ = tag;
-        let path = std::path::PathBuf::from(format!(
-            "/tmp/tc{}-{unique}",
-            std::process::id()
-        ));
+        let path = std::path::PathBuf::from(format!("/tmp/tc{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self(std::fs::canonicalize(&path).expect("canonicalize"))
     }
@@ -78,6 +76,7 @@ impl ControlHandler for TestHandler {
                     "system.ping",
                     "system.capabilities",
                     "system.identify",
+                    "system.quit",
                     "workspace.list",
                     "workspace.create",
                     "workspace.select",
@@ -88,6 +87,18 @@ impl ControlHandler for TestHandler {
                     "notification.create",
                     "notification.list",
                     "notification.clear",
+                    "panel.state",
+                    "panel.scrollback",
+                    "surface.changes.open",
+                    "surface.changes.read",
+                    "surface.changes.stage",
+                    "surface.changes.unstage",
+                    "surface.changes.discard",
+                    "surface.changes.stage_all",
+                    "surface.changes.discard_all",
+                    "surface.settings.open",
+                    "surface.settings.select",
+                    "surface.settings.read",
                 ];
                 let method_rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -135,12 +146,68 @@ impl ControlHandler for TestHandler {
                 result.insert("id".to_string(), "wt-new".to_string());
                 ControlResponse::success(&request.id, result)
             }
-            "workspace.select"
+            "system.quit"
+            | "workspace.select"
             | "workspace.close"
+            | "worktree.set"
             | "notify"
             | "session.ref"
             | "notification.create"
             | "notification.clear" => ControlResponse::success(&request.id, BTreeMap::new()),
+            "panel.create" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("id".to_string(), "pane-test".to_string())]),
+            ),
+            "panel.split" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("id".to_string(), "pane-split".to_string())]),
+            ),
+            "panel.list" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("panels".to_string(), rows::encode(&[]))]),
+            ),
+            "panel.read" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("data".to_string(), String::new())]),
+            ),
+            "panel.state" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([
+                    ("workingDirectory".to_string(), "/tmp".to_string()),
+                    ("exitStatus".to_string(), "running".to_string()),
+                    ("scrollbackBytes".to_string(), "0".to_string()),
+                ]),
+            ),
+            "panel.scrollback" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([
+                    ("data".to_string(), String::new()),
+                    ("bytes".to_string(), "0".to_string()),
+                ]),
+            ),
+            "surface.changes.open"
+            | "surface.changes.read"
+            | "surface.changes.stage"
+            | "surface.changes.unstage"
+            | "surface.changes.discard"
+            | "surface.changes.stage_all"
+            | "surface.changes.discard_all"
+            | "surface.settings.open"
+            | "surface.settings.select"
+            | "surface.settings.read" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("ready".to_string(), "true".to_string())]),
+            ),
+            "panel.wait" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("exitCode".to_string(), "0".to_string())]),
+            ),
+            "panel.write" | "panel.key" | "panel.focus" | "panel.close" => {
+                ControlResponse::success(&request.id, BTreeMap::new())
+            }
+            "pane.split" | "pane.focus" | "pane.close" | "tab.cycle" | "tab.select" => {
+                ControlResponse::success(&request.id, BTreeMap::new())
+            }
             "notification.list" => {
                 let mut result = BTreeMap::new();
                 result.insert("notifications".to_string(), rows::encode(&[]));
@@ -562,6 +629,17 @@ fn stop_removes_the_socket_file_and_stops_accepting() {
     assert!(response.ok);
 }
 
+#[test]
+fn server_creates_missing_parent_for_platform_default_style_socket() {
+    let dir = TempDir::new("parent");
+    let socket_path = dir.path().join("runtime/TillerRust/control.sock");
+    let server = ControlServer::new(socket_path.clone(), TestHandler::new());
+
+    server.start().expect("server creates socket parent");
+    assert!(socket_path.exists(), "socket exists below a new parent");
+    server.stop();
+}
+
 // ---------------------------------------------------------------------------
 // The tillerctl binary over a real socket
 // ---------------------------------------------------------------------------
@@ -586,6 +664,353 @@ fn tillerctl_ping_prints_pong() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "pong");
+}
+
+#[test]
+fn tillerctl_quit_requests_a_graceful_application_exit() {
+    let (server, handler) = TestServer::start();
+    let output = tillerctl(&server.socket_path, &["quit"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        handler.requests().last().map(|request| request.method.as_str()),
+        Some("system.quit")
+    );
+}
+
+#[test]
+fn pane_registry_runs_a_real_command_and_returns_output_and_exit_code() {
+    let registry = PaneRegistry::new();
+    let pane = registry
+        .create(
+            std::env::current_dir().expect("current directory"),
+            Some("printf registry-ready; exit 7"),
+            "registry test",
+        )
+        .expect("pane creates");
+
+    let exit_code = registry
+        .wait(&pane.id, Some(Duration::from_secs(5)))
+        .expect("pane exits");
+    assert_eq!(exit_code, 7);
+    assert_eq!(
+        registry.read(&pane.id).expect("pane output"),
+        b"registry-ready"
+    );
+}
+
+#[test]
+fn pane_registry_writes_input_to_a_live_command() {
+    let registry = PaneRegistry::new();
+    let pane = registry
+        .create(
+            std::env::current_dir().expect("current directory"),
+            Some("IFS= read line; printf 'got:%s' \"$line\""),
+            "input test",
+        )
+        .expect("pane creates");
+
+    registry.write(&pane.id, b"hello\r").expect("pane write");
+    let exit_code = registry
+        .wait(&pane.id, Some(Duration::from_secs(5)))
+        .expect("pane exits");
+    assert_eq!(exit_code, 0);
+    assert!(
+        String::from_utf8_lossy(&registry.read(&pane.id).expect("pane output"))
+            .contains("got:hello")
+    );
+}
+
+#[test]
+fn pane_registry_lists_live_application_panes_for_their_worktree() {
+    let registry = PaneRegistry::new();
+    let working_directory = std::env::current_dir().expect("current directory");
+    let pane = PaneInfo {
+        id: "pane-ui-1".to_string(),
+        tab: "Terminal".to_string(),
+        title: "Terminal".to_string(),
+        agent: String::new(),
+        active: true,
+    };
+
+    registry
+        .set_external(working_directory.clone(), vec![pane.clone()])
+        .expect("application panes register");
+
+    assert_eq!(
+        registry.list_for(&working_directory).expect("list panes"),
+        vec![pane]
+    );
+}
+
+#[test]
+fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
+    let registry = PaneRegistry::new();
+    let working_directory = std::env::current_dir().expect("current directory");
+    let pane = PaneInfo {
+        id: "pane-ui-state".to_string(),
+        tab: "Terminal".to_string(),
+        title: "Terminal".to_string(),
+        agent: String::new(),
+        active: true,
+    };
+    registry
+        .set_external_state(
+            working_directory.clone(),
+            vec![(
+                pane.clone(),
+                PaneStateSnapshot {
+                    working_directory: working_directory.clone(),
+                    scrollback: b"old\nnew\n".to_vec(),
+                    exit_status: Some(PaneExitStatus::Success),
+                },
+            )],
+        )
+        .expect("application pane state registers");
+
+    let state = registry.state(&pane.id).expect("live state");
+    assert_eq!(state.scrollback, b"old\nnew\n");
+    assert_eq!(state.exit_status, Some(PaneExitStatus::Success));
+    assert_eq!(
+        registry
+            .scrollback(&pane.id, Some(4))
+            .expect("bounded scrollback"),
+        b"new\n".to_vec()
+    );
+
+    registry
+        .set_external_state(working_directory, Vec::new())
+        .expect("application pane closes");
+    assert_eq!(
+        registry.state(&pane.id),
+        Err(PaneError::ClosedPane(pane.id.clone()))
+    );
+    assert_eq!(
+        registry.scrollback("pane-never-seen", None),
+        Err(PaneError::UnknownPane("pane-never-seen".to_string()))
+    );
+}
+
+#[test]
+fn tillerctl_panel_create_emits_the_panel_method() {
+    let (server, handler) = TestServer::start();
+    let output = tillerctl(
+        &server.socket_path,
+        &[
+            "panel",
+            "create",
+            "--worktree",
+            "wt-1",
+            "--cmd",
+            "printf ready",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let seen = handler.requests();
+    let request = seen.last().expect("panel.create seen");
+    assert_eq!(request.method, "panel.create");
+    assert_eq!(
+        request.params.get("worktree").map(String::as_str),
+        Some("wt-1")
+    );
+    assert_eq!(
+        request.params.get("cmd").map(String::as_str),
+        Some("printf ready")
+    );
+}
+
+#[test]
+fn tillerctl_exposes_every_panel_subcommand() {
+    let (server, handler) = TestServer::start();
+    let commands = [
+        (
+            vec!["panel", "create", "--cmd", "printf ready"],
+            "panel.create",
+        ),
+        (
+            vec!["panel", "split", "right", "--from", "pane-test"],
+            "panel.split",
+        ),
+        (vec!["panel", "list"], "panel.list"),
+        (
+            vec!["panel", "write", "pane-test", "--input", "hello", "--enter"],
+            "panel.write",
+        ),
+        (
+            vec!["panel", "key", "pane-test", "--key", "enter"],
+            "panel.key",
+        ),
+        (vec!["panel", "read", "pane-test"], "panel.read"),
+        (vec!["panel", "state", "pane-test"], "panel.state"),
+        (
+            vec!["panel", "scrollback", "pane-test", "--max-bytes", "32"],
+            "panel.scrollback",
+        ),
+        (
+            vec!["panel", "wait", "pane-test", "--timeout-ms", "100"],
+            "panel.wait",
+        ),
+        (vec!["panel", "focus", "pane-test"], "panel.focus"),
+        (vec!["panel", "close", "pane-test"], "panel.close"),
+    ];
+
+    for (args, method) in &commands {
+        let output = tillerctl(&server.socket_path, args);
+        assert!(
+            output.status.success(),
+            "{method} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let methods: Vec<_> = handler
+        .requests()
+        .into_iter()
+        .map(|request| request.method)
+        .collect();
+    assert_eq!(
+        methods,
+        commands
+            .iter()
+            .map(|(_, method)| method.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tillerctl_exposes_terminal_state_and_surface_subcommands() {
+    let (server, handler) = TestServer::start();
+    let commands = [
+        (vec!["panel", "state", "pane-test"], "panel.state"),
+        (
+            vec!["panel", "scrollback", "pane-test", "--max-bytes", "16"],
+            "panel.scrollback",
+        ),
+        (
+            vec!["surface", "changes", "open", "--worktree", "wt-1"],
+            "surface.changes.open",
+        ),
+        (vec!["surface", "changes", "read"], "surface.changes.read"),
+        (
+            vec!["surface", "settings", "open", "--section", "Agents"],
+            "surface.settings.open",
+        ),
+        (
+            vec!["surface", "settings", "select", "Agents"],
+            "surface.settings.select",
+        ),
+        (vec!["surface", "settings", "read"], "surface.settings.read"),
+    ];
+
+    for (args, method) in &commands {
+        let output = tillerctl(&server.socket_path, args);
+        assert!(
+            output.status.success(),
+            "{method} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let methods: Vec<_> = handler
+        .requests()
+        .into_iter()
+        .map(|request| request.method)
+        .collect();
+    assert_eq!(
+        methods,
+        commands
+            .iter()
+            .map(|(_, method)| method.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tillerctl_exposes_changes_mutation_subcommands() {
+    let (server, handler) = TestServer::start();
+    let commands = [
+        (
+            vec!["surface", "changes", "stage", "f.txt"],
+            "surface.changes.stage",
+        ),
+        (
+            vec!["surface", "changes", "unstage", "f.txt"],
+            "surface.changes.unstage",
+        ),
+        (
+            vec!["surface", "changes", "discard", "f.txt"],
+            "surface.changes.discard",
+        ),
+        (
+            vec!["surface", "changes", "stage-all"],
+            "surface.changes.stage_all",
+        ),
+        (
+            vec!["surface", "changes", "discard-all"],
+            "surface.changes.discard_all",
+        ),
+    ];
+
+    for (args, method) in &commands {
+        let output = tillerctl(&server.socket_path, args);
+        assert!(
+            output.status.success(),
+            "{method} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let methods: Vec<_> = handler
+        .requests()
+        .into_iter()
+        .map(|request| request.method)
+        .collect();
+    assert_eq!(
+        methods,
+        commands
+            .iter()
+            .map(|(_, method)| method.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tillerctl_exposes_the_application_pane_and_tab_commands() {
+    let (server, handler) = TestServer::start();
+    let commands = [
+        (vec!["pane", "split", "right"], "pane.split"),
+        (vec!["pane", "focus", "left"], "pane.focus"),
+        (vec!["pane", "close"], "pane.close"),
+        (vec!["tab", "cycle", "backward"], "tab.cycle"),
+        (vec!["tab", "select", "3"], "tab.select"),
+    ];
+
+    for (args, method) in &commands {
+        let output = tillerctl(&server.socket_path, args);
+        assert!(
+            output.status.success(),
+            "{method} stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let requests = handler.requests();
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|request| request.method.as_str())
+        .collect();
+    assert_eq!(methods, commands.iter().map(|(_, method)| *method).collect::<Vec<_>>());
+    assert_eq!(requests[0].params.get("direction").map(String::as_str), Some("right"));
+    assert_eq!(requests[1].params.get("direction").map(String::as_str), Some("left"));
+    assert_eq!(requests[3].params.get("direction").map(String::as_str), Some("backward"));
+    assert_eq!(requests[4].params.get("index").map(String::as_str), Some("3"));
 }
 
 #[test]
@@ -707,6 +1132,42 @@ fn tillerctl_session_ref_round_trips() {
             .get("ref")
             .map(String::as_str),
         Some("sess-42")
+    );
+}
+
+#[test]
+fn tillerctl_worktree_set_round_trips() {
+    let (server, handler) = TestServer::start();
+    let output = tillerctl(
+        &server.socket_path,
+        &[
+            "worktree-set",
+            "--worktree",
+            "wt-1",
+            "--comment",
+            "agent pane",
+            "--session",
+            "pane-1",
+        ],
+    );
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    let request = handler
+        .requests()
+        .last()
+        .cloned()
+        .expect("worktree.set request");
+    assert_eq!(request.method, "worktree.set");
+    assert_eq!(
+        request.params.get("worktree").map(String::as_str),
+        Some("wt-1")
+    );
+    assert_eq!(
+        request.params.get("comment").map(String::as_str),
+        Some("agent pane")
+    );
+    assert_eq!(
+        request.params.get("session").map(String::as_str),
+        Some("pane-1")
     );
 }
 
@@ -838,8 +1299,56 @@ fn socket_mode_is_never_permissive_during_startup() {
 #[test]
 fn same_uid_peer_is_accepted() {
     let (server, _) = TestServer::start();
-    let response =
-        round_trip(&server.socket_path, &request::system_ping(), Duration::from_secs(5))
-            .expect("same-uid connection accepted");
+    let response = round_trip(
+        &server.socket_path,
+        &request::system_ping(),
+        Duration::from_secs(5),
+    )
+    .expect("same-uid connection accepted");
     assert!(response.ok);
+}
+
+#[test]
+fn pane_registry_shutdown_terminates_live_children() {
+    let dir = TempDir::new("shutdown");
+    let pid_file = dir.path().join("child.pid");
+    let command = format!(
+        "printf '%s' \"$$\" > {}; exec sleep 60",
+        pid_file.display()
+    );
+    let registry = PaneRegistry::new();
+    registry
+        .create(dir.path(), Some(&command), "sleep")
+        .expect("spawn child pane");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = pid.parse::<i32>()
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pane child did not publish its pid"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    registry.shutdown();
+    while std::time::Instant::now() < deadline {
+        if !process_exists(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("pane child {pid} was still running after registry shutdown");
+}
+
+fn process_exists(pid: i32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
