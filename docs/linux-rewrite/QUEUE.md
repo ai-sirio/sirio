@@ -573,3 +573,30 @@ Settings); the menu needs the same treatment.
 
 Both are dispatched to `codex12` as an addendum to P67, with the instruction to **name the
 persistence widening as a seam rather than build it inside the piece**.
+
+## P68 landed (`codex11`), and P70 dispatched in its place
+
+**Confirmed stale by exercise, not by grep** — `F-EDIT-04`, `F-EDIT-06`, `F-EDIT-08`. Reported to
+`pireview` with verdicts left unchanged, which is the correct division: builders produce evidence,
+**only the critic changes a verdict**.
+
+**Built, `builder-claimed, unverified`:** `F-EDIT-01`, `02`, `03`, `05`, `07`, `10`, `11`. Ten named
+tests in `file_view`, seventeen in `right_panel`, UI suite 179/179.
+
+`F-EDIT-07`'s proof is `different_languages_produce_different_code_spans` — it asserts *two languages
+differ* rather than that one file renders. That distinction is the whole difference between proving a
+feature and proving a screenshot, and it is the standard the remaining rows should be held to.
+
+**`F-EDIT-12` refused**, correctly: only the harness-only drag fixture exists, no real drag/drop on
+file rows. This is the second time a builder has declined this rather than ship a drag that draws and
+drops nothing (`codex12` declined `F-TAB-25` and `F-TAB-18/24` on the same grounds in P65).
+
+### The gate's fmt blocker has moved
+
+It was `pi`'s `settings.rs`. It is now **`main.rs` at 6423, 7230, 9591** — `codex12`'s file, and
+`codex12` is live in it. `codex11`'s owned clippy and `cargo build -p tiller -p tiller_control` were
+green; the 12 workspace test failures it saw are concurrent-edit noise from a shared worktree, not
+findings. Routed to `codex12`, not chased.
+
+**Token `tiller_theme` still lacks:** *compact-action padding*. `codex11` used
+`titlebar_control_spacing` as the nearest existing token rather than a literal. Queued for `sonnet`.
