@@ -1572,3 +1572,33 @@ bugs that do not exist.
 **Stated honestly to `codex12`:** this was measured, not observed. The write-rate is real and the
 code path is plain, but nobody has yet watched the gate die on this specific line — so it was sent
 as a diagnosis to confirm or refute, not as an instruction.
+
+## 01:20 — the right-click question is closed, with a frame
+
+`reference/linux-progress/p17-rclick-term.png`, captured by the critic through the new `rclick`
+helper, shows the terminal context menu open: Copy, Paste, Set Title, Split Left/Right/Above/Below,
+Clear, Close.
+
+**Right-click works.** The XWayland restriction this project believed in for part of tonight never
+existed; the harness simply had no button-3 path. Twelve rows are verifiable, `ENVIRONMENT.md` now
+says so with the frame cited, and the claim has been corrected on the published progress page too —
+where it had been stated as fact.
+
+Worth recording how it was settled: the critic verified the helper **before** trusting a verdict
+from it, having been told explicitly that a helper the orchestrator wrote is not evidence. That
+instruction is what turned a plausible-looking two-line fix into a proven one.
+
+### And the frame contains a second finding
+
+Every long menu label is truncated at the same x — `Copy C…`, `Set Titl…`, `Split Le…` — while
+`Copy` and `Paste` render whole. **The Files panel is painting over the context menu**, and the cut
+falls exactly on its left edge.
+
+Sent to the critic *before* it writes verdicts on those rows, because this is precisely the shape
+that produces a wrong one: the menu opens, has the right items, and receives the click. Judging the
+covered items as missing would mark `FAILED — absent` a surface that exists and responds, and send
+somebody to rebuild what is already built. It is a **z-order defect and its own row.**
+
+It also must not be merged with the P72 webview occlusion despite the resemblance. There, a native
+child window sits above GPUI's GL surface and cannot be reordered — a constraint. Here both elements
+are GPUI's and the paint order is ours — a bug. One is architecture, the other is a fix.
