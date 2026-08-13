@@ -189,3 +189,31 @@ editor tests 27 passed, `transplant-check.py` exit 1 with 46 pre-existing candid
 it. If they hold, the ledger moves 196 → 205. Not `sonnet`'s to judge only insofar as it wrote none
 of these files — `editor.rs`, `file_view.rs` and `right_panel.rs` are `codex11`'s, so `sonnet` may
 take this block.
+
+### Orchestrator drive, 2026-08-14 01:17-01:22 — three F-EDIT rows exercised live
+
+Taken while `fable` was mid plain-launch batch, which turned out to be the problem (see the display
+contention entry now in `ENVIRONMENT.md`). **Two captures are clean and unambiguous; a third is
+discarded as contaminated.** Only clean frames are reported below.
+
+**Route to the editor, since this cost three captures to find:** a single click on a file row in the
+Files panel **selects** it; **double-click opens** (`right_panel.rs:476`, `event.click_count >= 2`).
+A synthetic `xdotool click --repeat 2 --delay 80 1` did **not** open the file — unproven whether GPUI
+rejects the synthetic double-click or the pointer was stolen. **The reliable route is right-click →
+Open**, and that is what the captures below use.
+
+| row | verdict | evidence |
+|---|---|---|
+| `F-EDIT-10` | **PASSED** | `orch4-rclick-file.png` — right-click on `CLAUDE.md` opens a context menu with **Open**, **Reveal in File Manager**, **Copy Path**, matching `right_panel.rs:369/375/385`. Clicking **Open** opened the file (`orch5-ctx-open.png`). |
+| `F-EDIT-07` | **PASSED** | `orch5-ctx-open.png` — header shows a **`Markdown`** language badge for `CLAUDE.md`; the fenced block is labelled **`bash`** with comments coloured distinctly from commands, and inline code spans render in their own colour. Language detection is real and reaches the surface. |
+| `F-EDIT-01` | **half-proven** | `orch5-ctx-open.png` — the **`Preview` | `Code`** segmented switch is drawn in the editor header with `Preview` active and Markdown genuinely rendered (H1/H2, fenced block, inline code). **The switch was not successfully clicked** — the attempt is the contaminated capture. Drawn and in the correct default state; toggling unproven. |
+
+**Also observed, and it is a defect worth its own row:** the file context menu renders at the **top of
+the Files panel** (y≈149) rather than at the pointer (y≈841), with ample room below the cursor. A
+context menu that does not follow the pointer is wrong, and it is a different fault from the P17
+z-order overlap already recorded — that one was the panel painting *over* the menu; this is the menu
+appearing in the wrong *place*.
+
+Not exercised: `F-EDIT-02`, `F-EDIT-03`, `F-EDIT-05`, `F-EDIT-06`, `F-EDIT-11`, `F-EDIT-12`. The
+route is now known, so these are cheap for whoever holds the display next. `F-EDIT-11` needs the
+clipboard read back after clicking **Copy Path**, not just the menu item photographed.

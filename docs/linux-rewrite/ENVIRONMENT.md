@@ -76,6 +76,23 @@ The desktop session is **Wayland**. `DISPLAY=:1` is XWayland, and the app runs a
   shows nothing does.
 - **The portal file picker is Wayland-side and invisible to X captures.** It will not appear in a
   screenshot even when it is open.
+- **Only one agent may drive the display at a time.** Measured 2026-08-14, 01:22, the hard way.
+
+  `linux-drive.sh` solves **which window to photograph** — it matches `_NET_WM_PID` against the
+  process it launched, precisely so nobody drives a stranger's instance. It does **not** solve
+  **which window receives the click.** `xdotool mousemove` moves the one global X pointer, and the
+  click goes to whatever window is under it. So two simultaneous drivers corrupt each other's input
+  while each still photographs its own window correctly.
+
+  The symptom is a frame that says *the control did nothing* about code that is fine — **a false
+  negative, the expensive kind**, and indistinguishable from a real one by inspection.
+
+  Proof: the identical sequence (right-click a file row, click `Open`) opened the editor in one
+  capture and left the menu sitting open in the very next, with nothing else changed.
+
+  **Claim the display before a drive batch and say so in your pane.** If your captures overlap
+  somebody else's window in time, re-take any frame that shows *no change* before writing it to the
+  ledger — same rule as paint lag, different cause.
 
 ## There is no headless critic
 
