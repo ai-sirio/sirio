@@ -153,3 +153,39 @@ loudest HITs are simply my own census population being well-evidenced). These ro
   large mixed file as a question, exactly as the tool's own footer says.
 - Not re-litigated here: the 5+2 zero-consumer PASSED rows (queued to pireview via
   DEAD-MODELS.md) and `TILLER_SOCKET_ENABLE` (queued to codex12).
+
+## P81 — nine `F-EDIT` rows, all stale (codex11, 2026-08-14, no source changed)
+
+`codex11` audited the nine `F-EDIT` rows carrying `FAILED — absent` and reported **all nine already
+built and tested**: no dead controls, nothing genuinely absent, no `main.rs` seam. It changed no
+source files. That is a builder's claim, so these are **queued for adjudication, not marked PASSED.**
+
+Three claims spot-checked independently by the orchestrator before filing:
+
+| row | route found | claim |
+|---|---|---|
+| `F-EDIT-01` | `file_view.rs:48` `MarkdownMode::{Code, Preview}`; switch at `:226`, doc-commented `F-EDIT-01` | holds |
+| `F-EDIT-07` | `file_view.rs:748` — per-language keyword sets, `Language::Rust => ["fn","let","mut",…]`, reached via `editor.language()` | holds; a keyword highlighter, not a grammar engine, which is what the brief asked for |
+| `F-EDIT-06` | `main.rs:121` `(WindowCommand::SaveFile, "ctrl-s")`, guarded at `:132` to the active Editor tab | holds |
+
+**`F-EDIT-06` vs `F-EDIT-04` is resolved, in `F-EDIT-04`'s favour.** `F-EDIT-06`'s *"no save path"*
+was written at pass 3 and is thirteen passes stale; the chord, the action and the handler are all
+present. This was the contradiction P81 was written to settle.
+
+`F-EDIT-12` came back with a **correction to the brief's own framing**: the drag payload is not a
+bare `PathBuf` but the pair `(PathBuf, String)`. The Changes list builds and drags it
+(`changes.rs:651`/`:992`) and the terminal receives it (`tiller_terminal/src/lib.rs:1187`) — so it is
+**not** a seam to `main.rs`, as had been assumed. The file explorer is not itself a drag source, but
+the row's wording is *explorer or changes list*.
+
+Remaining unadjudicated: `F-EDIT-02`, `F-EDIT-03`, `F-EDIT-05`, `F-EDIT-10`, `F-EDIT-11` — claimed
+built and tested, not spot-checked here. `F-EDIT-10`/`11` share one right-click menu.
+
+Fresh test evidence from the pass: `tiller_ui --lib` 210 passed, `tiller_terminal --lib` 22 passed,
+editor tests 27 passed, `transplant-check.py` exit 1 with 46 pre-existing candidates and **none** from
+`editor.rs`, `file_view.rs` or `right_panel.rs`.
+
+**Critic note.** Nine rows for the cost of opening one file, editing it, saving it and right-clicking
+it. If they hold, the ledger moves 196 → 205. Not `sonnet`'s to judge only insofar as it wrote none
+of these files — `editor.rs`, `file_view.rs` and `right_panel.rs` are `codex11`'s, so `sonnet` may
+take this block.
