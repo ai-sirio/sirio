@@ -1216,7 +1216,7 @@ of inheriting the number, which is the second time tonight that has paid.
 - **`tiller_agents/**` → `codex11`.** P69's line giving it to `pi` is stale. `codex11` already owns
   `tiller_acp/**` and has just worked inside it; adapters and transport are one subsystem. B-04 and
   B-10 cut with the agents half to `codex11`, the `chat.rs` half to `pi`.
-- **`tiller_usage/**` → `codex12`.** Usage is session-scoped and `session.rs`/`main.rs` are his; it is
+- **`tiller_usage/**` → `codex12`.** Usage is session-scoped and `session.rs`/`main.rs` are already theirs; it is
   also the lightest backend load of the three. Unblocks B-70 and B-62's backend half.
 
 ### The two no-piece rows, checked against the macOS source rather than argued
