@@ -1322,3 +1322,37 @@ control, not a stale verdict, but a live control reachable only through a door n
 Routed to `pi` (owns `chat.rs`) with the fix — `ctrl-a`, `ctrl-c`, and delete the two `cmd-` arrows
 outright since plain `home`/`end` are already bound beside them. Affects at least `F-CHAT-29`, which
 is already in `fable`'s recipe set and therefore about to be exercised.
+
+### I verified P72's z-order myself, and the conclusion needs one qualification
+
+I had relayed `codex11`'s "WebKit stays above GPUI" to two other agents on the strength of its report,
+so I read the evidence rather than keep passing it on. **It holds, and the spike is well built.**
+
+`browser.rs`'s `BrowserSpike` renders a marker that is a **sibling of the sidebar** on a full-width
+`.relative().flex_1()` container — `left: 260`, `width: 520`, so it spans x ∈ [260, 780] while the
+`build_as_child` webview starts at x = 336. Its label is `"GPUI → WebKit"`. The capture shows only
+**"GPUI →"**: the 444px that should cover the web view, including the word "WebKit", is not drawn.
+Because the container is full width, GPUI is not clipping it — the child X window is painting over
+it. The spike's own comment says *"either result answers the z-order part of P72"*, which is why it
+is worth trusting: it was built so both outcomes would be informative.
+
+**The qualification.** What is proven is that a **child X window** (`build_as_child`) composites above
+GPUI. That is a fact about this embedding strategy, not about web content in general, and B-02 is the
+largest piece on the board — so the choice should be made with the alternatives named:
+
+1. **Separate top-level window** for the browser. Simplest, and what was routed to `codex12` for the
+   honest New Browser entry.
+2. **Keep the child window, and make any GPUI chrome that must appear above it a separate X window
+   too** (override-redirect popup). This is how real browsers put dropdowns over page content, and it
+   preserves the in-tab surface. It is more work, not impossible work.
+3. Offscreen-render the page into a texture and composite it inside GPUI — full control of z-order,
+   but it sacrifices the interactivity that makes the feature worth having. Named for completeness;
+   not recommended.
+
+**Only option 1 was communicated.** Options 2 and 3 must reach `codex11` before B-02 starts, or a
+nine-row architectural decision gets made by default rather than on purpose.
+
+One process note: the spike's harness lives in `/tmp/tiller-p74-browser-be1wPZ`, but it is only 24
+lines and `#[path]`-includes the real `browser.rs` from the repo — so the proof **is** replayable.
+That is the right shape for a spike, and worth copying: put the logic in the tree and keep only the
+launcher outside it.
