@@ -27,6 +27,7 @@ use tiller_theme::Theme;
 
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
+use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 
 #[path = "icons.rs"]
 pub mod icons;
@@ -210,6 +211,12 @@ struct ProjectSettingsCard {
     is_git: bool,
 }
 
+#[derive(Clone)]
+enum ProjectFormSurface {
+    Clone(gpui::Entity<CloneForm>),
+    Create(gpui::Entity<CreateForm>),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarEvent {
     AddProject(PathBuf),
@@ -283,6 +290,8 @@ pub struct Sidebar {
     notice: Option<String>,
     context_menu: Option<OpenContextMenu>,
     project_settings: Option<ProjectSettingsCard>,
+    add_project_menu: bool,
+    project_form: Option<ProjectFormSurface>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
 }
 
@@ -375,6 +384,8 @@ impl Sidebar {
             notice: None,
             context_menu: None,
             project_settings: None,
+            add_project_menu: false,
+            project_form: None,
             pending_reorder: None,
         }
     }
@@ -452,6 +463,8 @@ impl Sidebar {
             notice: None,
             context_menu: None,
             project_settings: None,
+            add_project_menu: false,
+            project_form: None,
             pending_reorder: None,
         }
     }
@@ -795,7 +808,14 @@ impl Sidebar {
         cx.emit(SidebarEvent::ContextAction { target, action });
     }
 
-    fn start_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_add_project(&mut self, cx: &mut Context<Self>) {
+        self.add_project_menu = !self.add_project_menu;
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn start_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_project_menu = false;
         // GPUI's platform path prompt is the one mechanism this codebase
         // opens a chooser with: it routes to the XDG portal on Linux and
         // the system open-panel on macOS. The sidebar only turns the picked
@@ -830,6 +850,49 @@ impl Sidebar {
             });
         })
         .detach();
+    }
+
+    fn project_form_parent() -> PathBuf {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(|| std::env::temp_dir())
+    }
+
+    fn start_clone_project(&mut self, cx: &mut Context<Self>) {
+        self.add_project_menu = false;
+        let form = cx.new(|cx| CloneForm::new(Self::project_form_parent(), cx));
+        cx.subscribe(
+            &form,
+            |sidebar, _, event: &CloneFormEvent, cx| match event {
+                CloneFormEvent::Cloned(path) => {
+                    sidebar.project_form = None;
+                    cx.emit(SidebarEvent::AddProject(path.clone()));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        self.project_form = Some(ProjectFormSurface::Clone(form));
+        cx.notify();
+    }
+
+    fn start_create_project(&mut self, cx: &mut Context<Self>) {
+        self.add_project_menu = false;
+        let form = cx.new(|cx| CreateForm::new(Self::project_form_parent(), cx));
+        cx.subscribe(
+            &form,
+            |sidebar, _, event: &CreateFormEvent, cx| match event {
+                CreateFormEvent::Created(path) => {
+                    sidebar.project_form = None;
+                    cx.emit(SidebarEvent::AddProject(path.clone()));
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+        self.project_form = Some(ProjectFormSurface::Create(form));
+        cx.notify();
     }
 
     fn request_remove_project(
@@ -1518,6 +1581,131 @@ impl Sidebar {
         })
     }
 
+    fn render_add_project_menu(
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let open_entity = entity.clone();
+        let clone_entity = entity.clone();
+        let create_entity = entity.clone();
+        div()
+            .id("add-project-menu")
+            .debug_selector(|| "add-project-menu".to_owned())
+            .absolute()
+            .top(px(30.0))
+            .right(px(12.0))
+            .w(px(190.0))
+            .p(px(6.0))
+            .rounded(theme.radii.user_pill)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .shadow_lg()
+            .child(Self::render_add_project_item(
+                entity.clone(),
+                "Open Project…",
+                "add-project-open",
+                theme,
+                move |_, window, cx| {
+                    open_entity.update(cx, |sidebar, cx| sidebar.start_open_project(window, cx))
+                },
+            ))
+            .child(Self::render_add_project_item(
+                entity.clone(),
+                "Clone Repository…",
+                "add-project-clone",
+                theme,
+                move |_, _, cx| clone_entity.update(cx, |sidebar, cx| sidebar.start_clone_project(cx)),
+            ))
+            .child(Self::render_add_project_item(
+                entity.clone(),
+                "Create Project…",
+                "add-project-create",
+                theme,
+                move |_, _, cx| {
+                    create_entity.update(cx, |sidebar, cx| sidebar.start_create_project(cx))
+                },
+            ))
+    }
+
+    fn render_add_project_item(
+        entity: gpui::Entity<Self>,
+        label: &'static str,
+        selector: &'static str,
+        theme: Theme,
+        action: impl Fn(gpui::Entity<Self>, &mut Window, &mut gpui::App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(selector)
+            .debug_selector(|| selector.to_owned())
+            .w_full()
+            .min_h(px(29.0))
+            .px(px(10.0))
+            .py(px(5.0))
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.footnote)
+            .text_color(theme.title)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, window, cx| action(entity.clone(), window, cx))
+            .child(label)
+    }
+
+    fn render_project_form(
+        form: ProjectFormSurface,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let form_view = match form {
+            ProjectFormSurface::Clone(form) => div().child(form).into_any_element(),
+            ProjectFormSurface::Create(form) => div().child(form).into_any_element(),
+        };
+        let close_entity = entity.clone();
+        div()
+            .id("project-form-overlay")
+            .debug_selector(|| "project-form-overlay".to_owned())
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(px(0.0))
+            .bottom(px(0.0))
+            .p(px(12.0))
+            .bg(rgb(0x000000).alpha(0.35))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("project-form-card")
+                    .debug_selector(|| "project-form-card".to_owned())
+                    .w(px(300.0))
+                    .rounded(theme.radii.toast)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .bg(theme.background)
+                    .child(form_view)
+                    .child(
+                        div()
+                            .id("close-project-form")
+                            .debug_selector(|| "close-project-form".to_owned())
+                            .ml(px(16.0))
+                            .mb(px(12.0))
+                            .w(px(80.0))
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .rounded(theme.radii.control)
+                            .text_color(theme.title)
+                            .hover(|style| style.bg(theme.row_hover))
+                            .on_click(move |_, _, cx| {
+                                close_entity.update(cx, |sidebar, cx| {
+                                    sidebar.project_form = None;
+                                    cx.notify();
+                                });
+                            })
+                            .child("Cancel"),
+                    ),
+            )
+    }
+
     fn render_project_settings(
         card: ProjectSettingsCard,
         entity: gpui::Entity<Self>,
@@ -1937,6 +2125,8 @@ impl Render for Sidebar {
         let notice = self.notice.clone();
         let context_menu = self.context_menu.clone();
         let project_settings = self.project_settings.clone();
+        let add_project_menu = self.add_project_menu;
+        let project_form = self.project_form.clone();
         let reorder_drop_entity = entity.clone();
         div()
             .relative()
@@ -1973,12 +2163,15 @@ impl Render for Sidebar {
                             .text_size(px(16.0))
                             .text_color(theme.meta)
                             .hover(|style| style.bg(theme.row_hover).rounded(theme.radii.control))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.start_add_project(window, cx);
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_add_project(cx);
                             }))
                             .child("+"),
                     ),
             )
+            .when(add_project_menu, |this| {
+                this.child(Self::render_add_project_menu(entity.clone(), theme))
+            })
             .child(
                 div()
                     .id("filter-field")
@@ -2166,6 +2359,9 @@ impl Render for Sidebar {
             })
             .when_some(project_settings, |this, card| {
                 this.child(Self::render_project_settings(card, entity.clone(), theme))
+            })
+            .when_some(project_form, |this, form| {
+                this.child(Self::render_project_form(form, entity.clone(), theme))
             })
     }
 }
@@ -2593,7 +2789,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn add_project_picker_reports_the_chosen_directory(cx: &mut gpui::TestAppContext) {
+    async fn add_project_menu_open_choice_reports_the_chosen_directory(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -2617,9 +2815,20 @@ mod tests {
         cx.simulate_click(plus_bounds.center(), Modifiers::none());
         cx.run_until_parked();
 
+        for selector in ["add-project-open", "add-project-clone", "add-project-create"] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "the + menu offers {selector}"
+            );
+        }
+        let open = cx
+            .debug_bounds("add-project-open")
+            .expect("open project choice");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
         assert!(
             cx.did_prompt_for_paths(),
-            "clicking + must open the platform folder picker"
+            "Open Project must open the platform folder picker"
         );
 
         // The picker is a directory chooser, not a file chooser.
@@ -2643,7 +2852,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn add_project_picker_cancel_is_silent(cx: &mut gpui::TestAppContext) {
+    async fn add_project_menu_open_cancel_is_silent(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -2665,9 +2874,14 @@ mod tests {
             .expect("the + add-project control is rendered");
         cx.simulate_click(plus_bounds.center(), Modifiers::none());
         cx.run_until_parked();
+        let open = cx
+            .debug_bounds("add-project-open")
+            .expect("open project choice");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
         assert!(
             cx.did_prompt_for_paths(),
-            "clicking + opens the platform folder picker"
+            "Open Project opens the platform folder picker"
         );
 
         // The user cancels: the platform answers None and nothing happens.
@@ -2993,9 +3207,9 @@ mod tests {
 
     /// F-SID-01: the sidebar draws its Projects header's Add Project control
     /// and every project row, and the control is a real control — clicking it
-    /// opens the platform folder picker.
+    /// opens the three-choice project menu.
     #[gpui::test]
-    async fn projects_header_add_control_and_project_rows_render(cx: &mut gpui::TestAppContext) {
+    async fn projects_header_add_menu_and_project_rows_render(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -3019,8 +3233,48 @@ mod tests {
         cx.simulate_click(plus.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.did_prompt_for_paths(),
-            "clicking + must open the platform folder picker"
+            cx.debug_bounds("add-project-open").is_some()
+                && cx.debug_bounds("add-project-clone").is_some()
+                && cx.debug_bounds("add-project-create").is_some(),
+            "clicking + must open the three-choice project menu"
+        );
+    }
+
+    #[gpui::test]
+    async fn project_menu_mounts_clone_and_create_forms(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("add-project").expect("add project control");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        let clone = cx
+            .debug_bounds("add-project-clone")
+            .expect("clone project choice");
+        cx.simulate_click(clone.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("clone-url-field").is_some(),
+            "clone form is mounted"
+        );
+
+        let cancel = cx
+            .debug_bounds("close-project-form")
+            .expect("project form cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        let create = cx
+            .debug_bounds("add-project-create")
+            .expect("create project choice");
+        cx.simulate_click(create.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("create-name-field").is_some(),
+            "create form is mounted"
         );
     }
 

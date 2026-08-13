@@ -49,6 +49,7 @@ signature the browser shows today.
 ## Closed, and worth recording as closed
 
 - **Browser mount** — `BrowserSurface` is exported and mounted as a real `TabContent::Browser`: GPUI chrome surrounds the native WebKit child, the tab opens from the palette/menu, routes the ten browser control methods, persists as `browser`, restores at launch, and persists allowed origins through the v11 store. `codex12`, P83, verified 2026-08-14. Rows `F-BRW-01` through `F-BRW-07` and `F-BRW-09`.
+- **Project forms and sidebar add menu** — `CloneForm` and `CreateForm` are mounted by `sidebar.rs`; their completion events emit `SidebarEvent::AddProject`, and the owned `+` control offers Open, Clone, and Create. `codex12`, P83, verified 2026-08-14. Rows `F-PRJ-01`, `F-PRJ-05`, `F-PRJ-06`, `F-PRJ-07`, `F-PRJ-08`, `F-PRJ-09`, and `F-PRJ-10`.
 - **`add_chat_tab` takes `&mut Window`** — `main.rs:4201`. Verified 2026-08-14. `OWNERSHIP.md` still
   listed this as open; it is not.
 - **`tiller_markdown` → `file_view.rs`** — `file_view.rs:28` imports `Document`/`parse` and uses
