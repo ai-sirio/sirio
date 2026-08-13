@@ -27,6 +27,7 @@
 //! and [`discovery::current_branch`] reports what branch a checkout is on.
 //! [`Workspace::load_project`] ties it together.
 
+mod create;
 mod discovery;
 mod domain;
 mod error;
@@ -43,6 +44,7 @@ mod ui;
 mod workspace;
 mod worktree;
 
+pub use create::{ProjectCreationError, create_project};
 pub use discovery::{
     DiscoveredProject, DiscoveredWorktree, current_branch, discover_project, discover_worktrees,
     is_git_repository, parse_worktree_list,

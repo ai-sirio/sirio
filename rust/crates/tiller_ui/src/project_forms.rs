@@ -1,0 +1,825 @@
+//! Project-entry surfaces: clone an existing repository or create a folder.
+
+use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
+
+use gpui::{
+    App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton,
+    Render, Task, Window, div, prelude::*, px,
+};
+use tiller_git::{GitRemote, clone_repository};
+use tiller_project::create_project;
+use tiller_theme::Theme;
+
+/// The observable states of a clone operation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum CloneStatus {
+    /// No clone is running and the form may be submitted.
+    #[default]
+    Ready,
+    /// Git is receiving objects; the value is between zero and one.
+    Running { progress: f64 },
+    /// Git failed. The URL remains in the form so the user can retry.
+    Failed(String),
+    /// The repository was cloned successfully.
+    Complete(PathBuf),
+}
+
+/// Pure state and guards for [`CloneForm`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CloneFormState {
+    url: String,
+    status: CloneStatus,
+}
+
+impl CloneFormState {
+    /// Replaces the URL draft. Editing after a failure returns the form to
+    /// the ready state; editing during a clone cannot cancel that clone.
+    pub fn set_url(&mut self, url: impl Into<String>) {
+        self.url = url.into();
+        if !matches!(self.status, CloneStatus::Running { .. }) {
+            self.status = CloneStatus::Ready;
+        }
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn status(&self) -> &CloneStatus {
+        &self.status
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match &self.status {
+            CloneStatus::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    pub fn progress(&self) -> Option<f64> {
+        match self.status {
+            CloneStatus::Running { progress } => Some(progress),
+            _ => None,
+        }
+    }
+
+    /// Whether a click may start a clone. A failed attempt is intentionally
+    /// submit-able so the same form is the retry surface.
+    pub fn can_submit(&self) -> bool {
+        !self.url.trim().is_empty()
+            && !matches!(
+                self.status,
+                CloneStatus::Running { .. } | CloneStatus::Complete(_)
+            )
+    }
+
+    /// Transitions into the in-flight state, refusing a second start.
+    pub fn begin(&mut self) -> bool {
+        if !self.can_submit() {
+            return false;
+        }
+        self.status = CloneStatus::Running { progress: 0.0 };
+        true
+    }
+
+    pub fn set_progress(&mut self, progress: f64) {
+        if let CloneStatus::Running { progress: current } = &mut self.status {
+            *current = progress.clamp(0.0, 1.0);
+        }
+    }
+
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.status = CloneStatus::Failed(error.into());
+    }
+
+    pub fn complete(&mut self, destination: PathBuf) {
+        self.status = CloneStatus::Complete(destination);
+    }
+}
+
+/// The typed result published when [`CloneForm`] finishes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloneFormEvent {
+    Cloned(PathBuf),
+}
+
+enum CloneWorkerMessage {
+    Progress(f64),
+    Finished(Result<PathBuf, String>),
+}
+
+/// A GPUI surface for cloning a repository from a URL.
+pub struct CloneForm {
+    parent: PathBuf,
+    state: CloneFormState,
+    focus: FocusHandle,
+    task: Option<Task<()>>,
+}
+
+impl CloneForm {
+    /// Creates a form whose destination folders will be placed under
+    /// `parent`. The host can change that location before submission.
+    pub fn new(parent: PathBuf, cx: &mut Context<Self>) -> Self {
+        ensure_theme(cx);
+        Self {
+            parent,
+            state: CloneFormState::default(),
+            focus: cx.focus_handle(),
+            task: None,
+        }
+    }
+
+    pub fn set_parent(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+        self.parent = parent;
+        cx.notify();
+    }
+
+    pub fn parent(&self) -> &Path {
+        &self.parent
+    }
+
+    pub fn set_url(&mut self, url: impl Into<String>, cx: &mut Context<Self>) {
+        self.state.set_url(url);
+        cx.notify();
+    }
+
+    pub fn url(&self) -> &str {
+        self.state.url()
+    }
+
+    /// The destination preview derived from the URL, if it has a safe final
+    /// folder component.
+    pub fn destination(&self) -> Option<PathBuf> {
+        destination_for(&self.parent, self.state.url())
+    }
+
+    pub fn status(&self) -> &CloneStatus {
+        self.state.status()
+    }
+
+    /// Starts the clone worker, or does nothing when the state guard rejects
+    /// the click. Progress is forwarded from GitClone's existing parser.
+    pub fn submit(&mut self, cx: &mut Context<Self>) {
+        if !self.state.begin() {
+            return;
+        }
+
+        let Some(destination) = self.destination() else {
+            self.state
+                .fail("the URL does not contain a destination folder name");
+            cx.notify();
+            return;
+        };
+        let url = self.state.url().to_owned();
+        let (sender, receiver) = mpsc::channel();
+        let worker_destination = destination.clone();
+        std::thread::spawn(move || {
+            let result = clone_repository(&url, &worker_destination, |progress| {
+                let _ = sender.send(CloneWorkerMessage::Progress(progress));
+            })
+            .map(|_| worker_destination)
+            .map_err(|error| error.to_string());
+            let _ = sender.send(CloneWorkerMessage::Finished(result));
+        });
+
+        self.task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                loop {
+                    let message = match receiver.try_recv() {
+                        Ok(message) => message,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            let _ = this.update(cx, |form, cx| {
+                                form.task = None;
+                                form.state.fail("clone worker stopped unexpectedly");
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    };
+                    let finished = match message {
+                        CloneWorkerMessage::Progress(progress) => {
+                            let _ = this.update(cx, |form, cx| {
+                                form.state.set_progress(progress);
+                                cx.notify();
+                            });
+                            false
+                        }
+                        CloneWorkerMessage::Finished(result) => {
+                            let _ = this.update(cx, |form, cx| {
+                                form.task = None;
+                                match result {
+                                    Ok(destination) => {
+                                        form.state.complete(destination.clone());
+                                        cx.emit(CloneFormEvent::Cloned(destination));
+                                    }
+                                    Err(error) => form.state.fail(error),
+                                }
+                                cx.notify();
+                            });
+                            true
+                        }
+                    };
+                    if finished {
+                        return;
+                    }
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(20))
+                    .await;
+            }
+        }));
+    }
+
+    fn on_url_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "enter" | "return" => self.submit(cx),
+            "backspace" | "delete" => {
+                self.state.url.pop();
+                if !matches!(self.state.status, CloneStatus::Running { .. }) {
+                    self.state.status = CloneStatus::Ready;
+                }
+                cx.notify();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                {
+                    self.state.url.push_str(character);
+                    if !matches!(self.state.status, CloneStatus::Running { .. }) {
+                        self.state.status = CloneStatus::Ready;
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+}
+
+impl Focusable for CloneForm {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<CloneFormEvent> for CloneForm {}
+
+impl Render for CloneForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let url_is_empty = self.state.url().trim().is_empty();
+        let url_value = if url_is_empty {
+            "https://github.com/owner/repository.git".to_owned()
+        } else {
+            self.state.url().to_owned()
+        };
+        let destination = self
+            .destination()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "derived from the URL".to_owned());
+        let (status_line, status_color) = clone_status_line(&self.state, theme);
+        let can_submit = self.state.can_submit();
+        let button_label = if self.state.error().is_some() {
+            "Retry clone"
+        } else {
+            "Clone repository"
+        };
+
+        div()
+            .id("clone-form")
+            .w_full()
+            .p(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .bg(theme.background)
+            .child(
+                div()
+                    .text_size(theme.typography.headline)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child("Clone repository"),
+            )
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.subtitle)
+                    .child("Paste a Git URL and choose where its folder should live."),
+            )
+            .child(form_label("Repository URL", theme))
+            .child(
+                div()
+                    .id("clone-url-field")
+                    .debug_selector(|| "clone-url-field".to_owned())
+                    .track_focus(&self.focus)
+                    .w_full()
+                    .h(px(32.0))
+                    .px(px(9.0))
+                    .flex()
+                    .items_center()
+                    .rounded(theme.radii.control)
+                    .bg(theme.filter_field_bg)
+                    .border_1()
+                    .border_color(if url_is_empty {
+                        theme.hairline
+                    } else {
+                        theme.selection_ring
+                    })
+                    .text_size(theme.typography.footnote)
+                    .text_color(if url_is_empty {
+                        theme.meta
+                    } else {
+                        theme.title
+                    })
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
+                    )
+                    .on_key_down(cx.listener(Self::on_url_key))
+                    .child(url_value),
+            )
+            .child(form_label("Destination", theme))
+            .child(
+                div()
+                    .id("clone-destination")
+                    .w_full()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.subtitle)
+                    .child(destination),
+            )
+            .child(
+                div()
+                    .id("clone-submit")
+                    .debug_selector(|| "clone-submit".to_owned())
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.control)
+                    .bg(if can_submit {
+                        theme.selected_fill
+                    } else {
+                        theme.primary_pill_bg
+                    })
+                    .text_size(theme.typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if can_submit { theme.title } else { theme.meta })
+                    .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
+                    .child(button_label),
+            )
+            .when(self.state.progress().is_some(), |this| {
+                let progress = self.state.progress().unwrap_or_default();
+                this.child(
+                    div()
+                        .id("clone-progress")
+                        .w_full()
+                        .h(px(5.0))
+                        .rounded(px(3.0))
+                        .bg(theme.primary_pill_bg)
+                        .child(
+                            div()
+                                .h(px(5.0))
+                                .rounded(px(3.0))
+                                .bg(theme.tab_focus_accent)
+                                .w(px(240.0 * progress as f32)),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id("clone-status")
+                    .text_size(theme.typography.footnote)
+                    .text_color(status_color)
+                    .child(status_line),
+            )
+    }
+}
+
+/// The observable states of a create-directory operation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CreateStatus {
+    #[default]
+    Ready,
+    Running,
+    Failed(String),
+    Complete(PathBuf),
+}
+
+/// Pure state and guards for [`CreateForm`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CreateFormState {
+    name: String,
+    status: CreateStatus,
+}
+
+impl CreateFormState {
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+        if !matches!(self.status, CreateStatus::Running) {
+            self.status = CreateStatus::Ready;
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn status(&self) -> &CreateStatus {
+        &self.status
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match &self.status {
+            CreateStatus::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    pub fn can_submit(&self) -> bool {
+        !self.name.trim().is_empty()
+            && !matches!(
+                self.status,
+                CreateStatus::Running | CreateStatus::Complete(_)
+            )
+    }
+
+    pub fn begin(&mut self) -> bool {
+        if !self.can_submit() {
+            return false;
+        }
+        self.status = CreateStatus::Running;
+        true
+    }
+
+    pub fn fail(&mut self, error: impl Into<String>) {
+        self.status = CreateStatus::Failed(error.into());
+    }
+
+    pub fn complete(&mut self, destination: PathBuf) {
+        self.status = CreateStatus::Complete(destination);
+    }
+}
+
+/// The typed result published when [`CreateForm`] finishes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreateFormEvent {
+    Created(PathBuf),
+}
+
+/// A GPUI surface for creating a new project directory.
+pub struct CreateForm {
+    parent: PathBuf,
+    state: CreateFormState,
+    focus: FocusHandle,
+    task: Option<Task<()>>,
+}
+
+impl CreateForm {
+    pub fn new(parent: PathBuf, cx: &mut Context<Self>) -> Self {
+        ensure_theme(cx);
+        Self {
+            parent,
+            state: CreateFormState::default(),
+            focus: cx.focus_handle(),
+            task: None,
+        }
+    }
+
+    pub fn set_parent(&mut self, parent: PathBuf, cx: &mut Context<Self>) {
+        self.parent = parent;
+        cx.notify();
+    }
+
+    pub fn parent(&self) -> &Path {
+        &self.parent
+    }
+
+    pub fn set_name(&mut self, name: impl Into<String>, cx: &mut Context<Self>) {
+        self.state.set_name(name);
+        cx.notify();
+    }
+
+    pub fn name(&self) -> &str {
+        self.state.name()
+    }
+
+    pub fn destination(&self) -> PathBuf {
+        self.parent.join(self.state.name().trim())
+    }
+
+    pub fn status(&self) -> &CreateStatus {
+        self.state.status()
+    }
+
+    /// Starts directory creation, retaining the draft on failure for retry.
+    pub fn submit(&mut self, cx: &mut Context<Self>) {
+        if !self.state.begin() {
+            return;
+        }
+        let parent = self.parent.clone();
+        let name = self.state.name().to_owned();
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    create_project(&parent, &name).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |form, cx| {
+                form.task = None;
+                match result {
+                    Ok(destination) => {
+                        form.state.complete(destination.clone());
+                        cx.emit(CreateFormEvent::Created(destination));
+                    }
+                    Err(error) => form.state.fail(error),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn on_name_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "enter" | "return" => self.submit(cx),
+            "backspace" | "delete" => {
+                self.state.name.pop();
+                if !matches!(self.state.status, CreateStatus::Running) {
+                    self.state.status = CreateStatus::Ready;
+                }
+                cx.notify();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                {
+                    self.state.name.push_str(character);
+                    if !matches!(self.state.status, CreateStatus::Running) {
+                        self.state.status = CreateStatus::Ready;
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+}
+
+impl Focusable for CreateForm {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<CreateFormEvent> for CreateForm {}
+
+impl Render for CreateForm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::get(cx);
+        let name_is_empty = self.state.name().trim().is_empty();
+        let name_value = if name_is_empty {
+            "project-folder-name".to_owned()
+        } else {
+            self.state.name().to_owned()
+        };
+        let parent = self.parent.display().to_string();
+        let destination = self.destination().display().to_string();
+        let (status_line, status_color) = create_status_line(&self.state, theme);
+        let can_submit = self.state.can_submit();
+        let button_label = if self.state.error().is_some() {
+            "Retry creation"
+        } else {
+            "Create project"
+        };
+
+        div()
+            .id("create-form")
+            .w_full()
+            .p(px(16.0))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .bg(theme.background)
+            .child(
+                div()
+                    .text_size(theme.typography.headline)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child("Create project"),
+            )
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.subtitle)
+                    .child("Make a new folder for a project in the selected location."),
+            )
+            .child(form_label("Project name", theme))
+            .child(
+                div()
+                    .id("create-name-field")
+                    .debug_selector(|| "create-name-field".to_owned())
+                    .track_focus(&self.focus)
+                    .w_full()
+                    .h(px(32.0))
+                    .px(px(9.0))
+                    .flex()
+                    .items_center()
+                    .rounded(theme.radii.control)
+                    .bg(theme.filter_field_bg)
+                    .border_1()
+                    .border_color(if name_is_empty {
+                        theme.hairline
+                    } else {
+                        theme.selection_ring
+                    })
+                    .text_size(theme.typography.footnote)
+                    .text_color(if name_is_empty {
+                        theme.meta
+                    } else {
+                        theme.title
+                    })
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|form, _, window, cx| form.focus.focus(window, cx)),
+                    )
+                    .on_key_down(cx.listener(Self::on_name_key))
+                    .child(name_value),
+            )
+            .child(form_label("Parent location", theme))
+            .child(
+                div()
+                    .id("create-parent")
+                    .w_full()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.subtitle)
+                    .child(parent),
+            )
+            .child(
+                div()
+                    .id("create-destination")
+                    .w_full()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child(format!("Creates {destination}")),
+            )
+            .child(
+                div()
+                    .id("create-submit")
+                    .debug_selector(|| "create-submit".to_owned())
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.control)
+                    .bg(if can_submit {
+                        theme.selected_fill
+                    } else {
+                        theme.primary_pill_bg
+                    })
+                    .text_size(theme.typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if can_submit { theme.title } else { theme.meta })
+                    .on_click(cx.listener(|form, _, _, cx| form.submit(cx)))
+                    .child(button_label),
+            )
+            .child(
+                div()
+                    .id("create-status")
+                    .text_size(theme.typography.footnote)
+                    .text_color(status_color)
+                    .child(status_line),
+            )
+    }
+}
+
+fn destination_for(parent: &Path, url: &str) -> Option<PathBuf> {
+    let name = GitRemote::project_name(url);
+    let mut components = Path::new(&name).components();
+    if !matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    ) {
+        return None;
+    }
+    Some(parent.join(name))
+}
+
+fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rgba) {
+    match state.status() {
+        CloneStatus::Ready => ("Ready to clone".to_owned(), theme.subtitle),
+        CloneStatus::Running { progress } => (
+            format!("Cloning… {}%", (progress * 100.0).round() as u8),
+            theme.tab_focus_accent,
+        ),
+        CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.tab_error),
+        CloneStatus::Complete(destination) => (
+            format!("Cloned to {}", destination.display()),
+            theme.tab_done,
+        ),
+    }
+}
+
+fn create_status_line(state: &CreateFormState, theme: &Theme) -> (String, gpui::Rgba) {
+    match state.status() {
+        CreateStatus::Ready => ("Ready to create".to_owned(), theme.subtitle),
+        CreateStatus::Running => ("Creating project…".to_owned(), theme.tab_focus_accent),
+        CreateStatus::Failed(error) => (format!("Creation failed: {error}"), theme.tab_error),
+        CreateStatus::Complete(destination) => {
+            (format!("Created {}", destination.display()), theme.tab_done)
+        }
+    }
+}
+
+fn form_label(label: &'static str, theme: &Theme) -> impl IntoElement {
+    div()
+        .text_size(theme.typography.footnote)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.title)
+        .child(label)
+}
+
+fn ensure_theme(cx: &mut Context<impl Sized>) {
+    if !cx.has_global::<Theme>() {
+        Theme::init(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{CloneFormState, CloneStatus, CreateFormState, CreateStatus};
+
+    #[test]
+    fn clone_state_disables_empty_url_and_double_submission() {
+        let mut state = CloneFormState::default();
+        assert!(!state.can_submit());
+
+        state.set_url("file:///tmp/source");
+        assert!(state.can_submit());
+        assert!(state.begin());
+        assert!(!state.can_submit());
+        assert!(!state.begin());
+        assert!(matches!(state.status(), CloneStatus::Running { .. }));
+    }
+
+    #[test]
+    fn clone_failure_keeps_url_and_allows_retry() {
+        let mut state = CloneFormState::default();
+        state.set_url("https://example.test/repository.git");
+        assert!(state.begin());
+        state.fail("connection refused");
+
+        assert_eq!(state.url(), "https://example.test/repository.git");
+        assert_eq!(state.error(), Some("connection refused"));
+        assert!(state.can_submit());
+        assert!(state.begin());
+    }
+
+    #[test]
+    fn clone_progress_and_completion_are_explicit_states() {
+        let mut state = CloneFormState::default();
+        state.set_url("file:///tmp/source");
+        assert!(state.begin());
+        state.set_progress(0.47);
+        assert_eq!(state.progress(), Some(0.47));
+        let destination = PathBuf::from("/tmp/source");
+        state.complete(destination.clone());
+        assert_eq!(state.status(), &CloneStatus::Complete(destination));
+        assert!(!state.can_submit());
+    }
+
+    #[test]
+    fn create_state_disables_empty_name_and_double_submission() {
+        let mut state = CreateFormState::default();
+        assert!(!state.can_submit());
+
+        state.set_name("new-project");
+        assert!(state.can_submit());
+        assert!(state.begin());
+        assert!(!state.can_submit());
+        assert!(!state.begin());
+        assert!(matches!(state.status(), CreateStatus::Running));
+    }
+
+    #[test]
+    fn create_failure_keeps_name_and_allows_retry() {
+        let mut state = CreateFormState::default();
+        state.set_name("already-there");
+        assert!(state.begin());
+        state.fail("already exists");
+
+        assert_eq!(state.name(), "already-there");
+        assert_eq!(state.error(), Some("already exists"));
+        assert!(state.can_submit());
+        assert!(state.begin());
+    }
+}
