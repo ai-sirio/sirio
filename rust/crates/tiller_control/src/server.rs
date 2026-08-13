@@ -38,7 +38,10 @@ use crate::protocol::{ControlRequest, ControlResponse, decode_request, encode_li
 pub const MAX_BUFFER_BYTES: usize = 1 << 20;
 
 /// Maximum bytes in `sockaddr_un.sun_path` including the null terminator on
-/// Darwin.
+/// Maximum encoded Unix-socket path length for the target platform.
+#[cfg(target_os = "linux")]
+const MAX_SOCKET_PATH_LENGTH: usize = 108;
+#[cfg(not(target_os = "linux"))]
 const MAX_SOCKET_PATH_LENGTH: usize = 104;
 
 /// How the app answers a control request. Implementations must be cheap to
@@ -122,6 +125,7 @@ impl ControlServer {
 
     /// Binds the socket and starts accepting connections.
     pub fn start(&self) -> Result<(), ServerError> {
+        self.prepare_parent_directory()?;
         self.prepare_path()?;
 
         // The socket must never exist at the umask-derived mode: between a
@@ -133,12 +137,11 @@ impl ControlServer {
         // renamed into place: the final path never exists in a permissive
         // state, because before the rename it does not exist at all and
         // after it it is already 0600.
-        let listener = Self::bind_private(&self.socket_path).map_err(|error| {
-            ServerError::BindFailed {
+        let listener =
+            Self::bind_private(&self.socket_path).map_err(|error| ServerError::BindFailed {
                 path: self.socket_path.clone(),
                 detail: error.to_string(),
-            }
-        })?;
+            })?;
 
         // Belt and braces: re-assert 0600 on the final path and fail loudly
         // if it cannot be enforced.
@@ -158,6 +161,37 @@ impl ControlServer {
         });
         *self.accept_thread.lock().expect("accept thread mutex") = Some(handle);
         self.started.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// XDG runtime directories are normally provisioned by the login/session
+    /// manager, but the state-directory fallback and explicit test/override
+    /// paths may not exist yet. Create only the socket's leaf parent and keep
+    /// it private before binding anything inside it.
+    fn prepare_parent_directory(&self) -> Result<(), ServerError> {
+        let parent = self
+            .socket_path
+            .parent()
+            .ok_or_else(|| ServerError::BindFailed {
+                path: self.socket_path.clone(),
+                detail: "socket path has no parent directory".to_string(),
+            })?;
+        let parent_was_present = parent.is_dir();
+        fs::create_dir_all(parent).map_err(|error| ServerError::BindFailed {
+            path: self.socket_path.clone(),
+            detail: format!("could not create socket directory: {error}"),
+        })?;
+        // Never chmod an existing directory supplied by TILLER_SOCKET (it
+        // may be a shared directory such as /tmp). New leaf directories are
+        // ours, so make those private before binding the socket.
+        if !parent_was_present {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                ServerError::BindFailed {
+                    path: self.socket_path.clone(),
+                    detail: format!("could not secure socket directory: {error}"),
+                }
+            })?;
+        }
         Ok(())
     }
 
@@ -221,11 +255,13 @@ impl ControlServer {
         let nanos_hex = format!("{nanos:x}");
 
         let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent directory")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "socket path has no parent directory",
+            )
         })?;
-        // Room left in `sun_path` for the temporary file name (103 bytes
-        // usable on macOS: 104 minus the NUL terminator), after the parent
-        // directory and the slash.
+        // Leave room in `sun_path` for the temporary file name and NUL
+        // terminator, after the parent directory and slash.
         let room = MAX_SOCKET_PATH_LENGTH
             .saturating_sub(1)
             .saturating_sub(parent.as_os_str().as_encoded_bytes().len())
@@ -368,7 +404,30 @@ fn peer_is_owner(stream: &UnixStream) -> bool {
 
 /// Platforms without LOCAL_PEERCRED fall back to the file-mode boundary
 /// alone. Tiller targets macOS, where the check above applies.
+#[cfg(target_os = "linux")]
+fn peer_is_owner(stream: &UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    result == 0 && credentials.uid == unsafe { libc::getuid() }
+}
+
 #[cfg(not(any(
+    target_os = "linux",
     target_os = "macos",
     target_os = "ios",
     target_os = "freebsd",

@@ -16,13 +16,15 @@ use std::path::PathBuf;
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, MouseButton,
-    PathPromptOptions, PromptLevel, Render, Rgba, Window, div, prelude::*, px, rgb,
+    MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, prelude::*, px, rgb,
 };
 use tiller_git::{
     create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
 };
 use tiller_project::TabKind;
 use tiller_theme::Theme;
+
+use crate::tab_bar::NewTabAction;
 
 #[path = "icons.rs"]
 pub mod icons;
@@ -60,7 +62,17 @@ const FILTER_LEFT_INSET: f32 = 20.0;
 const ROW_LEFT_INSET: f32 = 27.0;
 const ROW_RIGHT_INSET: f32 = 7.0;
 const TAB_INDENT: f32 = 35.0;
-const ROW_HEIGHT: f32 = 30.0;
+pub(crate) const ROW_HEIGHT: f32 = 32.0;
+/// Single-line row title line height (13.5px at waku's row ratio).
+pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
+/// Two-line card context line height (11.5px).
+pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
+/// Vertical padding of a row (waku's `py(7)`).
+pub(crate) const ROW_V_PADDING: f32 = 7.0;
+/// Gap between a card's title and context lines.
+pub(crate) const ROW_GAP: f32 = 4.0;
+/// Two-line card height: 7 + 18 + 4 + 15 + 7 — waku's session-card math.
+pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
 const GUIDE_LEFT: f32 = 20.0;
 const GUIDE_WIDTH: f32 = 2.0;
 const PROJECT_TITLE_CHARS_PER_LINE: usize = 30;
@@ -88,6 +100,8 @@ pub struct SidebarRow {
     pub selected: bool,
     /// Whether this project row is expanded.
     pub expanded: bool,
+    /// The application-level primary marker for a worktree row.
+    pub is_primary: bool,
     /// The worktree's live agent status, driving the small status dot next
     /// to its glyph. Only meaningful for `RowKind::Worktree`; host-pushed,
     /// the same way `RightPanel::set_activity` is — this crate never
@@ -128,6 +142,70 @@ pub struct SidebarProject {
 pub struct SidebarWorktree {
     pub branch: String,
     pub path: PathBuf,
+    pub is_primary: bool,
+}
+
+/// Stable target carried by a sidebar context action. Paths and catalog ids
+/// are the host's source of truth; row numbers are only drawing identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarContextTarget {
+    Project {
+        id: String,
+        path: PathBuf,
+        is_git: bool,
+    },
+    Worktree {
+        path: PathBuf,
+        is_primary: bool,
+    },
+}
+
+/// The transitions exposed by a project/worktree context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarContextAction {
+    ProjectSettings,
+    InitializeGit,
+    RevealInFileManager,
+    RemoveProject,
+    SetPrimary,
+    UnsetPrimary,
+    NewTab(NewTabAction),
+}
+
+/// Typed explanation for an unavailable context-menu command. The reason is
+/// rendered beside the disabled item instead of leaving a grey mystery row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarDisabledReason {
+    AlreadyGitProject,
+}
+
+impl std::fmt::Display for SidebarDisabledReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyGitProject => formatter.write_str("Git is already initialized"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarContextItem {
+    pub label: &'static str,
+    pub action: SidebarContextAction,
+    pub enabled: bool,
+    pub disabled_reason: Option<SidebarDisabledReason>,
+}
+
+#[derive(Clone)]
+struct OpenContextMenu {
+    target: SidebarContextTarget,
+}
+
+#[derive(Clone)]
+struct ProjectSettingsCard {
+    id: String,
+    name: String,
+    path: PathBuf,
+    is_git: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,8 +214,21 @@ pub enum SidebarEvent {
     RemoveProject(String),
     /// Select the open tab with this id (an `OpenTab::id`, not a row id).
     SelectTab(usize),
+    /// The user clicked a worktree row. The host owns which worktree is
+    /// selected — the sidebar only reports the click, carrying the
+    /// worktree's checkout path — and answers with
+    /// [`Sidebar::set_selected_worktree`] so the highlight follows the
+    /// host's decision, not the other way around.
+    SelectWorktree(PathBuf),
     /// Close the open tab with this id.
     CloseTab(usize),
+    /// Open the project settings sheet for a catalog project.
+    OpenProjectSettings(String),
+    /// A typed project/worktree context-menu transition for the shell.
+    ContextAction {
+        target: SidebarContextTarget,
+        action: SidebarContextAction,
+    },
 }
 
 /// The kinds of rows rendered by [`Sidebar`].
@@ -181,6 +272,8 @@ pub struct Sidebar {
     /// A transient error message (failed creation/removal) shown at the
     /// bottom of the sidebar.
     notice: Option<String>,
+    context_menu: Option<OpenContextMenu>,
+    project_settings: Option<ProjectSettingsCard>,
 }
 
 impl Sidebar {
@@ -214,6 +307,7 @@ impl Sidebar {
                 title: title.to_string(),
                 selected,
                 expanded,
+                is_primary: false,
                 agent_status: None,
                 is_git: true,
                 path,
@@ -223,9 +317,10 @@ impl Sidebar {
             }
         }
 
+        let worktree_path = tiller_repo.clone();
         let mut rows = vec![
             row(0, RowKind::Project, 0, "tiller", true, true, tiller_repo),
-            row(1, RowKind::Worktree, 1, "main", true, false, None),
+            row(1, RowKind::Worktree, 1, "main", true, false, worktree_path),
             row(2, RowKind::Tab, 2, "Chat", true, false, None),
             row(
                 3,
@@ -268,6 +363,8 @@ impl Sidebar {
             filter_focus: cx.focus_handle().tab_stop(true),
             prompt: None,
             notice: None,
+            context_menu: None,
+            project_settings: None,
         }
     }
 
@@ -284,8 +381,12 @@ impl Sidebar {
                 kind: RowKind::Project,
                 depth: 0,
                 title: project.name,
-                selected: project_index == 0,
+                // Only the first worktree of the first project starts
+                // selected: the selected row is one fact, and a project row
+                // is a container, not a selection.
+                selected: false,
                 expanded: true,
+                is_primary: false,
                 agent_status: None,
                 is_git: project_is_git,
                 path: Some(project_path),
@@ -302,6 +403,7 @@ impl Sidebar {
                     title: worktree.branch,
                     selected: project_index == 0 && worktree_index == 0,
                     expanded: false,
+                    is_primary: worktree.is_primary,
                     agent_status: None,
                     // Worktree rows inherit the project's repo-ness; the
                     // worktree actions hang off the project row.
@@ -320,6 +422,7 @@ impl Sidebar {
                     title: "New Worktree...".to_string(),
                     selected: false,
                     expanded: false,
+                    is_primary: false,
                     agent_status: None,
                     is_git: true,
                     path: None,
@@ -336,6 +439,8 @@ impl Sidebar {
             filter_focus: cx.focus_handle().tab_stop(true),
             prompt: None,
             notice: None,
+            context_menu: None,
+            project_settings: None,
         }
     }
 
@@ -348,7 +453,190 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Returns the complete context menu contract for a project or worktree.
+    /// Disabled rows stay visible with their typed reason so the user can
+    /// distinguish an unavailable transition from a missing affordance.
+    pub fn context_menu_items(target: &SidebarContextTarget) -> Vec<SidebarContextItem> {
+        let item = |label, action, enabled, disabled_reason| SidebarContextItem {
+            label,
+            action,
+            enabled,
+            disabled_reason,
+        };
+        match target {
+            SidebarContextTarget::Project { is_git, .. } => vec![
+                item(
+                    "Project Settings",
+                    SidebarContextAction::ProjectSettings,
+                    true,
+                    None,
+                ),
+                item(
+                    "Initialize Git repository",
+                    SidebarContextAction::InitializeGit,
+                    !is_git,
+                    is_git.then_some(SidebarDisabledReason::AlreadyGitProject),
+                ),
+                item(
+                    "Show in File Manager",
+                    SidebarContextAction::RevealInFileManager,
+                    true,
+                    None,
+                ),
+                item(
+                    "Remove Project",
+                    SidebarContextAction::RemoveProject,
+                    true,
+                    None,
+                ),
+            ],
+            SidebarContextTarget::Worktree { is_primary, .. } => {
+                let mut items = vec![item(
+                    if *is_primary {
+                        "Unset Primary"
+                    } else {
+                        "Set Primary"
+                    },
+                    if *is_primary {
+                        SidebarContextAction::UnsetPrimary
+                    } else {
+                        SidebarContextAction::SetPrimary
+                    },
+                    true,
+                    None,
+                )];
+                items.extend([
+                    item(
+                        "New Terminal",
+                        SidebarContextAction::NewTab(NewTabAction::NewTerminal),
+                        true,
+                        None,
+                    ),
+                    item(
+                        "Claude Code",
+                        SidebarContextAction::NewTab(NewTabAction::ClaudeCode),
+                        true,
+                        None,
+                    ),
+                    item(
+                        "Codex",
+                        SidebarContextAction::NewTab(NewTabAction::Codex),
+                        true,
+                        None,
+                    ),
+                    item(
+                        "OpenCode",
+                        SidebarContextAction::NewTab(NewTabAction::OpenCode),
+                        true,
+                        None,
+                    ),
+                    item(
+                        "Pi",
+                        SidebarContextAction::NewTab(NewTabAction::Pi),
+                        true,
+                        None,
+                    ),
+                    item(
+                        "Oh-My-Pi",
+                        SidebarContextAction::NewTab(NewTabAction::OhMyPi),
+                        true,
+                        None,
+                    ),
+                    item(
+                        "New Chat",
+                        SidebarContextAction::NewTab(NewTabAction::NewChat),
+                        true,
+                        None,
+                    ),
+                ]);
+                items
+            }
+        }
+    }
+
+    fn context_target(&self, row_id: usize) -> Option<SidebarContextTarget> {
+        let row = self.rows.iter().find(|row| row.id == row_id)?;
+        match row.kind {
+            RowKind::Project => Some(SidebarContextTarget::Project {
+                id: self.project_ids.get(&row_id)?.clone(),
+                path: row.path.clone()?,
+                is_git: row.is_git,
+            }),
+            RowKind::Worktree => Some(SidebarContextTarget::Worktree {
+                path: row.path.clone()?,
+                is_primary: row.is_primary,
+            }),
+            RowKind::Tab | RowKind::NewWorktree => None,
+        }
+    }
+
+    fn open_context_menu(&mut self, row_id: usize, cx: &mut Context<Self>) {
+        if let Some(target) = self.context_target(row_id) {
+            self.context_menu = Some(OpenContextMenu { target });
+            self.project_settings = None;
+            cx.notify();
+        }
+    }
+
+    fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Host entry point for the gear affordance. The sheet is intentionally
+    /// read-only until project-setting mutations have a persistence contract.
+    pub fn open_project_settings(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        let Some(row_id) = self
+            .project_ids
+            .iter()
+            .find_map(|(row_id, id)| (id == project_id).then_some(*row_id))
+        else {
+            return;
+        };
+        let Some(row) = self.rows.iter().find(|row| row.id == row_id) else {
+            return;
+        };
+        let Some(path) = row.path.clone() else {
+            return;
+        };
+        self.context_menu = None;
+        self.project_settings = Some(ProjectSettingsCard {
+            id: project_id.to_string(),
+            name: row.title.clone(),
+            path,
+            is_git: row.is_git,
+        });
+        cx.notify();
+    }
+
+    pub fn set_notice(&mut self, notice: impl Into<String>, cx: &mut Context<Self>) {
+        self.notice = Some(notice.into());
+        cx.notify();
+    }
+
+    fn dispatch_context_action(
+        &mut self,
+        target: SidebarContextTarget,
+        action: SidebarContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        if action == SidebarContextAction::RemoveProject {
+            if let SidebarContextTarget::Project { id, .. } = target {
+                self.request_remove_project(id, window, cx);
+            }
+            return;
+        }
+        cx.emit(SidebarEvent::ContextAction { target, action });
+    }
+
     fn start_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // GPUI's platform path prompt is the one mechanism this codebase
+        // opens a chooser with: it routes to the XDG portal on Linux and
+        // the system open-panel on macOS. The sidebar only turns the picked
+        // path into an event; the shell owns what happens next.
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -356,13 +644,27 @@ impl Sidebar {
             prompt: Some("Add Project".into()),
         });
         cx.spawn_in(window, async move |sidebar, cx| {
-            let Ok(Ok(Some(mut paths))) = receiver.await else {
-                return;
-            };
-            let Some(path) = paths.pop() else {
-                return;
-            };
-            let _ = sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::AddProject(path)));
+            let outcome = receiver.await;
+            let _ = sidebar.update(cx, |sidebar, cx| match outcome {
+                // A real selection: report the picked directory.
+                Ok(Ok(Some(mut paths))) => {
+                    if let Some(path) = paths.pop() {
+                        cx.emit(SidebarEvent::AddProject(path));
+                    }
+                }
+                // Cancelled (or an empty selection): nothing, silently.
+                Ok(Ok(None)) => {}
+                // The platform could not open a chooser at all (no XDG
+                // portal on this session, for example). A silent no-op
+                // here is the exact "drawn but does nothing" defect — say
+                // why instead of pretending nothing happened.
+                Ok(Err(error)) => {
+                    sidebar.notice = Some(format!("could not open the folder picker: {error}"));
+                    cx.notify();
+                }
+                // The prompt was dropped with the window.
+                Err(_) => {}
+            });
         })
         .detach();
     }
@@ -382,7 +684,8 @@ impl Sidebar {
         );
         cx.spawn_in(window, async move |sidebar, cx| {
             if receiver.await.unwrap_or(1) == 0 {
-                let _ = sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::RemoveProject(project_id)));
+                let _ =
+                    sidebar.update(cx, |_, cx| cx.emit(SidebarEvent::RemoveProject(project_id)));
             }
         })
         .detach();
@@ -411,17 +714,24 @@ impl Sidebar {
         }
     }
 
+    /// waku's row rhythm: a single-line row is 32px (13.5px title at an
+    /// 18px line height plus 7px of vertical padding — the action-row
+    /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
+    /// the session-card math). Long titles add one 18px line each.
     fn row_height(row: &SidebarRow) -> f32 {
-        if row.kind == RowKind::Project {
-            let lines = row
-                .title
-                .chars()
-                .count()
-                .div_ceil(PROJECT_TITLE_CHARS_PER_LINE)
-                .max(1);
-            ROW_HEIGHT + (lines.saturating_sub(1) as f32 * 14.0)
+        let lines = row
+            .title
+            .chars()
+            .count()
+            .div_ceil(PROJECT_TITLE_CHARS_PER_LINE)
+            .max(1);
+        let extra_lines = lines.saturating_sub(1) as f32;
+        let is_card =
+            row.path.is_some() && matches!(row.kind, RowKind::Project | RowKind::Worktree);
+        if is_card {
+            CARD_TWO_LINE_HEIGHT + extra_lines * ROW_TITLE_LINE_HEIGHT
         } else {
-            ROW_HEIGHT
+            ROW_HEIGHT + extra_lines * ROW_TITLE_LINE_HEIGHT
         }
     }
 
@@ -448,6 +758,23 @@ impl Sidebar {
             row.selected = row.id == id;
         }
         cx.notify();
+    }
+
+    /// Host-driven selection: the shell answers a [`SidebarEvent::SelectWorktree`]
+    /// by calling this, so the highlight always agrees with what the shell
+    /// actually treats as the current worktree.
+    pub fn set_selected_worktree(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for row in &mut self.rows {
+            let selected = row.kind == RowKind::Worktree && row.path.as_deref() == Some(path);
+            if row.selected != selected {
+                row.selected = selected;
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Sets the live agent status shown on a worktree row's status dot. The
@@ -514,17 +841,15 @@ impl Sidebar {
                     row.selected,
                 )
             })
-            .eq(tabs
-                .iter()
-                .map(|tab| {
-                    (
-                        Some(tab.id),
-                        Some(tab.kind),
-                        tab.agent_icon,
-                        tab.title.as_str(),
-                        tab.selected,
-                    )
-                }));
+            .eq(tabs.iter().map(|tab| {
+                (
+                    Some(tab.id),
+                    Some(tab.kind),
+                    tab.agent_icon,
+                    tab.title.as_str(),
+                    tab.selected,
+                )
+            }));
         if unchanged {
             return;
         }
@@ -537,6 +862,7 @@ impl Sidebar {
             title: tab.title,
             selected: tab.selected,
             expanded: false,
+            is_primary: false,
             agent_status: None,
             is_git: false,
             path: None,
@@ -712,6 +1038,7 @@ impl Sidebar {
                 title: branch.to_string(),
                 selected: false,
                 expanded: false,
+                is_primary: false,
                 agent_status: None,
                 is_git: true,
                 path: Some(path),
@@ -930,13 +1257,171 @@ impl Sidebar {
         match row.kind {
             RowKind::Project => Icon::FolderFill,
             RowKind::Worktree => Icon::GitBranch,
-            RowKind::Tab => row.agent_icon.unwrap_or_else(|| match row.tab_kind {
+            RowKind::Tab => row.agent_icon.unwrap_or(match row.tab_kind {
                 Some(TabKind::Terminal) => Icon::SquareTerminal,
                 Some(TabKind::Editor | TabKind::Diff) => Icon::File,
-                Some(TabKind::AgentChat | TabKind::Browser) | None => Icon::MessageSquare,
+                _ => Icon::MessageSquare,
             }),
             RowKind::NewWorktree => Icon::Plus,
         }
+    }
+
+    fn context_action_selector(action: SidebarContextAction) -> &'static str {
+        match action {
+            SidebarContextAction::ProjectSettings => "project-settings",
+            SidebarContextAction::InitializeGit => "initialize-git",
+            SidebarContextAction::RevealInFileManager => "reveal-in-file-manager",
+            SidebarContextAction::RemoveProject => "remove-project",
+            SidebarContextAction::SetPrimary => "set-primary",
+            SidebarContextAction::UnsetPrimary => "unset-primary",
+            SidebarContextAction::NewTab(NewTabAction::NewTerminal) => "new-terminal",
+            SidebarContextAction::NewTab(NewTabAction::ClaudeCode) => "claude-code",
+            SidebarContextAction::NewTab(NewTabAction::Codex) => "codex",
+            SidebarContextAction::NewTab(NewTabAction::OpenCode) => "opencode",
+            SidebarContextAction::NewTab(NewTabAction::Pi) => "pi",
+            SidebarContextAction::NewTab(NewTabAction::OhMyPi) => "oh-my-pi",
+            SidebarContextAction::NewTab(NewTabAction::NewChat) => "new-chat",
+            SidebarContextAction::NewTab(NewTabAction::NewChanges)
+            | SidebarContextAction::NewTab(NewTabAction::NewBrowser)
+            | SidebarContextAction::NewTab(NewTabAction::SplitClaudeCode) => "unsupported",
+        }
+    }
+
+    fn render_context_menu(
+        menu: OpenContextMenu,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let target = menu.target;
+        let mut view = div()
+            .id("sidebar-context-menu")
+            .debug_selector(|| "sidebar-context-menu".to_owned())
+            .absolute()
+            .left(px(18.0))
+            .top(px(54.0))
+            .w(px(240.0))
+            .p(px(6.0))
+            .rounded(theme.radii.user_pill)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .shadow_lg();
+
+        for item in Self::context_menu_items(&target) {
+            let selector = format!(
+                "sidebar-context-item-{}",
+                Self::context_action_selector(item.action)
+            );
+            let enabled = item.enabled;
+            let action = item.action;
+            let item_target = target.clone();
+            let item_entity = entity.clone();
+            let mut row = div()
+                .id(selector.clone())
+                .debug_selector(move || selector.clone())
+                .w_full()
+                .min_h(px(29.0))
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(theme.radii.control)
+                .flex()
+                .items_center()
+                .justify_between()
+                .text_size(theme.typography.footnote)
+                .text_color(if enabled { theme.title } else { theme.meta })
+                .when(enabled, |this| {
+                    this.hover(|style| style.bg(theme.row_hover))
+                });
+            if enabled {
+                row = row.on_click(move |_, window, cx| {
+                    item_entity.update(cx, |sidebar, cx| {
+                        sidebar.dispatch_context_action(item_target.clone(), action, window, cx)
+                    });
+                });
+            }
+            row = row.child(item.label);
+            if let Some(reason) = item.disabled_reason {
+                row = row.child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme.meta)
+                        .child(reason.to_string()),
+                );
+            }
+            view = view.child(row);
+        }
+        view.on_mouse_down_out(move |_, _, cx| {
+            entity.update(cx, |sidebar, cx| sidebar.close_context_menu(cx));
+        })
+    }
+
+    fn render_project_settings(
+        card: ProjectSettingsCard,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let close_entity = entity.clone();
+        div()
+            .id("project-settings-sheet")
+            .debug_selector(|| "project-settings-sheet".to_owned())
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(px(0.0))
+            .bottom(px(0.0))
+            .p(px(16.0))
+            .bg(theme.sidebar)
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .text_size(theme.typography.headline)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child(format!("Project Settings · {}", card.name)),
+            )
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child(card.path.display().to_string()),
+            )
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.title)
+                    .child(if card.is_git {
+                        "Repository: Git"
+                    } else {
+                        "Repository: Folder"
+                    }),
+            )
+            .child(
+                div()
+                    .id("close-project-settings")
+                    .debug_selector(|| "close-project-settings".to_owned())
+                    .mt(px(4.0))
+                    .w(px(80.0))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(theme.radii.control)
+                    .text_color(theme.title)
+                    .hover(|style| style.bg(theme.row_hover))
+                    .on_click(move |_, _, cx| {
+                        close_entity.update(cx, |sidebar, cx| {
+                            sidebar.project_settings = None;
+                            cx.notify();
+                        });
+                    })
+                    .child("Close"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme.meta)
+                    .child(card.id),
+            )
     }
 
     fn render_row(
@@ -949,10 +1434,16 @@ impl Sidebar {
         let selected = row.selected;
         let kind = row.kind;
         let title = row.title.clone();
+        let path = row.path.clone();
+        // The click closure reports the checkout path for worktree rows.
+        let worktree_path = path.clone();
         let is_project = kind == RowKind::Project;
-        let is_tab = kind == RowKind::Tab;
         let is_worktree = kind == RowKind::Worktree;
         let guide = matches!(kind, RowKind::Worktree | RowKind::Tab);
+        // waku's card rhythm: projects and worktrees are two-line cards
+        // (13.5px title over an 11.5px context line); leaf rows are
+        // single-line at the 32px action-row height.
+        let is_card = path.is_some() && matches!(kind, RowKind::Project | RowKind::Worktree);
         let row_height = Self::row_height(&row);
         let row_left_inset = ROW_LEFT_INSET + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
         let row_width = SIDEBAR_WIDTH - row_left_inset - ROW_RIGHT_INSET;
@@ -987,8 +1478,8 @@ impl Sidebar {
         let remove_entity = entity.clone();
         let click_entity = entity.clone();
         let tab_close_entity = entity.clone();
+        let context_entity = entity.clone();
         let hover_group = format!("sidebar-project-{row_id}");
-        let project_group = hover_group.clone();
         let tab_id = row.tab_id;
 
         let row_debug_selector = if kind == RowKind::NewWorktree {
@@ -999,17 +1490,25 @@ impl Sidebar {
         let mut row_view = div()
             .id(row_id)
             .debug_selector(move || row_debug_selector)
+            .group(hover_group.clone())
             .relative()
             .h(px(row_height))
             .w(px(row_width))
             .ml(px(row_left_inset))
             .mr(px(ROW_RIGHT_INSET))
             .flex()
-            .items_center()
-            .gap(px(7.0))
+            .flex_col()
+            .justify_center()
+            .gap(px(ROW_GAP))
             .px(px(8.0))
-            .rounded(px(6.0))
-            .text_size(px(if is_tab { 12.0 } else { 13.0 }))
+            .py(px(ROW_V_PADDING))
+            .rounded(theme.radii.control)
+            // Rows are clickable, never draggable: project order belongs to
+            // the host's catalog, there is no reorder gesture to install,
+            // and a pointer cursor would invite a drag the program cannot
+            // perform (P19). Pin the default arrow — waku's convention.
+            .cursor_default()
+            .text_size(px(13.5))
             .text_color(text_color)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, window, cx| {
@@ -1027,20 +1526,36 @@ impl Sidebar {
                             sidebar.begin_worktree_prompt(row_id, window, cx);
                         }
                         RowKind::Tab => {}
-                        RowKind::Worktree => sidebar.select_row(row_id, cx),
+                        RowKind::Worktree => {
+                            // Report the click to the host; the host decides
+                            // what actually becomes selected and confirms by
+                            // calling back `set_selected_worktree`.
+                            if let Some(path) = worktree_path.as_ref() {
+                                cx.emit(SidebarEvent::SelectWorktree(path.clone()));
+                            }
+                            sidebar.select_row(row_id, cx);
+                        }
                     }
                 });
             });
 
+        row_view = row_view.on_mouse_down(MouseButton::Right, move |_: &MouseDownEvent, _, cx| {
+            cx.stop_propagation();
+            context_entity.update(cx, |sidebar, cx| sidebar.open_context_menu(row_id, cx));
+        });
+
         if selected {
-            row_view = row_view.bg(if is_project {
-                theme.row_hover
-            } else {
-                theme.selection_fill
-            });
+            row_view = row_view.bg(theme.selected_fill);
         }
 
-        let row_view = row_view
+        // The card's main line. The disclosure chevron and every per-row
+        // control are hover-revealed, waku's way of keeping a resting row
+        // free of chrome.
+        let main_line = div()
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .min_h(px(ROW_TITLE_LINE_HEIGHT))
             .child(
                 div()
                     .w(px(12.0))
@@ -1059,6 +1574,8 @@ impl Sidebar {
                         None => match disclosure {
                             Some(icon) => IconElement::new(icon, px(11.0))
                                 .text_color(theme.meta)
+                                .invisible()
+                                .group_hover(hover_group.clone(), |icon| icon.visible())
                                 .into_any_element(),
                             None => div().into_any_element(),
                         },
@@ -1080,7 +1597,7 @@ impl Sidebar {
                     .w(px(title_width))
                     .flex_none()
                     .whitespace_normal()
-                    .line_height(px(14.0))
+                    .line_height(px(ROW_TITLE_LINE_HEIGHT))
                     .font_weight(if is_project {
                         FontWeight::SEMIBOLD
                     } else {
@@ -1090,23 +1607,22 @@ impl Sidebar {
                     .child(title),
             )
             .when(is_project, |this| {
-                this.group(project_group.clone()).child(
+                this.child(
                     div()
-                        .id(("remove-project", row_id))
+                        .id(("project-settings", row_id))
+                        .debug_selector(move || format!("project-settings-{row_id}"))
                         .cursor(gpui::CursorStyle::PointingHand)
                         .w(px(16.0))
                         .flex_none()
                         .text_size(px(12.0))
                         .text_color(theme.meta)
-                        .when(!selected, |this| {
-                            this.invisible()
-                                .group_hover(project_group.clone(), |style| style.visible())
-                        })
+                        .invisible()
+                        .group_hover(hover_group.clone(), |style| style.visible())
                         .child(IconElement::new(Icon::Settings, px(12.0)).text_color(theme.meta))
-                        .on_click(move |_, window, cx| {
+                        .on_click(move |_, _window, cx| {
                             if let Some(project_id) = project_id.clone() {
-                                remove_entity.update(cx, |sidebar, cx| {
-                                    sidebar.request_remove_project(project_id, window, cx);
+                                remove_entity.update(cx, |_, cx| {
+                                    cx.emit(SidebarEvent::OpenProjectSettings(project_id));
                                 });
                             }
                         }),
@@ -1114,7 +1630,7 @@ impl Sidebar {
             })
             .when(is_worktree, |this| {
                 let remove_entity = entity.clone();
-                this.group(hover_group.clone()).child(
+                this.child(
                     div()
                         .id(("remove-worktree", row_id))
                         .debug_selector(move || format!("remove-worktree-{row_id}"))
@@ -1122,10 +1638,10 @@ impl Sidebar {
                         .flex_none()
                         .text_size(px(11.0))
                         .text_color(theme.meta)
-                        .rounded(px(4.0))
+                        .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.row_hover))
                         .invisible()
-                        .group_hover(hover_group, |style| style.visible())
+                        .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             remove_entity.update(cx, |sidebar, cx| {
@@ -1139,11 +1655,15 @@ impl Sidebar {
                 this.child(
                     div()
                         .id(("sidebar-tab-close", row_id))
+                        .debug_selector(move || format!("sidebar-tab-close-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
                         .text_size(px(13.0))
                         .text_color(theme.subtitle)
-                        .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
+                        .rounded(theme.radii.chip)
+                        .hover(|style| style.bg(theme.row_hover))
+                        .invisible()
+                        .group_hover(hover_group.clone(), |style| style.visible())
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
                             tab_close_entity.update(cx, |_, cx| {
@@ -1153,6 +1673,40 @@ impl Sidebar {
                         .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.subtitle)),
                 )
             });
+
+        let row_view = row_view.child(main_line).when(is_card, |this| {
+            let sub = path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            this.child(
+                div()
+                    // Aligned under the title: 12px leading slot + 7px gap
+                    // + 16px glyph + 7px gap.
+                    .pl(px(42.0))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .text_size(px(11.5))
+                    .line_height(px(ROW_SUB_LINE_HEIGHT))
+                    .text_color(theme.meta)
+                    .child(div().min_w_0().truncate().child(sub))
+                    .when(row.is_primary, |this| {
+                        this.child(
+                            div()
+                                .id(("sidebar-primary-pill", row_id))
+                                .debug_selector(move || format!("sidebar-primary-pill-{row_id}"))
+                                .px(px(5.0))
+                                .rounded(theme.radii.chip)
+                                .bg(theme.primary_pill_bg)
+                                .text_color(theme.title)
+                                .text_size(px(10.0))
+                                .child("Primary"),
+                        )
+                    }),
+            )
+        });
 
         let mut container = div().relative().w_full().h(px(row_height));
         if guide {
@@ -1191,6 +1745,8 @@ impl Render for Sidebar {
         let filter_text = self.filter.clone();
         let prompt = self.prompt.clone();
         let notice = self.notice.clone();
+        let context_menu = self.context_menu.clone();
+        let project_settings = self.project_settings.clone();
         div()
             .relative()
             .flex()
@@ -1198,25 +1754,26 @@ impl Render for Sidebar {
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .overflow_hidden()
-            .bg(theme.canvas)
+            .bg(theme.sidebar)
             .border_r_1()
-            .border_color(gpui::black())
+            .border_color(theme.sidebar_border)
             .pt(px(8.0))
             .child(
                 div()
-                    .h(px(18.0))
+                    .h(px(20.0))
                     .w_full()
                     .px(px(FILTER_LEFT_INSET))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_size(px(11.0))
+                    .text_size(px(11.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.meta)
                     .child("Projects")
                     .child(
                         div()
                             .id("add-project")
+                            .debug_selector(|| "add-project".to_string())
                             .w(px(20.0))
                             .h(px(20.0))
                             .flex()
@@ -1224,7 +1781,7 @@ impl Render for Sidebar {
                             .justify_center()
                             .text_size(px(16.0))
                             .text_color(theme.meta)
-                            .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
+                            .hover(|style| style.bg(theme.row_hover).rounded(theme.radii.control))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.start_add_project(window, cx);
                             }))
@@ -1244,7 +1801,7 @@ impl Render for Sidebar {
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .rounded(px(6.0))
+                    .rounded(theme.radii.control)
                     .bg(theme.filter_field_bg)
                     .border_1()
                     .border_color(if filter_is_focused {
@@ -1260,11 +1817,11 @@ impl Render for Sidebar {
                         }),
                     )
                     .on_key_down(cx.listener(Self::on_filter_key))
-                    .child(div().text_size(px(11.0)).text_color(theme.meta).child("⌕"))
+                    .child(div().text_size(px(11.5)).text_color(theme.meta).child("⌕"))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.5))
+                            .text_size(px(11.5))
                             .text_color(if filter_text.is_empty() {
                                 theme.meta
                             } else {
@@ -1286,12 +1843,13 @@ impl Render for Sidebar {
                     .flex()
                     .flex_col()
                     .overflow_y_scroll()
-                    .children(
-                        rows.into_iter().map(move |row| {
+                    .children(rows.into_iter().map({
+                        let entity = entity.clone();
+                        move |row| {
                             let project_id = project_ids.get(&row.id).cloned();
                             Self::render_row(row, project_id, entity.clone(), theme)
-                        }),
-                    ),
+                        }
+                    })),
             )
             .when(notice.is_some(), |this| {
                 this.child(
@@ -1300,7 +1858,7 @@ impl Render for Sidebar {
                         .w_full()
                         .px(px(FILTER_LEFT_INSET))
                         .py(px(6.0))
-                        .text_size(px(11.0))
+                        .text_size(theme.typography.footnote)
                         .text_color(theme.diff_deletion)
                         .child(notice.unwrap_or_default()),
                 )
@@ -1334,7 +1892,7 @@ impl Render for Sidebar {
                                 .debug_selector(|| "worktree-prompt".to_string())
                                 .track_focus(&prompt.focus)
                                 .w(px(260.0))
-                                .rounded(px(10.0))
+                                .rounded(theme.radii.toast)
                                 .bg(theme.chat_surface)
                                 .border_1()
                                 .border_color(theme.hairline)
@@ -1357,7 +1915,7 @@ impl Render for Sidebar {
                                 })
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(theme.typography.headline)
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme.title)
                                         .child(format!("New worktree in {}", prompt.project_name)),
@@ -1369,11 +1927,11 @@ impl Render for Sidebar {
                                         .px(px(8.0))
                                         .flex()
                                         .items_center()
-                                        .rounded(px(6.0))
+                                        .rounded(theme.radii.control)
                                         .bg(theme.filter_field_bg)
                                         .border_1()
                                         .border_color(theme.selection_ring)
-                                        .text_size(px(12.0))
+                                        .text_size(theme.typography.footnote)
                                         .text_color(if prompt.draft.is_empty() {
                                             theme.meta
                                         } else {
@@ -1388,19 +1946,25 @@ impl Render for Sidebar {
                                 .when(prompt.error.is_some(), |this| {
                                     this.child(
                                         div()
-                                            .text_size(px(11.0))
+                                            .text_size(theme.typography.footnote)
                                             .text_color(theme.diff_deletion)
                                             .child(prompt.error.clone().unwrap_or_default()),
                                     )
                                 })
                                 .child(
                                     div()
-                                        .text_size(px(10.5))
+                                        .text_size(theme.typography.caption2)
                                         .text_color(theme.meta)
                                         .child("Enter to create · Esc to cancel"),
                                 ),
                         ),
                 )
+            })
+            .when_some(context_menu, |this, menu| {
+                this.child(Self::render_context_menu(menu, entity.clone(), theme))
+            })
+            .when_some(project_settings, |this, card| {
+                this.child(Self::render_project_settings(card, entity.clone(), theme))
             })
     }
 }
@@ -1408,7 +1972,7 @@ impl Render for Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, VisualTestContext, point};
+    use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1479,6 +2043,7 @@ mod tests {
             selected: false,
             expanded: false,
             agent_status: None,
+            is_primary: false,
             is_git: false,
             path: None,
             tab_id: Some(1),
@@ -1499,6 +2064,7 @@ mod tests {
             selected: false,
             expanded: false,
             agent_status: None,
+            is_primary: false,
             is_git: false,
             path: None,
             tab_id: Some(2),
@@ -1509,13 +2075,115 @@ mod tests {
         assert_eq!(Sidebar::row_icon(&row), Icon::ClaudeCode);
     }
 
+    #[test]
+    fn sidebar_context_items_explain_git_eligibility_and_list_every_new_surface() {
+        let git_project = SidebarContextTarget::Project {
+            id: "git".to_string(),
+            path: PathBuf::from("/tmp/git"),
+            is_git: true,
+        };
+        let items = Sidebar::context_menu_items(&git_project);
+        let initialize = items
+            .iter()
+            .find(|item| item.action == SidebarContextAction::InitializeGit)
+            .expect("Git initialization remains visible as a disabled command");
+        assert!(!initialize.enabled);
+        assert_eq!(
+            initialize.disabled_reason,
+            Some(SidebarDisabledReason::AlreadyGitProject)
+        );
+
+        let worktree = SidebarContextTarget::Worktree {
+            path: PathBuf::from("/tmp/git-main"),
+            is_primary: false,
+        };
+        let worktree_items = Sidebar::context_menu_items(&worktree);
+        assert!(
+            worktree_items
+                .iter()
+                .any(|item| { item.action == SidebarContextAction::SetPrimary && item.enabled })
+        );
+        for action in [
+            NewTabAction::NewTerminal,
+            NewTabAction::ClaudeCode,
+            NewTabAction::Codex,
+            NewTabAction::OpenCode,
+            NewTabAction::Pi,
+            NewTabAction::OhMyPi,
+            NewTabAction::NewChat,
+        ] {
+            assert!(
+                worktree_items
+                    .iter()
+                    .any(|item| item.action == SidebarContextAction::NewTab(action)),
+                "context menu lists {action:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn right_click_context_menu_dispatches_a_typed_worktree_action(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("context-menu");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("sidebar-context-menu").is_some(),
+            "right-click draws the context menu"
+        );
+
+        let terminal = cx
+            .debug_bounds("sidebar-context-item-new-terminal")
+            .expect("the context menu exposes New Terminal");
+        cx.simulate_click(terminal.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(events.borrow().iter().any(|event| matches!(
+            event,
+            SidebarEvent::ContextAction {
+                target: SidebarContextTarget::Worktree { .. },
+                action: SidebarContextAction::NewTab(NewTabAction::NewTerminal),
+            }
+        )));
+    }
+
     #[gpui::test]
     async fn new_worktree_prompt_creates_a_real_worktree(cx: &mut gpui::TestAppContext) {
         let repo = scratch_repo("create");
 
         cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -1589,8 +2257,7 @@ mod tests {
         let repo = scratch_repo("remove");
 
         cx.update(Theme::init);
-        let window =
-            cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -1602,16 +2269,19 @@ mod tests {
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
-        // The remove button sits at the row's right edge. The new worktree
-        // row is inserted directly above the New Worktree row (whose bounds
-        // are known statically), one row height up.
+        // The remove button sits at the row's right edge, on the card's
+        // title line. The new worktree row is inserted directly above the
+        // New Worktree row (whose bounds are known statically): the card is
+        // 51px tall with 7px top padding and an 18px title line, so the ×
+        // rides 16px below the card's top edge — i.e. 35px above the next
+        // row's top.
         let new_worktree_bounds = cx
             .debug_bounds("new-worktree-row")
             .expect("the New Worktree row's bounds are known");
         // The × is 16px wide, inset 8px from the row's right edge.
         let remove_button = point(
             new_worktree_bounds.origin.x + new_worktree_bounds.size.width - px(16.0),
-            new_worktree_bounds.origin.y - px(15.0),
+            new_worktree_bounds.origin.y - px(35.0),
         );
         // The remove button is hover-revealed: move the mouse over the row
         // first so the × is visible and clickable.
@@ -1619,21 +2289,14 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_click(remove_button, Modifiers::none());
 
-        let sidebar_entity = cx.update(|window, _| {
-            window
-                .root::<Sidebar>()
-                .flatten()
-                .expect("sidebar root")
-        });
-        cx.condition(
-            &sidebar_entity,
-            |sidebar, _cx| {
-                !sidebar
-                    .rows
-                    .iter()
-                    .any(|row| row.kind == RowKind::Worktree && row.title == "to-remove")
-            },
-        )
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.condition(&sidebar_entity, |sidebar, _cx| {
+            !sidebar
+                .rows
+                .iter()
+                .any(|row| row.kind == RowKind::Worktree && row.title == "to-remove")
+        })
         .await;
 
         // The row is gone from the tree and the repository agrees.
@@ -1658,6 +2321,281 @@ mod tests {
         assert!(
             !porcelain.contains("to-remove"),
             "porcelain no longer reports the removed worktree:\n{porcelain}"
+        );
+    }
+
+    #[gpui::test]
+    async fn clicking_a_worktree_row_reports_selection_to_the_host(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("select");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        // The fixture's worktree rows carry no path; give the first one a
+        // real checkout path so the click has something to report.
+        let worktree_path = repo.join("tiller-main");
+        cx.update(|_, cx| {
+            sidebar_entity.update(cx, |sidebar, cx| {
+                if let Some(row) = sidebar
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.kind == RowKind::Worktree)
+                {
+                    row.path = Some(worktree_path.clone());
+                }
+                cx.notify();
+            })
+        });
+        let row_bounds = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the first worktree row is rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let emitted = events.borrow();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::SelectWorktree(path) if *path == worktree_path)),
+            "clicking a worktree row must emit SelectWorktree with its path, got {emitted:?}"
+        );
+
+        // The host answers by confirming the selection; the highlight agrees.
+        sidebar_entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_selected_worktree(&worktree_path, cx);
+        });
+        let selected = cx.read(|cx| {
+            sidebar_entity
+                .read(cx)
+                .rows
+                .iter()
+                .filter(|r| r.selected)
+                .count()
+        });
+        assert_eq!(selected, 1, "exactly one row stays selected");
+    }
+
+    #[gpui::test]
+    async fn add_project_picker_reports_the_chosen_directory(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let picked = std::env::temp_dir().join("tiller-picked-project");
+        let plus_bounds = cx
+            .debug_bounds("add-project")
+            .expect("the + add-project control is rendered");
+        cx.simulate_click(plus_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.did_prompt_for_paths(),
+            "clicking + must open the platform folder picker"
+        );
+
+        // The picker is a directory chooser, not a file chooser.
+        cx.simulate_path_prompt_response(|options| {
+            assert!(
+                options.directories && !options.files && !options.multiple,
+                "the add-project picker asks for one directory"
+            );
+            Some(vec![picked.clone()])
+        });
+        cx.run_until_parked();
+
+        let emitted = events.borrow();
+        assert!(
+            emitted.iter().any(|event| matches!(
+                event,
+                SidebarEvent::AddProject(path) if *path == picked
+            )),
+            "the chosen directory must be emitted as AddProject, got {emitted:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn add_project_picker_cancel_is_silent(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let plus_bounds = cx
+            .debug_bounds("add-project")
+            .expect("the + add-project control is rendered");
+        cx.simulate_click(plus_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.did_prompt_for_paths(),
+            "clicking + opens the platform folder picker"
+        );
+
+        // The user cancels: the platform answers None and nothing happens.
+        cx.simulate_path_prompt_response(|_options| None);
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().is_empty(),
+            "cancelling the picker must emit nothing, got {:?}",
+            events.borrow()
+        );
+    }
+
+    #[gpui::test]
+    async fn dragging_across_rows_does_not_reorder_the_sidebar(cx: &mut gpui::TestAppContext) {
+        // P19: rows used to invite drag-to-reorder without any handler — an
+        // affordance that promises something the program cannot do. There is
+        // no reorder (project order belongs to the host's catalog and its
+        // persistence; the reference app and waku have no drag-reorder
+        // either), so the affordance is removed: rows install no drag
+        // gesture, and a drag-shaped interaction must leave the row order
+        // untouched.
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_ids = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window
+                    .root::<Sidebar>()
+                    .flatten()
+                    .expect("sidebar root")
+                    .read(cx)
+                    .rows
+                    .iter()
+                    .map(|row| row.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = row_ids(&mut cx);
+
+        // A drag-shaped motion: sweep from the first row to the last and
+        // release there. Without a drag handler this is an ordinary hover
+        // plus a click — the order must not change and nothing may panic.
+        let first = cx.debug_bounds("sidebar-row-0").expect("first row");
+        let last = cx.debug_bounds("sidebar-row-7").expect("last row");
+        cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(last.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let after = row_ids(&mut cx);
+        assert_eq!(
+            before, after,
+            "a drag-shaped interaction must not reorder sidebar rows"
+        );
+    }
+
+    /// F-TAB-15: a host-owned tab row's close control is drawn, hover-
+    /// revealed, and clicking it reports CloseTab with the real tab id —
+    /// the tab strip's ✕, exercised from the sidebar's view of the same
+    /// tabs the strip renders.
+    #[gpui::test]
+    async fn the_drawn_tab_close_control_reports_closeta_tab(cx: &mut gpui::TestAppContext) {
+        let repo = scratch_repo("tab-close");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        // The host pushes one open tab under the worktree row (id 1).
+        let tab_id = 42usize;
+        sidebar_entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(
+                1,
+                vec![SidebarTab {
+                    id: tab_id,
+                    title: "Chat".into(),
+                    selected: true,
+                    kind: TabKind::AgentChat,
+                    agent_icon: None,
+                }],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let row_id = TAB_ROW_ID_OFFSET + tab_id;
+
+        // The close control is hover-revealed: move over the row, then the
+        // ✕ is visible and clickable at its own drawn bounds.
+        // `debug_bounds` takes a static selector; the row ids are dynamic,
+        // so leak one string per lookup — a bounded, test-only cost.
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let close_selector: &'static str =
+            Box::leak(format!("sidebar-tab-close-{row_id}").into_boxed_str());
+        let row_bounds = cx
+            .debug_bounds(row_selector)
+            .expect("the host-driven tab row is drawn");
+        cx.simulate_mouse_move(row_bounds.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let close = cx
+            .debug_bounds(close_selector)
+            .expect("the tab close control is drawn after hovering the row");
+        cx.simulate_click(close.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let emitted = events.borrow();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::CloseTab(id) if *id == tab_id)),
+            "clicking the drawn ✕ must emit CloseTab for the real tab id, got {emitted:?}"
+        );
+        assert!(
+            !emitted
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::SelectTab(_))),
+            "the close control must not also select the tab"
         );
     }
 }

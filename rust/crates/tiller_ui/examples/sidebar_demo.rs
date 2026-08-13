@@ -19,7 +19,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Sidebar::new_for_demo(cx)),
+            |_, cx| cx.new(Sidebar::new_for_demo),
         )
         .expect("open sidebar demo window");
         cx.activate(true);

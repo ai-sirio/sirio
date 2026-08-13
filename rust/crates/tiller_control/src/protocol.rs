@@ -113,11 +113,10 @@ pub fn default_socket_path(environment: &BTreeMap<String, String>) -> String {
     {
         let root = absolute_environment_path(environment, "XDG_RUNTIME_DIR")
             .unwrap_or_else(|| xdg_state_home(environment));
-        return root
-            .join("TillerRust")
+        root.join("TillerRust")
             .join("control.sock")
             .to_string_lossy()
-            .into_owned();
+            .into_owned()
     }
 }
 
@@ -342,11 +341,7 @@ pub mod request {
         request("surface.changes.read", BTreeMap::new())
     }
 
-    fn changes_path_action(
-        method: &str,
-        path: &str,
-        worktree: Option<&str>,
-    ) -> ControlRequest {
+    fn changes_path_action(method: &str, path: &str, worktree: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::from([("path".to_string(), path.to_string())]);
         if let Some(worktree) = worktree {
             params.insert("worktree".to_string(), worktree.to_string());
@@ -453,7 +448,9 @@ pub mod request {
         request("workspace.close", params)
     }
 
-    /// Associates a worktree with an optional pane/session and comment.
+    /// Associates runtime-only worktree metadata with an optional pane/session
+    /// and comment. The control state is rebuilt on launch, so these values do
+    /// not survive an application restart.
     pub fn worktree_set(
         worktree: &str,
         comment: Option<&str>,

@@ -318,13 +318,23 @@ fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
 }
 
 /// Line counts for every changed file, in one git invocation plus a cheap
-/// read per untracked file. Untracked files do not appear in `--numstat`
-/// against HEAD at all, so their additions are counted from disk — mirroring
-/// `GitDiffStats.stats` from the Swift app.
+/// read per untracked file, plus per-file diffs for checkouts with an unborn
+/// HEAD. Untracked files do not appear in `--numstat` against HEAD at all,
+/// so their additions are counted from disk — mirroring `GitDiffStats.stats`
+/// from the Swift app — falling back to a diff when the disk count gives up
+/// (binary, or over the snapshot cap), so a large or binary untracked file
+/// does not render +0 −0 next to its real diff.
+///
+/// A checkout with an unborn HEAD has nothing to diff against, so
+/// `--numstat HEAD` cannot run at all; every entry there gets its counts
+/// from the same no-index diff the expanded view renders. The row's +/− and
+/// the expansion therefore can never disagree — previously a staged file in
+/// such a repo showed +0 −0 while its expanded diff showed real lines.
 pub fn stats(repo: &Path, entries: &[StatusEntry]) -> Result<HashMap<PathBuf, DiffStat>, GitError> {
     let mut result = HashMap::new();
+    let head = has_head(repo);
 
-    if has_head(repo) {
+    if head {
         let output = git::run_accepting(
             &[
                 "diff",
@@ -340,7 +350,16 @@ pub fn stats(repo: &Path, entries: &[StatusEntry]) -> Result<HashMap<PathBuf, Di
         result = parse_numstat(&output.stdout_string());
     }
 
-    for entry in entries.iter().filter(|entry| entry.is_untracked()) {
+    for entry in entries {
+        if head && !entry.is_untracked() {
+            continue; // already in the numstat result
+        }
+        // No `--numstat` coverage here: untracked files always, and every
+        // file in an unborn-HEAD checkout. Count from disk when possible
+        // (cheap, Swift-parity); otherwise from the same no-index diff the
+        // expanded view renders. A file whose diff also fails is left out of
+        // the map — the surface renders its counts as unavailable rather
+        // than inventing zeroes.
         let absolute = repo.join(&entry.path);
         if let Some(lines) = line_count(&absolute) {
             result.insert(
@@ -349,6 +368,17 @@ pub fn stats(repo: &Path, entries: &[StatusEntry]) -> Result<HashMap<PathBuf, Di
                     additions: lines,
                     deletions: 0,
                     is_binary: false,
+                },
+            );
+            continue;
+        }
+        if let Ok(diff) = diff_entry(repo, entry, DEFAULT_CONTEXT_LINES) {
+            result.insert(
+                entry.path.clone(),
+                DiffStat {
+                    additions: diff.additions,
+                    deletions: diff.deletions,
+                    is_binary: diff.is_binary,
                 },
             );
         }
@@ -594,5 +624,93 @@ mod tests {
     #[test]
     fn empty_numstat_is_empty() {
         assert!(parse_numstat("").is_empty());
+    }
+
+    // ── stats() over real repos: the counts the Changes surface shows ──
+
+    fn run(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn scratch_repo(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tiller-git-stats-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create repo dir");
+        run(&dir, &["init", "-q"]);
+        run(&dir, &["config", "user.email", "tests@example.invalid"]);
+        run(&dir, &["config", "user.name", "Tiller tests"]);
+        dir
+    }
+
+    /// A checkout with an unborn HEAD has nothing to diff against, so
+    /// `--numstat HEAD` cannot run; a staged file there must still report
+    /// its real line counts. Previously it rendered +0 −0 while its
+    /// expanded diff showed real lines — the counts now come from the same
+    /// no-index diff the expanded view renders, so they cannot disagree.
+    #[test]
+    fn stats_count_staged_files_in_an_unborn_head_repo() {
+        let dir = scratch_repo("unborn");
+        std::fs::write(dir.join("new.txt"), "one\ntwo\nthree\n").expect("write");
+        run(&dir, &["add", "new.txt"]);
+
+        let entries = crate::status::status(&dir).expect("status").entries;
+        assert!(entries.iter().any(|entry| entry.path == *"new.txt"));
+        let stats = stats(&dir, &entries).expect("stats");
+        assert_eq!(
+            stats[&PathBuf::from("new.txt")],
+            DiffStat {
+                additions: 3,
+                deletions: 0,
+                is_binary: false,
+            },
+            "a staged file in an unborn-HEAD repo reports its real lines"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Untracked files are counted from disk (Swift parity), but when the
+    /// disk count gives up — binary, or over the 500 KB snapshot cap — the
+    /// counts must come from the same no-index diff the expanded view
+    /// shows, instead of rendering +0 −0 next to real lines.
+    #[test]
+    fn stats_fall_back_to_the_diff_for_uncountable_untracked_files() {
+        let dir = scratch_repo("uncountable");
+        run(&dir, &["commit", "--allow-empty", "-q", "-m", "root"]);
+        std::fs::write(dir.join("blob.bin"), b"\xFF\xFE\x00\x00binary").expect("write");
+        // 750 KB of real lines: over the 500 KB disk-count cap, so the
+        // count must come from the diff.
+        let huge = "line\n".repeat(150_000);
+        std::fs::write(dir.join("huge.txt"), &huge).expect("write");
+
+        let entries = crate::status::status(&dir).expect("status").entries;
+        assert_eq!(entries.len(), 2, "both files are untracked");
+        let stats = stats(&dir, &entries).expect("stats");
+        assert_eq!(
+            stats[&PathBuf::from("blob.bin")],
+            DiffStat {
+                additions: 0,
+                deletions: 0,
+                is_binary: true,
+            },
+            "a binary untracked file reports binary, not +0 −0"
+        );
+        assert_eq!(
+            stats[&PathBuf::from("huge.txt")].additions,
+            150_000,
+            "a file over the disk-count cap reports its real line count"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

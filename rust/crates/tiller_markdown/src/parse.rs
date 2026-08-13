@@ -1,5 +1,7 @@
 //! `pulldown-cmark`'s flat event stream turned into the [`Document`] tree.
 
+#![allow(clippy::while_let_on_iterator)]
+
 use pulldown_cmark::{
     Alignment as CmarkAlignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
@@ -428,7 +430,7 @@ impl<'a> Builder<'a> {
         let text = self.flatten_events_to_text(1);
         Block::Paragraph {
             inline: (!text.is_empty())
-                .then(|| Inline::Text(text))
+                .then_some(Inline::Text(text))
                 .into_iter()
                 .collect(),
         }
@@ -438,7 +440,7 @@ impl<'a> Builder<'a> {
     fn flatten_inlines(&mut self) -> Vec<Inline> {
         let text = self.flatten_events_to_text(1);
         (!text.is_empty())
-            .then(|| Inline::Text(text))
+            .then_some(Inline::Text(text))
             .into_iter()
             .collect()
     }

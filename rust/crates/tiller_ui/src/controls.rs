@@ -4,6 +4,9 @@ use gpui::{App, ClickEvent, Div, FontWeight, Rgba, Window, div, prelude::*, px, 
 use std::rc::Rc;
 use tiller_theme::Theme;
 
+/// A segmented control's selection callback.
+type SegmentCallback = Rc<dyn Fn(usize, &mut App)>;
+
 /// Creates a titled settings section with a card beneath it.
 pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement {
     div()
@@ -13,7 +16,7 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
         .child(
             div()
                 .mb(px(9.0))
-                .text_size(px(13.0))
+                .text_size(theme.typography.headline)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.title)
                 .child(text!(id = format!("settings-section-title-{title}"), title)),
@@ -21,11 +24,13 @@ pub fn section(title: &'static str, card: Div, theme: Theme) -> impl IntoElement
         .child(card)
 }
 
-/// Creates the rounded surface containing a group of settings rows.
+/// Creates the rounded surface containing a group of settings rows. The
+/// 12px step is the edit-card/menu radius from the measured scale —
+/// Tiller's settings cards sit on it.
 pub fn card(theme: Theme) -> Div {
     div()
         .w_full()
-        .rounded(px(12.0))
+        .rounded(theme.radii.user_pill)
         .overflow_hidden()
         .bg(theme.card_fill)
 }
@@ -43,7 +48,7 @@ pub fn row(
         .flex_col()
         .justify_center()
         .flex_1()
-        .text_size(px(13.0))
+        .text_size(theme.typography.headline)
         .text_color(theme.title)
         .child(text!(id = format!("settings-row-label-{label}"), label));
 
@@ -51,7 +56,7 @@ pub fn row(
         label_view = label_view.child(
             div()
                 .mt(px(2.0))
-                .text_size(px(11.0))
+                .text_size(theme.typography.footnote)
                 .text_color(theme.subtitle)
                 .child(description),
         );
@@ -91,6 +96,7 @@ where
 {
     div()
         .id(id)
+        .debug_selector(move || id.to_string())
         .relative()
         .w(px(36.0))
         .h(px(20.0))
@@ -122,13 +128,13 @@ pub fn segmented(
     theme: Theme,
     callback: impl Fn(usize, &mut App) + 'static,
 ) -> impl IntoElement {
-    let callback: Rc<dyn Fn(usize, &mut App)> = Rc::new(callback);
+    let callback: SegmentCallback = Rc::new(callback);
     let mut control = div()
         .id(id)
         .h(px(26.0))
         .flex()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(theme.radii.control)
         .bg(theme.primary_pill_bg)
         .p(px(2.0));
 
@@ -138,14 +144,15 @@ pub fn segmented(
         control = control.child(
             div()
                 .id(format!("{id}-{index}"))
+                .debug_selector(move || format!("{id}-{index}"))
                 .h(px(22.0))
                 .min_w(px(56.0))
                 .px(px(10.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.0))
-                .text_size(px(12.0))
+                .rounded(theme.radii.chip_active)
+                .text_size(theme.typography.callout)
                 .font_weight(if active {
                     FontWeight::SEMIBOLD
                 } else {
@@ -156,7 +163,7 @@ pub fn segmented(
                 } else {
                     theme.subtitle
                 })
-                .when(active, |this| this.bg(theme.tab_focus_accent))
+                .when(active, |this| this.bg(theme.selected_fill))
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(text!(id = ("segmented-option", index), *label)),
@@ -192,7 +199,7 @@ where
         .h(px(28.0))
         .flex()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(theme.radii.control)
         .bg(theme.primary_pill_bg)
         .child(
             div()
@@ -202,7 +209,7 @@ where
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(theme.typography.callout)
                 .text_color(theme.meta)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| decrement(value - 1, cx))
@@ -214,7 +221,7 @@ where
                 .px(px(4.0))
                 .flex()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(theme.typography.callout)
                 .text_color(theme.title)
                 .child(format!("{value} {unit}")),
         )
@@ -226,7 +233,7 @@ where
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.0))
+                .text_size(theme.typography.callout)
                 .text_color(theme.meta)
                 .hover(|style| style.bg(theme.row_hover))
                 .on_click(move |_, _, cx| increment(value + 1, cx))
@@ -235,12 +242,12 @@ where
 }
 
 /// A short status/action badge, matching the pills used by Settings rows.
-pub fn badge(label: &'static str, background: Rgba, foreground: Rgba) -> Div {
+pub fn badge(theme: Theme, label: &'static str, background: Rgba, foreground: Rgba) -> Div {
     div()
         .px(px(6.0))
         .py(px(2.0))
-        .rounded(px(7.0))
-        .text_size(px(10.0))
+        .rounded(theme.radii.row_card)
+        .text_size(theme.typography.caption2)
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(foreground)
         .bg(background)
@@ -270,15 +277,21 @@ pub fn subsection_header(
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.0))
+                        .text_size(theme.typography.headline)
                         .text_color(theme.title)
-                        .child(text!(id = format!("settings-subsection-title-{title}"), title)),
+                        .child(text!(
+                            id = format!("settings-subsection-title-{title}"),
+                            title
+                        )),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(theme.typography.footnote)
                         .text_color(theme.subtitle)
-                        .child(text!(id = format!("settings-subsection-description-{title}"), description)),
+                        .child(text!(
+                            id = format!("settings-subsection-description-{title}"),
+                            description
+                        )),
                 ),
         )
         .child(action)
@@ -300,12 +313,14 @@ pub fn action_row(action: impl IntoElement, theme: Theme) -> Div {
 /// A compact account row with the two status pills used by provider cards.
 pub fn account_row(label: &'static str, subtitle: &'static str, active: bool, theme: Theme) -> Div {
     let mut badges = div().flex().items_center().gap(px(5.0)).child(badge(
+        theme,
         "This device",
         theme.primary_pill_bg,
         theme.title,
     ));
     if active {
         badges = badges.child(badge(
+            theme,
             "Active",
             theme.tab_focus_accent,
             theme.title_selected,
@@ -332,17 +347,23 @@ pub fn account_row(label: &'static str, subtitle: &'static str, active: bool, th
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(13.0))
+                                .text_size(theme.typography.headline)
                                 .text_color(theme.title)
-                                .child(text!(id = format!("settings-account-label-{label}"), label)),
+                                .child(text!(
+                                    id = format!("settings-account-label-{label}"),
+                                    label
+                                )),
                         )
                         .child(badges),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(theme.typography.footnote)
                         .text_color(theme.subtitle)
-                        .child(text!(id = format!("settings-account-subtitle-{label}"), subtitle)),
+                        .child(text!(
+                            id = format!("settings-account-subtitle-{label}"),
+                            subtitle
+                        )),
                 ),
         )
 }
@@ -359,10 +380,11 @@ where
 {
     div()
         .id(id)
+        .debug_selector(move || id.to_string())
         .px(px(10.0))
         .py(px(5.0))
-        .rounded(px(6.0))
-        .text_size(px(12.0))
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.callout)
         .text_color(theme.title)
         .bg(theme.primary_pill_bg)
         .hover(|style| style.bg(theme.row_hover))

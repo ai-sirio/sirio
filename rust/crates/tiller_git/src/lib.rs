@@ -38,21 +38,36 @@
 //! - Binary files report zero counts with `is_binary` set.
 
 mod actions;
+mod branches;
+mod clone;
 mod diff;
+mod directory_status;
 mod error;
 mod git;
+mod remote;
+mod side_by_side;
 mod status;
 mod worktree;
 
-pub use actions::{discard, discard_all, stage, stage_all, unstage};
+pub use actions::{GitActions, discard, discard_all, stage, stage_all, unstage};
+pub use branches::{GitBranches, list_branches};
+pub use clone::{GitClone, clone_repository};
 pub use diff::{
     DEFAULT_CONTEXT_LINES, DiffLine, DiffOrigin, DiffStat, FileDiff, Hunk,
     WHOLE_FILE_CONTEXT_LINES, diff_entry, parse_diff, parse_numstat, stats,
 };
-pub use error::GitError;
+pub use directory_status::{DirectoryGitStatus, DirectoryStatusAggregator, directory_statuses};
+pub use error::{GitActionError, GitError};
+pub use git::{GitCommandResult, GitRunner, run_streaming};
+pub use remote::{GitRemote, github_owner, project_name};
+pub use side_by_side::{
+    DiffSideBySideLine, DiffSideBySideRow, GitDiffSideBySide, GitDiffSideBySideLine,
+    GitDiffSideBySideRow, side_by_side_rows,
+};
 pub use status::{
     StatusEntry, StatusKind, StatusParseError, StatusSnapshot, has_head, parse_status, status,
 };
 pub use worktree::{
-    WorktreeError, create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
+    WorktreeError, create_worktree, derive_worktree_path, init_repository, remove_worktree,
+    resolve_parent_directory,
 };

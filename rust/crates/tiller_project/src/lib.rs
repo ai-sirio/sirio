@@ -28,11 +28,18 @@
 //! [`Workspace::load_project`] ties it together.
 
 mod discovery;
+mod domain;
 mod error;
+mod file;
+mod file_link;
 mod git;
 mod id;
+mod layout;
 mod project;
+mod settings;
+mod skill;
 mod tab;
+mod ui;
 mod workspace;
 mod worktree;
 
@@ -40,9 +47,28 @@ pub use discovery::{
     DiscoveredProject, DiscoveredWorktree, current_branch, discover_project, discover_worktrees,
     is_git_repository, parse_worktree_list,
 };
+pub use domain::{
+    AutoNamingThrottle, OnceGate, default_project_base, move_item, move_tab, numeric_tab_selection,
+    resolve_worktree_defaults,
+};
 pub use error::GitError;
+pub use file::{
+    DroppedFile, DroppedPath, FileDropError, MAX_DROPPED_IMAGE_BYTES, classify_file_drop,
+    shell_quote_path, terminal_file_drop,
+};
+pub use file::{FileTreeEntry, FileTreeError, load_file_tree, validate_relative_path};
+pub use file_link::{FileLinkTarget, is_markdown_path, resolve_file_link};
 pub use id::{ProjectId, TabId, WorktreeId};
+pub use layout::{
+    ContentKind, FocusIntent, LayoutCommand, LayoutError, LayoutNode, LayoutTransition,
+    LegacyWorkspaceTab, PaneGroup, SnapshotError, SplitAxis, WorkspaceLayout, WorkspaceSnapshot,
+    WorkspaceTab, WorkspaceTabViewState, browser_content_id, classify_layout_command,
+    document_content_id, terminal_content_id, worktree_content_id,
+};
 pub use project::Project;
+pub use settings::SettingsPolicy;
+pub use skill::{SkillInstallCommand, agent_skill_install_command};
 pub use tab::{Tab, TabKind};
+pub use ui::{AppearanceMode, UpdateEvent, UpdateState};
 pub use workspace::{FilteredProject, FilteredTab, FilteredTree, FilteredWorktree, Workspace};
 pub use worktree::Worktree;

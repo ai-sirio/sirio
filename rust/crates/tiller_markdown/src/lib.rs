@@ -29,13 +29,17 @@
 //! pending bytes exceed a budget) and/or batch chunks instead of parsing
 //! every byte.
 
+mod document;
+mod editing;
+mod file_events;
 mod model;
 mod parse;
 mod scan;
 
-pub use model::{
-    Alignment, Block, Document, Inline, ListItem, ListKind, TableCell,
-};
+pub use document::{DocumentChange, DocumentError, MarkdownDocument};
+pub use editing::{EditedText, SelectionRange, prefix_selected_lines, wrap_selection};
+pub use file_events::{FileEventKind, FileSystemEvent, FileSystemEventMonitor};
+pub use model::{Alignment, Block, Document, Inline, ListItem, ListKind, TableCell};
 pub use parse::{parse, parse_with_options};
 
 pub use pulldown_cmark::Options;

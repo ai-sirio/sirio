@@ -13,6 +13,7 @@ tiller_git.workspace = true
 tiller_acp.workspace = true
 tiller_markdown.workspace = true
 tiller_project.workspace = true
+tiller_agents.workspace = true
 tiller_usage = { path = "../tiller_usage" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Same crates gpui uses, at the same versions, so a `RenderImage` can be
@@ -39,3 +40,7 @@ objc2-foundation = { version = "0.3", features = [
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+
+[[bin]]
+name = "changes_preview"
+path = "src/bin/changes_preview.rs"

@@ -22,8 +22,25 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-gpui = { path = "/Users/enzopiopalmisano/Desktop/Progetti/zed-ref/crates/gpui", default-features = false }
-gpui_platform = { path = "/Users/enzopiopalmisano/Desktop/Progetti/zed-ref/crates/gpui_platform", default-features = false, features = ["font-kit"] }
+# GPUI used to be an absolute path into a zed checkout on one particular Mac, which meant the
+# workspace failed to resolve — not to build, to *resolve* — anywhere else, taking all thirteen
+# crates down with it even though only four of them touch GPUI. Now that Tiller targets Linux as
+# well, a pinned git rev is the only form that works on both machines with no local checkout.
+# Bump the rev deliberately: it is the single knob that moves the GPUI API under the whole UI.
+# gpui's own defaults are ["font-kit", "wayland", "x11", "windows-manifest"], so
+# `default-features = false` silently removed the two that decide whether this program can put a
+# window on a Linux screen. gpui::guess_compositor() is compiled against *gpui's* features, not
+# gpui_platform's: with them off it reads neither $DISPLAY nor $WAYLAND_DISPLAY, returns
+# "Headless", and the app runs a perfectly healthy event loop forever without a window. It
+# compiles, starts, logs, exits cleanly — and renders nothing. Enable them explicitly here;
+# gpui_platform below must enable its own copies as well, since they are separate switches.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false, features = ["wayland", "x11"] }
+# "wayland" and "x11" are not decoration: gpui_platform ships `default = []`, so without them
+# gpui_linux compiles with no windowing backend at all. The app then starts, logs, runs, and
+# silently never maps a window — it fails in the one way a compiler cannot catch. macOS never
+# needed the flag, which is exactly why their absence survived the port. Zed's own binary
+# enables both and lets the backend be chosen at runtime; so do we.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false, features = ["font-kit", "wayland", "x11"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

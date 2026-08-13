@@ -169,7 +169,9 @@ impl Icon {
             Icon::FolderFill => include_bytes!("../../../assets/icons/folder-fill.svg"),
             Icon::GitBranch => include_bytes!("../../../assets/icons/git-branch-thin.svg"),
             Icon::MessageSquare => include_bytes!("../../../assets/icons/chat-circle-thin.svg"),
-            Icon::SquareTerminal => include_bytes!("../../../assets/icons/terminal-window-thin.svg"),
+            Icon::SquareTerminal => {
+                include_bytes!("../../../assets/icons/terminal-window-thin.svg")
+            }
             Icon::Close => include_bytes!("../../../assets/icons/x-thin.svg"),
             Icon::ChevronDown => include_bytes!("../../../assets/icons/caret-down-thin.svg"),
             Icon::ChevronRight => include_bytes!("../../../assets/icons/caret-right-thin.svg"),
@@ -259,23 +261,18 @@ impl IconElement {
     /// text colour, else the window's inherited one. Mirrors GPUI's own
     /// `Svg` element. Kept as a free helper because `paint` borrows
     /// `self.interactivity` mutably while reading the style.
-    fn paint_color(
-        style: &gpui::Style,
-        window: &mut Window,
-    ) -> gpui::Hsla {
-        style.text.color.unwrap_or_else(|| window.text_style().color)
+    fn paint_color(style: &gpui::Style, window: &mut Window) -> gpui::Hsla {
+        style
+            .text
+            .color
+            .unwrap_or_else(|| window.text_style().color)
     }
 }
 
 /// Path 1: chromatic agent marks, painted full-colour with their own
 /// colours. The SVG is rasterized once per (icon, pixel size) and
 /// cached; the resulting `RenderImage` is painted into `bounds`.
-fn paint_agent_mark(
-    icon: Icon,
-    bounds: Bounds<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) {
+fn paint_agent_mark(icon: Icon, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
     // Render at 2x the point size, matching GPUI's own SVG renderer
     // (`SMOOTH_SVG_SCALE_FACTOR`): pixel-perfect on retina displays.
     let pixel = (f32::from(bounds.size.width) * 2.0).round().max(1.0);
@@ -285,19 +282,14 @@ fn paint_agent_mark(
         // render_single_frame multiplies its scale argument by its own
         // 2x factor, so divide it back out.
         let scale = pixel / view_box / 2.0;
-        cx.svg_renderer().render_single_frame(icon.svg(), scale).ok()
+        cx.svg_renderer()
+            .render_single_frame(icon.svg(), scale)
+            .ok()
     });
     let Some(image) = image else {
         return;
     };
-    let _ = window.paint_image(
-        bounds,
-        bounds,
-        Default::default(),
-        image,
-        0,
-        false,
-    );
+    let _ = window.paint_image(bounds, bounds, Default::default(), image, 0, false);
 }
 
 /// Path 2: the tinted SVG mask (original behaviour): rasterize the
@@ -340,8 +332,7 @@ fn paint_system_symbol(
     let Some(symbol) = system_symbol(icon) else {
         return;
     };
-    let Some(image) = sfsymbol::rasterize_symbol(symbol, f32::from(bounds.size.width), tint)
-    else {
+    let Some(image) = sfsymbol::rasterize_symbol(symbol, f32::from(bounds.size.width), tint) else {
         // Unknown symbol name on this system: degrade to the embedded
         // SVG rather than paint nothing.
         paint_tinted_svg(icon, bounds, color, window, cx);
@@ -466,10 +457,10 @@ impl AgentMarkCache {
         key: (Icon, u32),
         rasterize: impl FnOnce() -> Option<Arc<RenderImage>>,
     ) -> Option<Arc<RenderImage>> {
-        if let Ok(cache) = self.0.lock() {
-            if let Some(image) = cache.get(&key) {
-                return Some(image.clone());
-            }
+        if let Ok(cache) = self.0.lock()
+            && let Some(image) = cache.get(&key)
+        {
+            return Some(image.clone());
         }
         let image = rasterize()?;
         if let Ok(mut cache) = self.0.lock() {
@@ -602,12 +593,12 @@ mod tests {
                 payload.len()
             );
             let text = std::str::from_utf8(payload).expect("svg is utf-8");
-            assert!(text.contains("<svg"), "{} starts with an svg root", icon.path());
             assert!(
-                text.contains("viewBox=\""),
-                "{} has a viewBox",
+                text.contains("<svg"),
+                "{} starts with an svg root",
                 icon.path()
             );
+            assert!(text.contains("viewBox=\""), "{} has a viewBox", icon.path());
         }
     }
 
@@ -616,7 +607,11 @@ mod tests {
         let assets = TillerAssets;
         for icon in ALL_ICONS {
             let loaded = assets.load(icon.path()).expect("load does not fail");
-            assert!(loaded.is_some(), "{} is served by the asset source", icon.path());
+            assert!(
+                loaded.is_some(),
+                "{} is served by the asset source",
+                icon.path()
+            );
             assert_eq!(loaded.unwrap().as_ref(), icon.svg());
         }
         assert!(assets.load("icons/does-not-exist.svg").unwrap().is_none());
@@ -667,7 +662,10 @@ mod tests {
         let omp = std::str::from_utf8(Icon::OhMyPi.svg()).expect("utf-8");
         assert!(omp.contains("linearGradient"), "omp is a gradient mark");
         assert!(omp.contains("#ED4ABF") && omp.contains("#9B4DFF") && omp.contains("#5AD8E6"));
-        assert!(!omp.contains("currentColor"), "omp must not resolve through the theme tint");
+        assert!(
+            !omp.contains("currentColor"),
+            "omp must not resolve through the theme tint"
+        );
     }
 
     #[test]
@@ -675,9 +673,15 @@ mod tests {
         // Codex's knot and OpenCode's frame must not accidentally become
         // the currentColor-tinted generic glyphs they replaced.
         let codex = std::str::from_utf8(Icon::Codex.svg()).expect("utf-8");
-        assert!(codex.contains("viewBox=\"-19 0 139 155\""), "the knot is cropped from the wordmark logo");
+        assert!(
+            codex.contains("viewBox=\"-19 0 139 155\""),
+            "the knot is cropped from the wordmark logo"
+        );
         let pi = std::str::from_utf8(Icon::Pi.svg()).expect("utf-8");
-        assert!(pi.contains("viewBox=\"0 0 800 800\""), "Pi keeps the Swift shape's viewBox");
+        assert!(
+            pi.contains("viewBox=\"0 0 800 800\""),
+            "Pi keeps the Swift shape's viewBox"
+        );
     }
 
     #[test]
@@ -703,8 +707,14 @@ mod tests {
 
     #[test]
     fn view_box_size_parses_embedded_svgs() {
-        assert!((view_box_size(Icon::FolderFill) - 256.0).abs() < 1.0, "phosphor viewBox");
-        assert!((view_box_size(Icon::ClaudeCode) - 110.0).abs() < 1.0, "sunburst viewBox");
+        assert!(
+            (view_box_size(Icon::FolderFill) - 256.0).abs() < 1.0,
+            "phosphor viewBox"
+        );
+        assert!(
+            (view_box_size(Icon::ClaudeCode) - 110.0).abs() < 1.0,
+            "sunburst viewBox"
+        );
         assert!((view_box_size(Icon::Pi) - 800.0).abs() < 1.0, "pi viewBox");
     }
 }

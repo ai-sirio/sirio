@@ -18,7 +18,7 @@ use tiller_usage::{
 
 use crate::sidebar::icons::{Icon, IconElement};
 
-const HEIGHT: f32 = 40.0;
+pub(crate) const HEIGHT: f32 = 40.0;
 
 /// The Swift default: refresh every five minutes (60..3600 allowed).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
@@ -41,16 +41,14 @@ impl UsageBarData {
     }
 }
 
-/// A self-refreshing status bar. The Claude usage segment is fetched from
-/// the real CLI on the background executor, on an interval, with a manual
-/// refresh button.
+/// A self-refreshing status bar. The provider usage segments are fetched
+/// from the real CLIs on the background executor, on an interval.
 pub struct StatusBar {
     data: UsageBarData,
     claude: ProviderUsageState,
     codex: ProviderUsageState,
     opencode_go: ProviderUsageState,
-    /// Single-flight: one fetch in progress per refresh path.
-    fetching: bool,
+    /// How often the usage segments re-fetch.
     refresh_interval: Duration,
     /// Lazily armed on first render (the constructor has no context to spawn
     /// with).
@@ -66,7 +64,6 @@ impl StatusBar {
             claude: ProviderUsageState::Loading,
             codex: ProviderUsageState::Loading,
             opencode_go: ProviderUsageState::Loading,
-            fetching: false,
             refresh_interval: REFRESH_INTERVAL,
             refresh_task_started: false,
             on_settings: None,
@@ -103,28 +100,6 @@ impl StatusBar {
         &self.opencode_go
     }
 
-    /// Starts a fetch of every provider now (manual refresh). Single-flight.
-    fn refresh_now(&mut self, cx: &mut Context<Self>) {
-        if self.fetching {
-            return;
-        }
-        self.fetching = true;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            // All three fetches run concurrently on the background pool;
-            // the awaits below only collect their results.
-            let executor = cx.background_executor();
-            let claude = executor.spawn(async move { ClaudeUsageFetcher::fetch() });
-            let codex = executor.spawn(async move { CodexUsageFetcher::fetch() });
-            let opencode_go = executor.spawn(async move { OpenCodeGoUsageFetcher::fetch() });
-            let (claude, codex, opencode_go) = (claude.await, codex.await, opencode_go.await);
-            let _ = this.update(cx, |bar, cx| {
-                bar.apply_outcomes(claude, codex, opencode_go, cx);
-            });
-        })
-        .detach();
-    }
-
     /// Applies one round of fetch outcomes; never panics on a bad provider.
     fn apply_outcomes(
         &mut self,
@@ -133,7 +108,6 @@ impl StatusBar {
         opencode_go: UsageFetchOutcome,
         cx: &mut Context<Self>,
     ) {
-        self.fetching = false;
         self.claude = reduce(claude, &self.claude);
         self.codex = reduce(codex, &self.codex);
         self.opencode_go = reduce(opencode_go, &self.opencode_go);
@@ -210,19 +184,17 @@ impl Render for StatusBar {
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();
-        let refresh = self.on_refresh.clone();
-        let entity = cx.entity();
 
         let icon_button = |id: &'static str, icon: Icon| {
             div()
                 .id(id)
-                .w(px(20.0))
-                .h(px(20.0))
+                .w(px(22.0))
+                .h(px(22.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(4.0))
-                .text_size(px(11.0))
+                .rounded(theme.radii.control)
+                .text_size(px(11.5))
                 .text_color(theme.meta)
                 .hover(|style| style.bg(theme.row_hover))
                 .child(IconElement::new(icon, px(12.0)).text_color(theme.meta))
@@ -234,28 +206,38 @@ impl Render for StatusBar {
         let claude_dimmed = Self::segment_dimmed(&self.claude);
         let codex_dimmed = Self::segment_dimmed(&self.codex);
         let opencode_go_dimmed = Self::segment_dimmed(&self.opencode_go);
-        let claude_color = if claude_dimmed { dim(theme.meta) } else { theme.meta };
-        let codex_color = if codex_dimmed { dim(theme.title) } else { theme.title };
-        let opencode_go_color = if opencode_go_dimmed { dim(theme.title) } else { theme.title };
-
-        let provider_segment = |display_name: &'static str,
-                                mark: Icon,
-                                text_color: gpui::Rgba,
-                                text: String| {
-            // The `text!` macro derives its element id from its own source
-            // location: inside this closure the location is shared by all
-            // three segments, so the ids must be explicit or the duplicate
-            // element ids make GPUI drop all but one segment.
-            let text_id = format!("{display_name}-usage-text");
-            div()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .text_size(px(10.0))
-                .text_color(text_color)
-                .child(IconElement::new(mark, px(12.0)))
-                .child(text!(id = text_id, text))
+        let claude_color = if claude_dimmed {
+            dim(theme.meta)
+        } else {
+            theme.meta
         };
+        let codex_color = if codex_dimmed {
+            dim(theme.title)
+        } else {
+            theme.title
+        };
+        let opencode_go_color = if opencode_go_dimmed {
+            dim(theme.title)
+        } else {
+            theme.title
+        };
+
+        let provider_segment =
+            |display_name: &'static str, mark: Icon, text_color: gpui::Rgba, text: String| {
+                // The `text!` macro derives its element id from its own source
+                // location: inside this closure the location is shared by all
+                // three segments, so the ids must be explicit or the duplicate
+                // element ids make GPUI drop all but one segment.
+                let text_id = format!("{display_name}-usage-text");
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(theme.typography.caption2)
+                    .text_color(text_color)
+                    .child(IconElement::new(mark, px(12.0)))
+                    .child(text!(id = text_id, text))
+            };
 
         let left = div()
             .flex()
@@ -266,14 +248,6 @@ impl Render for StatusBar {
                     if let Some(callback) = &settings {
                         callback();
                     }
-                }),
-            )
-            .child(
-                icon_button("status-refresh", Icon::RefreshCw).on_click(move |_, _, cx| {
-                    if let Some(callback) = &refresh {
-                        callback();
-                    }
-                    entity.update(cx, |bar, cx| bar.refresh_now(cx));
                 }),
             )
             .child(provider_segment(
@@ -302,7 +276,7 @@ impl Render for StatusBar {
             .flex()
             .items_center()
             .bg(theme.canvas)
-            .text_size(px(10.0))
+            .text_size(theme.typography.caption2)
             .text_color(theme.meta)
             .child(left)
             .child(div().flex_1())

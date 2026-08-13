@@ -39,10 +39,13 @@ mod error;
 mod migrations;
 mod model;
 
+/// Maximum logical SQLite database size enforced by the package.
+pub const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
+
 pub use db::AppDatabase;
 pub use error::PersistenceError;
 pub use migrations::{CURRENT_SCHEMA_VERSION, migrate_up_to};
 pub use model::{
     AppSettings, AppearanceMode, FileIconTheme, ProjectRecord, SidebarState, TabRecord,
-    WorktreeRecord, settings_keys, settings_ranges,
+    TabStateRecord, WorktreeRecord, settings_keys, settings_ranges,
 };

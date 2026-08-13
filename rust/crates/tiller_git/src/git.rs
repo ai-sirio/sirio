@@ -78,6 +78,218 @@ pub(crate) struct GitOutput {
     pub status: Option<i32>,
 }
 
+/// The completed result returned by the streaming runner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitCommandResult {
+    /// Raw stdout captured while the command ran.
+    pub stdout: Vec<u8>,
+    /// Complete stderr, including the line endings that were used by git.
+    pub stderr: String,
+    /// The process exit code.
+    pub exit_code: i32,
+}
+
+impl GitCommandResult {
+    /// Decodes stdout lossily, matching the buffered runner's convenience
+    /// accessor while retaining raw bytes in the result.
+    pub fn stdout_string(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+}
+
+/// Public entry point for git operations that need live stderr progress.
+pub struct GitRunner;
+
+impl GitRunner {
+    /// Runs `git <args>` in `cwd`, invoking `on_line` for each non-empty line
+    /// of stderr as soon as its CR/LF delimiter arrives. The completed result
+    /// is returned only after the child exits and both output streams close.
+    pub fn run_streaming<F>(
+        args: &[&str],
+        cwd: &Path,
+        on_line: F,
+    ) -> Result<GitCommandResult, GitError>
+    where
+        F: FnMut(String),
+    {
+        Self::run_streaming_with_binary(Path::new(GIT_BINARY), args, cwd, on_line)
+    }
+
+    /// Testable/configurable form of [`Self::run_streaming`]. The normal
+    /// product path resolves `git` through `PATH`; this form also lets callers
+    /// choose an explicit executable when a packaged git is required.
+    pub fn run_streaming_with_binary<F>(
+        binary: &Path,
+        args: &[&str],
+        cwd: &Path,
+        mut on_line: F,
+    ) -> Result<GitCommandResult, GitError>
+    where
+        F: FnMut(String),
+    {
+        let mut command = Command::new(binary);
+        command
+            .args(args)
+            .current_dir(cwd)
+            // Every parser in this crate (clone progress, status output,
+            // branch listing) matches git's English output. Without a fixed
+            // locale the progress lines arrive translated — "Ricezione degli
+            // oggetti" instead of "Receiving objects" — and the parsed state
+            // silently stays empty. git's own scripting docs prescribe
+            // LC_ALL=C for exactly this reason.
+            .env("LC_ALL", "C")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().map_err(|error| GitError::Spawn {
+            message: error.to_string(),
+        })?;
+
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let (events_tx, events_rx) = mpsc::channel();
+        let stdout_reader = std::thread::spawn({
+            let events_tx = events_tx.clone();
+            move || {
+                let _ = events_tx.send(StreamEvent::StdoutDone(read_to_end(stdout)));
+            }
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            read_stderr_lines(stderr, events_tx);
+        });
+
+        let timeout = configured_timeout();
+        let deadline = Instant::now() + timeout;
+        let mut status = None;
+        let mut stdout = None;
+        let mut stderr = None;
+        while status.is_none() {
+            while let Ok(event) = events_rx.try_recv() {
+                handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
+            }
+
+            match child.try_wait() {
+                Ok(Some(exit)) => status = Some(exit),
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        kill_tree(&mut child);
+                        reap_within_grace(&mut child);
+                        drop(events_rx);
+                        return Err(GitError::TimedOut {
+                            command: args.join(" "),
+                            timeout,
+                        });
+                    }
+                    if let Ok(event) = events_rx.recv_timeout(POLL_INTERVAL) {
+                        handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
+                    }
+                }
+                Err(error) => {
+                    kill_tree(&mut child);
+                    reap_within_grace(&mut child);
+                    drop(events_rx);
+                    return Err(GitError::Spawn {
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        // The process is gone, but the reader threads may still be delivering
+        // their final buffers. Drain until both completion events arrive.
+        while stdout.is_none() || stderr.is_none() {
+            match events_rx.recv_timeout(KILL_GRACE_PERIOD) {
+                Ok(event) => handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr),
+                Err(_) => break,
+            }
+        }
+        if stdout.is_some() && stderr.is_some() {
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+        }
+
+        let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
+        let result = GitCommandResult {
+            stdout: stdout.unwrap_or_default(),
+            stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+            exit_code,
+        };
+        if exit_code == 0 {
+            Ok(result)
+        } else {
+            Err(GitError::CommandFailed {
+                code: exit_code,
+                stderr: result.stderr,
+            })
+        }
+    }
+}
+
+/// Free-function spelling for the default streaming runner.
+pub fn run_streaming<F>(args: &[&str], cwd: &Path, on_line: F) -> Result<GitCommandResult, GitError>
+where
+    F: FnMut(String),
+{
+    GitRunner::run_streaming(args, cwd, on_line)
+}
+
+enum StreamEvent {
+    StderrLine(String),
+    StderrDone(Vec<u8>),
+    StdoutDone(Vec<u8>),
+}
+
+fn handle_stream_event<F>(
+    event: StreamEvent,
+    on_line: &mut F,
+    stdout: &mut Option<Vec<u8>>,
+    stderr: &mut Option<Vec<u8>>,
+) where
+    F: FnMut(String),
+{
+    match event {
+        StreamEvent::StderrLine(line) => on_line(line),
+        StreamEvent::StderrDone(output) => *stderr = Some(output),
+        StreamEvent::StdoutDone(output) => *stdout = Some(output),
+    }
+}
+
+fn read_stderr_lines(mut pipe: impl std::io::Read, events_tx: mpsc::Sender<StreamEvent>) {
+    let mut captured = Vec::new();
+    let mut pending = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let count = match std::io::Read::read(&mut pipe, &mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        captured.extend_from_slice(&buffer[..count]);
+        for &byte in &buffer[..count] {
+            if byte == b'\r' || byte == b'\n' {
+                if !pending.is_empty() {
+                    let line = String::from_utf8_lossy(&pending).into_owned();
+                    if events_tx.send(StreamEvent::StderrLine(line)).is_err() {
+                        return;
+                    }
+                    pending.clear();
+                }
+            } else {
+                pending.push(byte);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let _ = events_tx.send(StreamEvent::StderrLine(
+            String::from_utf8_lossy(&pending).into_owned(),
+        ));
+    }
+    let _ = events_tx.send(StreamEvent::StderrDone(captured));
+}
+
 impl GitOutput {
     pub fn stdout_string(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()

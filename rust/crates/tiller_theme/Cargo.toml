@@ -7,3 +7,16 @@ publish.workspace = true
 [dependencies]
 gpui.workspace = true
 anyhow.workspace = true
+# Font discovery for the runtime-resolved code family: fontdb is the same
+# database gpui's Linux text system loads, so the generic "monospace" answer
+# here is the system's own (fontconfig's alias), not a hard-coded guess.
+# Already in the dependency tree via gpui_wgpu -> cosmic-text; no new
+# transitive dependencies.
+fontdb = "0.23"
+
+# The XDG desktop portal's color-scheme query. Same crate gpui_linux uses for
+# the same purpose; declared here (rather than the workspace manifest) because
+# only this crate consumes it. Linux-only: macOS resolves appearance
+# synchronously through NSAppearance and never needs the portal.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }

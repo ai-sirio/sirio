@@ -32,17 +32,28 @@
 //!   as [`ProviderUsageState::Stale`] (the bar renders it dimmed) instead
 //!   of showing an old number as current.
 
+mod account;
 mod claude;
 mod codex;
 mod http;
 mod model;
+mod ollama;
 mod opencode_go;
 
-pub use claude::{ClaudeUsageFetcher, classify_failure, parse_claude_usage};
-pub use codex::CodexUsageFetcher;
+pub use account::{AgentAccountIdentity, LocalAccountState, parse_codex_identity};
+pub use claude::{
+    ClaudeUsageFetcher, classify_failure, claude_config_dir, claude_has_credentials_at,
+    parse_claude_usage,
+};
+pub use codex::{
+    CodexOAuthCredentials, CodexUsageFetcher, CredentialLoadError, TokenRefreshFailure,
+    classify_token_refresh_failure, codex_auth_file_path, codex_has_credentials_at,
+    load_codex_credentials,
+};
 pub use model::{
     ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason, UsageWindow, reduce,
 };
+pub use ollama::parse_ollama_cloud_usage;
 pub use opencode_go::OpenCodeGoUsageFetcher;
 
 /// The provider identity, matching the Swift `UsageProvider` ids.
@@ -55,6 +66,13 @@ pub enum UsageProvider {
 }
 
 impl UsageProvider {
+    pub const ALL: [Self; 4] = [
+        Self::Claude,
+        Self::Codex,
+        Self::OpenCodeGo,
+        Self::OllamaCloud,
+    ];
+
     /// The stable id used by the rest of the app (agent catalog id).
     pub fn id(self) -> &'static str {
         match self {
@@ -69,5 +87,38 @@ impl UsageProvider {
     /// network providers are listed so callers can decide what to show.
     pub fn reads_local_state(self) -> bool {
         matches!(self, UsageProvider::Claude)
+    }
+
+    /// Stable preference key controlling whether this provider is shown and
+    /// refreshed. Missing preferences default to enabled for compatibility.
+    pub fn preference_key(self) -> &'static str {
+        match self {
+            Self::Claude => "usage.claude.enabled",
+            Self::Codex => "usage.codex.enabled",
+            Self::OpenCodeGo => "usage.opencodeGo.enabled",
+            Self::OllamaCloud => "usage.ollamaCloud.enabled",
+        }
+    }
+
+    pub fn is_enabled(self, preferences: &std::collections::HashMap<String, bool>) -> bool {
+        preferences
+            .get(self.preference_key())
+            .copied()
+            .unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_catalog_and_preferences_are_stable() {
+        assert_eq!(UsageProvider::ALL.len(), 4);
+        let mut preferences = std::collections::HashMap::new();
+        assert!(UsageProvider::Claude.is_enabled(&preferences));
+        preferences.insert(UsageProvider::Claude.preference_key().to_string(), false);
+        assert!(!UsageProvider::Claude.is_enabled(&preferences));
+        assert_eq!(UsageProvider::OpenCodeGo.id(), "opencode");
     }
 }

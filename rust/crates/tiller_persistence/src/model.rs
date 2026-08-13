@@ -125,6 +125,24 @@ impl TabRecord {
     }
 }
 
+/// Opaque per-tab state owned by a surface host. The persistence layer keeps
+/// the JSON opaque so the schema can store pane/layout state without knowing
+/// about GPUI or terminal types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabStateRecord {
+    pub tab_id: String,
+    pub state: String,
+}
+
+impl TabStateRecord {
+    pub fn new(tab_id: impl Into<String>, state: impl Into<String>) -> Self {
+        Self {
+            tab_id: tab_id.into(),
+            state: state.into(),
+        }
+    }
+}
+
 /// The app appearance, mirroring Swift's `AppAppearance` raw values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppearanceMode {

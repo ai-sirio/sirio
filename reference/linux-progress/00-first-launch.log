@@ -1,0 +1,6 @@
+[session] development build: session state is checkout-local at /home/enzopalmisano/Library/Application Support/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+libEGL warning: DRI3 error: Could not get DRI3 device
+libEGL warning: Ensure your X server supports DRI3 to get accelerated rendering
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+vulkan: No DRI3 support detected - required for presentation
+Note: you can probably enable DRI3 in your Xorg config

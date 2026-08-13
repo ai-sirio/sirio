@@ -6,15 +6,19 @@
 //! not `Sync`; callers that need multi-threaded access should wrap the
 //! database in a `Mutex` (or keep it on one thread, as the GPUI app does).
 
+use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
+use crate::MAX_DATABASE_BYTES;
 use crate::error::PersistenceError;
-use crate::migrations::migrate;
+use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     AppSettings, AppearanceMode, FileIconTheme, ProjectRecord, SidebarState, TabRecord,
-    WorktreeRecord, settings_keys,
+    TabStateRecord, WorktreeRecord, settings_keys,
 };
 
 /// Durable storage for what Tiller must remember across launches.
@@ -33,6 +37,8 @@ impl AppDatabase {
     /// [`PersistenceError::Sqlite`] — it is never panicked on and never
     /// silently discarded: the file is left untouched.
     pub fn open(path: &Path) -> Result<Self, PersistenceError> {
+        let _initial_open_lock = acquire_initial_open_lock(path)?;
+        validate_existing_file(path)?;
         let conn = Self::open_connection(path)?;
         Ok(Self {
             conn,
@@ -47,7 +53,8 @@ impl AppDatabase {
         let mut conn = Connection::open_in_memory().map_err(|error| {
             classify_open_error(PersistenceError::Sqlite(error), Path::new(":memory:"))
         })?;
-        Self::initialize(&mut conn)?;
+        Self::initialize(&mut conn, Path::new(":memory:"))
+            .map_err(|error| classify_open_error(error, Path::new(":memory:")))?;
         Ok(Self { conn, path: None })
     }
 
@@ -63,15 +70,38 @@ impl AppDatabase {
             .map_err(PersistenceError::from)
     }
 
+    /// The logical page limit installed on this connection.
+    pub fn database_limit_bytes(&self) -> Result<u64, PersistenceError> {
+        let page_size: i64 = self
+            .conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let max_pages: i64 = self
+            .conn
+            .query_row("PRAGMA max_page_count", [], |row| row.get(0))?;
+        let page_size = u64::try_from(page_size).map_err(|_| {
+            corrupt(
+                self.path.as_deref().unwrap_or(Path::new(":memory:")),
+                "database page size is negative",
+            )
+        })?;
+        let max_pages = u64::try_from(max_pages).map_err(|_| {
+            corrupt(
+                self.path.as_deref().unwrap_or(Path::new(":memory:")),
+                "database max page count is negative",
+            )
+        })?;
+        Ok(page_size.saturating_mul(max_pages))
+    }
+
     fn open_connection(path: &Path) -> Result<Connection, PersistenceError> {
         let mut conn = Connection::open(path)
             .map_err(|error| classify_open_error(PersistenceError::Sqlite(error), path))?;
-        Self::initialize(&mut conn).map_err(|error| classify_open_error(error, path))?;
+        Self::initialize(&mut conn, path).map_err(|error| classify_open_error(error, path))?;
         Ok(conn)
     }
 
     /// Per-connection pragmas plus the forward migration.
-    fn initialize(conn: &mut Connection) -> Result<(), PersistenceError> {
+    fn initialize(conn: &mut Connection, path: &Path) -> Result<(), PersistenceError> {
         // A concurrent opener (another Tiller process, or a CLI invoked by an
         // agent hook) may hold the migration write lock when we arrive;
         // wait for it instead of failing with SQLITE_BUSY. 5s dwarfs any
@@ -82,7 +112,9 @@ impl AppDatabase {
         // during writes. Persistent in the file; setting it again on open is
         // a no-op.
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        install_database_limit(conn, path)?;
         migrate(conn)?;
+        verify_integrity(conn, path)?;
         Ok(())
     }
 
@@ -330,6 +362,83 @@ impl AppDatabase {
         Ok(())
     }
 
+    /// Replaces opaque state for the tabs of one worktree. The state rows are
+    /// foreign-keyed to `tab`, so replacing tabs also removes stale state.
+    pub fn save_tab_states(
+        &self,
+        worktree_id: &str,
+        states: &[TabStateRecord],
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM tab_state
+             WHERE tab_id IN (SELECT id FROM tab WHERE worktree_id = ?1)",
+            [worktree_id],
+        )?;
+        for state in states {
+            transaction.execute(
+                "INSERT INTO tab_state (tab_id, state) VALUES (?1, ?2)",
+                rusqlite::params![state.tab_id, state.state],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Loads opaque state in the same order as the worktree's tabs.
+    pub fn tab_states_of_worktree(
+        &self,
+        worktree_id: &str,
+    ) -> Result<Vec<TabStateRecord>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tab_state.tab_id, tab_state.state
+             FROM tab_state
+             JOIN tab ON tab.id = tab_state.tab_id
+             WHERE tab.worktree_id = ?1
+             ORDER BY tab.order_idx, tab.id",
+        )?;
+        let rows = statement.query_map([worktree_id], |row| {
+            Ok(TabStateRecord {
+                tab_id: row.get(0)?,
+                state: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ------------------------------------------------------------------
+    // Agent session references
+    // ------------------------------------------------------------------
+
+    /// Loads the pane-to-agent-session associations used by control hooks.
+    pub fn session_refs(&self) -> Result<BTreeMap<String, String>, PersistenceError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT session, reference FROM session_ref ORDER BY session")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows
+            .collect::<Result<Vec<(String, String)>, _>>()?
+            .into_iter()
+            .collect())
+    }
+
+    /// Upserts one pane-to-agent-session association.
+    pub fn save_session_ref(&self, session: &str, reference: &str) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO session_ref (session, reference) VALUES (?1, ?2)
+             ON CONFLICT(session) DO UPDATE SET reference = excluded.reference",
+            params![session, reference],
+        )?;
+        Ok(())
+    }
+
+    /// Removes the pane-to-agent-session association, if present.
+    pub fn delete_session_ref(&self, session: &str) -> Result<(), PersistenceError> {
+        self.conn
+            .execute("DELETE FROM session_ref WHERE session = ?1", [session])?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
@@ -466,6 +575,196 @@ impl AppDatabase {
     }
 }
 
+/// Serializes the tiny window in which SQLite has created a new zero-byte
+/// file but has not committed the first schema yet. The lock is only created
+/// for a previously missing path, so a user-provided empty file is still
+/// rejected by validate_existing_file.
+struct InitialOpenLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Drop for InitialOpenLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_initial_open_lock(path: &Path) -> Result<Option<InitialOpenLock>, PersistenceError> {
+    let lock_path = initial_open_lock_path(path);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+
+    loop {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.len() == 0 => {
+                // A creator that won the lock may already have created the
+                // SQLite file, so wait for it to finish. Without the lock,
+                // this is an existing empty file and must be rejected.
+                if !lock_path.exists() {
+                    return Ok(None);
+                }
+            }
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&lock_path)
+                {
+                    Ok(file) => {
+                        return Ok(Some(InitialOpenLock {
+                            path: lock_path,
+                            _file: file,
+                        }));
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(PersistenceError::Io(error)),
+                }
+            }
+            Err(error) => return Err(PersistenceError::Io(error)),
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(PersistenceError::Io(std::io::Error::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "timed out waiting for SQLite initialization lock {}",
+                    lock_path.display()
+                ),
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn initial_open_lock_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("database"));
+    path.with_file_name(format!(".{file_name}.tiller-open.lock"))
+}
+
+/// Validates an existing file before opening it read-write. A missing path is
+/// a new database; an existing empty file is almost certainly a truncated
+/// write and must not be mistaken for one.
+fn validate_existing_file(path: &Path) -> Result<(), PersistenceError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(PersistenceError::Io(error)),
+    };
+    if metadata.len() == 0 {
+        return Err(corrupt(path, "existing database file is empty"));
+    }
+
+    let mut file = File::open(path).map_err(PersistenceError::Io)?;
+    let mut header = [0_u8; 100];
+    if let Err(error) = file.read_exact(&mut header) {
+        return Err(if error.kind() == ErrorKind::UnexpectedEof {
+            corrupt(
+                path,
+                "database file is truncated before its complete header",
+            )
+        } else {
+            PersistenceError::Io(error)
+        });
+    }
+    if &header[..16] != b"SQLite format 3\0" {
+        return Err(corrupt(path, "file does not have a SQLite header"));
+    }
+
+    let page_size = decode_page_size(&header);
+    if !is_valid_page_size(page_size) {
+        return Err(corrupt(
+            path,
+            "database header contains an invalid page size",
+        ));
+    }
+    if metadata.len() % page_size as u64 != 0 {
+        return Err(corrupt(path, "database file length is not page-aligned"));
+    }
+
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| classify_open_error(PersistenceError::Sqlite(error), path))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(PersistenceError::NewerSchema {
+            version,
+            supported: CURRENT_SCHEMA_VERSION,
+        });
+    }
+    verify_integrity(&conn, path)?;
+    let bytes = logical_database_bytes(&conn, path)?;
+    if bytes > MAX_DATABASE_BYTES {
+        return Err(PersistenceError::DatabaseTooLarge {
+            path: path.to_path_buf(),
+            bytes,
+            max_bytes: MAX_DATABASE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn decode_page_size(header: &[u8; 100]) -> u32 {
+    let raw = u16::from_be_bytes([header[16], header[17]]);
+    if raw == 1 { 65_536 } else { raw as u32 }
+}
+
+fn is_valid_page_size(page_size: u32) -> bool {
+    (512..=65_536).contains(&page_size) && page_size.is_power_of_two()
+}
+
+fn logical_database_bytes(conn: &Connection, path: &Path) -> Result<u64, PersistenceError> {
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    let page_size =
+        u64::try_from(page_size).map_err(|_| corrupt(path, "database page size is negative"))?;
+    let page_count =
+        u64::try_from(page_count).map_err(|_| corrupt(path, "database page count is negative"))?;
+    if page_size == 0 {
+        return Err(corrupt(path, "database page size is zero"));
+    }
+    Ok(page_size.saturating_mul(page_count))
+}
+
+fn install_database_limit(conn: &Connection, path: &Path) -> Result<(), PersistenceError> {
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    let page_size =
+        u64::try_from(page_size).map_err(|_| corrupt(path, "database page size is negative"))?;
+    let bytes = logical_database_bytes(conn, path)?;
+    if bytes > MAX_DATABASE_BYTES {
+        return Err(PersistenceError::DatabaseTooLarge {
+            path: path.to_path_buf(),
+            bytes,
+            max_bytes: MAX_DATABASE_BYTES,
+        });
+    }
+    let max_pages = (MAX_DATABASE_BYTES / page_size).max(1);
+    conn.pragma_update(None, "max_page_count", max_pages as i64)?;
+    Ok(())
+}
+
+fn verify_integrity(conn: &Connection, path: &Path) -> Result<(), PersistenceError> {
+    let result: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if result.eq_ignore_ascii_case("ok") {
+        Ok(())
+    } else {
+        Err(corrupt(
+            path,
+            &format!("SQLite quick_check returned {result}"),
+        ))
+    }
+}
+
+fn corrupt(path: &Path, message: &str) -> PersistenceError {
+    PersistenceError::Corrupt {
+        path: path.to_path_buf(),
+        message: message.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Row mapping helpers
 // ---------------------------------------------------------------------------
@@ -584,11 +883,18 @@ fn clamp_setting(value: &str, range: std::ops::RangeInclusive<i64>, default: i64
 fn classify_open_error(error: PersistenceError, path: &Path) -> PersistenceError {
     match error {
         PersistenceError::Sqlite(rusqlite::Error::SqliteFailure(ffi_error, _))
-            if ffi_error.code == rusqlite::ErrorCode::NotADatabase =>
+            if matches!(
+                ffi_error.code,
+                rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+            ) =>
         {
             PersistenceError::Corrupt {
                 path: path.to_path_buf(),
-                message: "file is not a database".to_string(),
+                message: if ffi_error.code == rusqlite::ErrorCode::NotADatabase {
+                    "file is not a database".to_string()
+                } else {
+                    "SQLite reported a corrupt database".to_string()
+                },
             }
         }
         other => other,

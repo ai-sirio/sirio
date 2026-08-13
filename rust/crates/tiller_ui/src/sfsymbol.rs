@@ -74,7 +74,11 @@ pub(crate) fn rasterize_symbol(
         height,
         tint,
     };
-    if let Some(image) = cache().lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+    if let Some(image) = cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
         return Some(image);
     }
 
@@ -100,10 +104,10 @@ fn rasterize_symbol_mask(symbol: &str, width: u32, height: u32) -> Option<Vec<u8
     use objc2::rc::autoreleasepool;
     use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{
-        NSBitmapImageRep, NSCompositingOperation, NSGraphicsContext, NSImage,
-        NSCalibratedRGBColorSpace,
+        NSBitmapImageRep, NSCalibratedRGBColorSpace, NSCompositingOperation, NSGraphicsContext,
+        NSImage,
     };
-    use objc2_foundation::{NSPoint, NSRect, NSString, NSSize};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
     autoreleasepool(|_| {
         let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
@@ -150,8 +154,7 @@ fn rasterize_symbol_mask(symbol: &str, width: u32, height: u32) -> Option<Vec<u8
 
         let bytes_per_row = rep.bytesPerRow() as usize;
         let samples = rep.samplesPerPixel() as usize;
-        let alpha_first =
-            (rep.bitmapFormat().0 & objc2_app_kit::NSBitmapFormat::AlphaFirst.0) != 0;
+        let alpha_first = (rep.bitmapFormat().0 & objc2_app_kit::NSBitmapFormat::AlphaFirst.0) != 0;
         if samples < 4 {
             return None;
         }
@@ -247,38 +250,54 @@ mod tests {
             .map(|p| p[0])
             .max()
             .unwrap_or(0);
-        assert!(blue_max < 8, "blue channel stays ~0 for an orange tint, got {blue_max}");
+        assert!(
+            blue_max < 8,
+            "blue channel stays ~0 for an orange tint, got {blue_max}"
+        );
         assert_eq!(untinted, 0);
     }
-
 
     #[test]
     fn probe_sf_steps() {
         use objc2::rc::autoreleasepool;
         use objc2_app_kit::{NSBitmapImageRep, NSImage};
-        use objc2_foundation::{NSString, NSSize};
+        use objc2_foundation::{NSSize, NSString};
         autoreleasepool(|_| {
             let name = NSString::from_str("folder.fill");
             let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None);
-            println!("step1 image: {}", if image.is_some() { "Some" } else { "None" });
+            println!(
+                "step1 image: {}",
+                if image.is_some() { "Some" } else { "None" }
+            );
             let Some(image) = image else { return };
-            image.setSize(NSSize { width: 28.0, height: 28.0 });
+            image.setSize(NSSize {
+                width: 28.0,
+                height: 28.0,
+            });
             image.setTemplate(true);
             let size = image.size();
             println!("step2 image size: {:?}", size);
             let tiff = image.TIFFRepresentation();
-            println!("step3 tiff: {}", if tiff.is_some() { "Some" } else { "None" });
+            println!(
+                "step3 tiff: {}",
+                if tiff.is_some() { "Some" } else { "None" }
+            );
             let Some(tiff) = tiff else { return };
             println!("step3b tiff len: {}", tiff.length());
             let rep = NSBitmapImageRep::imageRepWithData(&tiff);
             println!("step4 rep: {}", if rep.is_some() { "Some" } else { "None" });
             let Some(rep) = rep else { return };
-            println!("step5 wide={} high={} samples={} bpp={} bpr={} fmt={:?}",
-                rep.pixelsWide(), rep.pixelsHigh(), rep.samplesPerPixel(), rep.bitsPerPixel(),
-                rep.bytesPerRow(), rep.bitmapFormat().0);
+            println!(
+                "step5 wide={} high={} samples={} bpp={} bpr={} fmt={:?}",
+                rep.pixelsWide(),
+                rep.pixelsHigh(),
+                rep.samplesPerPixel(),
+                rep.bitsPerPixel(),
+                rep.bytesPerRow(),
+                rep.bitmapFormat().0
+            );
         });
     }
-
 
     #[test]
     fn probe_pixels() {
@@ -294,7 +313,10 @@ mod tests {
                 shown += 1;
             }
         }
-        println!("max_b={max_b} total_painted={}", bytes.chunks_exact(4).filter(|p| p[3] > 0).count());
+        println!(
+            "max_b={max_b} total_painted={}",
+            bytes.chunks_exact(4).filter(|p| p[3] > 0).count()
+        );
     }
 
     #[test]
@@ -302,7 +324,11 @@ mod tests {
         let mask: Vec<u8> = (0..4).flat_map(|_| [0, 0, 0, 255]).collect();
         let out = bake_tint(&mask, 2, 2, (255, 0, 0));
         for pixel in out.chunks_exact(4) {
-            assert_eq!(pixel, &[0, 0, 255, 255], "red tint -> BGRA (0, 0, 255, 255)");
+            assert_eq!(
+                pixel,
+                &[0, 0, 255, 255],
+                "red tint -> BGRA (0, 0, 255, 255)"
+            );
         }
     }
 

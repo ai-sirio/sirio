@@ -10,12 +10,50 @@
 use std::io;
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
+
+/// The Claude config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude` —
+/// the same precedence `claude` itself uses.
+pub fn claude_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".claude"))
+        .expect("HOME must be set")
+}
+
+/// Whether a Claude credentials file (`<config dir>/.credentials.json`)
+/// carries a usable credential: an OAuth account (`claudeAiOauth` with an
+/// access token) or an API key (`hashedToken`). **Presence, not
+/// validity** — the usage fetch answers whether the credential still
+/// works; this answers only "has the user signed in".
+pub fn claude_has_credentials_at(credentials_file: &Path) -> bool {
+    let Ok(data) = std::fs::read(credentials_file) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else {
+        return false;
+    };
+    let oauth_token = json
+        .get("claudeAiOauth")
+        .and_then(|oauth| oauth.get("accessToken"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|token| !token.is_empty());
+    if oauth_token {
+        return true;
+    }
+    json.get("hashedToken")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|token| !token.is_empty())
+}
 
 /// One usage window of the Claude panel.
 const SESSION_LABEL: &str = "5h";
@@ -44,10 +82,12 @@ pub fn parse_claude_usage(raw: &str) -> Option<ProviderUsage> {
 
     let session = first_percent(&lines, is_session_label)
         .map(|percent| UsageWindow::new(SESSION_LABEL, percent));
-    let weekly = first_percent(&lines, |line| is_weekly_label(line) && !contains_fable(line))
-        .map(|percent| UsageWindow::new(WEEKLY_LABEL, percent));
-    let fable = first_percent(&lines, is_fable_label)
-        .map(|percent| UsageWindow::new(FABLE_LABEL, percent));
+    let weekly = first_percent(&lines, |line| {
+        is_weekly_label(line) && !contains_fable(line)
+    })
+    .map(|percent| UsageWindow::new(WEEKLY_LABEL, percent));
+    let fable =
+        first_percent(&lines, is_fable_label).map(|percent| UsageWindow::new(FABLE_LABEL, percent));
 
     let usage = ProviderUsage {
         session,
@@ -112,7 +152,10 @@ fn utf8_char_len(byte: u8) -> usize {
 
 /// Lowercase, whitespace-stripped line for pattern matching.
 fn normalized(line: &str) -> String {
-    line.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect()
+    line.to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
 }
 
 fn is_session_label(line: &str) -> bool {
@@ -150,11 +193,11 @@ fn first_percent(lines: &[String], is_label: impl Fn(&str) -> bool) -> Option<u8
         if !is_label(line) {
             continue;
         }
-        for j in i..(i + 4).min(lines.len()) {
-            if j > i && is_section_label(&lines[j]) && !is_label(&lines[j]) {
+        for (offset, candidate) in lines.iter().skip(i).take(4).enumerate() {
+            if offset > 0 && is_section_label(candidate) && !is_label(candidate) {
                 break;
             }
-            if let Some(percent) = percent_token(&lines[j]) {
+            if let Some(percent) = percent_token(candidate) {
                 return Some(percent);
             }
         }
@@ -226,13 +269,10 @@ pub fn classify_failure(text: &str) -> Option<UsageReason> {
 pub struct ClaudeUsageFetcher;
 
 impl ClaudeUsageFetcher {
-    /// How long the whole fetch may take before giving up. 60 s, not the
-    /// Swift default of 25 s: under load the Claude TUI takes 20 s+ just
-    /// to render its prompt, and a fetch that aborts before the panel
-    /// appears would report the provider unavailable every cycle. Still
-    /// bounded — the fetch runs off the render thread and kills the child
-    /// on exit.
-    pub const TIMEOUT: Duration = Duration::from_secs(60);
+    /// How long the whole fetch may take before giving up. This is a hard
+    /// upper bound for the provider, including PTY startup and the `/usage`
+    /// round trip.
+    pub const TIMEOUT: Duration = Duration::from_secs(25);
     /// How long the TUI gets to settle before `/usage` is sent.
     pub const SETTLE: Duration = Duration::from_secs(2);
     /// How often the output buffer is polled.
@@ -244,8 +284,8 @@ impl ClaudeUsageFetcher {
 
     /// Internal overload with explicit timing, for tests.
     pub fn fetch_with(settle: Duration, poll: Duration, timeout: Duration) -> UsageFetchOutcome {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let mut pty = match Pty::spawn(&shell, &["-lc", "claude"]) {
+        let shell = login_shell();
+        let pty = match Pty::spawn(&shell, &["-lc", "claude"]) {
             Ok(pty) => pty,
             Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
         };
@@ -354,6 +394,21 @@ impl ClaudeUsageFetcher {
     }
 }
 
+fn login_shell() -> String {
+    if let Some(shell) = std::env::var_os("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|shell| shell.is_file())
+    {
+        return shell.to_string_lossy().into_owned();
+    }
+    ["/bin/bash", "/bin/sh", "/usr/bin/bash"]
+        .into_iter()
+        .find(|shell| std::path::Path::new(shell).is_file())
+        .unwrap_or("/bin/sh")
+        .to_string()
+}
+
 /// A minimal PTY: `posix_openpt` + a login-shell child on the slave side.
 /// macOS-only, mirroring the Swift app's `PtyProcess`.
 struct Pty {
@@ -381,11 +436,20 @@ impl Pty {
             if name.is_null() {
                 return Err(io::Error::last_os_error());
             }
-            PathBuf::from(std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned())
+            PathBuf::from(
+                std::ffi::CStr::from_ptr(name)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
         };
         // SAFETY: slave path comes from ptsname; O_NOCTTY because the child
         // attaches it explicitly via TIOCSCTTY after setsid.
-        let slave = unsafe { libc::open(slave_path.to_str().unwrap_or("").as_ptr() as *const _, libc::O_RDWR | libc::O_NOCTTY) };
+        let slave = unsafe {
+            libc::open(
+                slave_path.to_str().unwrap_or("").as_ptr() as *const _,
+                libc::O_RDWR | libc::O_NOCTTY,
+            )
+        };
         if slave < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -413,7 +477,7 @@ impl Pty {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(slave, libc::TIOCSCTTY.into(), 0) < 0 {
+                if libc::ioctl(slave, libc::TIOCSCTTY, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
@@ -430,7 +494,8 @@ impl Pty {
         std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             loop {
-                let n = unsafe { libc::read(reader_master, chunk.as_mut_ptr().cast(), chunk.len()) };
+                let n =
+                    unsafe { libc::read(reader_master, chunk.as_mut_ptr().cast(), chunk.len()) };
                 if n <= 0 {
                     break;
                 }
@@ -452,11 +517,7 @@ impl Pty {
     fn write(&self, bytes: &[u8]) {
         // SAFETY: master is a valid open fd for the lifetime of `self`.
         unsafe {
-            libc::write(
-                self.master,
-                bytes.as_ptr().cast(),
-                bytes.len(),
-            );
+            libc::write(self.master, bytes.as_ptr().cast(), bytes.len());
         }
     }
 

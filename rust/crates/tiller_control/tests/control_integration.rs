@@ -676,7 +676,10 @@ fn tillerctl_quit_requests_a_graceful_application_exit() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        handler.requests().last().map(|request| request.method.as_str()),
+        handler
+            .requests()
+            .last()
+            .map(|request| request.method.as_str()),
         Some("system.quit")
     );
 }
@@ -722,6 +725,104 @@ fn pane_registry_writes_input_to_a_live_command() {
         String::from_utf8_lossy(&registry.read(&pane.id).expect("pane output"))
             .contains("got:hello")
     );
+}
+
+#[test]
+fn pane_registry_close_terminates_process_group() {
+    let dir = TempDir::new("close-group");
+    let pid_file = dir.path().join("pids");
+    let command = format!(
+        "( trap '' TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
+        pid_file.display()
+    );
+    let registry = PaneRegistry::new();
+    let pane = registry
+        .create(dir.path(), Some(&command), "compound")
+        .expect("spawn compound pane");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let pids = loop {
+        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+            let pids = contents
+                .split_whitespace()
+                .map(|pid| pid.parse::<i32>().expect("numeric pid"))
+                .collect::<Vec<_>>();
+            if pids.len() == 2 {
+                break pids;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "compound pane did not publish both pids"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(pids.iter().all(|pid| process_exists(*pid)));
+
+    registry.close(&pane.id).expect("close compound pane");
+    let terminated = wait_for_processes_to_exit(&pids, deadline);
+    if !terminated {
+        // Keep a red run from leaking a 60-second child into the developer's
+        // session when the implementation still kills only the shell.
+        unsafe {
+            libc::kill(pids[1], libc::SIGKILL);
+        }
+    }
+    assert!(
+        terminated,
+        "all process-group pids must be gone after close"
+    );
+}
+
+#[test]
+fn pane_registry_shutdown_for_only_its_worktree() {
+    let first_dir = TempDir::new("shutdown-for-first");
+    let second_dir = TempDir::new("shutdown-for-second");
+    let first_pid_file = first_dir.path().join("pids");
+    let second_pid_file = second_dir.path().join("pids");
+    let first_command = format!(
+        "( trap '' TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
+        first_pid_file.display()
+    );
+    let second_command = format!(
+        "( trap '' TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
+        second_pid_file.display()
+    );
+    let registry = PaneRegistry::new();
+    let first = registry
+        .create(first_dir.path(), Some(&first_command), "first")
+        .expect("spawn first pane");
+    let second = registry
+        .create(second_dir.path(), Some(&second_command), "second")
+        .expect("spawn second pane");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let first_pids = wait_for_pid_file(&first_pid_file, deadline);
+    let second_pids = wait_for_pid_file(&second_pid_file, deadline);
+    assert!(first_pids.iter().all(|pid| process_exists(*pid)));
+    assert!(second_pids.iter().all(|pid| process_exists(*pid)));
+
+    registry
+        .shutdown_for(first_dir.path())
+        .expect("shutdown first worktree");
+    assert!(wait_for_processes_to_exit(&first_pids, deadline));
+    assert!(
+        registry
+            .list_for(second_dir.path())
+            .expect("list second worktree")
+            .iter()
+            .any(|pane| pane.id == second.id),
+        "closing one worktree must leave other worktree panes registered"
+    );
+    assert!(
+        second_pids.iter().all(|pid| process_exists(*pid)),
+        "closing one worktree must leave other worktree processes alive"
+    );
+
+    assert!(registry.list_for(first_dir.path()).unwrap().is_empty());
+    assert!(registry.close(&first.id).is_err());
+    registry.shutdown();
+    assert!(wait_for_processes_to_exit(&second_pids, deadline));
 }
 
 #[test]
@@ -1006,11 +1107,29 @@ fn tillerctl_exposes_the_application_pane_and_tab_commands() {
         .iter()
         .map(|request| request.method.as_str())
         .collect();
-    assert_eq!(methods, commands.iter().map(|(_, method)| *method).collect::<Vec<_>>());
-    assert_eq!(requests[0].params.get("direction").map(String::as_str), Some("right"));
-    assert_eq!(requests[1].params.get("direction").map(String::as_str), Some("left"));
-    assert_eq!(requests[3].params.get("direction").map(String::as_str), Some("backward"));
-    assert_eq!(requests[4].params.get("index").map(String::as_str), Some("3"));
+    assert_eq!(
+        methods,
+        commands
+            .iter()
+            .map(|(_, method)| *method)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        requests[0].params.get("direction").map(String::as_str),
+        Some("right")
+    );
+    assert_eq!(
+        requests[1].params.get("direction").map(String::as_str),
+        Some("left")
+    );
+    assert_eq!(
+        requests[3].params.get("direction").map(String::as_str),
+        Some("backward")
+    );
+    assert_eq!(
+        requests[4].params.get("index").map(String::as_str),
+        Some("3")
+    );
 }
 
 #[test]
@@ -1312,10 +1431,7 @@ fn same_uid_peer_is_accepted() {
 fn pane_registry_shutdown_terminates_live_children() {
     let dir = TempDir::new("shutdown");
     let pid_file = dir.path().join("child.pid");
-    let command = format!(
-        "printf '%s' \"$$\" > {}; exec sleep 60",
-        pid_file.display()
-    );
+    let command = format!("printf '%s' \"$$\" > {}; exec sleep 60", pid_file.display());
     let registry = PaneRegistry::new();
     registry
         .create(dir.path(), Some(&command), "sleep")
@@ -1351,4 +1467,33 @@ fn process_exists(pid: i32) -> bool {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn wait_for_pid_file(path: &Path, deadline: std::time::Instant) -> Vec<i32> {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let pids = contents
+                .split_whitespace()
+                .map(|pid| pid.parse::<i32>().expect("numeric pid"))
+                .collect::<Vec<_>>();
+            if pids.len() == 2 {
+                return pids;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "compound pane did not publish both pids"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_processes_to_exit(pids: &[i32], deadline: std::time::Instant) -> bool {
+    while std::time::Instant::now() < deadline {
+        if pids.iter().all(|pid| !process_exists(*pid)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
 }

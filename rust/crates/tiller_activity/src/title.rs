@@ -15,6 +15,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::ansi::strip_ansi;
 use crate::status::AgentStatus;
 
 /// How long a Layer-A (hook) push stays authoritative over Layer-B (title)
@@ -29,7 +30,9 @@ const CLAUDE_IDLE_GLYPH: &str = "\u{2733}"; // ✳
 
 /// True if `title` contains any braille block character (a spinner frame).
 pub fn contains_braille_spinner(title: &str) -> bool {
-    title.chars().any(|c| BRAILLE_SPINNER_RANGE.contains(&c))
+    strip_ansi(title)
+        .chars()
+        .any(|c| BRAILLE_SPINNER_RANGE.contains(&c))
 }
 
 /// Word-boundary-safe substring containment, shared by the status keyword
@@ -72,6 +75,7 @@ fn is_word_char(c: char) -> bool {
 /// mistaking a plain shell prompt showing a branch/cwd name like
 /// "pi-notes" for a running Pi agent.
 pub fn identify_agent_from_title(title: &str) -> Option<&'static str> {
+    let title = strip_ansi(title);
     if title.is_empty() {
         return None;
     }
@@ -110,7 +114,7 @@ pub fn identify_agent_from_title(title: &str) -> Option<&'static str> {
     //    ALONE identifies nothing: Claude and Codex 0.144+ both write the
     //    same "dots" cycle (⠋⠙⠹…) into their working titles, so it carries
     //    no identity.
-    if contains_braille_spinner(title) && contains_word("pi", &lower) {
+    if contains_braille_spinner(&title) && contains_word("pi", &lower) {
         return Some("pi");
     }
 
@@ -124,13 +128,14 @@ pub fn identify_agent_from_title(title: &str) -> Option<&'static str> {
 /// Returns `None` when the title carries no recognizable status opinion;
 /// `None` must never force a transition.
 pub fn detect_status_from_title(title: &str, agent_id: &str) -> Option<AgentStatus> {
+    let title = strip_ansi(title);
     if title.is_empty() {
         return None;
     }
     match agent_id {
-        "claude" => detect_claude(title),
-        "pi" | "omp" => detect_pi_family(title, agent_id),
-        _ => detect_generic(title, agent_id),
+        "claude" => detect_claude(&title),
+        "pi" | "omp" => detect_pi_family(&title, agent_id),
+        _ => detect_generic(&title, agent_id),
     }
 }
 
@@ -173,7 +178,7 @@ fn detect_generic(title: &str, agent_id: &str) -> Option<AgentStatus> {
     const WAITING: [&str; 3] = ["permission", "action required", "waiting"];
 
     let lower = title.to_lowercase();
-    if !lower.contains(agent_id) {
+    if !contains_word(agent_id, &lower) {
         return None;
     }
     if WAITING.iter().any(|keyword| contains_word(keyword, &lower)) {

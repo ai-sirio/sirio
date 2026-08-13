@@ -5,14 +5,199 @@
 //! workspace can therefore redraw the tree without recreating a terminal or a
 //! chat transcript.
 
-use gpui::Entity;
+use gpui::{App, Entity, KeyBinding, actions};
 use tiller_terminal::TerminalView;
-use tiller_ui::{chat::Chat, file_view::FileView};
+use tiller_ui::{changes::ChangesTab, chat::Chat, file_view::FileView};
+
+actions!(
+    pane_commands,
+    [
+        SplitPaneRight,
+        SplitPaneDown,
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneAbove,
+        FocusPaneBelow,
+        ClosePane,
+        CycleTabForward,
+        CycleTabBackward,
+        JumpToTab1,
+        JumpToTab2,
+        JumpToTab3,
+        JumpToTab4,
+        JumpToTab5,
+        JumpToTab6,
+        JumpToTab7,
+        JumpToTab8,
+        JumpToTab9,
+        OpenAllTabs,
+        OpenTabMenu,
+        CloseTab,
+        CloseOtherTabs,
+        CloseTabsToRight,
+        MoveTabEarlier,
+        MoveTabLater,
+        MoveTabToCurrentPane,
+        MoveTabToOtherPane,
+        ResumeChat,
+    ]
+);
+
+/// Install the pane and tab commands at the application level. The shell
+/// remains responsible for attaching handlers to its workspace root.
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-alt-left", FocusPaneLeft, None),
+        KeyBinding::new("ctrl-alt-right", FocusPaneRight, None),
+        KeyBinding::new("ctrl-alt-up", FocusPaneAbove, None),
+        KeyBinding::new("ctrl-alt-down", FocusPaneBelow, None),
+        KeyBinding::new("ctrl-alt-shift-right", SplitPaneRight, None),
+        KeyBinding::new("ctrl-alt-shift-down", SplitPaneDown, None),
+        KeyBinding::new("ctrl-alt-w", ClosePane, None),
+        KeyBinding::new("ctrl-tab", CycleTabForward, None),
+        KeyBinding::new("ctrl-shift-tab", CycleTabBackward, None),
+        KeyBinding::new("ctrl-1", JumpToTab1, None),
+        KeyBinding::new("ctrl-2", JumpToTab2, None),
+        KeyBinding::new("ctrl-3", JumpToTab3, None),
+        KeyBinding::new("ctrl-4", JumpToTab4, None),
+        KeyBinding::new("ctrl-5", JumpToTab5, None),
+        KeyBinding::new("ctrl-6", JumpToTab6, None),
+        KeyBinding::new("ctrl-7", JumpToTab7, None),
+        KeyBinding::new("ctrl-8", JumpToTab8, None),
+        KeyBinding::new("ctrl-9", JumpToTab9, None),
+        KeyBinding::new("ctrl-w", CloseTab, None),
+    ]);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SplitDirection {
     Horizontal,
     Vertical,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PaneSize {
+    width: f32,
+    height: f32,
+}
+
+#[allow(dead_code)]
+impl PaneSize {
+    pub(crate) const fn new(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SplitDisabledReason {
+    SoleTabInGroup,
+    PaneTooSmall {
+        direction: SplitDirection,
+        available: f32,
+        required: f32,
+    },
+}
+
+impl std::fmt::Display for SplitDisabledReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SoleTabInGroup => {
+                formatter.write_str("cannot split the sole tab in its pane group")
+            }
+            Self::PaneTooSmall {
+                direction: SplitDirection::Horizontal,
+                available,
+                required,
+            } => write!(
+                formatter,
+                "pane is too narrow: {available:.0}pt available, {required:.0}pt required"
+            ),
+            Self::PaneTooSmall {
+                direction: SplitDirection::Vertical,
+                available,
+                required,
+            } => write!(
+                formatter,
+                "pane is too short: {available:.0}pt available, {required:.0}pt required"
+            ),
+        }
+    }
+}
+
+#[allow(dead_code)]
+const SPLIT_DIVIDER_SIZE: f32 = 6.0;
+#[allow(dead_code)]
+const MIN_SPLIT_PANE_WIDTH: f32 = 240.0;
+#[allow(dead_code)]
+const MIN_SPLIT_PANE_HEIGHT: f32 = 160.0;
+
+/// Return the reason a directional split cannot be offered, if any.
+///
+/// The available dimension is the size each child would receive after the
+/// divider is reserved. Keeping this check pure lets menus, keyboard handlers,
+/// accessibility callers, and tests use the same explanation.
+#[allow(dead_code)]
+pub(crate) fn split_disabled_reason(
+    direction: SplitDirection,
+    size: PaneSize,
+    tab_count: usize,
+) -> Option<SplitDisabledReason> {
+    if tab_count == 1 {
+        return Some(SplitDisabledReason::SoleTabInGroup);
+    }
+
+    let (length, required) = match direction {
+        SplitDirection::Horizontal => (size.width, MIN_SPLIT_PANE_WIDTH),
+        SplitDirection::Vertical => (size.height, MIN_SPLIT_PANE_HEIGHT),
+    };
+    let available = ((length - SPLIT_DIVIDER_SIZE).max(0.0) / 2.0).floor();
+    (available < required).then_some(SplitDisabledReason::PaneTooSmall {
+        direction,
+        available,
+        required,
+    })
+}
+
+/// Pure selection state for the tabs in one pane group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TabSelection {
+    active: usize,
+    tab_count: usize,
+}
+
+impl TabSelection {
+    pub(crate) fn new(tab_count: usize, active: usize) -> Option<Self> {
+        (tab_count > 0).then(|| Self {
+            active: active.min(tab_count - 1),
+            tab_count,
+        })
+    }
+
+    pub(crate) fn active(self) -> usize {
+        self.active
+    }
+
+    pub(crate) fn cycle(self, forward: bool) -> Self {
+        let active = if forward {
+            (self.active + 1) % self.tab_count
+        } else if self.active == 0 {
+            self.tab_count - 1
+        } else {
+            self.active - 1
+        };
+        Self { active, ..self }
+    }
+
+    /// Select a 1-based tab position. Positions beyond the group select the
+    /// last tab, matching the documented Ctrl-9 behavior.
+    pub(crate) fn jump(self, position: usize) -> Self {
+        Self {
+            active: position.saturating_sub(1).min(self.tab_count - 1),
+            ..self
+        }
+    }
 }
 
 pub(crate) enum PaneNode<T> {
@@ -231,13 +416,14 @@ pub(crate) enum PaneContent {
     Chat(Entity<Chat>),
     Terminal { view: Entity<TerminalView> },
     File { view: Entity<FileView> },
+    Changes(Entity<ChangesTab>),
 }
 
 impl PaneContent {
     pub(crate) fn terminal(&self) -> Option<Entity<TerminalView>> {
         match self {
             Self::Terminal { view } => Some(view.clone()),
-            Self::Chat(_) | Self::File { .. } => None,
+            Self::Chat(_) | Self::File { .. } | Self::Changes(_) => None,
         }
     }
 }
@@ -307,7 +493,10 @@ fn remove_node<T>(node: PaneNode<T>, target: usize) -> (Option<PaneNode<T>>, Opt
 
 #[cfg(test)]
 mod tests {
-    use super::{PaneNode, SplitDirection};
+    use super::{
+        PaneNode, PaneSize, SplitDirection, SplitDisabledReason, TabSelection,
+        split_disabled_reason,
+    };
 
     fn tree() -> PaneNode<&'static str> {
         PaneNode::leaf(0, "root")
@@ -323,12 +512,34 @@ mod tests {
     }
 
     #[test]
+    fn splitting_the_focused_pane_down_preserves_both_panes() {
+        let mut tree = tree();
+        assert!(tree.split_focused(0, 1, SplitDirection::Vertical, "down"));
+        assert_eq!(tree.leaf_ids(), vec![0, 1]);
+        assert_eq!(tree.neighbor(0, SplitDirection::Vertical, true), Some(1));
+        assert_eq!(tree.neighbor(1, SplitDirection::Vertical, false), Some(0));
+    }
+
+    #[test]
+    fn focus_movement_returns_the_neighbour_and_leaves_focus_unchanged_when_absent() {
+        let mut tree = tree();
+        assert!(tree.split_focused(0, 1, SplitDirection::Horizontal, "right"));
+
+        assert_eq!(tree.neighbor(0, SplitDirection::Horizontal, true), Some(1));
+        assert_eq!(tree.neighbor(1, SplitDirection::Horizontal, false), Some(0));
+        assert_eq!(tree.neighbor(0, SplitDirection::Vertical, false), None);
+        assert_eq!(tree.neighbor(1, SplitDirection::Vertical, true), None);
+        assert_eq!(tree.neighbor(99, SplitDirection::Horizontal, true), None);
+    }
+
+    #[test]
     fn removing_a_leaf_collapses_the_parent() {
         let mut tree = tree();
         assert!(tree.split_focused(0, 1, SplitDirection::Horizontal, "right"));
         let removed = tree.remove(0);
         assert_eq!(removed, Some("root"));
         assert_eq!(tree.leaf_ids(), vec![1]);
+        assert_eq!(tree.first_id(), Some(1));
     }
 
     #[test]
@@ -339,5 +550,84 @@ mod tests {
         assert!(tree.set_ratio(&[true], 0.75));
         assert!(tree.set_ratio(&[], 0.95));
         assert!(!tree.set_ratio(&[true, true], 0.5));
+    }
+
+    #[test]
+    fn nested_splits_offer_directional_neighbors_and_prune_after_close() {
+        let mut tree = tree();
+        assert!(tree.split_focused(0, 1, SplitDirection::Horizontal, "right"));
+        assert!(tree.split_focused(1, 2, SplitDirection::Vertical, "down"));
+
+        assert_eq!(tree.neighbor(0, SplitDirection::Horizontal, true), Some(1));
+        assert_eq!(tree.neighbor(1, SplitDirection::Vertical, true), Some(2));
+        assert_eq!(tree.neighbor(2, SplitDirection::Vertical, false), Some(1));
+
+        assert_eq!(tree.remove(2), Some("down"));
+        assert_eq!(tree.leaf_ids(), vec![0, 1]);
+        assert_eq!(tree.remove(1), Some("right"));
+        assert_eq!(tree.leaf_ids(), vec![0]);
+    }
+
+    #[test]
+    fn tab_cycle_wraps_forward_and_backward() {
+        let selection = TabSelection::new(3, 2).expect("a non-empty tab group");
+        assert_eq!(selection.cycle(true).active(), 0);
+
+        let selection = TabSelection::new(3, 0).expect("a non-empty tab group");
+        assert_eq!(selection.cycle(false).active(), 2);
+    }
+
+    #[test]
+    fn jumping_to_a_tab_uses_one_based_positions_and_clamps_to_the_last_tab() {
+        let selection = TabSelection::new(5, 0).expect("a non-empty tab group");
+        assert_eq!(selection.jump(1).active(), 0);
+        assert_eq!(selection.jump(5).active(), 4);
+        assert_eq!(selection.jump(9).active(), 4);
+    }
+
+    #[test]
+    fn empty_tab_groups_have_no_selection() {
+        assert!(TabSelection::new(0, 0).is_none());
+    }
+
+    #[test]
+    fn split_disabled_reason_explains_a_too_small_pane() {
+        let reason =
+            split_disabled_reason(SplitDirection::Horizontal, PaneSize::new(400.0, 500.0), 2)
+                .expect("a 400 point pane cannot produce two 240 point panes");
+
+        assert_eq!(
+            reason,
+            SplitDisabledReason::PaneTooSmall {
+                direction: SplitDirection::Horizontal,
+                available: 197.0,
+                required: 240.0,
+            }
+        );
+        assert_eq!(
+            reason.to_string(),
+            "pane is too narrow: 197pt available, 240pt required"
+        );
+    }
+
+    #[test]
+    fn split_disabled_reason_explains_a_sole_tab() {
+        let reason =
+            split_disabled_reason(SplitDirection::Vertical, PaneSize::new(600.0, 500.0), 1)
+                .expect("the sole tab cannot create a pane group split");
+
+        assert_eq!(reason, SplitDisabledReason::SoleTabInGroup);
+        assert_eq!(
+            reason.to_string(),
+            "cannot split the sole tab in its pane group"
+        );
+    }
+
+    #[test]
+    fn split_disabled_reason_is_absent_when_both_constraints_are_satisfied() {
+        assert_eq!(
+            split_disabled_reason(SplitDirection::Vertical, PaneSize::new(600.0, 500.0), 2,),
+            None
+        );
     }
 }

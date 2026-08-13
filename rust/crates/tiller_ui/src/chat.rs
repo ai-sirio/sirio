@@ -17,37 +17,21 @@ use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tiller_acp::{
     AcpClient, AcpEvent, AgentCommand, ContextUsage, ModelCatalog, ModelOption, PermissionOption,
 };
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_theme::Theme;
 
-const TRANSCRIPT_WIDTH: f32 = 738.0;
-const COMPOSER_HEIGHT: f32 = 150.0;
-const COMPOSER_INSET: f32 = 16.0;
-const CARD_H_PADDING: f32 = 14.0;
-const CARD_V_PADDING: f32 = 10.0;
+/// The transcript's content column — waku's measured `CONTENT_MAX_WIDTH`
+/// 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` §A.2).
+pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
+pub(crate) const CARD_H_PADDING: f32 = 14.0;
+pub(crate) const CARD_V_PADDING: f32 = 10.0;
 
-/// Claude's default accent, from `App/AgentAccentColor.swift:defaultHexByAgentId`.
-/// Per-agent accent colours are user-configurable data owned by
-/// `TillerCore`/`AppSettings`, not part of `AppTheme`/`AppSurfaceColor` — out
-/// of `tiller_theme`'s scope, so this stays a crate-local constant rather
-/// than an invented theme token.
-const CLAUDE_ACCENT: Rgba = Rgba {
-    r: 0xD9 as f32 / 255.0,
-    g: 0x77 as f32 / 255.0,
-    b: 0x57 as f32 / 255.0,
-    a: 1.0,
-};
-
-const INACTIVE_SEND_FILL: Rgba = Rgba {
-    r: 0.5,
-    g: 0.5,
-    b: 0.5,
-    a: 0.18,
-};
+/// The user turn's pill: rounded, right-aligned, capped at waku's bubble
+/// width. The assistant reply has no container at all.
+pub(crate) const USER_PILL_MAX_WIDTH: f32 = 540.0;
 
 actions!(
     chat_composer,
@@ -418,12 +402,7 @@ impl Chat {
     /// stream. The command defaults to the same `npx` agent used by
     /// `tiller_acp`'s own smoke test, overridable with `TILLER_ACP_PROGRAM`.
     pub fn launch(cx: &mut Context<Self>) -> Self {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before the Unix epoch")
-            .as_nanos();
-        let cwd = std::env::temp_dir().join(format!("tiller-chat-demo-{suffix}"));
-        let _ = std::fs::create_dir_all(&cwd);
+        let cwd = default_agent_cwd();
 
         let command = std::env::var_os("TILLER_ACP_PROGRAM")
             .map(PathBuf::from)
@@ -602,8 +581,18 @@ impl Chat {
                     resolved: None,
                 });
             }
-            AcpEvent::TurnEnded { .. } => {
-                self.push_entry(Entry::TurnFooter(now_hhmm()));
+            AcpEvent::TurnEnded { stop_reason } => {
+                // The footer must state *why* the turn stopped. A cancelled
+                // or refused turn that ends in a plain timestamp looks like an
+                // ordinary completion, and that is the exact failure class
+                // this surface is responsible for: the transcript is where a
+                // user notices a hidden state least.
+                let time = now_hhmm();
+                let label = match stop_reason.as_str() {
+                    "EndTurn" => time,
+                    reason => format!("{time} · {}", turn_end_label(reason)),
+                };
+                self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
                 self.has_completed_turn = true;
             }
@@ -663,6 +652,30 @@ impl Chat {
             .map(Entry::plain_text)
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    /// Returns the plain transcript retained by the shell when a chat tab is
+    /// closed. The shell persists the opaque string, not ACP implementation
+    /// details, so a later Resume Chat action can reconstruct visible history
+    /// even when the original transport is gone.
+    pub fn transcript_for_resume(&self) -> String {
+        self.transcript_text()
+    }
+
+    /// Restores retained transcript text into a fresh chat surface. It is
+    /// intentionally rendered as one historical assistant entry: preserving
+    /// the exact visible transcript is more important than pretending the
+    /// ACP event boundaries survived after the session was retained.
+    pub fn restore_transcript(&mut self, transcript: &str, cx: &mut Context<Self>) {
+        if transcript.is_empty() {
+            return;
+        }
+        self.push_entry(Entry::Assistant {
+            text: transcript.to_string(),
+            document: parse(transcript),
+        });
+        self.has_completed_turn = true;
+        cx.notify();
     }
 
     fn selected_transcript_text(&self) -> Option<String> {
@@ -1130,6 +1143,9 @@ impl Chat {
             Block::Heading { level, inline } => div()
                 .w_full()
                 .text_size(markdown_heading_size(level, typography))
+                .line_height(px(
+                    f32::from(markdown_heading_size(level, typography)) * 1.42
+                ))
                 .font_weight(FontWeight::BOLD)
                 .text_color(colors.title)
                 .child(Self::render_inline(
@@ -1143,6 +1159,7 @@ impl Chat {
             Block::Paragraph { inline } => div()
                 .w_full()
                 .text_size(typography.headline)
+                .line_height(typography.body_line_height)
                 .text_color(colors.title)
                 .child(Self::render_inline(
                     inline,
@@ -1191,7 +1208,7 @@ impl Chat {
                 };
                 div()
                     .w_full()
-                    .rounded(px(8.0))
+                    .rounded(theme.radii.code_block)
                     .bg(colors.code_inset_fill)
                     .px(px(12.0))
                     .py(px(9.0))
@@ -1213,8 +1230,9 @@ impl Chat {
                     )
                     .child(
                         div()
-                            .font_family("SFMono-Regular")
+                            .font_family(typography.code_family)
                             .text_size(typography.code_size)
+                            .line_height(typography.code_line_height)
                             .text_color(colors.primary_text_color)
                             .child(Self::render_plain_text(
                                 text,
@@ -1440,7 +1458,7 @@ impl Chat {
             .flex_col()
             .border_1()
             .border_color(colors.hairline)
-            .rounded(px(6.0))
+            .rounded(theme.radii.control)
             .overflow_hidden()
             .child(render_row(
                 header,
@@ -1530,19 +1548,26 @@ impl Chat {
         match entry {
             Entry::User(text) => div()
                 .w_full()
-                .px(px(CARD_H_PADDING))
-                .py(px(CARD_V_PADDING))
-                .rounded(px(10.0))
-                .bg(colors.card_fill)
-                .text_size(typography.headline)
-                .text_color(colors.title)
-                .child(Self::render_plain_text(
-                    text,
-                    theme,
-                    format!("user-entry-{entry_index}"),
-                    source_start,
-                    Some(&interaction),
-                ))
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w(px(USER_PILL_MAX_WIDTH))
+                        .rounded(theme.radii.user_pill)
+                        .bg(colors.raised)
+                        .px(px(12.0))
+                        .py(px(8.0))
+                        .text_size(typography.headline)
+                        .line_height(typography.body_line_height)
+                        .text_color(colors.title)
+                        .child(Self::render_plain_text(
+                            text,
+                            theme,
+                            format!("user-entry-{entry_index}"),
+                            source_start,
+                            Some(&interaction),
+                        )),
+                )
                 .into_any_element(),
             Entry::Assistant { document, .. } => {
                 Self::render_markdown(document, theme, Some(interaction), source_start)
@@ -1550,6 +1575,7 @@ impl Chat {
             Entry::Thought(text) => div()
                 .w_full()
                 .text_size(typography.callout)
+                .line_height(px(19.0))
                 .text_color(colors.subtitle)
                 .italic()
                 .child(Self::render_plain_text(
@@ -1563,7 +1589,7 @@ impl Chat {
             Entry::ToolCall { title, status, .. } => div()
                 .w_full()
                 .flex()
-                .rounded(px(8.0))
+                .rounded(theme.radii.code_block)
                 .bg(colors.card_fill)
                 .border_l_2()
                 .border_color(colors.rail_tool)
@@ -1596,7 +1622,7 @@ impl Chat {
             } => {
                 let mut card = div()
                     .w_full()
-                    .rounded(px(8.0))
+                    .rounded(theme.radii.code_block)
                     .bg(colors.card_fill)
                     .border_l_2()
                     .border_color(colors.rail_question)
@@ -1623,15 +1649,17 @@ impl Chat {
                     for option in options {
                         let entity = entity.clone();
                         let option_for_click = option.clone();
+                        let option_id = option.id.clone();
                         row = row.child(
                             div()
                                 .id((
                                     "permission-option",
                                     request_id as usize ^ option_hash(&option),
                                 ))
+                                .debug_selector(move || format!("permission-option-{option_id}"))
                                 .px(px(10.0))
                                 .py(px(5.0))
-                                .rounded(px(6.0))
+                                .rounded(theme.radii.control)
                                 .bg(colors.primary_pill_bg)
                                 .text_size(typography.footnote)
                                 .text_color(colors.title)
@@ -1648,77 +1676,28 @@ impl Chat {
                 }
                 card.into_any_element()
             }
-            Entry::TurnFooter(at) => {
-                let entity = entity.clone();
-                let at_for_copy = at.clone();
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(typography.footnote)
-                                    .text_color(colors.meta)
-                                    .child(at.clone()),
-                            )
-                            .child(
-                                div()
-                                    .id(("copy-reply", entry_index))
-                                    .px(px(4.0))
-                                    .rounded(px(4.0))
-                                    .text_size(typography.footnote)
-                                    .text_color(colors.meta)
-                                    .hover(|style| style.bg(colors.chat_row_hover))
-                                    .on_click(move |_, _, cx| {
-                                        entity.update(cx, |chat, cx| {
-                                            let last_reply = chat
-                                                .entries
-                                                .iter()
-                                                .rev()
-                                                .find_map(|entry| match entry {
-                                                    Entry::Assistant { text, .. } => {
-                                                        Some(text.clone())
-                                                    }
-                                                    _ => None,
-                                                })
-                                                .unwrap_or_default();
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                last_reply,
-                                            ));
-                                        });
-                                    })
-                                    .child("⧉"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(div().flex_1().h(px(1.0)).bg(colors.hairline))
-                            .child(
-                                div()
-                                    .text_size(typography.footnote)
-                                    .text_color(colors.meta)
-                                    .child(at_for_copy),
-                            )
-                            .child(div().flex_1().h(px(1.0)).bg(colors.hairline)),
-                    )
-                    .into_any_element()
-            }
+            Entry::TurnFooter(at) => div()
+                .w_full()
+                .h(px(24.0))
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(div().h(px(1.0)).flex_1().bg(colors.hairline))
+                .child(
+                    div()
+                        .text_size(typography.footnote)
+                        .text_color(colors.meta)
+                        .child(at.clone()),
+                )
+                .child(div().h(px(1.0)).flex_1().bg(colors.hairline))
+                .into_any_element(),
             Entry::Error {
                 message, retryable, ..
             } => {
                 let retry_entity = entity.clone();
                 div()
                     .w_full()
-                    .rounded(px(8.0))
+                    .rounded(theme.radii.code_block)
                     .bg(colors.diff_deletion_background)
                     .border_l_2()
                     .border_color(colors.diff_deletion)
@@ -1734,9 +1713,10 @@ impl Chat {
                         this.child(
                             div()
                                 .id(("retry", entry_index))
+                                .debug_selector(|| "chat-retry".into())
                                 .px(px(8.0))
                                 .py(px(4.0))
-                                .rounded(px(6.0))
+                                .rounded(theme.radii.control)
                                 .text_color(colors.title)
                                 .bg(colors.card_fill)
                                 .hover(|style| style.bg(colors.chat_row_hover))
@@ -1783,18 +1763,14 @@ impl Chat {
         let status_pill = div()
             .flex()
             .items_center()
-            .gap(px(5.0))
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(20.0))
-            .bg(colors.card_fill)
+            .gap(px(6.0))
+            .h(px(24.0))
+            .px(px(7.0))
+            .rounded(theme.radii.control)
+            .bg(colors.raised)
+            .text_size(typography.ui_size)
             .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(
-                div()
-                    .text_size(typography.footnote)
-                    .text_color(colors.title)
-                    .child(label),
-            )
+            .child(div().text_color(colors.title).child(label))
             .when(self.has_completed_turn, |this| {
                 this.child(div().text_color(colors.meta).child("⌄"))
             });
@@ -1818,46 +1794,49 @@ impl Chat {
                     .map(|option| option.name.clone())
             })
             .or_else(|| self.selected_model.clone())
-            .unwrap_or_else(|| "No model reported".into());
+            .unwrap_or_else(|| "Claude Code".into());
         let model_entity = entity.clone();
-        let model_chip = if self.has_completed_turn {
-            Some(
+        // A labelled chip — "Model" in muted chrome text, the value in
+        // title text — waku's composer-chip anatomy. The picker opens only
+        // once a turn has completed and the agent reported models; before
+        // that the chip is a static agent name.
+        let model_chip = div()
+            .id("model-chip")
+            .debug_selector(|| "model-chip".into())
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(24.0))
+            .px(px(7.0))
+            .rounded(theme.radii.control)
+            .bg(colors.raised)
+            .text_size(typography.ui_size)
+            .hover(|style| style.bg(colors.chat_row_hover))
+            .when(self.has_completed_turn, |this| {
+                this.on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_model_picker(window, cx);
+                }))
+            })
+            .child(div().text_color(colors.meta).child("Model"))
+            .child(
                 div()
-                    .id("model-chip")
-                    .debug_selector(|| "model-chip".into())
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(20.0))
-                    .bg(colors.card_fill)
-                    .text_size(typography.footnote)
+                    .id(self
+                        .selected_model
+                        .as_deref()
+                        .map(|id| format!("model-selection-{id}"))
+                        .unwrap_or_else(|| "model-selection-none".into()))
+                    .debug_selector(move || {
+                        self.selected_model
+                            .as_deref()
+                            .map(|id| format!("model-selection-{id}"))
+                            .unwrap_or_else(|| "model-selection-none".into())
+                    })
                     .text_color(colors.title)
-                    .hover(|style| style.bg(colors.chat_row_hover))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_model_picker(window, cx);
-                    }))
-                    .child(
-                        div()
-                            .id(self
-                                .selected_model
-                                .as_deref()
-                                .map(|id| format!("model-selection-{id}"))
-                                .unwrap_or_else(|| "model-selection-none".into()))
-                            .debug_selector(move || {
-                                self.selected_model
-                                    .as_deref()
-                                    .map(|id| format!("model-selection-{id}"))
-                                    .unwrap_or_else(|| "model-selection-none".into())
-                            })
-                            .child(selected_model_name.clone()),
-                    )
-                    .child(div().text_color(colors.meta).child("⌄")),
+                    .child(selected_model_name.clone()),
             )
-        } else {
-            None
-        };
+            .when(self.has_completed_turn, |this| {
+                this.child(div().text_color(colors.meta).child("⌄"))
+            });
 
         let model_picker = if self.model_picker_open {
             let picker_entity = model_entity.clone();
@@ -1873,7 +1852,7 @@ impl Chat {
                     .bottom(px(43.0))
                     .w(px(245.0))
                     .p(px(8.0))
-                    .rounded(px(10.0))
+                    .rounded(theme.radii.toast)
                     .bg(colors.card_fill)
                     .border_1()
                     .border_color(colors.hairline)
@@ -1901,7 +1880,7 @@ impl Chat {
                             .w_full()
                             .px(px(8.0))
                             .py(px(7.0))
-                            .rounded(px(6.0))
+                            .rounded(theme.radii.control)
                             .text_size(typography.footnote)
                             .text_color(colors.title)
                             .hover(|style| style.bg(colors.chat_row_hover))
@@ -1989,7 +1968,7 @@ impl Chat {
                                     );
                                 }
                                 if let Ok(path) = path.build() {
-                                    window.paint_path(path, CLAUDE_ACCENT);
+                                    window.paint_path(path, colors.gauge);
                                 }
                             },
                         )
@@ -2012,7 +1991,7 @@ impl Chat {
                     .bottom(px(43.0))
                     .w(px(285.0))
                     .p(px(12.0))
-                    .rounded(px(10.0))
+                    .rounded(theme.radii.toast)
                     .bg(colors.card_fill)
                     .border_1()
                     .border_color(colors.hairline)
@@ -2071,22 +2050,34 @@ impl Chat {
         };
 
         let send_entity = entity.clone();
+        let context_percent = context_usage
+            .as_ref()
+            .filter(|usage| usage.size > 0)
+            .map(|usage| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
+            .unwrap_or(0);
 
+        // The composer is the visual anchor: a raised card with a roomy
+        // input and one row of labelled chips — status, model, context —
+        // ending in the circular send control. The card is waku's: max
+        // 720px, 13px radius, `composer` fill, a hairline border that turns
+        // coral while focused.
         div()
             .id("composer")
+            .debug_selector(|| "composer".into())
             .relative()
             .w(px(TRANSCRIPT_WIDTH))
-            .h(px(COMPOSER_HEIGHT))
-            .rounded(px(22.0))
-            .bg(colors.chat_surface)
+            .rounded(theme.radii.composer)
+            .bg(colors.composer)
             .border_1()
             .border_color(if focused {
-                CLAUDE_ACCENT
+                colors.accent
             } else {
                 colors.hairline
             })
+            .p(px(10.0))
             .flex()
             .flex_col()
+            .gap(px(8.0))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -2096,10 +2087,11 @@ impl Chat {
             )
             .child(
                 div()
-                    .flex_1()
-                    .px(px(COMPOSER_INSET))
-                    .pt(px(14.0))
+                    .px(px(4.0))
+                    .pt(px(2.0))
+                    .min_h(px(44.0))
                     .text_size(typography.headline)
+                    .line_height(typography.body_line_height)
                     .text_color(if self.composer_text.is_empty() {
                         colors.meta
                     } else {
@@ -2113,88 +2105,57 @@ impl Chat {
             )
             .child(
                 div()
-                    .px(px(COMPOSER_INSET))
-                    .pb(px(10.0))
-                    .h(px(30.0))
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap(px(6.0))
+                    .child(status_pill)
+                    .child(model_chip)
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .id("attach")
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(colors.meta)
-                                    .hover(|style| style.bg(colors.chat_row_hover).rounded(px(4.0)))
-                                    .child("+"),
-                            )
-                            .child(status_pill),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .id("overflow")
-                                    .w(px(20.0))
-                                    .h(px(20.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(colors.meta)
-                                    .hover(|style| style.bg(colors.chat_row_hover).rounded(px(4.0)))
-                                    .child("…"),
-                            )
+                            .gap(px(6.0))
+                            .h(px(24.0))
+                            .px(px(7.0))
+                            .rounded(theme.radii.control)
+                            .bg(colors.raised)
+                            .text_size(typography.ui_size)
                             .child(context_ring)
-                            .children(model_chip)
-                            .when(!self.has_completed_turn, |this| {
-                                this.child(
-                                    div()
-                                        .px(px(8.0))
-                                        .py(px(4.0))
-                                        .rounded(px(20.0))
-                                        .bg(colors.card_fill)
-                                        .text_size(typography.footnote)
-                                        .text_color(colors.title)
-                                        .child("Claude Code"),
-                                )
-                            })
                             .child(
                                 div()
-                                    .id("send")
-                                    .w(px(28.0))
-                                    .h(px(28.0))
-                                    .rounded(px(14.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(if can_send {
-                                        CLAUDE_ACCENT
-                                    } else {
-                                        INACTIVE_SEND_FILL
-                                    })
-                                    .text_color(if can_send {
-                                        rgb(0xffffff)
-                                    } else {
-                                        CLAUDE_ACCENT
-                                    })
-                                    .when(can_send, |this| {
-                                        this.on_click(move |_, _, cx| {
-                                            send_entity.update(cx, |chat, cx| chat.send(cx));
-                                        })
-                                    })
-                                    .child("↑"),
+                                    .text_color(colors.title)
+                                    .child(format!("{context_percent}%")),
                             ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("send")
+                            .debug_selector(|| "send".into())
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(14.0))
+                            .bg(if can_send {
+                                colors.overlay_strong
+                            } else {
+                                colors.overlay
+                            })
+                            .text_color(if can_send {
+                                colors.title
+                            } else {
+                                colors.text_ghost
+                            })
+                            .hover(|style| style.bg(colors.raised))
+                            .when(can_send, |this| {
+                                this.on_click(move |_, _, cx| {
+                                    send_entity.update(cx, |chat, cx| chat.send(cx));
+                                })
+                            })
+                            .child("↑"),
                     ),
             )
             .children(model_picker)
@@ -2262,8 +2223,9 @@ impl Render for Chat {
             .child(
                 div()
                     .id("chat-transcript")
+                    .debug_selector(|| "chat-transcript".into())
                     .w(px(TRANSCRIPT_WIDTH))
-                    .pt(px(18.0))
+                    .pt(px(22.0))
                     .flex_1()
                     .flex()
                     .key_context("ChatTranscript")
@@ -2285,7 +2247,7 @@ impl Render for Chat {
                                         div()
                                             .id(("chat-entry", entry_index))
                                             .w(px(TRANSCRIPT_WIDTH))
-                                            .pb(px(14.0))
+                                            .pb(px(8.0))
                                             .child(Chat::render_entry(
                                                 entry,
                                                 entry_index,
@@ -2307,15 +2269,42 @@ impl Render for Chat {
                 div()
                     .w_full()
                     .flex()
-                    .justify_center()
+                    .flex_col()
+                    .items_center()
                     .pb(px(18.0))
-                    .child(self.render_composer(&theme, window, cx)),
+                    .child(self.render_composer(&theme, window, cx))
+                    .child(
+                        // A quiet context line under the card: the agent's
+                        // working directory. Chrome below the fold.
+                        div()
+                            .mt(px(8.0))
+                            .text_size(theme.typography.caption2)
+                            .text_color(theme.colors.meta)
+                            .child(self.agent_cwd.display().to_string()),
+                    ),
             )
     }
 }
 
 fn now_hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
+}
+
+/// Human label for a non-`EndTurn` stop reason, stated in the turn footer so
+/// an abnormal end never reads as an ordinary completion. The protocol's own
+/// Debug strings are "Cancelled", "Refusal", "MaxTokens", "MaxTurnRequests".
+fn turn_end_label(reason: &str) -> &'static str {
+    match reason {
+        "Cancelled" => "cancelled",
+        "Refusal" => "refused to continue",
+        "MaxTokens" => "stopped at the token limit",
+        "MaxTurnRequests" => "stopped at the turn-request limit",
+        _ => "ended",
+    }
+}
+
+fn default_agent_cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())
 }
 
 fn markdown_heading_size(level: u8, typography: tiller_theme::Typography) -> gpui::Pixels {
@@ -2360,19 +2349,24 @@ impl InlineBuilder {
                     return;
                 }
 
-                let mut highlight = HighlightStyle::default();
-                highlight.font_weight = strong.then_some(FontWeight::BOLD);
-                highlight.font_style = emphasis.then_some(FontStyle::Italic);
+                let mut highlight = HighlightStyle {
+                    font_weight: strong.then_some(FontWeight::BOLD),
+                    font_style: emphasis.then_some(FontStyle::Italic),
+                    ..Default::default()
+                };
                 if code {
-                    highlight.background_color = Some(theme.colors.code_inset_fill.into());
+                    // waku spends its one saturated colour on inline code:
+                    // the warm `code_text` on a faint `code_wash` ground.
+                    highlight.color = Some(theme.colors.code_text.into());
+                    highlight.background_color = Some(theme.colors.code_wash.into());
                     self.font_overrides
-                        .push((start..end, "SFMono-Regular".into()));
+                        .push((start..end, theme.typography.code_family.into()));
                 }
                 if let Some(target) = link_target {
-                    highlight.color = Some(theme.colors.file_link.into());
+                    highlight.color = Some(theme.colors.accent.into());
                     highlight.underline = Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(theme.colors.file_link.into()),
+                        color: Some(theme.colors.accent.into()),
                         wavy: false,
                     });
                     self.links.push((start..end, target.to_string()));
@@ -2397,18 +2391,19 @@ impl InlineBuilder {
                 let end = self.text.len();
                 if start < end {
                     let mut highlight = HighlightStyle {
-                        background_color: Some(theme.colors.code_inset_fill.into()),
+                        color: Some(theme.colors.code_text.into()),
+                        background_color: Some(theme.colors.code_wash.into()),
                         ..Default::default()
                     };
                     highlight.font_weight = strong.then_some(FontWeight::BOLD);
                     highlight.font_style = emphasis.then_some(FontStyle::Italic);
                     if let Some(target) = link_target {
-                        highlight.color = Some(theme.colors.file_link.into());
+                        highlight.color = Some(theme.colors.accent.into());
                         self.links.push((start..end, target.to_string()));
                     }
                     self.highlights.push((start..end, highlight));
                     self.font_overrides
-                        .push((start..end, "SFMono-Regular".into()));
+                        .push((start..end, theme.typography.code_family.into()));
                 }
             }
             Inline::Link {
@@ -2440,7 +2435,530 @@ fn option_hash(option: &PermissionOption) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    const CHAT_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/chat_fixture.py"
+    );
+
+    /// Scratch directory shared between a test and the fixture subprocess;
+    /// removed when the test finishes.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("tiller-chat-test-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Pumps both executors — with real sleeps, virtual-clock advances, and
+    /// `run_until_parked` — until `condition` holds over the chat's own
+    /// state, or the budget is exhausted. A drawn test that skips this loop
+    /// can pass on timing luck; every test below goes through it.
+    fn pump_chat_until(
+        cx: &VisualTestContext,
+        chat: &gpui::Entity<Chat>,
+        mut condition: impl FnMut(&Chat) -> bool,
+    ) {
+        cx.cx.executor().allow_parking();
+        for _ in 0..600 {
+            if chat.read_with(&cx.cx, |chat, _| condition(chat)) {
+                return;
+            }
+            cx.cx
+                .executor()
+                .advance_clock(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+        let summary = chat.read_with(&cx.cx, |chat, _| {
+            let entries = chat
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Error { message, .. } => format!("Error({message})"),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!(
+                "client={} streaming={} connecting={} entries=[{entries}]",
+                chat.client.is_some(),
+                chat.streaming,
+                chat.connecting
+            )
+        });
+        panic!("chat condition never became true within the pump budget: {summary}");
+    }
+
+    /// A freshly drawn frame, so `debug_bounds` reads state that actually
+    /// rendered rather than the last stale frame.
+    fn refresh_frame(cx: &mut VisualTestContext) {
+        cx.update(|window, _| window.refresh());
+        cx.cx.run_until_parked();
+    }
+
+    fn chat_view<'a>(
+        cx: &'a mut TestAppContext,
+        fixture_args: &[&str],
+    ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        let args = fixture_args.to_vec();
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut command = AgentCommand::new("python3").arg(CHAT_FIXTURE);
+            for arg in &args {
+                command = command.arg(*arg);
+            }
+            Chat::from_test_command(command, std::env::temp_dir(), cx)
+        });
+        (chat, cx)
+    }
+
+    fn focus_and_type(cx: &mut VisualTestContext, text: &str) {
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input(text);
+    }
+
+    /// F-CHAT-37: a fresh chat shows an empty transcript with the composer
+    /// and its controls, and typing does not send.
+    #[gpui::test]
+    async fn empty_chat_renders_composer_and_typing_does_not_send(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.is_empty() && chat.list_state.item_count() == 0
+            }),
+            "before any message there are no transcript items"
+        );
+        assert!(
+            cx.debug_bounds("composer").is_some(),
+            "the composer card is drawn"
+        );
+        assert!(
+            cx.debug_bounds("send").is_some(),
+            "the send control is drawn"
+        );
+        assert!(
+            cx.debug_bounds("chat-status").is_some(),
+            "the status pill is drawn"
+        );
+        assert!(
+            cx.debug_bounds("chat-transcript").is_some(),
+            "the transcript surface is drawn"
+        );
+
+        focus_and_type(cx, "hello");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_text.clone()),
+            "hello",
+            "typing fills the composer"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.entries.is_empty()),
+            "typing alone must not send anything"
+        );
+    }
+
+    /// F-CHAT-04: Return sends; Shift+Return inserts a newline without
+    /// sending. Both halves are driven through the real key-dispatch path in
+    /// a drawn frame.
+    #[gpui::test]
+    async fn enter_sends_and_shift_return_inserts_a_newline(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "first");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::User(text) if text == "first"))
+            }),
+            "Return sends the composed message"
+        );
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+
+        // A completed turn leaves the composer usable for the Shift+Return
+        // half.
+        focus_and_type(cx, "line one");
+        cx.simulate_keystrokes("shift-return");
+        cx.simulate_input("line two");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_text.clone()),
+            "line one\nline two",
+            "Shift+Return inserts a newline into the composer"
+        );
+        let user_entries = chat.read_with(&cx.cx, |chat, _| {
+            chat.entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::User(_)))
+                .count()
+        });
+        assert_eq!(
+            user_entries, 1,
+            "Shift+Return must not send a second message"
+        );
+
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(text) if text == "line one\nline two"))
+                && chat.has_completed_turn
+        });
+    }
+
+    /// F-CHAT-01 + F-CHAT-23 + F-CHAT-18: one streamed turn renders as a
+    /// user pill, an assistant reply that grows in place, a thought, a tool
+    /// call card, a live usage update, and the turn footer. The fixture's
+    /// go-file gate makes the in-place growth assertion deterministic.
+    #[gpui::test]
+    async fn a_streamed_reply_grows_one_entry_with_thought_tool_and_usage(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // Chunk one arrives and the fixture blocks on the go-file, so the
+        // transcript must be mid-growth here: one Assistant entry holding
+        // "first " and nothing after it, with the turn still streaming.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.len() == 2
+                && matches!(
+                    chat.entries.last(),
+                    Some(Entry::Assistant { text, .. }) if text == "first "
+                )
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "Enter starts a streaming turn that stays active until the agent ends it"
+        );
+        let assistant_count = chat.read_with(&cx.cx, |chat, _| {
+            chat.entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::Assistant { .. }))
+                .count()
+        });
+        assert_eq!(
+            assistant_count, 1,
+            "the reply grows one entry in place, not one entry per chunk"
+        );
+
+        // Release the rest of the turn.
+        std::fs::write(dir.0.join("go"), "go").expect("write go file");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.len() == 5 && matches!(chat.entries.last(), Some(Entry::TurnFooter(_)))
+        });
+
+        let (assistant, thought, tool, usage, completed) = chat.read_with(&cx.cx, |chat, _| {
+            let assistant = chat
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    Entry::Assistant { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("assistant reply");
+            let thought = chat
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    Entry::Thought(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("thought chunk");
+            let tool = chat
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    Entry::ToolCall { title, status, .. } => Some((title.clone(), status.clone())),
+                    _ => None,
+                })
+                .expect("tool call card");
+            (
+                assistant,
+                thought,
+                tool,
+                chat.context_usage.clone(),
+                chat.has_completed_turn,
+            )
+        });
+        assert_eq!(
+            assistant, "first streamed",
+            "both chunks land in the same growing entry"
+        );
+        assert_eq!(thought, "thinking hard");
+        assert_eq!(tool, ("write nonce".into(), "Completed".into()));
+        assert_eq!(
+            usage,
+            Some(ContextUsage {
+                used: 53_000,
+                size: 200_000,
+                cost: None
+            })
+        );
+        assert!(completed, "the turn completes with a footer");
+
+        // The drawn transcript laid out the footer and the composer is back
+        // to its post-turn state.
+        refresh_frame(cx);
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.list_state.bounds_for_item(4).is_some()
+            }),
+            "the turn footer is laid out in the drawn transcript"
+        );
+        assert!(cx.debug_bounds("chat-status").is_some());
+    }
+
+    /// F-CHAT-25 (option answers): a permission prompt renders both option
+    /// buttons in the drawn frame and each answer is recorded on the card.
+    #[gpui::test]
+    async fn a_permission_prompt_answers_both_ways(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["permission"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let send = |cx: &mut VisualTestContext, text: &str| {
+            focus_and_type(cx, text);
+            cx.simulate_keystrokes("enter");
+            cx.run_until_parked();
+        };
+
+        // First prompt: answer Allow.
+        send(cx, "may I?");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.can_send()),
+            "the composer cannot send while a permission is pending (F-CHAT-05)"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("permission-option-allow").is_some()
+                && cx.debug_bounds("permission-option-deny").is_some(),
+            "both permission answers are drawn as buttons"
+        );
+        let allow = cx
+            .debug_bounds("permission-option-allow")
+            .expect("allow button");
+        cx.simulate_click(allow.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Permission { resolved: Some(choice), .. } if choice == "Allow once")
+            }) && chat.has_completed_turn
+        });
+
+        // Second prompt: answer Deny against the same connection.
+        send(cx, "second?");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+        let deny = cx
+            .debug_bounds("permission-option-deny")
+            .expect("deny button");
+        cx.simulate_click(deny.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(entry, Entry::Permission { resolved: Some(choice), .. } if choice == "Deny once")
+            })
+        });
+        let (answered, footers) = chat.read_with(&cx.cx, |chat, _| {
+            let answered = chat
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Permission {
+                        resolved: Some(choice),
+                        ..
+                    } => Some(choice.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let footers = chat
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TurnFooter(_)))
+                .count();
+            (answered, footers)
+        });
+        assert_eq!(answered, vec!["Allow once", "Deny once"]);
+        assert_eq!(footers, 2, "both answered turns complete");
+    }
+
+    /// F-CHAT-03 + the stream-death seam: a transport that dies mid-reply
+    /// leaves a stated error card with a working Retry, and Retry reconnects
+    /// and completes a later turn.
+    #[gpui::test]
+    async fn a_stream_that_dies_mid_reply_states_the_error_and_retry_recovers(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["death-then-ok", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // The fixture streams "partial" and dies; the transcript must state
+        // the death instead of looking like a normal empty reply.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        retryable: true,
+                        kind: ErrorKind::Connection,
+                        ..
+                    }
+                )
+            }) && !chat.streaming
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+            }),
+            "what arrived before the death stays in the transcript"
+        );
+        refresh_frame(cx);
+        let retry = cx
+            .debug_bounds("chat-retry")
+            .expect("the drawn error card offers Retry");
+
+        // Retry relaunches the agent; the second fixture invocation behaves,
+        // so the connection error card is cleared and a later turn completes.
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.client.is_some()
+                && !chat.entries.iter().any(|entry| {
+                    matches!(
+                        entry,
+                        Entry::Error {
+                            kind: ErrorKind::Connection,
+                            ..
+                        }
+                    )
+                })
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.connecting),
+            "a recovered chat is no longer connecting"
+        );
+
+        focus_and_type(cx, "again");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Assistant { text, .. } if text == "alive "))
+                && chat.has_completed_turn
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::User(text) if text == "again"))
+            }),
+            "the recovered connection takes a new turn"
+        );
+    }
+
+    /// F-CHAT-07 + the cancelled-request seam: Escape stops a streaming turn
+    /// and the transcript footer states the cancellation instead of looking
+    /// like an ordinary completion. A later, normally-ended turn stays plain.
+    #[gpui::test]
+    async fn escape_cancels_the_stream_and_the_transcript_states_it(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "Escape immediately stops the streaming turn"
+        );
+
+        // The agent answers the cancelled prompt; the footer states it.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::TurnFooter(text) if text.contains("cancelled")))
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+            }),
+            "the partial reply stays visible under the cancelled footer"
+        );
+
+        // The composer is usable again; a normal next turn is not marked.
+        focus_and_type(cx, "again");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(
+                |entry| matches!(entry, Entry::TurnFooter(text) if !text.contains("cancelled")),
+            )
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.has_completed_turn),
+            "a later turn completes normally"
+        );
+    }
 
     fn configure_test_chat(chat: &mut Chat) {
         chat.has_completed_turn = true;
@@ -2456,6 +2974,11 @@ mod tests {
             size: 100,
             cost: None,
         });
+    }
+
+    #[test]
+    fn default_agent_cwd_follows_the_process_workspace() {
+        assert_eq!(default_agent_cwd(), std::env::current_dir().unwrap());
     }
 
     #[gpui::test]
@@ -2619,6 +3142,41 @@ mod tests {
                 Some(expected.as_str())
             );
         });
+    }
+
+    #[gpui::test]
+    async fn a_retained_transcript_can_be_restored_as_visible_chat_history(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::User("question".into()));
+            chat.push_entry(Entry::Assistant {
+                text: "answer".into(),
+                document: parse("answer"),
+            });
+            chat
+        });
+        let transcript = chat.read_with(cx, |chat, _| chat.transcript_for_resume());
+
+        let (restored, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.restore_transcript(&transcript, cx);
+            chat
+        });
+        assert_eq!(
+            restored.read_with(cx, |chat, _| chat.transcript_for_resume()),
+            transcript
+        );
     }
 
     #[gpui::test]

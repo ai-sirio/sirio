@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 pulldown-cmark = "0.13"
+libc = "0.2"

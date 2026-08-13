@@ -30,8 +30,10 @@
 //! status. Process enumeration and PTY reading belong to the caller.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::time::Instant;
 
+use crate::notification::NotificationPayload;
 use crate::status::{AgentStatus, Transition};
 use crate::title::{
     TITLE_DEBOUNCE, detect_status_from_title, identify_agent_from_title, should_apply_title_signal,
@@ -305,6 +307,29 @@ impl AgentActivityModel {
         self.process_owned_panes.remove(pane_id);
     }
 
+    /// Refreshes Layer-D evidence from a terminal shell PID. A matching
+    /// descendant claims an otherwise-unregistered pane as running; an
+    /// unmatched or disappeared process tree clears only process-owned state.
+    /// Other ownership kinds remain untouched.
+    pub fn refresh_process_signal(
+        &mut self,
+        pane_id: &str,
+        shell_pid: u32,
+    ) -> io::Result<Option<Transition>> {
+        match crate::process::inspect_foreground_agent(shell_pid) {
+            Ok(Some(agent_id)) => Ok(self.process_identified(pane_id, agent_id)),
+            Ok(None) => {
+                self.process_gone(pane_id);
+                Ok(None)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.process_gone(pane_id);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Pane closed
     // ------------------------------------------------------------------
@@ -386,6 +411,43 @@ impl AgentActivityModel {
             .copied()
             .filter(|id| running.contains(id))
             .collect()
+    }
+
+    /// Builds the platform-neutral notification payload for a tracked pane.
+    /// The caller supplies display context because project/worktree ownership
+    /// belongs above this crate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_payload(
+        &self,
+        pane_id: &str,
+        status: AgentStatus,
+        agent_display_name: &str,
+        worktree_id: &str,
+        worktree_branch: &str,
+        project_name: Option<&str>,
+        worktree_comment: Option<&str>,
+    ) -> Option<NotificationPayload> {
+        if !self.pane_agents.contains_key(pane_id) {
+            return None;
+        }
+        let mut body = worktree_branch.to_string();
+        if let Some(project_name) = project_name {
+            body.push_str(" · ");
+            body.push_str(project_name);
+        }
+        if let Some(comment) = worktree_comment
+            .map(str::trim)
+            .filter(|comment| !comment.is_empty())
+        {
+            body.push_str("  ·  ");
+            body.push_str(comment);
+        }
+        Some(NotificationPayload {
+            pane_id: pane_id.to_string(),
+            worktree_id: worktree_id.to_string(),
+            title: format!("{agent_display_name} — {}", status.human_label()),
+            body,
+        })
     }
 }
 

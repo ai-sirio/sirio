@@ -12,3 +12,5 @@ publish.workspace = true
 # exposed by std — Zed's own process wrapper does the same.
 [dependencies]
 libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
