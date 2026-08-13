@@ -944,3 +944,40 @@ given that this has run all day, may be exactly what happened.
 and the tree has not been quiet once today; running it now, with five agents compiling, would
 reproduce the very load that makes the honest half of the claim true. It is a scheduling
 constraint, not a work item: run it in the first genuine idle window, with the failing test named.
+
+## 23:10 — the composer focus finding, corrected and sharpened
+
+The earlier note said the composer's only focus path is its own `on_mouse_down` in `chat.rs`. **That
+phrasing was too narrow and, read literally, wrong** — `main.rs` can focus it: `Chat` implements
+`Focusable` returning `composer_focus` (`chat.rs:3040`), and `select_pane` (`main.rs:4339`) resolves
+that handle and calls `window.focus(&focus_handle, cx)`. The route exists.
+
+**The real finding is stronger.** The *creation* path never takes that route, and cannot:
+
+```rust
+fn add_chat_tab(
+    &mut self,
+    adapter: Option<&dyn tiller_agents::AgentAdapter>,
+    cx: &mut Context<Self>,          // main.rs:3934 — no Window parameter
+```
+
+GPUI focus requires `&mut Window`. `add_chat_tab` has none, so it is not a branch that forgets to
+focus — **the signature makes focusing impossible**. It sets `focused_pane`, which is internal
+bookkeeping, not focus. All four `select_pane` callers (`:4374`, `:4474`, `:4560`, `:4690`) are click
+or keyboard paths; none runs on creation.
+
+So a freshly opened chat tab has no caret in its composer until the user clicks. That is consistent
+with every pass-14 frame: tab opened, keystrokes sent, `Message…` never cleared, status `idle`,
+frames byte-identical.
+
+**One-shot check, sent to pireview:** open a new chat and type *without* clicking — the placeholder
+must persist. Then click into the composer and retype. If the second attempt lands, the gap is named
+precisely and belongs to `pi` (owner of `chat.rs`): *a newly opened chat does not put the caret in
+its own input*, which every agent CLI does. If typing fails even after the click, this explanation is
+wrong and must be discarded rather than stretched to fit.
+
+**Why this correction is recorded rather than quietly fixed.** The first version was a claim about
+a file that got generalised into a claim about the app — the identical shape as GAP 2, where a code
+branch was read and a menu inferred from it. Catching it one message later instead of one pass later
+is the only difference, and that difference came from re-reading my own assertion rather than from
+anyone challenging it.
