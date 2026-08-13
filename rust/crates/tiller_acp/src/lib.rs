@@ -6,9 +6,10 @@
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, InitializeRequest,
-    NewSessionRequest, PermissionOption as ProtocolPermissionOption, PromptRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, ImageContent,
+    InitializeRequest, NewSessionRequest, PermissionOption as ProtocolPermissionOption,
+    PlanEntry as ProtocolPlanEntry, PlanEntryStatus as ProtocolPlanEntryStatus, PromptRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigOptionValue, SessionConfigSelectOptions, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, TextContent, ToolCallStatus,
@@ -24,6 +25,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+mod chat;
+
+pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
 // protocol byte exists. Keep that cold-start budget bounded, but long enough
@@ -174,6 +179,80 @@ pub struct ContextCost {
     pub currency: String,
 }
 
+/// An image the user attached to the composer, ready for an ACP image block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageAttachment {
+    /// Media type, e.g. `image/png`.
+    pub mime_type: String,
+    /// Base64-encoded media payload.
+    pub base64_data: String,
+}
+
+/// One slash command advertised by the agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AvailableCommandInfo {
+    /// Command name (e.g. `create_plan`).
+    pub name: String,
+    /// Human-readable description of what the command does.
+    pub description: String,
+}
+
+/// One choice in an effort-level selector.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffortChoice {
+    /// Protocol value sent to the agent.
+    pub value: String,
+    /// Human-readable label.
+    pub name: String,
+}
+
+/// The effort-level selector advertised by the session, when the agent
+/// offers one (OpenCode reports it as a `configOptions` select with id
+/// `effort`; standard ACP agents may tag it with another category).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffortOption {
+    /// Configuration option identifier used by `session/set_config_option`.
+    pub option_id: String,
+    /// Human-readable label for the option, when the agent provides one.
+    pub name: Option<String>,
+    /// Currently selected value, when the agent reports one.
+    pub current_value: Option<String>,
+    /// The offered levels.
+    pub choices: Vec<EffortChoice>,
+}
+
+/// A structured question folded out of an `AskUserQuestion`-shaped tool
+/// input attached to a permission request. The permission's own options
+/// remain the wire of record; this only adds the free-text prompt and text
+/// input affordances the raw options cannot carry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionQuestion {
+    /// The question's header, falling back to the prompt text.
+    pub header: String,
+    /// The question body; empty when it duplicates the header.
+    pub prompt: String,
+    /// A free-text input offered alongside the options, when declared.
+    pub text_input: Option<PermissionTextInput>,
+}
+
+/// Free-text input configuration for a structured question.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PermissionTextInput {
+    /// Placeholder shown in the empty field.
+    pub placeholder: Option<String>,
+    /// Text prefilled into the field.
+    pub prefill: Option<String>,
+}
+
+/// One row of the agent's execution plan (F-CHAT-24).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanEntryInfo {
+    /// Human-readable description of what this task aims to accomplish.
+    pub content: String,
+    /// Wire status: `pending`, `in_progress`, or `completed`.
+    pub status: String,
+}
+
 /// Typed events emitted by one ACP session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AcpEvent {
@@ -208,22 +287,35 @@ pub enum AcpEvent {
     },
     /// The model selector changed or became available.
     ModelCatalog(ModelCatalog),
+    /// The agent advertised its slash-command list.
+    AvailableCommands(Vec<AvailableCommandInfo>),
+    /// The agent advertised an effort-level selector.
+    Effort(EffortOption),
     /// The agent reported current context-window usage.
     ContextUsage(ContextUsage),
-    /// A session update outside the chat/tool subset, retained so callers can
-    /// observe protocol traffic without treating it as a transport failure.
-    OtherSessionUpdate {
-        /// The debug name of the protocol update variant.
-        kind: String,
-    },
     /// The agent is waiting for a caller decision.
     PermissionRequest {
         /// Handle passed to [`AcpClient::respond_permission`].
         request_id: u64,
         /// Session that owns the request.
         session_id: String,
+        /// Title of the tool call asking for the decision.
+        title: String,
         /// Available choices.
         options: Vec<PermissionOption>,
+        /// A structured question carried by the tool input, when present.
+        question: Option<PermissionQuestion>,
+    },
+    /// The agent published or advanced its execution plan.
+    PlanUpdate {
+        /// Current plan rows; the client replaces any earlier plan.
+        entries: Vec<PlanEntryInfo>,
+    },
+    /// A session update outside the chat/tool subset, retained so callers can
+    /// observe protocol traffic without treating it as a transport failure.
+    OtherSessionUpdate {
+        /// The debug name of the protocol update variant.
+        kind: String,
     },
     /// The current prompt turn finished.
     TurnEnded {
@@ -244,7 +336,9 @@ pub enum AcpEvent {
 #[derive(Debug)]
 enum Command {
     Prompt(String),
+    PromptContent(Vec<ContentBlock>),
     SetModel { config_id: String, value: String },
+    SetConfigOption { option_id: String, value: String },
     Cancel,
     Shutdown(mpsc::SyncSender<()>),
 }
@@ -274,6 +368,7 @@ pub struct InitializeInfo {
 /// A live client connection to one ACP agent subprocess.
 pub struct AcpClient {
     command_tx: async_channel::Sender<Command>,
+    event_tx: Option<EventStreamSender>,
     pending_permissions: PermissionWaiters,
     child: ChildHandle,
     session_id: String,
@@ -309,6 +404,7 @@ impl AcpClient {
         let cwd = cwd.as_ref().to_path_buf();
         let (command_tx, command_rx) = async_channel::unbounded();
         let (event_tx, event_rx) = async_channel::unbounded();
+        let worker_event_tx = event_tx.clone();
         let (worker_tx, worker_rx) = mpsc::sync_channel(2);
         let pending_permissions: PermissionWaiters = Arc::new(Mutex::new(HashMap::new()));
         let worker_pending = Arc::clone(&pending_permissions);
@@ -320,7 +416,7 @@ impl AcpClient {
                     command,
                     cwd,
                     command_rx,
-                    event_tx,
+                    worker_event_tx,
                     worker_tx,
                     worker_pending,
                 );
@@ -371,6 +467,7 @@ impl AcpClient {
         Ok((
             Self {
                 command_tx,
+                event_tx: Some(event_tx),
                 pending_permissions,
                 child,
                 session_id: startup.session_id,
@@ -407,11 +504,43 @@ impl AcpClient {
             .map_err(|error| anyhow!("ACP worker is not running: {error}"))
     }
 
+    /// Send a user turn composed of text, file mentions, and images, as
+    /// separate ACP content blocks (see [`prompt_blocks`] for the mapping).
+    pub fn prompt_content(
+        &self,
+        text: impl Into<String>,
+        mention_paths: Vec<String>,
+        images: Vec<ImageAttachment>,
+        cwd: impl AsRef<Path>,
+    ) -> Result<()> {
+        let blocks = prompt_blocks(&text.into(), &mention_paths, &images, cwd.as_ref());
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        self.command_tx
+            .send_blocking(Command::PromptContent(blocks))
+            .map_err(|error| anyhow!("ACP worker is not running: {error}"))
+    }
+
     /// Ask the agent to change the current session model.
     pub fn set_model(&self, config_id: impl Into<String>, value: impl Into<String>) -> Result<()> {
         self.command_tx
             .send_blocking(Command::SetModel {
                 config_id: config_id.into(),
+                value: value.into(),
+            })
+            .map_err(|error| anyhow!("ACP worker is not running: {error}"))
+    }
+
+    /// Ask the agent to change a non-model configuration option (effort).
+    pub fn set_config_option(
+        &self,
+        option_id: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<()> {
+        self.command_tx
+            .send_blocking(Command::SetConfigOption {
+                option_id: option_id.into(),
                 value: value.into(),
             })
             .map_err(|error| anyhow!("ACP worker is not running: {error}"))
@@ -437,36 +566,59 @@ impl AcpClient {
             .map_err(|error| anyhow!("ACP permission request is no longer active: {error}"))
     }
 
+    /// Withdraw a permission request without selecting any option (F-CHAT-25).
+    pub fn cancel_permission(&self, request_id: u64) -> Result<()> {
+        let waiter = self
+            .pending_permissions
+            .lock()
+            .map_err(|_| anyhow!("ACP permission state is poisoned"))?
+            .remove(&request_id)
+            .ok_or_else(|| anyhow!("unknown ACP permission request {request_id}"))?;
+        waiter
+            .send_blocking(PermissionChoice::Cancelled)
+            .map_err(|error| anyhow!("ACP permission request is no longer active: {error}"))
+    }
+
     /// Stop the agent and wait for the subprocess worker to finish.
     pub fn shutdown(&mut self) -> Result<()> {
-        if let Some(worker) = self.worker.take() {
-            let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(0);
-            self.command_tx
-                .send_blocking(Command::Shutdown(shutdown_tx))
-                .map_err(|error| anyhow!("ACP worker is not running: {error}"))?;
-            match shutdown_rx.recv_timeout(SHUTDOWN_TIMEOUT) {
-                Ok(()) => {
-                    let _ = worker.join();
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    terminate_and_reap_blocking(&self.child);
-                    let _ = thread::spawn(move || {
-                        let _ = worker.join();
-                    });
-                    return Err(anyhow::Error::new(AcpError::Timeout {
-                        operation: TimeoutOperation::Shutdown,
-                        duration: SHUTDOWN_TIMEOUT,
-                    }));
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = worker.join();
-                    return Err(anyhow::Error::new(AcpError::Transport(
-                        "ACP worker exited during shutdown".into(),
-                    )));
-                }
-            }
+        let Some(worker) = self.worker.take() else {
+            self.event_tx.take();
+            return Ok(());
+        };
+
+        let (shutdown_tx, shutdown_rx) = mpsc::sync_channel(0);
+        if let Err(error) = self
+            .command_tx
+            .send_blocking(Command::Shutdown(shutdown_tx))
+        {
+            terminate_and_reap_blocking(&self.child);
+            let _ = worker.join();
+            self.event_tx.take();
+            return Err(anyhow!("ACP worker is not running: {error}"));
         }
-        Ok(())
+
+        let result = match shutdown_rx.recv_timeout(SHUTDOWN_TIMEOUT) {
+            Ok(()) => {
+                let _ = worker.join();
+                Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                terminate_and_reap_blocking(&self.child);
+                let _ = worker.join();
+                Err(anyhow::Error::new(AcpError::Timeout {
+                    operation: TimeoutOperation::Shutdown,
+                    duration: SHUTDOWN_TIMEOUT,
+                }))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                Err(anyhow::Error::new(AcpError::Transport(
+                    "ACP worker exited during shutdown".into(),
+                )))
+            }
+        };
+        self.event_tx.take();
+        result
     }
 }
 
@@ -513,6 +665,46 @@ fn run_connection(
         }
     };
     let child: ChildHandle = Arc::new(Mutex::new(Some(child)));
+    let connection_finished = Arc::new(AtomicBool::new(false));
+    let watchdog_child = Arc::clone(&child);
+    let watchdog_waiters = Arc::clone(&pending_permissions);
+    let watchdog_finished = Arc::clone(&connection_finished);
+    let _watchdog = thread::Builder::new()
+        .name("tiller-acp-permission-watchdog".into())
+        .spawn(move || {
+            // The permission handler blocks the connection's single dispatch
+            // task while it waits for a choice, so a transport that dies with
+            // a permission pending would otherwise hang until PERMISSION_TIMEOUT
+            // — the read loop can never notice the EOF. Watch the child
+            // process instead: on exit, withdraw every pending permission so
+            // the handler unblocks and the connection observes the death.
+            loop {
+                if watchdog_finished.load(Ordering::Acquire) {
+                    break;
+                }
+                let exited =
+                    watchdog_child
+                        .lock()
+                        .ok()
+                        .is_none_or(|mut child| match child.as_mut() {
+                            Some(child) => {
+                                let wait = child.status();
+                                let probe = async_io::Timer::after(Duration::from_millis(50));
+                                futures::pin_mut!(wait, probe);
+                                matches!(
+                                    block_on(futures::future::select(wait, probe)),
+                                    futures::future::Either::Left(_)
+                                )
+                            }
+                            None => true,
+                        });
+                if exited {
+                    cancel_permissions(&watchdog_waiters);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
     if worker_tx
         .send(WorkerSignal::Process(Arc::clone(&child)))
         .is_err()
@@ -562,9 +754,9 @@ fn run_connection(
             .name("tiller")
             .on_receive_notification(
                 async move |notification: SessionNotification, _connection| {
-                    let _ = notification_events
-                        .send(notification_to_event(notification))
-                        .await;
+                    for event in notification_to_events(notification) {
+                        let _ = notification_events.send(event).await;
+                    }
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
@@ -579,11 +771,25 @@ fn run_connection(
                         waiters.insert(request_id, choice_tx);
                     }
                     let options = request.options.iter().map(permission_option).collect();
+                    let title = request
+                        .tool_call
+                        .fields
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "Permission requested".into());
+                    let question = request
+                        .tool_call
+                        .fields
+                        .raw_input
+                        .as_ref()
+                        .and_then(parse_permission_question);
                     let _ = permission_events
                         .send(AcpEvent::PermissionRequest {
                             request_id,
                             session_id: request.session_id.to_string(),
+                            title,
                             options,
+                            question,
                         })
                         .await;
                     let choice = choice_rx.recv();
@@ -641,6 +847,7 @@ fn run_connection(
                     agent_capabilities: format!("{:?}", initialize.agent_capabilities),
                 };
                 let model_catalog = model_catalog_from_options(session.config_options.as_ref());
+                let effort = effort_from_options(session.config_options.as_ref());
                 let model_event = model_catalog.clone().map(AcpEvent::ModelCatalog);
                 startup_sender
                     .send(WorkerSignal::Startup(Ok(Startup {
@@ -652,20 +859,27 @@ fn run_connection(
                 if let Some(model_event) = model_event {
                     let _ = connection_events.send(model_event).await;
                 }
+                if let Some(effort) = effort {
+                    let _ = connection_events.send(AcpEvent::Effort(effort)).await;
+                }
                 started.store(true, Ordering::Release);
                 while let Ok(command) = command_rx.recv().await {
                     match command {
-                        Command::Prompt(text) => {
+                        Command::Prompt(_) | Command::PromptContent(_) => {
+                            let prompt_blocks = match command {
+                                Command::Prompt(text) => {
+                                    vec![ContentBlock::Text(TextContent::new(text))]
+                                }
+                                Command::PromptContent(blocks) => blocks,
+                                _ => unreachable!(),
+                            };
                             let session_id = session.session_id.clone();
                             let event_tx = connection_events.clone();
                             let prompt_id = prompt_counter.fetch_add(1, Ordering::Relaxed);
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
                             connection
-                                .send_request(PromptRequest::new(
-                                    session_id,
-                                    vec![ContentBlock::Text(TextContent::new(text))],
-                                ))
+                                .send_request(PromptRequest::new(session_id, prompt_blocks))
                                 .on_receiving_result(move |result| async move {
                                     active_prompt_for_result.store(0, Ordering::Release);
                                     match result {
@@ -744,6 +958,35 @@ fn run_connection(
                                     Ok(())
                                 })?;
                         }
+                        Command::SetConfigOption { option_id, value } => {
+                            let event_tx = connection_events.clone();
+                            connection
+                                .send_request(SetSessionConfigOptionRequest::new(
+                                    session.session_id.clone(),
+                                    option_id,
+                                    SessionConfigOptionValue::value_id(value),
+                                ))
+                                .on_receiving_result(move |result| async move {
+                                    match result {
+                                        Ok(response) => {
+                                            if let Some(effort) =
+                                                effort_from_options(Some(&response.config_options))
+                                            {
+                                                let _ =
+                                                    event_tx.send(AcpEvent::Effort(effort)).await;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let _ = event_tx
+                                                .send(AcpEvent::TransportError(format!(
+                                                    "config option selection failed: {error}"
+                                                )))
+                                                .await;
+                                        }
+                                    }
+                                    Ok(())
+                                })?;
+                        }
                         Command::Cancel => {
                             cancel_permissions(&connection_waiters);
                             connection.send_notification(CancelNotification::new(
@@ -765,6 +1008,7 @@ fn run_connection(
         protocol.await
     });
 
+    connection_finished.store(true, Ordering::Release);
     terminate_and_reap_blocking(&child);
     if let Ok(mut ack) = shutdown_ack.lock()
         && let Some(ack) = ack.take()
@@ -873,6 +1117,61 @@ fn permission_option(option: &ProtocolPermissionOption) -> PermissionOption {
     }
 }
 
+/// Folds an `AskUserQuestion`-shaped tool input (`{questions: [{header,
+/// question, options: [{label, description}]}]}`) into the display fields a
+/// question card needs. Only the first question is surfaced; multi-question
+/// payloads are rare and the extra ones would need a second card. A
+/// `_tillerTextInput` metadata object declares the free-text affordance.
+fn parse_permission_question(raw_input: &serde_json::Value) -> Option<PermissionQuestion> {
+    let input = raw_input.as_object()?;
+    let questions = input.get("questions")?.as_array()?;
+    let first = questions.first()?.as_object()?;
+    let prompt = first.get("question")?.as_str()?.to_string();
+    let header = first
+        .get("header")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| prompt.clone());
+    // Pi's `ui/select` repeats its header in `question`; a card that prints
+    // both would show the same sentence twice.
+    let body = if header.trim() == prompt.trim() {
+        String::new()
+    } else {
+        prompt
+    };
+    let text_input = input.get("_tillerTextInput").and_then(|value| {
+        let object = value.as_object()?;
+        Some(PermissionTextInput {
+            placeholder: object
+                .get("placeholder")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+            prefill: object
+                .get("prefill")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned),
+        })
+    });
+    Some(PermissionQuestion {
+        header,
+        prompt: body,
+        text_input,
+    })
+}
+
+fn plan_entry(entry: &ProtocolPlanEntry) -> PlanEntryInfo {
+    PlanEntryInfo {
+        content: entry.content.clone(),
+        status: match entry.status {
+            ProtocolPlanEntryStatus::Pending => "pending",
+            ProtocolPlanEntryStatus::InProgress => "in_progress",
+            ProtocolPlanEntryStatus::Completed => "completed",
+            _ => "pending",
+        }
+        .into(),
+    }
+}
+
 fn content_text(content: ContentChunk) -> Option<String> {
     match content.content {
         ContentBlock::Text(text) => Some(text.text),
@@ -880,26 +1179,30 @@ fn content_text(content: ContentChunk) -> Option<String> {
     }
 }
 
-fn notification_to_event(notification: SessionNotification) -> AcpEvent {
+fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
     match notification.update {
-        SessionUpdate::AgentMessageChunk(content) => content_text(content)
-            .map(AcpEvent::AgentMessageChunk)
-            .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
-                kind: "AgentMessageChunk(non-text)".into(),
-            }),
-        SessionUpdate::AgentThoughtChunk(content) => content_text(content)
-            .map(AcpEvent::ThoughtChunk)
-            .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
-                kind: "AgentThoughtChunk(non-text)".into(),
-            }),
-        SessionUpdate::ToolCall(tool) => AcpEvent::ToolCallStarted {
+        SessionUpdate::AgentMessageChunk(content) => vec![
+            content_text(content)
+                .map(AcpEvent::AgentMessageChunk)
+                .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
+                    kind: "AgentMessageChunk(non-text)".into(),
+                }),
+        ],
+        SessionUpdate::AgentThoughtChunk(content) => vec![
+            content_text(content)
+                .map(AcpEvent::ThoughtChunk)
+                .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
+                    kind: "AgentThoughtChunk(non-text)".into(),
+                }),
+        ],
+        SessionUpdate::ToolCall(tool) => vec![AcpEvent::ToolCallStarted {
             id: tool.tool_call_id.to_string(),
             title: tool.title,
             status: format!("{:?}", tool.status),
-        },
+        }],
         SessionUpdate::ToolCallUpdate(update) => {
             let status = update.fields.status.map(|status| format!("{:?}", status));
-            if matches!(
+            vec![if matches!(
                 update.fields.status,
                 Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
             ) {
@@ -913,26 +1216,50 @@ fn notification_to_event(notification: SessionNotification) -> AcpEvent {
                     title: update.fields.title,
                     status,
                 }
-            }
+            }]
         }
-        SessionUpdate::UsageUpdate(usage) => AcpEvent::ContextUsage(ContextUsage {
+        SessionUpdate::UsageUpdate(usage) => vec![AcpEvent::ContextUsage(ContextUsage {
             used: usage.used,
             size: usage.size,
             cost: usage.cost.map(|cost| ContextCost {
                 amount: cost.amount,
                 currency: cost.currency,
             }),
-        }),
-        SessionUpdate::ConfigOptionUpdate(update) => {
-            model_catalog_from_options(Some(&update.config_options))
-                .map(AcpEvent::ModelCatalog)
-                .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
-                    kind: "ConfigOptionUpdate".into(),
-                })
+        })],
+        SessionUpdate::AvailableCommandsUpdate(update) => {
+            vec![AcpEvent::AvailableCommands(
+                update
+                    .available_commands
+                    .into_iter()
+                    .map(|command| AvailableCommandInfo {
+                        name: command.name,
+                        description: command.description,
+                    })
+                    .collect(),
+            )]
         }
-        _ => AcpEvent::OtherSessionUpdate {
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            let options = update.config_options;
+            let mut events = Vec::with_capacity(2);
+            if let Some(catalog) = model_catalog_from_options(Some(&options)) {
+                events.push(AcpEvent::ModelCatalog(catalog));
+            }
+            if let Some(effort) = effort_from_options(Some(&options)) {
+                events.push(AcpEvent::Effort(effort));
+            }
+            if events.is_empty() {
+                events.push(AcpEvent::OtherSessionUpdate {
+                    kind: "ConfigOptionUpdate".into(),
+                });
+            }
+            events
+        }
+        SessionUpdate::Plan(plan) => vec![AcpEvent::PlanUpdate {
+            entries: plan.entries.iter().map(plan_entry).collect(),
+        }],
+        _ => vec![AcpEvent::OtherSessionUpdate {
             kind: "other".into(),
-        },
+        }],
     }
 }
 
@@ -966,6 +1293,80 @@ fn model_catalog_from_options(options: Option<&Vec<SessionConfigOption>>) -> Opt
     })
 }
 
+/// Extracts the effort-level selector from a session configuration option
+/// list: the select whose id is `effort` (or whose category tag reads
+/// `effort`, as OpenCode reports it).
+fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<EffortOption> {
+    let option = options?.iter().find(|option| {
+        option.id.to_string() == "effort"
+            || matches!(&option.category, Some(SessionConfigOptionCategory::Other(category)) if category == "effort")
+    })?;
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let choices = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(values) => values.clone(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter().cloned())
+            .collect(),
+        _ => Vec::new(),
+    };
+    Some(EffortOption {
+        option_id: option.id.to_string(),
+        name: Some(option.name.clone()),
+        current_value: Some(select.current_value.to_string()),
+        choices: choices
+            .into_iter()
+            .map(|choice| EffortChoice {
+                value: choice.value.to_string(),
+                name: choice.name,
+            })
+            .collect(),
+    })
+}
+
+/// Assembles the `session/prompt` content blocks from a draft, mirroring the
+/// reference app's `ChatPromptBuilder`: the trimmed text first, then one
+/// resource link per mentioned path (absolute paths as-is, relative paths
+/// resolved against the session working directory, both serialized as
+/// `file://` URIs), then one image block per attachment.
+fn prompt_blocks(
+    text: &str,
+    mention_paths: &[String],
+    images: &[ImageAttachment],
+    cwd: &Path,
+) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        blocks.push(ContentBlock::Text(TextContent::new(trimmed)));
+    }
+    for path in mention_paths {
+        let path = Path::new(path);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        blocks.push(ContentBlock::ResourceLink(ResourceLink::new(
+            name,
+            format!("file://{}", resolved.display()),
+        )));
+    }
+    for image in images {
+        blocks.push(ContentBlock::Image(ImageContent::new(
+            image.base64_data.clone(),
+            image.mime_type.clone(),
+        )));
+    }
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,8 +1381,8 @@ mod tests {
             ))),
         );
         assert_eq!(
-            notification_to_event(message),
-            AcpEvent::AgentMessageChunk("ciao".into())
+            notification_to_events(message),
+            vec![AcpEvent::AgentMessageChunk("ciao".into())]
         );
     }
 
@@ -995,11 +1396,11 @@ mod tests {
             )),
         );
         assert_eq!(
-            notification_to_event(update),
-            AcpEvent::ToolCallCompleted {
+            notification_to_events(update),
+            vec![AcpEvent::ToolCallCompleted {
                 id: "tool".into(),
                 status: "Completed".into(),
-            }
+            }]
         );
     }
 
@@ -1010,8 +1411,8 @@ mod tests {
             SessionUpdate::ToolCall(ToolCall::new("tool", "Read file")),
         );
         assert!(matches!(
-            notification_to_event(update),
-            AcpEvent::ToolCallStarted { id, title, .. } if id == "tool" && title == "Read file"
+            notification_to_events(update).as_slice(),
+            [AcpEvent::ToolCallStarted { id, title, .. }] if id == "tool" && title == "Read file"
         ));
     }
 
@@ -1025,15 +1426,15 @@ mod tests {
             ),
         );
         assert_eq!(
-            notification_to_event(update),
-            AcpEvent::ContextUsage(ContextUsage {
+            notification_to_events(update),
+            vec![AcpEvent::ContextUsage(ContextUsage {
                 used: 53_000,
                 size: 200_000,
                 cost: Some(ContextCost {
                     amount: 0.045,
                     currency: "USD".into(),
                 }),
-            })
+            })]
         );
     }
 
@@ -1096,9 +1497,182 @@ mod tests {
             ),
         );
         assert!(matches!(
-            notification_to_event(update),
-            AcpEvent::ModelCatalog(ModelCatalog { selected_id, .. }) if selected_id == "haiku"
+            notification_to_events(update).as_slice(),
+            [AcpEvent::ModelCatalog(ModelCatalog { selected_id, .. })] if selected_id == "haiku"
         ));
+    }
+
+    #[test]
+    fn maps_available_commands_update_to_typed_event() {
+        let update = SessionNotification::new(
+            "session",
+            SessionUpdate::AvailableCommandsUpdate(
+                agent_client_protocol::schema::v1::AvailableCommandsUpdate::new(vec![
+                    agent_client_protocol::schema::v1::AvailableCommand::new(
+                        "cr",
+                        "Code review the diff",
+                    ),
+                    agent_client_protocol::schema::v1::AvailableCommand::new(
+                        "research",
+                        "Research a topic",
+                    ),
+                ]),
+            ),
+        );
+        assert_eq!(
+            notification_to_events(update),
+            vec![AcpEvent::AvailableCommands(vec![
+                AvailableCommandInfo {
+                    name: "cr".into(),
+                    description: "Code review the diff".into(),
+                },
+                AvailableCommandInfo {
+                    name: "research".into(),
+                    description: "Research a topic".into(),
+                },
+            ])]
+        );
+    }
+
+    #[test]
+    fn maps_effort_selector_to_effort_event_alongside_the_model_catalog() {
+        let update = SessionNotification::new(
+            "session",
+            SessionUpdate::ConfigOptionUpdate(
+                agent_client_protocol::schema::v1::ConfigOptionUpdate::new(vec![
+                    SessionConfigOption::select(
+                        "model",
+                        "Model",
+                        "sonnet",
+                        vec![
+                            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                                "sonnet", "Sonnet",
+                            ),
+                        ],
+                    )
+                    .category(SessionConfigOptionCategory::Model),
+                    SessionConfigOption::select(
+                        "effort",
+                        "Reasoning effort",
+                        "medium",
+                        vec![
+                            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                                "low", "Low",
+                            ),
+                            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                                "medium", "Medium",
+                            ),
+                            agent_client_protocol::schema::v1::SessionConfigSelectOption::new(
+                                "high", "High",
+                            ),
+                        ],
+                    )
+                    .category(SessionConfigOptionCategory::Other("effort".into())),
+                ]),
+            ),
+        );
+        assert_eq!(
+            notification_to_events(update),
+            vec![
+                AcpEvent::ModelCatalog(ModelCatalog {
+                    config_id: "model".into(),
+                    selected_id: "sonnet".into(),
+                    options: vec![ModelOption {
+                        id: "sonnet".into(),
+                        name: "Sonnet".into(),
+                        description: None,
+                    }],
+                }),
+                AcpEvent::Effort(EffortOption {
+                    option_id: "effort".into(),
+                    name: Some("Reasoning effort".into()),
+                    current_value: Some("medium".into()),
+                    choices: vec![
+                        EffortChoice {
+                            value: "low".into(),
+                            name: "Low".into(),
+                        },
+                        EffortChoice {
+                            value: "medium".into(),
+                            name: "Medium".into(),
+                        },
+                        EffortChoice {
+                            value: "high".into(),
+                            name: "High".into(),
+                        },
+                    ],
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_effort_choices_from_session_configuration() {
+        let options = vec![SessionConfigOption::select(
+            "effort",
+            "Reasoning effort",
+            "high",
+            vec![
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new("low", "Low"),
+                agent_client_protocol::schema::v1::SessionConfigSelectOption::new("high", "High"),
+            ],
+        )];
+        let effort = effort_from_options(Some(&options)).expect("effort selector");
+        assert_eq!(effort.option_id, "effort");
+        assert_eq!(effort.current_value.as_deref(), Some("high"));
+        assert_eq!(
+            effort.choices,
+            vec![
+                EffortChoice {
+                    value: "low".into(),
+                    name: "Low".into(),
+                },
+                EffortChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn prompt_blocks_builds_trimmed_text_resource_links_and_images() {
+        let cwd = std::env::temp_dir().join("tiller-acp-blocks-test");
+        let blocks = prompt_blocks(
+            "  hello world  \n",
+            &["sub/notes.md".into(), "/abs/file.png".into()],
+            &[ImageAttachment {
+                mime_type: "image/png".into(),
+                base64_data: "AAAA".into(),
+            }],
+            &cwd,
+        );
+        assert_eq!(blocks.len(), 4, "text + two links + one image");
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Text(TextContent::new("hello world"))
+        );
+        assert_eq!(
+            blocks[1],
+            ContentBlock::ResourceLink(ResourceLink::new(
+                "notes.md",
+                format!("file://{}/sub/notes.md", cwd.display())
+            ))
+        );
+        assert_eq!(
+            blocks[2],
+            ContentBlock::ResourceLink(ResourceLink::new("file.png", "file:///abs/file.png"))
+        );
+        assert_eq!(
+            blocks[3],
+            ContentBlock::Image(ImageContent::new("AAAA", "image/png"))
+        );
+    }
+
+    #[test]
+    fn prompt_blocks_omits_whitespace_only_text() {
+        let blocks = prompt_blocks("   ", &[], &[], &std::env::temp_dir());
+        assert!(blocks.is_empty());
     }
 
     #[cfg(unix)]

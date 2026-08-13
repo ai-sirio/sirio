@@ -15,13 +15,17 @@ use gpui::{
 };
 use std::cell::Cell;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tiller_acp::{
-    AcpClient, AcpEvent, AgentCommand, ContextUsage, ModelCatalog, ModelOption, PermissionOption,
+    AcpClient, AcpEvent, AgentCommand, AvailableCommandInfo, ContextUsage, EffortOption,
+    ImageAttachment, ModelCatalog, ModelOption,
 };
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_theme::Theme;
+
+use crate::composer::{Composer, ComposerChip, ComposerPart};
+use crate::sidebar::icons::{Icon, IconElement};
 
 /// The transcript's content column — waku's measured `CONTENT_MAX_WIDTH`
 /// 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` §A.2).
@@ -52,6 +56,73 @@ actions!(
     ]
 );
 
+actions!(chat_question_answer, [SendAnswer, CancelAnswer]);
+
+/// One option rendered on a question or plan-approval card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AnswerOption {
+    /// Protocol option id sent back to the agent.
+    id: String,
+    /// Human-readable label.
+    label: String,
+    /// Whether the option declines the request, tinted distinctly.
+    is_rejection: bool,
+}
+
+/// Free-text input offered on a question card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AnswerTextInput {
+    /// Placeholder shown in the empty field.
+    placeholder: Option<String>,
+    /// Text prefilled into the field.
+    prefill: Option<String>,
+}
+
+impl AnswerTextInput {
+    fn placeholder(&self) -> String {
+        self.placeholder
+            .clone()
+            .unwrap_or_else(|| "Type an answer".into())
+    }
+}
+
+/// One row of the agent's plan, as rendered on the Plan card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlanEntryRow {
+    /// Human-readable description of the task.
+    content: String,
+    /// Wire status: `pending`, `in_progress`, or `completed`.
+    status: String,
+}
+
+/// A pending approval attached to the Plan card (F-CHAT-24).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlanApproval {
+    /// Handle passed to [`AcpClient::respond_permission`].
+    request_id: u64,
+    /// Title of the tool asking for approval.
+    title: String,
+    /// Offered choices.
+    options: Vec<AnswerOption>,
+    /// Chosen option label, once answered.
+    resolved: Option<String>,
+    /// No longer answerable.
+    expired: bool,
+}
+
+/// F-CHAT-25: the live state of the question-card answer field — which
+/// request's field owns focus, and its draft text. One field can be focused
+/// at a time, so the state is a single slot rather than a map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QuestionAnswerState {
+    /// Focus handle of the answer field.
+    focus: FocusHandle,
+    /// Draft text of the focused answer field.
+    draft: String,
+    /// The request whose answer field currently holds focus.
+    for_request: Option<u64>,
+}
+
 /// One rendered element of the transcript.
 #[derive(Clone, Debug)]
 enum Entry {
@@ -70,11 +141,26 @@ enum Entry {
         title: String,
         status: String,
     },
-    /// An inline permission prompt; `resolved` is filled in once answered.
+    /// A question the agent put to the user, answered in place (F-CHAT-25).
+    /// `resolved` is the recorded answer once one is chosen or typed;
+    /// `expired` means the turn ended and the card is no longer answerable.
     Permission {
         request_id: u64,
-        options: Vec<PermissionOption>,
+        /// Tool title naming the asker.
+        title: String,
+        /// Structured question body; empty for plain permission gates.
+        prompt: String,
+        options: Vec<AnswerOption>,
+        /// Free-text input when the question offers one.
+        text_input: Option<AnswerTextInput>,
         resolved: Option<String>,
+        expired: bool,
+    },
+    /// The agent's execution plan (F-CHAT-24). Replaced in place as entries
+    /// advance; a pending approval attaches its option buttons to the card.
+    Plan {
+        entries: Vec<PlanEntryRow>,
+        approval: Option<PlanApproval>,
     },
     /// The muted timestamp/rule footer closing out one completed turn.
     TurnFooter(String),
@@ -97,10 +183,15 @@ impl Entry {
             } => resolved.clone().unwrap_or_else(|| {
                 options
                     .iter()
-                    .map(|option| option.name.as_str())
+                    .map(|option| option.label.as_str())
                     .collect::<Vec<_>>()
                     .join(" / ")
             }),
+            Self::Plan { entries, .. } => entries
+                .iter()
+                .map(|entry| format!("{} · {}", entry.status, entry.content))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Self::TurnFooter(text) => text.clone(),
             Self::Error { message, .. } => message.clone(),
         }
@@ -368,17 +459,32 @@ impl IntoElement for TranscriptSelectableText {
     }
 }
 
+/// Converts an adapter's ACP program description into the concrete
+/// [`AgentCommand`] the chat spawns.
+///
+/// The conversion is mechanical on purpose: the per-adapter mapping lives
+/// in `tiller_agents` (each adapter answers its own ACP server), so a
+/// Codex tab launches Codex's server and a Claude tab Claude's — never a
+/// silently-downgraded default.
+pub fn acp_agent_command(program: tiller_agents::AcpProgram) -> AgentCommand {
+    AgentCommand::new(program.program).args(program.args.iter().copied())
+}
+
 /// A chat surface wired to one live [`AcpClient`] session.
 pub struct Chat {
     client: Option<AcpClient>,
     agent_command: AgentCommand,
     agent_cwd: PathBuf,
     entries: Vec<Entry>,
-    composer_text: String,
-    composer_cursor: usize,
-    composer_selection_anchor: Option<usize>,
+    composer: Composer,
     composer_focus: FocusHandle,
+    /// F-CHAT-25: the question answer field (focus, draft, owner request).
+    question_answer: QuestionAnswerState,
     streaming: bool,
+    /// D-CHAT-03: the draft committed (Enter) while a turn streams, to be
+    /// sent as the next user turn when the turn ends — one slot, latest
+    /// commit wins. `None` when nothing is queued.
+    queued_item: Option<String>,
     connecting: bool,
     retry_pending_send: bool,
     has_completed_turn: bool,
@@ -395,6 +501,37 @@ pub struct Chat {
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
     _event_task: Option<Task<()>>,
+    // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
+    /// Slash commands advertised by the agent over ACP.
+    available_commands: Vec<AvailableCommandInfo>,
+    /// The slash popup was dismissed for the current `/token`.
+    slash_dismissed: bool,
+    /// The `/token` the popup state (dismissal, selection) belongs to; any
+    /// change resets both.
+    last_slash_token: Option<String>,
+    /// Keyboard selection index into the slash candidates.
+    slash_selected: usize,
+    /// File-mention candidates for the current `@token`.
+    mention_candidates: Vec<String>,
+    /// The `@token` the in-flight candidate walk was started for.
+    mention_query: Option<String>,
+    /// In-flight candidate walk.
+    mention_task: Option<Task<()>>,
+    /// Transient attachment rejection message, e.g. an unsupported file.
+    attach_error: Option<String>,
+    /// In-flight native file picker.
+    attach_task: Option<Task<()>>,
+    /// Overflow menu (Follow Edited Files / New Conversation).
+    overflow_open: bool,
+    overflow_focus: FocusHandle,
+    /// Follow Edited Files toggle state.
+    following_edited_files: bool,
+    /// Effort-level selector advertised by the session.
+    effort: Option<EffortOption>,
+    /// Test seam: paths handed to the attach control instead of the native
+    /// file picker (never set outside `#[cfg(test)]`).
+    #[cfg(test)]
+    attach_test_paths: Vec<PathBuf>,
 }
 
 impl Chat {
@@ -412,6 +549,22 @@ impl Chat {
                     .args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
             });
 
+        Self::launch_with_command(command, cwd, cx)
+    }
+
+    /// Launches a real ACP agent from an explicit command and returns a
+    /// `Chat` wired to its event stream.
+    ///
+    /// This is the picker's door: the caller resolves the chosen adapter's
+    /// [`tiller_agents::AcpProgram`] (via `AgentAdapter::acp_program` or
+    /// `AgentAvailability::acp_program`) and converts it with
+    /// [`acp_agent_command`], so the tab connects to the agent the user
+    /// picked rather than a hard-coded default.
+    pub fn launch_with_command(
+        command: AgentCommand,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut chat = Self::new(command, cwd, cx);
         chat.start_connection(cx, false);
 
@@ -428,14 +581,19 @@ impl Chat {
             agent_command: command,
             agent_cwd: cwd,
             entries: Vec::new(),
-            composer_text: String::new(),
-            composer_cursor: 0,
-            composer_selection_anchor: None,
+            composer: Composer::new(),
             composer_focus: cx.focus_handle().tab_stop(true),
+            question_answer: QuestionAnswerState {
+                focus: cx.focus_handle().tab_stop(true),
+                draft: String::new(),
+                for_request: None,
+            },
             model_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
+            overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
             streaming: false,
+            queued_item: None,
             connecting: false,
             retry_pending_send: false,
             has_completed_turn: false,
@@ -449,6 +607,20 @@ impl Chat {
             transcript_selection: None,
             transcript_dragging: false,
             _event_task: None,
+            available_commands: Vec::new(),
+            slash_dismissed: false,
+            last_slash_token: None,
+            slash_selected: 0,
+            mention_candidates: Vec::new(),
+            mention_query: None,
+            mention_task: None,
+            attach_error: None,
+            attach_task: None,
+            overflow_open: false,
+            following_edited_files: false,
+            effort: None,
+            #[cfg(test)]
+            attach_test_paths: Vec::new(),
         }
     }
 
@@ -481,15 +653,24 @@ impl Chat {
             KeyBinding::new("right", Right, Some("ChatComposer")),
             KeyBinding::new("shift-left", SelectLeft, Some("ChatComposer")),
             KeyBinding::new("shift-right", SelectRight, Some("ChatComposer")),
-            KeyBinding::new("cmd-a", SelectAll, Some("ChatComposer")),
-            KeyBinding::new("cmd-c", CopyTranscript, Some("ChatTranscript")),
-            KeyBinding::new("cmd-c", CopyTranscript, Some("ChatComposer")),
+            // Linux spelling of the platform modifier (Super on Linux):
+            // Ctrl+A and Ctrl+C are what a Linux user presses; the mac
+            // `cmd-` forms would bind Super and be unreachable.
+            KeyBinding::new("ctrl-a", SelectAll, Some("ChatComposer")),
+            KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatTranscript")),
+            KeyBinding::new("ctrl-c", CopyTranscript, Some("ChatComposer")),
             KeyBinding::new("home", Home, Some("ChatComposer")),
             KeyBinding::new("end", End, Some("ChatComposer")),
-            KeyBinding::new("cmd-left", Home, Some("ChatComposer")),
-            KeyBinding::new("cmd-right", End, Some("ChatComposer")),
+            // No `cmd-left`/`cmd-right` here: Home/End above cover the same
+            // movement, and on Linux the Super variants are intercepted by
+            // the desktop's window tiling before the app ever sees them.
             KeyBinding::new("escape", Cancel, Some("ChatModelPicker")),
             KeyBinding::new("escape", Cancel, Some("ChatContextPopover")),
+            // F-CHAT-25: the question answer field owns Enter (send the
+            // answer) and Escape (cancel the question) while it has focus.
+            KeyBinding::new("enter", SendAnswer, Some("ChatQuestionAnswer")),
+            KeyBinding::new("return", SendAnswer, Some("ChatQuestionAnswer")),
+            KeyBinding::new("escape", CancelAnswer, Some("ChatQuestionAnswer")),
         ]);
     }
 
@@ -567,19 +748,103 @@ impl Chat {
                 self.available_models = options;
                 self.selected_model = Some(selected_id);
             }
+            AcpEvent::AvailableCommands(commands) => {
+                self.available_commands = commands;
+            }
+            AcpEvent::Effort(effort) => {
+                self.effort = Some(effort);
+            }
             AcpEvent::ContextUsage(usage) => {
                 self.context_usage = Some(usage);
             }
             AcpEvent::PermissionRequest {
                 request_id,
+                title,
                 options,
+                question,
                 ..
             } => {
-                self.push_entry(Entry::Permission {
-                    request_id,
-                    options,
-                    resolved: None,
-                });
+                let answer_options = options
+                    .into_iter()
+                    .map(|option| AnswerOption {
+                        is_rejection: option.kind.contains("Reject"),
+                        id: option.id,
+                        label: option.name,
+                    })
+                    .collect::<Vec<_>>();
+                let is_plan_approval = title.to_ascii_lowercase().contains("plan")
+                    && matches!(
+                        self.entries.last(),
+                        Some(Entry::Plan { approval: None, .. })
+                    );
+                if is_plan_approval {
+                    // F-CHAT-24: approval of a plan attaches its option
+                    // buttons to the Plan card instead of a separate card.
+                    if let Some(Entry::Plan { approval, .. }) = self.entries.last_mut() {
+                        *approval = Some(PlanApproval {
+                            request_id,
+                            title,
+                            options: answer_options,
+                            resolved: None,
+                            expired: false,
+                        });
+                    }
+                } else {
+                    let structured_prompt = question
+                        .as_ref()
+                        .map(|question| question.prompt.clone())
+                        .unwrap_or_default();
+                    let text_input = question
+                        .and_then(|question| question.text_input)
+                        .map(|input| AnswerTextInput {
+                            placeholder: input.placeholder,
+                            prefill: input.prefill,
+                        })
+                        .or_else(|| {
+                            // A question with no choices must still be
+                            // answerable: offer free text instead of
+                            // dead-ending the surface.
+                            answer_options
+                                .is_empty()
+                                .then_some(AnswerTextInput {
+                                    placeholder: None,
+                                    prefill: None,
+                                })
+                        });
+                    self.push_entry(Entry::Permission {
+                        request_id,
+                        title,
+                        prompt: structured_prompt,
+                        options: answer_options,
+                        text_input,
+                        resolved: None,
+                        expired: false,
+                    });
+                }
+            }
+            AcpEvent::PlanUpdate { entries } => {
+                let entries = entries
+                    .into_iter()
+                    .map(|entry| PlanEntryRow {
+                        content: entry.content,
+                        status: entry.status,
+                    })
+                    .collect::<Vec<_>>();
+                // A plan is a running state: each update replaces the
+                // previous Plan card, so entries advance in place.
+                if let Some(Entry::Plan {
+                    entries: existing,
+                    ..
+                }) = self.entries.iter_mut().rev().find(|entry| {
+                    matches!(entry, Entry::Plan { .. })
+                }) {
+                    *existing = entries;
+                } else {
+                    self.push_entry(Entry::Plan {
+                        entries,
+                        approval: None,
+                    });
+                }
             }
             AcpEvent::TurnEnded { stop_reason } => {
                 // The footer must state *why* the turn stopped. A cancelled
@@ -592,12 +857,19 @@ impl Chat {
                     "EndTurn" => time,
                     reason => format!("{time} · {}", turn_end_label(reason)),
                 };
+                self.expire_unanswered();
                 self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
                 self.has_completed_turn = true;
+                // D-CHAT-03: a turn ended — completed or cancelled alike,
+                // one rule — drains the queued item as the next turn,
+                // exactly once. The footer lands before the queued turn so
+                // the transcript reads: stop stated, then the redirect.
+                self.send_queued_item(cx);
             }
             AcpEvent::TransportError(message) => {
                 self.client.take();
+                self.expire_unanswered();
                 self.push_entry(Entry::Error {
                     message,
                     retryable: true,
@@ -613,6 +885,7 @@ impl Chat {
                 // belongs in the transcript like any other error rather than
                 // leaving the composer stuck in its streaming state.
                 self.client.take();
+                self.expire_unanswered();
                 self.push_entry(Entry::Error {
                     message: format!("{operation:?} timed out after {:.1}s", duration.as_secs_f32()),
                     retryable: true,
@@ -626,7 +899,7 @@ impl Chat {
     }
 
     fn can_send(&self) -> bool {
-        !self.streaming && !self.connecting && !self.composer_text.trim().is_empty()
+        !self.streaming && !self.connecting && !self.composer.is_empty()
     }
 
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
@@ -698,7 +971,7 @@ impl Chat {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "c" && event.keystroke.modifiers.platform {
+        if event.keystroke.key == "c" && event.keystroke.modifiers.control {
             self.copy_transcript(&CopyTranscript, window, cx);
         }
     }
@@ -754,7 +1027,220 @@ impl Chat {
         cx.notify();
     }
 
+    // --- Slash-command popup (F-CHAT-09) ---
+
+    /// The popup's candidate list: all commands while the query is empty,
+    /// then the case-insensitive prefix matches — capped at ten rows like
+    /// the reference `slashCandidates`.
+    fn slash_candidates(&self) -> Vec<&AvailableCommandInfo> {
+        let Some(query) = self.composer.slash_token() else {
+            return Vec::new();
+        };
+        let query = query.to_lowercase();
+        let matching = |command: &&AvailableCommandInfo| {
+            query.is_empty() || command.name.to_lowercase().starts_with(&query)
+        };
+        let all: Vec<&AvailableCommandInfo> = self.available_commands.iter().collect();
+        all.into_iter().filter(matching).take(10).collect()
+    }
+
+    fn slash_popup_visible(&self) -> bool {
+        !self.slash_candidates().is_empty() && !self.slash_dismissed
+    }
+
+    /// Inserts the selected command as a skill token. The popup closes
+    /// because the draft is no longer a single `/token`.
+    fn accept_slash_selection(&mut self, cx: &mut Context<Self>) {
+        let candidates = self.slash_candidates();
+        if candidates.is_empty() {
+            return;
+        }
+        let selected = self.slash_selected.min(candidates.len() - 1);
+        let name = candidates[selected].name.clone();
+        self.composer.replace_slash_token(&name);
+        self.slash_dismissed = true;
+        self.refresh_token_popups(cx);
+    }
+
+    fn accept_slash_command(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.composer.replace_slash_token(name);
+        self.slash_dismissed = true;
+        self.refresh_token_popups(cx);
+    }
+
+    // --- @ file mentions (F-CHAT-10) ---
+
+    /// Starts the bounded filesystem walk for the current mention token. The
+    /// result is dropped when the token changed while the walk ran — the
+    /// same staleness guard the reference `refreshMentionCandidates` uses.
+    fn schedule_mention_walk(&mut self, cx: &mut Context<Self>) {
+        let Some(query) = self.mention_query.clone() else {
+            self.mention_task.take();
+            return;
+        };
+        let cwd = self.agent_cwd.clone();
+        self.mention_task = Some(cx.spawn(async move |this, cx| {
+            let walk_query = query.clone();
+            let hits = cx
+                .background_executor()
+                .spawn(async move { mention_candidates_on_disk(&cwd, &walk_query) })
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                if chat.mention_query.as_deref() == Some(query.as_str()) {
+                    chat.mention_candidates = hits;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn accept_mention(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.composer.accept_mention(path);
+        self.mention_candidates.clear();
+        self.refresh_token_popups(cx);
+    }
+
+    // --- Attachments (F-CHAT-11 / F-CHAT-12) ---
+
+    /// Opens the image picker and inserts the chosen image as a chip.
+    /// `multiple` is off and only PNG/JPEG are accepted, so an unsupported
+    /// choice is impossible in the picker itself; whatever the picker (or
+    /// the test seam) returns is still validated here.
+    fn attach_image(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if !self.attach_test_paths.is_empty() {
+            let paths = std::mem::take(&mut self.attach_test_paths);
+            self.apply_attached_paths(paths, cx);
+            return;
+        }
+        let options = gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Attach image".into()),
+        };
+        let receiver = cx.prompt_for_paths(options);
+        self.attach_task = Some(cx.spawn(async move |this, cx| {
+            let result = receiver.await;
+            let _ = this.update(cx, |chat, cx| match result {
+                Ok(Ok(Some(paths))) => chat.apply_attached_paths(paths, cx),
+                Ok(Ok(None)) => {}
+                Ok(Err(_)) | Err(_) => {
+                    chat.show_attach_error("Could not open the file picker.".to_string(), cx)
+                }
+            });
+        }));
+    }
+
+    /// Validates picker results and inserts image chips. Anything that is
+    /// not exactly one PNG/JPEG file is rejected with a transient message.
+    fn apply_attached_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.len() != 1 {
+            self.show_attach_error("Only one image can be attached at a time.".to_string(), cx);
+            return;
+        }
+        let path = &paths[0];
+        let extension = path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let mime = match extension.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            _ => {
+                self.show_attach_error("Only PNG and JPEG images can be attached.".to_string(), cx);
+                return;
+            }
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            self.show_attach_error("The image could not be read.".to_string(), cx);
+            return;
+        };
+        use base64::Engine as _;
+        let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        self.composer.insert_chip_at_cursor(ComposerChip::Image {
+            mime: mime.to_string(),
+            base64,
+        });
+        self.refresh_token_popups(cx);
+        cx.notify();
+    }
+
+    /// Shows the transient rejection message and schedules its dismissal.
+    fn show_attach_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.attach_error = Some(message);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                chat.attach_error = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Removes one chip at the given part index (its × control).
+    fn remove_composer_chip(&mut self, part_index: usize, cx: &mut Context<Self>) {
+        self.composer.remove_chip(part_index);
+        self.refresh_token_popups(cx);
+        cx.notify();
+    }
+
+    // --- Overflow menu (F-CHAT-14) ---
+
+    fn toggle_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.overflow_open = !self.overflow_open;
+        if self.overflow_open {
+            let focus = self.overflow_focus.clone();
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Resets the composer and transcript to a brand-new chat: every entry
+    /// is dropped and the ACP session is relaunched.
+    fn new_conversation(&mut self, cx: &mut Context<Self>) {
+        let old_count = self.entries.len();
+        self.entries.clear();
+        self.list_state.splice(0..old_count, 0);
+        self.composer = Composer::new();
+        self.reset_composer_popups();
+        self.overflow_open = false;
+        self.streaming = false;
+        self.has_completed_turn = false;
+        self.transcript_selection = None;
+        self.start_connection(cx, false);
+        cx.notify();
+    }
+
+    // --- Effort levels (F-CHAT-17) ---
+
+    /// Optimistic like `select_model`: the picker reflects the choice
+    /// immediately and reverts when the agent rejects it.
+    fn select_effort(&mut self, value: String, cx: &mut Context<Self>) {
+        let Some(effort) = &mut self.effort else {
+            return;
+        };
+        let previous = effort.current_value.clone();
+        effort.current_value = Some(value.clone());
+        if let Some(client) = &self.client
+            && let Err(_error) = client.set_config_option(effort.option_id.clone(), value.clone())
+        {
+            effort.current_value = previous;
+        }
+        cx.notify();
+    }
+
     fn send(&mut self, cx: &mut Context<Self>) {
+        // D-CHAT-03: Enter while a turn runs queues the draft for the next
+        // turn instead of starting a second turn.
+        if self.streaming {
+            self.commit_queued_item(cx);
+            return;
+        }
         if !self.can_send() {
             return;
         }
@@ -763,17 +1249,29 @@ impl Chat {
             self.start_connection(cx, true);
             return;
         }
-        let text = std::mem::take(&mut self.composer_text);
-        self.composer_cursor = 0;
-        self.composer_selection_anchor = None;
+        let draft = self.composer.draft();
+        self.composer = Composer::new();
+        self.reset_composer_popups();
+        self.submit_turn(draft.text, draft.mention_paths, draft.images, cx);
+    }
+
+    /// Pushes the user turn into the transcript and sends it to the live
+    /// client. Shared by the normal send path and the queued-item drain, so
+    /// both turns take the same wire path.
+    fn submit_turn(
+        &mut self,
+        text: String,
+        mention_paths: Vec<String>,
+        images: Vec<ImageAttachment>,
+        cx: &mut Context<Self>,
+    ) {
         self.push_entry(Entry::User(text.clone()));
         self.streaming = true;
         if let Some(client) = &self.client
-            && let Err(error) = client.prompt(&text)
+            && let Err(error) =
+                client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
         {
             self.client.take();
-            self.composer_text = text;
-            self.composer_cursor = self.composer_text.len();
             self.push_entry(Entry::Error {
                 message: format!("send failed: {error:#}"),
                 retryable: true,
@@ -784,16 +1282,91 @@ impl Chat {
         cx.notify();
     }
 
+    /// D-CHAT-03: while a turn streams, a send commits the draft as the
+    /// queued item — one slot, latest commit wins. Mirrors `send`'s
+    /// consumption of the composer; an empty draft commits nothing and
+    /// leaves any previous item in place.
+    fn commit_queued_item(&mut self, cx: &mut Context<Self>) {
+        if self.composer.is_empty() {
+            return;
+        }
+        let draft = self.composer.draft();
+        self.composer = Composer::new();
+        self.reset_composer_popups();
+        self.queued_item = Some(draft.text);
+        cx.notify();
+    }
+
+    /// D-CHAT-03: the ✕ on the queued row. The item is dropped; nothing
+    /// sends when the turn ends.
+    fn remove_queued_item(&mut self, cx: &mut Context<Self>) {
+        self.queued_item = None;
+        cx.notify();
+    }
+
+    /// D-CHAT-03: drains the queued item as the next user turn. Only the
+    /// turn-end path calls this — completed and cancelled alike — so a
+    /// committed item sends exactly once. A turn end without a client is a
+    /// transport death: the item stays queued rather than firing nowhere.
+    fn send_queued_item(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            return;
+        }
+        let Some(text) = self.queued_item.take() else {
+            return;
+        };
+        self.submit_turn(text, Vec::new(), Vec::new(), cx);
+    }
+
+    /// Closes every popup that belongs to a specific draft token or state:
+    /// the slash and mention popups track tokens, the attach rejection is a
+    /// transient event, and the pickers/menu are one-shot surfaces.
+    fn reset_composer_popups(&mut self) {
+        self.slash_dismissed = false;
+        self.last_slash_token = None;
+        self.slash_selected = 0;
+        self.mention_candidates.clear();
+        self.mention_query = None;
+        self.attach_error = None;
+    }
+
     fn respond_permission(
         &mut self,
         request_id: u64,
-        option: &PermissionOption,
+        option: &AnswerOption,
         cx: &mut Context<Self>,
     ) {
-        if let Some((index, Entry::Permission { resolved, .. })) = self.entries.iter_mut().enumerate().rev().find(
-            |(_, entry)| matches!(entry, Entry::Permission { request_id: id, .. } if *id == request_id),
-        ) {
-            *resolved = Some(option.name.clone());
+        if let Some((index, entry)) = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| matches!(entry, Entry::Permission { request_id: id, .. } if *id == request_id))
+        {
+            let Entry::Permission { resolved, .. } = entry else {
+                unreachable!()
+            };
+            *resolved = Some(option.label.clone());
+            self.remeasure_entry(index);
+        } else if let Some((index, Entry::Plan { approval: Some(approval), .. })) = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| {
+                matches!(
+                    entry,
+                    Entry::Plan {
+                        approval: Some(PlanApproval {
+                            request_id: id,
+                            ..
+                        }),
+                        ..
+                    } if *id == request_id
+                )
+            })
+        {
+            approval.resolved = Some(option.label.clone());
             self.remeasure_entry(index);
         }
         if let Some(client) = &self.client {
@@ -802,67 +1375,182 @@ impl Chat {
         cx.notify();
     }
 
-    fn selected_range(&self) -> Option<Range<usize>> {
-        let anchor = self.composer_selection_anchor?;
-        (anchor != self.composer_cursor).then(|| {
-            let (start, end) = if anchor < self.composer_cursor {
-                (anchor, self.composer_cursor)
-            } else {
-                (self.composer_cursor, anchor)
+    /// F-CHAT-25: submits the typed answer to a pending question. The text
+    /// rides the selected-option channel; the transcript records it as the
+    /// answer, and the pending state ends.
+    fn answer_question_text(&mut self, request_id: u64, text: &str, cx: &mut Context<Self>) {
+        let answer = text.trim().to_string();
+        if answer.is_empty() {
+            return;
+        }
+        let mut answered = false;
+        if let Some((index, Entry::Permission {
+            resolved, expired, ..
+        })) = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| matches!(entry, Entry::Permission { request_id: id, .. } if *id == request_id))
+            && resolved.is_none()
+            && !*expired
+        {
+            *resolved = Some(answer.clone());
+            self.remeasure_entry(index);
+            answered = true;
+        }
+        if answered && let Some(client) = &self.client {
+            let _ = client.respond_permission(request_id, answer);
+        }
+        self.clear_question_answer_focus();
+        cx.notify();
+    }
+
+    /// F-CHAT-25: withdraws a pending question without choosing. The card
+    /// reads as no longer answerable; the agent is told the decision was
+    /// cancelled.
+    fn cancel_question(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        let mut cancelled = false;
+        if let Some((index, entry)) = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| matches!(entry, Entry::Permission { request_id: id, .. } if *id == request_id))
+        {
+            let Entry::Permission { expired, .. } = entry else {
+                unreachable!()
             };
-            start..end
-        })
+            if !*expired {
+                *expired = true;
+                self.remeasure_entry(index);
+                cancelled = true;
+            }
+        } else if let Some((index, Entry::Plan {
+            approval: Some(approval),
+            ..
+        })) = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| {
+                matches!(
+                    entry,
+                    Entry::Plan {
+                        approval: Some(PlanApproval {
+                            request_id: id,
+                            ..
+                        }),
+                        ..
+                    } if *id == request_id
+                )
+            })
+            && !approval.expired
+        {
+            approval.expired = true;
+            self.remeasure_entry(index);
+            cancelled = true;
+        }
+        if cancelled && let Some(client) = &self.client {
+            let _ = client.cancel_permission(request_id);
+        }
+        self.clear_question_answer_focus();
+        cx.notify();
     }
 
-    fn delete_selected(&mut self) -> bool {
-        let Some(range) = self.selected_range() else {
-            return false;
-        };
-        self.composer_text.replace_range(range.clone(), "");
-        self.composer_cursor = range.start;
-        self.composer_selection_anchor = None;
-        true
+    /// F-CHAT-27: a finished turn (or a dead transport) leaves every
+    /// unanswered question permanently unanswerable, so the surface never
+    /// sits in a wait nothing can resolve.
+    fn expire_unanswered(&mut self) {
+        for entry in &mut self.entries {
+            match entry {
+                Entry::Permission {
+                    resolved: None,
+                    expired,
+                    ..
+                } => *expired = true,
+                Entry::Plan {
+                    approval:
+                        Some(PlanApproval {
+                            resolved: None,
+                            expired,
+                            ..
+                        }),
+                    ..
+                } => *expired = true,
+                _ => {}
+            }
+        }
+        self.clear_question_answer_focus();
     }
 
-    fn insert_text(&mut self, text: &str) {
-        self.delete_selected();
-        self.composer_text.insert_str(self.composer_cursor, text);
-        self.composer_cursor += text.len();
-    }
-
-    fn previous_boundary(&self) -> usize {
-        self.composer_text[..self.composer_cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(index, _)| index)
-    }
-
-    fn next_boundary(&self) -> usize {
-        self.composer_text[self.composer_cursor..]
-            .char_indices()
-            .nth(1)
-            .map_or(self.composer_text.len(), |(index, _)| {
-                self.composer_cursor + index
+    /// The first unanswered question in the transcript, with its entry
+    /// index — the pending bar lives exactly while this is Some (F-CHAT-26).
+    fn pending_question(&self) -> Option<(usize, String)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| match entry {
+                Entry::Permission {
+                    title,
+                    resolved: None,
+                    expired: false,
+                    ..
+                } => Some((index, title.clone())),
+                Entry::Plan {
+                    approval:
+                        Some(PlanApproval {
+                            title,
+                            resolved: None,
+                            expired: false,
+                            ..
+                        }),
+                    ..
+                } => Some((index, title.clone())),
+                _ => None,
             })
     }
 
-    fn move_cursor(&mut self, cursor: usize, extend_selection: bool) {
-        if extend_selection {
-            if self.composer_selection_anchor.is_none() {
-                self.composer_selection_anchor = Some(self.composer_cursor);
-            }
-        } else {
-            self.composer_selection_anchor = None;
+    fn clear_question_answer_focus(&mut self) {
+        self.question_answer.draft.clear();
+        self.question_answer.for_request = None;
+    }
+
+    fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer.insert_text(text);
+        self.refresh_token_popups(cx);
+    }
+
+    /// Recomputes the token-driven popup state after any edit: the slash
+    /// token resets its dismissal/selection, the mention token starts or
+    /// cancels its candidate walk.
+    fn refresh_token_popups(&mut self, cx: &mut Context<Self>) {
+        let slash_token = self.composer.slash_token();
+        if slash_token != self.last_slash_token {
+            self.last_slash_token = slash_token;
+            self.slash_dismissed = false;
+            self.slash_selected = 0;
         }
-        self.composer_cursor = cursor;
+        let mention_token = self.composer.mention_token();
+        if mention_token != self.mention_query {
+            self.mention_candidates.clear();
+            self.mention_query = mention_token;
+            self.schedule_mention_walk(cx);
+        }
     }
 
     fn send_action(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
+        if self.slash_popup_visible() {
+            self.accept_slash_selection(cx);
+            cx.notify();
+            return;
+        }
         self.send(cx);
     }
 
     fn newline(&mut self, _: &Newline, _: &mut Window, cx: &mut Context<Self>) {
-        self.insert_text("\n");
+        self.insert_text("\n", cx);
         cx.notify();
     }
 
@@ -872,6 +1560,12 @@ impl Chat {
             cx.notify();
         } else if self.context_popover_open {
             self.context_popover_open = false;
+            cx.notify();
+        } else if self.overflow_open {
+            self.overflow_open = false;
+            cx.notify();
+        } else if self.slash_popup_visible() {
+            self.slash_dismissed = true;
             cx.notify();
         } else {
             self.cancel_turn(cx);
@@ -950,6 +1644,7 @@ impl Chat {
                     // say what was lost and come back idle.
                     let _ = this.update(cx, |chat, cx| {
                         if chat.streaming {
+                            chat.expire_unanswered();
                             chat.push_entry(Entry::Error {
                                 message: "agent transport closed".to_string(),
                                 // Relaunching is exactly the right response
@@ -991,63 +1686,49 @@ impl Chat {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.delete_selected() && self.composer_cursor > 0 {
-            let previous = self.previous_boundary();
-            self.composer_text.drain(previous..self.composer_cursor);
-            self.composer_cursor = previous;
-        }
+        self.composer.backspace();
+        self.refresh_token_popups(cx);
         cx.notify();
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.delete_selected() && self.composer_cursor < self.composer_text.len() {
-            let next = self.next_boundary();
-            self.composer_text.drain(self.composer_cursor..next);
-        }
+        self.composer.delete_forward();
+        self.refresh_token_popups(cx);
         cx.notify();
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(range) = self.selected_range() {
-            self.move_cursor(range.start, false);
-        } else {
-            self.move_cursor(self.previous_boundary(), false);
-        }
+        self.composer.move_left(false);
         cx.notify();
     }
 
     fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(range) = self.selected_range() {
-            self.move_cursor(range.end, false);
-        } else {
-            self.move_cursor(self.next_boundary(), false);
-        }
+        self.composer.move_right(false);
         cx.notify();
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(self.previous_boundary(), true);
+        self.composer.move_left(true);
         cx.notify();
     }
 
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(self.next_boundary(), true);
+        self.composer.move_right(true);
         cx.notify();
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.composer_selection_anchor = Some(0);
-        self.composer_cursor = self.composer_text.len();
+        self.composer.select_all();
         cx.notify();
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(0, false);
+        self.composer.move_home(false);
         cx.notify();
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_cursor(self.composer_text.len(), false);
+        self.composer.move_end(false);
         cx.notify();
     }
 
@@ -1057,8 +1738,28 @@ impl Chat {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // F-CHAT-25: while a question answer field holds focus, every key
+        // belongs to the draft — Enter sends the answer, Escape cancels the
+        // question, printable characters type. This mirrors the composer's
+        // own fallback handling below for hosts without the keymap.
+        if let Some(request_id) = self.question_answer.for_request {
+            if matches!(event.keystroke.key.as_str(), "enter" | "return") {
+                let draft = self.question_answer.draft.clone();
+                self.answer_question_text(request_id, &draft, cx);
+            } else if event.keystroke.key == "escape" {
+                self.cancel_question(request_id, cx);
+            } else if let Some(character) = event.keystroke.key_char.as_deref()
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.control
+                && character != "\n"
+            {
+                self.question_answer.draft.push_str(character);
+                cx.notify();
+            }
+            return;
+        }
         if event.keystroke.key == "c"
-            && event.keystroke.modifiers.platform
+            && event.keystroke.modifiers.control
             && self.transcript_selection.is_some()
         {
             self.copy_transcript(&CopyTranscript, _window, cx);
@@ -1072,7 +1773,10 @@ impl Chat {
         // as the `Cancel` action or as a raw key event.
         if matches!(event.keystroke.key.as_str(), "enter" | "return") {
             if event.keystroke.modifiers.shift {
-                self.insert_text("\n");
+                self.insert_text("\n", cx);
+                cx.notify();
+            } else if self.slash_popup_visible() {
+                self.accept_slash_selection(cx);
                 cx.notify();
             } else {
                 self.send(cx);
@@ -1080,8 +1784,38 @@ impl Chat {
             return;
         }
         if event.keystroke.key == "escape" {
-            self.cancel_turn(cx);
+            if self.slash_popup_visible() {
+                self.slash_dismissed = true;
+                cx.notify();
+            } else {
+                self.cancel_turn(cx);
+            }
             return;
+        }
+        // Slash-popup keyboard navigation: the popup keeps the composer's
+        // focus so typing keeps filtering, and up/down/tab steer the
+        // selection. Tab may be consumed by focus traversal in some hosts;
+        // Enter (bound to `Send`, handled above) accepts there too.
+        if self.slash_popup_visible() && !event.keystroke.modifiers.shift {
+            match event.keystroke.key.as_str() {
+                "up" => {
+                    self.slash_selected = self.slash_selected.saturating_sub(1);
+                    cx.notify();
+                    return;
+                }
+                "down" => {
+                    let last = self.slash_candidates().len().saturating_sub(1);
+                    self.slash_selected = (self.slash_selected + 1).min(last);
+                    cx.notify();
+                    return;
+                }
+                "tab" => {
+                    self.accept_slash_selection(cx);
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if let Some(character) = event.keystroke.key_char.as_deref()
@@ -1089,9 +1823,137 @@ impl Chat {
             && !event.keystroke.modifiers.control
             && character != "\n"
         {
-            self.insert_text(character);
+            self.insert_text(character, cx);
             cx.notify();
         }
+    }
+
+    /// F-CHAT-25: the keymap path for Enter while the answer field is
+    /// focused (the raw-key fallback lives in `on_composer_key`).
+    fn send_answer_action(&mut self, _: &SendAnswer, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request_id) = self.question_answer.for_request {
+            let draft = self.question_answer.draft.clone();
+            self.answer_question_text(request_id, &draft, cx);
+        }
+        cx.notify();
+    }
+
+    /// F-CHAT-25: the keymap path for Escape while the answer field is
+    /// focused.
+    fn cancel_answer_action(&mut self, _: &CancelAnswer, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request_id) = self.question_answer.for_request {
+            self.cancel_question(request_id, cx);
+        }
+        cx.notify();
+    }
+
+    /// F-CHAT-25: the answer row of a question card — a text field with the
+    /// question's draft, a Send control, and a Cancel control. The field
+    /// owns the `ChatQuestionAnswer` key context while focused.
+    fn render_question_answer_row(
+        request_id: u64,
+        input: &AnswerTextInput,
+        theme: &Theme,
+        entity: Entity<Self>,
+        question_answer: &QuestionAnswerState,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let field_entity = entity.clone();
+        let send_entity = entity.clone();
+        let cancel_entity = entity.clone();
+        let placeholder = input.placeholder();
+        let prefill_for_click = input.prefill.clone();
+
+        // The field is a display of `question_draft` while it owns focus;
+        // clicking it seeds the draft from the declared prefill when
+        // nothing has been typed yet.
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .id(("question-answer-input", request_id))
+                    .debug_selector(|| "question-answer-input".into())
+                    .key_context("ChatQuestionAnswer")
+                    .track_focus(&question_answer.focus)
+                    .px(px(8.0))
+                    .py(px(5.0))
+                    .flex_1()
+                    .rounded(theme.radii.control)
+                    .bg(colors.raised)
+                    .border_1()
+                    .border_color(if question_answer.for_request == Some(request_id) {
+                        colors.accent
+                    } else {
+                        colors.hairline
+                    })
+                    .text_size(typography.headline)
+                    .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        let prefill = prefill_for_click.clone();
+                        field_entity.update(cx, |chat, cx| {
+                            chat.question_answer.focus.focus(window, cx);
+                            if chat.question_answer.for_request != Some(request_id) {
+                                chat.question_answer.for_request = Some(request_id);
+                                if chat.question_answer.draft.is_empty()
+                                    && let Some(prefill) = prefill
+                                {
+                                    chat.question_answer.draft = prefill;
+                                }
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(if question_answer.draft.is_empty() {
+                        div()
+                            .text_color(colors.meta)
+                            .child(placeholder)
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_color(colors.title)
+                            .child(question_answer.draft.clone())
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .id(("question-answer-send", request_id))
+                    .debug_selector(|| "question-answer-send".into())
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(theme.radii.control)
+                    .bg(colors.primary_pill_bg)
+                    .text_size(typography.footnote)
+                    .text_color(colors.title)
+                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .on_click(move |_, _, cx| {
+                        send_entity.update(cx, |chat, cx| {
+                            let draft = chat.question_answer.draft.clone();
+                            chat.answer_question_text(request_id, &draft, cx);
+                        });
+                    })
+                    .child("Send"),
+            )
+            .child(
+                div()
+                    .id(("question-answer-cancel", request_id))
+                    .debug_selector(|| "question-answer-cancel".into())
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(theme.radii.control)
+                    .text_size(typography.footnote)
+                    .text_color(colors.git_conflict)
+                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .on_click(move |_, _, cx| {
+                        cancel_entity.update(cx, |chat, cx| {
+                            chat.cancel_question(request_id, cx);
+                        });
+                    })
+                    .child("Cancel"),
+            )
+            .into_any_element()
     }
 
     fn render_markdown(
@@ -1538,6 +2400,7 @@ impl Chat {
         entity: gpui::Entity<Self>,
         transcript_focus: FocusHandle,
         source_start: usize,
+        question_answer: &QuestionAnswerState,
     ) -> impl IntoElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -1617,9 +2480,18 @@ impl Chat {
                 .into_any_element(),
             Entry::Permission {
                 request_id,
+                title,
+                prompt,
                 options,
+                text_input,
                 resolved,
+                expired,
             } => {
+                let header = if title.is_empty() {
+                    "Permission requested".to_string()
+                } else {
+                    title
+                };
                 let mut card = div()
                     .w_full()
                     .rounded(theme.radii.code_block)
@@ -1635,8 +2507,16 @@ impl Chat {
                         div()
                             .text_size(typography.callout)
                             .text_color(colors.title)
-                            .child("Permission requested"),
+                            .child(header),
                     );
+                if !prompt.is_empty() {
+                    card = card.child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.subtitle)
+                            .child(prompt),
+                    );
+                }
                 if let Some(choice) = resolved {
                     card = card.child(
                         div()
@@ -1644,6 +2524,23 @@ impl Chat {
                             .text_color(colors.meta)
                             .child(format!("Answered: {choice}")),
                     );
+                } else if expired {
+                    // F-CHAT-27: the turn ended unanswered; offering the
+                    // buttons again would be a lie.
+                    card = card.child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child("No answer — the turn ended"),
+                    );
+                } else if let Some(input) = text_input {
+                    card = card.child(Self::render_question_answer_row(
+                        request_id,
+                        &input,
+                        theme,
+                        entity,
+                        question_answer,
+                    ));
                 } else {
                     let mut row = div().flex().gap(px(8.0));
                     for option in options {
@@ -1662,17 +2559,125 @@ impl Chat {
                                 .rounded(theme.radii.control)
                                 .bg(colors.primary_pill_bg)
                                 .text_size(typography.footnote)
-                                .text_color(colors.title)
+                                .text_color(if option.is_rejection {
+                                    colors.git_conflict
+                                } else {
+                                    colors.title
+                                })
                                 .hover(|style| style.bg(colors.chat_row_hover))
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |chat, cx| {
                                         chat.respond_permission(request_id, &option_for_click, cx);
                                     });
                                 })
-                                .child(option.name.clone()),
+                                .child(option.label.clone()),
                         );
                     }
                     card = card.child(row);
+                }
+                card.into_any_element()
+            }
+            Entry::Plan { entries, approval } => {
+                let completed = entries
+                    .iter()
+                    .filter(|entry| entry.status == "completed")
+                    .count();
+                let mut card = div()
+                    .w_full()
+                    .rounded(theme.radii.code_block)
+                    .bg(colors.card_fill)
+                    .border_l_2()
+                    .border_color(colors.rail_task)
+                    .px(px(CARD_H_PADDING))
+                    .py(px(CARD_V_PADDING))
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(typography.caption2)
+                            .child(div().text_color(colors.title).child("Plan"))
+                            .child(
+                                div()
+                                    .text_color(colors.meta)
+                                    .child(format!("{completed}/{}", entries.len())),
+                            ),
+                    );
+                for row in entries {
+                    let (glyph, tint) = match row.status.as_str() {
+                        "completed" => ("✓", colors.rail_edit),
+                        "in_progress" => ("◌", colors.title),
+                        _ => ("○", colors.meta),
+                    };
+                    card = card.child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(6.0))
+                            .text_size(typography.callout)
+                            .child(div().w(px(14.0)).text_color(tint).child(glyph))
+                            .child(div().flex_1().text_color(colors.title).child(row.content)),
+                    );
+                }
+                if let Some(approval) = approval {
+                    if let Some(choice) = &approval.resolved {
+                        card = card.child(
+                            div()
+                                .text_size(typography.footnote)
+                                .text_color(colors.meta)
+                                .child(format!("Approved: {choice}")),
+                        );
+                    } else if approval.expired {
+                        card = card.child(
+                            div()
+                                .text_size(typography.footnote)
+                                .text_color(colors.meta)
+                                .child("No answer — the turn ended"),
+                        );
+                    } else {
+                        let mut row = div().flex().gap(px(8.0));
+                        for option in &approval.options {
+                            let entity = entity.clone();
+                            let option_for_click = option.clone();
+                            let option_id = option.id.clone();
+                            let request_id = approval.request_id;
+                            row = row.child(
+                                div()
+                                    .id((
+                                        "permission-option",
+                                        request_id as usize ^ option_hash(option),
+                                    ))
+                                    .debug_selector(move || {
+                                        format!("permission-option-{option_id}")
+                                    })
+                                    .px(px(10.0))
+                                    .py(px(5.0))
+                                    .rounded(theme.radii.control)
+                                    .bg(colors.primary_pill_bg)
+                                    .text_size(typography.footnote)
+                                    .text_color(if option.is_rejection {
+                                        colors.git_conflict
+                                    } else {
+                                        colors.title
+                                    })
+                                    .hover(|style| style.bg(colors.chat_row_hover))
+                                    .on_click(move |_, _, cx| {
+                                        entity.update(cx, |chat, cx| {
+                                            chat.respond_permission(
+                                                request_id,
+                                                &option_for_click,
+                                                cx,
+                                            );
+                                        });
+                                    })
+                                    .child(option.label.clone()),
+                            );
+                        }
+                        card = card.child(row);
+                    }
                 }
                 card.into_any_element()
             }
@@ -1796,47 +2801,81 @@ impl Chat {
             .or_else(|| self.selected_model.clone())
             .unwrap_or_else(|| "Claude Code".into());
         let model_entity = entity.clone();
-        // A labelled chip — "Model" in muted chrome text, the value in
-        // title text — waku's composer-chip anatomy. The picker opens only
-        // once a turn has completed and the agent reported models; before
-        // that the chip is a static agent name.
-        let model_chip = div()
-            .id("model-chip")
-            .debug_selector(|| "model-chip".into())
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(24.0))
-            .px(px(7.0))
-            .rounded(theme.radii.control)
-            .bg(colors.raised)
-            .text_size(typography.ui_size)
-            .hover(|style| style.bg(colors.chat_row_hover))
-            .when(self.has_completed_turn, |this| {
-                this.on_click(cx.listener(|this, _, window, cx| {
+        let effort_label = self.effort.as_ref().and_then(|effort| {
+            effort.current_value.as_ref().map(|current| {
+                let name = effort
+                    .choices
+                    .iter()
+                    .find(|choice| choice.value == *current)
+                    .map(|choice| choice.name.clone())
+                    .unwrap_or_else(|| current.clone());
+                name.to_uppercase()
+            })
+        });
+        // The picker chip — "Model" in muted chrome text, the value in
+        // title text, the effort level when one is selected — opens only
+        // once a turn has completed and the agent reported models. Without
+        // models the pill degrades to a plain agent badge (F-CHAT-36): no
+        // label, no chevron, no picker.
+        let model_control = if self.has_completed_turn && !self.available_models.is_empty() {
+            let effort_for_chip = effort_label.clone();
+            div()
+                .id("model-chip")
+                .debug_selector(|| "model-chip".into())
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(24.0))
+                .px(px(7.0))
+                .rounded(theme.radii.control)
+                .bg(colors.raised)
+                .text_size(typography.ui_size)
+                .hover(|style| style.bg(colors.chat_row_hover))
+                .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
                 }))
-            })
-            .child(div().text_color(colors.meta).child("Model"))
-            .child(
-                div()
-                    .id(self
-                        .selected_model
-                        .as_deref()
-                        .map(|id| format!("model-selection-{id}"))
-                        .unwrap_or_else(|| "model-selection-none".into()))
-                    .debug_selector(move || {
-                        self.selected_model
+                .child(div().text_color(colors.meta).child("Model"))
+                .child(
+                    div()
+                        .id(self
+                            .selected_model
                             .as_deref()
                             .map(|id| format!("model-selection-{id}"))
-                            .unwrap_or_else(|| "model-selection-none".into())
-                    })
-                    .text_color(colors.title)
-                    .child(selected_model_name.clone()),
-            )
-            .when(self.has_completed_turn, |this| {
-                this.child(div().text_color(colors.meta).child("⌄"))
-            });
+                            .unwrap_or_else(|| "model-selection-none".into()))
+                        .debug_selector(move || {
+                            self.selected_model
+                                .as_deref()
+                                .map(|id| format!("model-selection-{id}"))
+                                .unwrap_or_else(|| "model-selection-none".into())
+                        })
+                        .text_color(colors.title)
+                        .child(selected_model_name.clone()),
+                )
+                .when_some(effort_for_chip, |this, label| {
+                    this.child(
+                        div()
+                            .id("model-effort-label")
+                            .debug_selector(|| "model-effort-label".into())
+                            .text_size(typography.caption2)
+                            .text_color(colors.meta)
+                            .child(label),
+                    )
+                })
+                .child(div().text_color(colors.meta).child("⌄"))
+        } else {
+            div()
+                .id("agent-badge")
+                .debug_selector(|| "agent-badge".into())
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .h(px(24.0))
+                .px(px(7.0))
+                .rounded(theme.radii.control)
+                .bg(colors.raised)
+                .text_size(typography.ui_size)
+                .child(div().text_color(colors.title).child(selected_model_name))
+        };
 
         let model_picker = if self.model_picker_open {
             let picker_entity = model_entity.clone();
@@ -1870,7 +2909,7 @@ impl Chat {
                                 .child("The connected agent did not report any models."),
                         )
                     })
-                    .children(self.available_models.iter().cloned().map(move |option| {
+                    .children(self.available_models.iter().cloned().map(|option| {
                         let option_id = option.id.clone();
                         let option_name = option.name.clone();
                         let option_entity = picker_entity.clone();
@@ -1889,7 +2928,67 @@ impl Chat {
                                     .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
                             })
                             .child(option_name)
-                    })),
+                    }))
+                    .when_some(self.effort.clone(), |this, effort| {
+                        if effort.choices.is_empty() {
+                            return this;
+                        }
+                        let effort_entity = picker_entity.clone();
+                        let effort_name =
+                            effort.name.clone().unwrap_or_else(|| "Effort".to_string());
+                        let current = effort.current_value.clone();
+                        let children: Vec<AnyElement> = vec![
+                            div()
+                                .w_full()
+                                .px(px(8.0))
+                                .pt(px(4.0))
+                                .text_size(typography.caption2)
+                                .text_color(colors.meta)
+                                .child(effort_name)
+                                .into_any_element(),
+                        ];
+                        let choices: Vec<AnyElement> = effort
+                            .choices
+                            .iter()
+                            .map(|choice| {
+                                let choice_value = choice.value.clone();
+                                let choice_name = choice.name.clone();
+                                let is_selected = current.as_deref() == Some(choice_value.as_str());
+                                let row_entity = effort_entity.clone();
+                                let choice_value_for_id = choice_value.clone();
+                                div()
+                                    .id(format!("effort-option-{}", choice_value))
+                                    .debug_selector(move || {
+                                        format!("effort-option-{}", choice_value_for_id)
+                                    })
+                                    .h(px(22.0))
+                                    .px(px(8.0))
+                                    .rounded(theme.radii.control)
+                                    .flex()
+                                    .items_center()
+                                    .text_size(typography.caption2)
+                                    .text_color(colors.title)
+                                    .when(is_selected, |this| this.bg(colors.selection_fill))
+                                    .hover(|style| style.bg(colors.chat_row_hover))
+                                    .on_click(move |_, _, cx| {
+                                        row_entity.update(cx, |chat, cx| {
+                                            chat.select_effort(choice_value.clone(), cx);
+                                        });
+                                    })
+                                    .child(choice_name)
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>();
+                        this.child(div().h(px(1.0)).w_full().bg(colors.hairline))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(4.0))
+                                    .children(children)
+                                    .child(div().flex().gap(px(4.0)).children(choices)),
+                            )
+                    }),
             )
         } else {
             None
@@ -1902,6 +3001,15 @@ impl Chat {
             .map(|usage| (usage.used as f32 / usage.size as f32).clamp(0.0, 1.0))
             .unwrap_or(0.0);
         let context_ring_entity = entity.clone();
+        // Above the 80% warning threshold the arc switches from the gauge
+        // blue to the shared danger token, the same rule as the reference
+        // `contextRingColor`. The warning wrapper element exists only in
+        // that state, so drawn tests can see the colour decision without
+        // reading pixels.
+        let context_warning = context_amount > 0.8;
+        let warning_element = div()
+            .id("context-ring-warning")
+            .debug_selector(|| "context-ring-warning".into());
         let context_ring = div()
             .id("context-ring")
             .debug_selector(|| "context-ring".into())
@@ -1915,6 +3023,7 @@ impl Chat {
             .on_click(move |_, window, cx| {
                 context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
             })
+            .when(context_warning, |this| this.child(warning_element))
             .child(
                 div()
                     .id("context-ring-progress")
@@ -1968,7 +3077,14 @@ impl Chat {
                                     );
                                 }
                                 if let Ok(path) = path.build() {
-                                    window.paint_path(path, colors.gauge);
+                                    window.paint_path(
+                                        path,
+                                        if context_warning {
+                                            colors.git_conflict
+                                        } else {
+                                            colors.gauge
+                                        },
+                                    );
                                 }
                             },
                         )
@@ -2050,11 +3166,318 @@ impl Chat {
         };
 
         let send_entity = entity.clone();
+        let stop_entity = entity.clone();
+        let attach_entity = entity.clone();
+        let overflow_entity = entity.clone();
+
+        // Slash-command popup (F-CHAT-09): a filtered list over the input,
+        // opened by the leading `/token`, closed the moment the token is no
+        // longer a single unbroken prefix. Keyboard selection comes from the
+        // composer key path (up/down/tab, enter accepts via `Send`); click
+        // accepts directly.
+        let slash_popup =
+            if self.slash_popup_visible() {
+                let candidates = self.slash_candidates();
+                let selected = self.slash_selected.min(candidates.len().saturating_sub(1));
+                let slash_entity = entity.clone();
+                Some(
+                    div()
+                        .id("slash-popup")
+                        .debug_selector(|| "slash-popup".into())
+                        .absolute()
+                        .left(px(16.0))
+                        .bottom(px(43.0))
+                        .w(px(360.0))
+                        .p(px(6.0))
+                        .rounded(theme.radii.toast)
+                        .bg(colors.card_fill)
+                        .border_1()
+                        .border_color(colors.hairline)
+                        .shadow_lg()
+                        .children(candidates.into_iter().enumerate().map(
+                            move |(index, command)| {
+                                let name = command.name.clone();
+                                let description = command.description.clone();
+                                let row_entity = slash_entity.clone();
+                                let is_selected = index == selected;
+                                let name_for_id = name.clone();
+                                let accept_name = name.clone();
+                                div()
+                                    .id(format!("slash-option-{name}"))
+                                    .debug_selector(move || format!("slash-option-{name_for_id}"))
+                                    .w_full()
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .rounded(theme.radii.control)
+                                    .flex()
+                                    .flex_col()
+                                    .when(is_selected, |this| this.bg(colors.selection_fill))
+                                    .on_click(move |_, _, cx| {
+                                        row_entity.update(cx, |chat, cx| {
+                                            chat.accept_slash_command(&accept_name, cx);
+                                        });
+                                    })
+                                    .child(
+                                        div()
+                                            .text_size(typography.footnote)
+                                            .text_color(colors.title)
+                                            .child(format!("/{name}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(typography.caption2)
+                                            .text_color(colors.meta)
+                                            .child(description),
+                                    )
+                            },
+                        )),
+                )
+            } else {
+                None
+            };
+
+        // @ file-mention popup (F-CHAT-10): the bounded filesystem walk's
+        // results for the trailing `@token`. Hidden when the token matches
+        // nothing.
+        let mention_popup =
+            if self.composer.mention_token().is_some() && !self.mention_candidates.is_empty() {
+                let mention_entity = entity.clone();
+                let candidates = self.mention_candidates.clone();
+                Some(
+                    div()
+                        .id("mention-popup")
+                        .debug_selector(|| "mention-popup".into())
+                        .absolute()
+                        .left(px(16.0))
+                        .bottom(px(43.0))
+                        .w(px(360.0))
+                        .p(px(6.0))
+                        .rounded(theme.radii.toast)
+                        .bg(colors.card_fill)
+                        .border_1()
+                        .border_color(colors.hairline)
+                        .shadow_lg()
+                        .children(candidates.into_iter().map(move |path| {
+                            let row_entity = mention_entity.clone();
+                            let path_for_id = path.clone();
+                            let path_for_accept = path.clone();
+                            div()
+                                .id(format!("mention-option-{path_for_id}"))
+                                .debug_selector(move || format!("mention-option-{path_for_id}"))
+                                .w_full()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(theme.radii.control)
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .on_click(move |_, _, cx| {
+                                    row_entity.update(cx, |chat, cx| {
+                                        chat.accept_mention(&path_for_accept, cx);
+                                    });
+                                })
+                                .child(
+                                    div()
+                                        .text_size(typography.caption2)
+                                        .text_color(colors.meta)
+                                        .child("▤"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(typography.footnote)
+                                        .text_color(colors.title)
+                                        .child(path),
+                                )
+                        })),
+                )
+            } else {
+                None
+            };
+
+        // Overflow menu (F-CHAT-14): Follow Edited Files toggle and New
+        // Conversation, the two secondary composer actions the control row
+        // does not carry inline.
+        let overflow_menu = if self.overflow_open {
+            let follow_label = if self.following_edited_files {
+                "Stop Following"
+            } else {
+                "Follow Edited Files"
+            };
+            Some(
+                div()
+                    .id("composer-overflow-menu")
+                    .debug_selector(|| "composer-overflow-menu".into())
+                    .key_context("ChatOverflowMenu")
+                    .track_focus(&self.overflow_focus)
+                    .on_action(cx.listener(Self::cancel))
+                    .absolute()
+                    .right(px(60.0))
+                    .bottom(px(43.0))
+                    .w(px(200.0))
+                    .p(px(6.0))
+                    .rounded(theme.radii.toast)
+                    .bg(colors.card_fill)
+                    .border_1()
+                    .border_color(colors.hairline)
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.overflow_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id("overflow-follow")
+                            .debug_selector(|| "overflow-follow".into())
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.footnote)
+                            .text_color(colors.title)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.following_edited_files = !this.following_edited_files;
+                                cx.notify();
+                            }))
+                            .child(follow_label),
+                    )
+                    .child(
+                        div()
+                            .id("overflow-new-conversation")
+                            .debug_selector(|| "overflow-new-conversation".into())
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.footnote)
+                            .text_color(colors.title)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.new_conversation(cx);
+                            }))
+                            .child("New Conversation"),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let attach_button = div()
+            .id("attach-image")
+            .debug_selector(|| "attach-image".into())
+            .w(px(24.0))
+            .h(px(24.0))
+            .rounded(theme.radii.control)
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(|style| style.bg(colors.chat_row_hover))
+            .on_click(move |_, window, cx| {
+                attach_entity.update(cx, |chat, cx| chat.attach_image(window, cx));
+            })
+            .child(IconElement::new(Icon::Plus, px(12.0)).text_color(colors.meta));
+
+        let overflow_button = div()
+            .id("composer-overflow")
+            .debug_selector(|| "composer-overflow".into())
+            .w(px(24.0))
+            .h(px(24.0))
+            .rounded(theme.radii.control)
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(|style| style.bg(colors.chat_row_hover))
+            .on_click(move |_, window, cx| {
+                overflow_entity.update(cx, |chat, cx| chat.toggle_overflow(window, cx));
+            })
+            .child(div().text_size(px(14.0)).text_color(colors.meta).child("…"));
+
         let context_percent = context_usage
             .as_ref()
             .filter(|usage| usage.size > 0)
             .map(|usage| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
             .unwrap_or(0);
+
+        // The composer text area renders the draft part by part: text runs
+        // inline, chips as removable tokens. The placeholder shows only when
+        // the whole draft is empty, so a chip-only draft still reads as
+        // content.
+        let composer_parts: Vec<AnyElement> = if self.composer.is_empty() {
+            // D-CHAT-03: while a turn runs the empty composer says what
+            // Enter will do instead of sending. The element carries its own
+            // selector so a drawn test can see the placeholder switch.
+            if self.streaming {
+                vec![
+                    div()
+                        .id("queue-placeholder")
+                        .debug_selector(|| "queue-placeholder".into())
+                        .text_color(colors.meta)
+                        .child("Type to queue for the next turn…")
+                        .into_any_element(),
+                ]
+            } else {
+                vec![
+                    div()
+                        .text_color(colors.meta)
+                        .child("Message...")
+                        .into_any_element(),
+                ]
+            }
+        } else {
+            self.composer
+                .parts()
+                .iter()
+                .enumerate()
+                .map(|(index, part)| match part {
+                    ComposerPart::Text(text) => div()
+                        .text_color(colors.primary_text_color)
+                        .child(text.clone())
+                        .into_any_element(),
+                    ComposerPart::Chip(chip) => {
+                        let remove_entity = entity.clone();
+                        let (glyph, kind) = match chip {
+                            ComposerChip::Skill { .. } => ("✦", "skill"),
+                            ComposerChip::File { .. } => ("▤", "file"),
+                            ComposerChip::Image { .. } => ("▣", "image"),
+                        };
+                        let label = chip.label();
+                        div()
+                            .id(format!("composer-chip-{kind}"))
+                            .debug_selector(move || format!("composer-chip-{kind}"))
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(5.0))
+                            .bg(colors.card_fill)
+                            .border_1()
+                            .border_color(colors.hairline)
+                            .text_size(typography.caption2)
+                            .child(div().text_color(colors.meta).child(glyph))
+                            .child(div().text_color(colors.title).child(label))
+                            .child(
+                                div()
+                                    .id(format!("chip-remove-{index}"))
+                                    .debug_selector(move || format!("chip-remove-{index}"))
+                                    .px(px(2.0))
+                                    .rounded(px(2.0))
+                                    .text_size(typography.caption2)
+                                    .text_color(colors.meta)
+                                    .hover(|style| style.bg(colors.chat_row_hover))
+                                    .on_click(move |_, _, cx| {
+                                        remove_entity.update(cx, |chat, cx| {
+                                            chat.remove_composer_chip(index, cx);
+                                        });
+                                    })
+                                    .child("×"),
+                            )
+                            .into_any_element()
+                    }
+                })
+                .collect()
+        };
 
         // The composer is the visual anchor: a raised card with a roomy
         // input and one row of labelled chips — status, model, context —
@@ -2087,29 +3510,83 @@ impl Chat {
             )
             .child(
                 div()
+                    .id("composer-input")
+                    .debug_selector(|| "composer-input".into())
                     .px(px(4.0))
                     .pt(px(2.0))
                     .min_h(px(44.0))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x(px(4.0))
+                    .gap_y(px(4.0))
                     .text_size(typography.headline)
                     .line_height(typography.body_line_height)
-                    .text_color(if self.composer_text.is_empty() {
-                        colors.meta
-                    } else {
-                        colors.primary_text_color
-                    })
-                    .child(if self.composer_text.is_empty() {
-                        "Message...".to_owned()
-                    } else {
-                        self.composer_text.clone()
-                    }),
+                    .children(composer_parts),
             )
+            .when_some(self.queued_item.clone(), |this, queued| {
+                // D-CHAT-03: the committed next-turn item, its text and a
+                // remove ✕. One slot: the latest commit replaces the row.
+                let remove_entity = entity.clone();
+                let queued_for_id = queued.clone();
+                this.child(
+                    div()
+                        .id("queued-item")
+                        .debug_selector(|| "queued-item".into())
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(theme.radii.control)
+                        .bg(colors.raised)
+                        .text_size(typography.footnote)
+                        .child(div().text_color(colors.meta).child("Queued:"))
+                        .child(
+                            div()
+                                .id("queued-text")
+                                .debug_selector(move || format!("queued-text-{queued_for_id}"))
+                                .text_color(colors.title)
+                                .child(queued),
+                        )
+                        .child(
+                            div()
+                                .id("queued-remove")
+                                .debug_selector(|| "queued-remove".into())
+                                .px(px(4.0))
+                                .rounded(px(3.0))
+                                .text_color(colors.meta)
+                                .hover(|style| style.bg(colors.chat_row_hover))
+                                .on_click(move |_, _, cx| {
+                                    remove_entity.update(cx, |chat, cx| {
+                                        chat.remove_queued_item(cx);
+                                    });
+                                })
+                                .child("×"),
+                        ),
+                )
+            })
+            .when_some(self.attach_error.clone(), |this, message| {
+                this.child(
+                    div()
+                        .id("attach-error")
+                        .debug_selector(|| "attach-error".into())
+                        .px(px(4.0))
+                        .text_size(typography.caption2)
+                        .text_color(colors.git_conflict)
+                        .child(message),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
+                    .child(attach_button)
                     .child(status_pill)
-                    .child(model_chip)
+                    .child(model_control)
+                    .child(div().flex_1())
+                    .child(overflow_button)
                     .child(
                         div()
                             .flex()
@@ -2127,7 +3604,6 @@ impl Chat {
                                     .child(format!("{context_percent}%")),
                             ),
                     )
-                    .child(div().flex_1())
                     .child(
                         div()
                             .id("send")
@@ -2139,25 +3615,50 @@ impl Chat {
                             .items_center()
                             .justify_center()
                             .text_size(px(14.0))
-                            .bg(if can_send {
+                            .bg(if self.streaming || can_send {
                                 colors.overlay_strong
                             } else {
                                 colors.overlay
                             })
-                            .text_color(if can_send {
+                            .text_color(if self.streaming || can_send {
                                 colors.title
                             } else {
                                 colors.text_ghost
                             })
                             .hover(|style| style.bg(colors.raised))
-                            .when(can_send, |this| {
+                            .when(self.streaming, |this| {
+                                // D-CHAT-02: while a turn runs the same
+                                // control becomes stop — a filled square in
+                                // theme tokens — and its click dispatches the
+                                // same path Escape uses. The selector stays
+                                // `"send"`; tests target the control, not
+                                // the glyph.
                                 this.on_click(move |_, _, cx| {
-                                    send_entity.update(cx, |chat, cx| chat.send(cx));
+                                    stop_entity.update(cx, |chat, cx| chat.cancel_turn(cx));
                                 })
+                                .child(
+                                    div()
+                                        .id("stop-glyph")
+                                        .debug_selector(|| "stop-glyph".into())
+                                        .w(px(9.0))
+                                        .h(px(9.0))
+                                        .rounded(px(2.0))
+                                        .bg(colors.title),
+                                )
                             })
-                            .child("↑"),
+                            .when(!self.streaming, |this| {
+                                this.when(can_send, |this| {
+                                    this.on_click(move |_, _, cx| {
+                                        send_entity.update(cx, |chat, cx| chat.send(cx));
+                                    })
+                                })
+                                .child("↑")
+                            }),
                     ),
             )
+            .children(slash_popup)
+            .children(mention_popup)
+            .children(overflow_menu)
             .children(model_picker)
             .children(context_popover)
     }
@@ -2195,8 +3696,10 @@ impl Render for Chat {
         let theme = *Theme::get(cx);
         let transcript_theme = theme;
         let entity = cx.entity();
+        let entity_for_bar = entity.clone();
         let transcript_ranges = self.transcript_entry_ranges();
         let transcript_focus = self.transcript_focus.clone();
+        let question_answer = self.question_answer.clone();
 
         div()
             .size_full()
@@ -2219,6 +3722,8 @@ impl Render for Chat {
             .on_action(cx.listener(Self::copy_transcript))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::send_answer_action))
+            .on_action(cx.listener(Self::cancel_answer_action))
             .on_key_down(cx.listener(Self::on_composer_key))
             .child(
                 div()
@@ -2255,6 +3760,7 @@ impl Render for Chat {
                                                 entity.clone(),
                                                 transcript_focus.clone(),
                                                 source_start,
+                                                &question_answer,
                                             ))
                                             .into_any_element()
                                     })
@@ -2272,6 +3778,57 @@ impl Render for Chat {
                     .flex_col()
                     .items_center()
                     .pb(px(18.0))
+                    .when_some(self.pending_question(), |this, (index, title)| {
+                        // F-CHAT-26: the persistent "the agent is waiting on
+                        // you" bar above the composer. It exists exactly
+                        // while a question is unanswered; Show scrolls the
+                        // transcript to the question card.
+                        let show_entity = entity_for_bar.clone();
+                        let bar_colors = theme.colors;
+                        let bar_typography = theme.typography;
+                        this.child(
+                            div()
+                                .id("pending-question-bar")
+                                .debug_selector(|| "pending-question-bar".into())
+                                .w(px(TRANSCRIPT_WIDTH))
+                                .mb(px(8.0))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(theme.radii.control)
+                                .bg(bar_colors.card_fill)
+                                .border_1()
+                                .border_color(bar_colors.rail_question)
+                                .text_size(bar_typography.footnote)
+                                .child(div().text_color(bar_colors.rail_question).child("?"))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_color(bar_colors.title)
+                                        .child(format!("Question waiting · {title}")),
+                                )
+                                .child(
+                                    div()
+                                        .id("pending-question-show")
+                                        .debug_selector(|| "pending-question-show".into())
+                                        .px(px(8.0))
+                                        .py(px(3.0))
+                                        .rounded(theme.radii.control)
+                                        .text_size(bar_typography.caption2)
+                                        .text_color(bar_colors.meta)
+                                        .hover(|style| style.bg(bar_colors.chat_row_hover))
+                                        .on_click(move |_, _, cx| {
+                                            show_entity.update(cx, |chat, cx| {
+                                                chat.list_state.scroll_to_reveal_item(index);
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child("Show"),
+                                ),
+                        )
+                    })
                     .child(self.render_composer(&theme, window, cx))
                     .child(
                         // A quiet context line under the card: the agent's
@@ -2305,6 +3862,75 @@ fn turn_end_label(reason: &str) -> &'static str {
 
 fn default_agent_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())
+}
+
+/// The reference `FileMentionIndex`: a synchronous, capped filesystem walk
+/// over the chat's working directory. Hidden files and the usual noise
+/// directories are skipped; the query is a case-insensitive substring match;
+/// basename-prefix matches rank first; the result is capped at 8 paths.
+fn mention_candidates_on_disk(cwd: &Path, query: &str) -> Vec<String> {
+    const SCAN_CAP: usize = 5000;
+    const IGNORED_DIRECTORIES: [&str; 4] = [".git", "node_modules", ".build", "DerivedData"];
+
+    let mut relative_paths = Vec::new();
+    let mut scanned = 0;
+    let mut stack: Vec<PathBuf> = vec![cwd.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            scanned += 1;
+            if scanned > SCAN_CAP {
+                return finish_mention_matches(relative_paths, query);
+            }
+            let path = entry.path();
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let is_hidden = name.starts_with('.');
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if is_hidden || IGNORED_DIRECTORIES.contains(&name.as_ref()) {
+                    continue;
+                }
+                stack.push(path);
+            } else if file_type.is_file()
+                && !is_hidden
+                && let Ok(relative) = path.strip_prefix(cwd)
+            {
+                relative_paths.push(relative.to_string_lossy().into_owned());
+            }
+        }
+    }
+    finish_mention_matches(relative_paths, query)
+}
+
+fn finish_mention_matches(mut relative_paths: Vec<String>, query: &str) -> Vec<String> {
+    let lowered = query.to_lowercase();
+    let matches: Vec<String> = relative_paths
+        .drain(..)
+        .filter(|path| lowered.is_empty() || path.to_lowercase().contains(&lowered))
+        .collect();
+    let mut ranked = matches;
+    ranked.sort_by(|a, b| {
+        let a_prefix = a
+            .rsplit('/')
+            .next()
+            .unwrap_or(a)
+            .to_lowercase()
+            .starts_with(&lowered);
+        let b_prefix = b
+            .rsplit('/')
+            .next()
+            .unwrap_or(b)
+            .to_lowercase()
+            .starts_with(&lowered);
+        b_prefix.cmp(&a_prefix).then_with(|| a.cmp(b))
+    });
+    ranked.truncate(8);
+    ranked
 }
 
 fn markdown_heading_size(level: u8, typography: tiller_theme::Typography) -> gpui::Pixels {
@@ -2426,7 +4052,7 @@ impl InlineBuilder {
     }
 }
 
-fn option_hash(option: &PermissionOption) -> usize {
+fn option_hash(option: &AnswerOption) -> usize {
     option.id.bytes().fold(0usize, |acc, byte| {
         acc.wrapping_mul(31).wrapping_add(byte as usize)
     })
@@ -2568,7 +4194,7 @@ mod tests {
 
         focus_and_type(cx, "hello");
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer_text.clone()),
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
             "hello",
             "typing fills the composer"
         );
@@ -2607,7 +4233,7 @@ mod tests {
         cx.simulate_input("line two");
         cx.run_until_parked();
         assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| chat.composer_text.clone()),
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
             "line one\nline two",
             "Shift+Return inserts a newline into the composer"
         );
@@ -2822,6 +4448,358 @@ mod tests {
         assert_eq!(footers, 2, "both answered turns complete");
     }
 
+    /// F-CHAT-25 + F-CHAT-26: a structured question renders with a free-text
+    /// field while the pending-question bar sits above the composer; typing
+    /// an answer and pressing Enter records it on the card, clears the bar,
+    /// and the agent echoes the text back — the answer leaves the surface
+    /// end to end.
+    #[gpui::test]
+    async fn a_text_answer_leaves_the_surface_and_clears_the_pending_bar(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["question"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // The question is pending: the card offers the text field, and the
+        // pending bar names the asker.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("question-answer-input").is_some(),
+            "the pending question offers a text answer field"
+        );
+        assert!(
+            cx.debug_bounds("question-answer-send").is_some()
+                && cx.debug_bounds("question-answer-cancel").is_some(),
+            "Send and Cancel controls are drawn with the field"
+        );
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_some(),
+            "the pending-question bar is drawn while the question is open"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.pending_question()
+                    .is_some_and(|(_, title)| title == "Ask user question")
+            }),
+            "the pending bar names the asking tool"
+        );
+
+        // Focus the field, type the answer, send it with Enter.
+        let field = cx
+            .debug_bounds("question-answer-input")
+            .expect("the answer field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Blue");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // The answer left the surface: the card records it, the pending bar
+        // is gone, and the agent received it (echoed back in the turn).
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: Some(choice),
+                        ..
+                    } if choice == "Blue"
+                )
+            }) && chat.has_completed_turn
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.pending_question().is_some()),
+            "answering the question clears the pending state"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_none(),
+            "the pending-question bar is gone after the answer"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(|entry| {
+                    matches!(
+                        entry,
+                        Entry::Assistant { text, .. } if text.contains("You chose: Blue")
+                    )
+                })
+            }),
+            "the agent received the typed answer and echoed it back"
+        );
+    }
+
+    /// F-CHAT-25 (Cancel): withdrawing a pending question marks the card
+    /// no longer answerable and clears the pending state; the turn still
+    /// completes.
+    #[gpui::test]
+    async fn cancel_on_a_question_closes_it_without_an_answer(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["question"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_some(),
+            "the pending bar shows before the cancel"
+        );
+
+        let cancel = cx
+            .debug_bounds("question-answer-cancel")
+            .expect("the cancel control is drawn");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: true,
+                        ..
+                    }
+                )
+            }) && chat.has_completed_turn
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.pending_question().is_some()),
+            "cancelling the question clears the pending state"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_none(),
+            "the pending bar is gone after the cancel"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(|entry| {
+                    matches!(
+                        entry,
+                        Entry::Permission {
+                            expired: true,
+                            resolved: None,
+                            ..
+                        }
+                    )
+                })
+            }),
+            "the cancelled card stays in the transcript as no-longer-answerable"
+        );
+    }
+
+    /// F-CHAT-27: cancelling the turn while its question is unanswered
+    /// expires the card — the transcript says so, the pending state ends,
+    /// and the composer is usable again instead of waiting forever.
+    #[gpui::test]
+    async fn a_question_whose_turn_ends_unanswered_expires_instead_of_waiting(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["question-expire"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_some(),
+            "the pending bar is up while the question is open"
+        );
+
+        // Escape cancels the turn; the protocol answers the pending
+        // permission with `cancelled`, and the card must expire instead of
+        // leaving the surface waiting on a decision nothing can deliver.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: true,
+                        ..
+                    }
+                )
+            }) && chat.has_completed_turn
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.pending_question().is_some()),
+            "an expired question is no longer pending"
+        );
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "the turn ended; the surface is not stuck streaming"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_none(),
+            "the pending bar clears when the question expires"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(|entry| {
+                    matches!(
+                        entry,
+                        Entry::Permission {
+                            expired: true,
+                            resolved: None,
+                            ..
+                        }
+                    )
+                })
+            }),
+            "the expired card stays in the transcript"
+        );
+
+        // The composer is usable again: a fresh turn completes.
+        focus_and_type(cx, "still alive?");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            let footers = chat
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::TurnFooter(_)))
+                .count();
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(text) if text == "still alive?"))
+                && footers >= 2
+        });
+    }
+
+    /// F-CHAT-24: a plan renders as a named Plan card with its entries; a
+    /// pending approval attaches its option buttons to the card, and the
+    /// approved plan advances in place.
+    #[gpui::test]
+    async fn a_plan_renders_approval_attaches_and_the_plan_advances(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plan"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "plan this");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // The plan card is up with both entries pending and its approval
+        // buttons attached (the permission named the plan tool).
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Plan {
+                        entries,
+                        approval:
+                            Some(PlanApproval {
+                                resolved: None,
+                                expired: false,
+                                ..
+                            }),
+                    } if entries.len() == 2
+                        && entries.iter().all(|row| row.status == "pending")
+                )
+            })
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.pending_question()
+                    .is_some_and(|(_, title)| title == "Exit plan mode")
+            }),
+            "a pending plan approval counts as the pending question"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("permission-option-approve").is_some()
+                && cx.debug_bounds("permission-option-keep").is_some(),
+            "the plan approval renders both decision buttons"
+        );
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_some(),
+            "the pending bar covers the plan approval"
+        );
+
+        // Approve: the decision leaves the surface, the plan advances.
+        let approve = cx
+            .debug_bounds("permission-option-approve")
+            .expect("approve button");
+        cx.simulate_click(approve.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Plan {
+                        entries,
+                        approval:
+                            Some(PlanApproval {
+                                resolved: Some(choice),
+                                ..
+                            }),
+                    } if choice == "Approve plan"
+                        && entries.iter().any(|row| {
+                            row.content == "Read the design" && row.status == "completed"
+                        })
+                        && entries.iter().any(|row| {
+                            row.content == "Implement it" && row.status == "in_progress"
+                        })
+                )
+            }) && chat.has_completed_turn
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.pending_question().is_some()),
+            "approving the plan clears the pending state"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_none(),
+            "the pending bar clears after the approval"
+        );
+    }
+
     /// F-CHAT-03 + the stream-death seam: a transport that dies mid-reply
     /// leaves a stated error card with a working Retry, and Retry reconnects
     /// and completes a later turn.
@@ -2960,6 +4938,333 @@ mod tests {
         );
     }
 
+    /// D-CHAT-02: while a turn streams, the send control keeps its `"send"`
+    /// selector but draws the stop state, and a real click on it cancels
+    /// through the same path as Escape — the footer states the cancellation
+    /// and the control returns to send afterwards.
+    #[gpui::test]
+    async fn stop_click_cancels_the_stream_and_the_transcript_states_it(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+        });
+        refresh_frame(cx);
+
+        // The control is the same `"send"` element, drawn as stop.
+        assert!(
+            cx.debug_bounds("send").is_some(),
+            "the control keeps its send selector while streaming"
+        );
+        assert!(
+            cx.debug_bounds("stop-glyph").is_some(),
+            "the stop state is drawn while the turn runs"
+        );
+
+        let stop = cx.debug_bounds("send").expect("the stop control is drawn");
+        cx.simulate_click(stop.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "a real click on the control stops the streaming turn"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("stop-glyph").is_none(),
+            "the stop state is gone once the turn is stopped"
+        );
+
+        // The agent answers the cancelled prompt; the footer states it.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::TurnFooter(text) if text.contains("cancelled")))
+        });
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+            }),
+            "the partial reply stays visible under the cancelled footer"
+        );
+
+        // The composer is usable again, with the plain placeholder, and a
+        // normal next turn completes unmarked.
+        focus_and_type(cx, "again");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(
+                |entry| matches!(entry, Entry::TurnFooter(text) if !text.contains("cancelled")),
+            )
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("stop-glyph").is_none()
+                && cx.debug_bounds("queue-placeholder").is_none(),
+            "the idle composer is neither stop nor queueing"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.has_completed_turn),
+            "the later turn completes normally"
+        );
+    }
+
+    /// D-CHAT-03, completion half: while a turn streams the composer stays
+    /// editable, its placeholder says the next Enter queues, Enter commits
+    /// the draft as the queued item, and when the turn completes the queued
+    /// item arrives as the next user turn exactly once. Text left
+    /// uncommitted at turn end stays in the composer and never auto-sends.
+    #[gpui::test]
+    async fn enter_during_a_stream_queues_and_the_turn_end_sends_it_exactly_once(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let fixture_dir = dir.0.to_str().expect("fixture dir is utf-8").to_string();
+        let (chat, cx) = chat_view(cx, &["staged", &fixture_dir]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && matches!(
+                    chat.entries.last(),
+                    Some(Entry::Assistant { text, .. }) if text == "first "
+                )
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queue-placeholder").is_some(),
+            "the empty composer shows the queue placeholder while streaming"
+        );
+
+        // Enter during the stream commits the queue; the transcript is not
+        // touched by the commit itself.
+        focus_and_type(cx, "queued msg");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (queued, entries) = chat.read_with(&cx.cx, |chat, _| {
+            (chat.queued_item.clone(), chat.entries.len())
+        });
+        assert_eq!(
+            queued.as_deref(),
+            Some("queued msg"),
+            "Enter during a stream commits the draft as the queued item"
+        );
+        assert_eq!(entries, 2, "queueing does not touch the transcript");
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queued-item").is_some(),
+            "the queued row is drawn in the composer"
+        );
+        assert!(
+            cx.debug_bounds("queued-text-queued msg").is_some(),
+            "the queued text is drawn in the row"
+        );
+
+        // Text typed after the commit stays in the composer (mid-sentence
+        // rule): it must not fire when the turn ends.
+        let input = cx
+            .debug_bounds("composer-input")
+            .expect("the composer input is drawn");
+        cx.simulate_click(input.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("half a thought");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            "half a thought",
+            "the composer stays editable while streaming"
+        );
+
+        // The turn completes; the queued item sends exactly once as a
+        // normal turn and is answered.
+        std::fs::write(dir.0.join("go"), "go").expect("write go file");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::User(text) if text == "queued msg"))
+                .count()
+                == 1
+                && chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Assistant { text, .. } if text == "reply "))
+        });
+        let (queued_count, uncommitted_sent, composer_text, queue_drained, completed) = chat
+            .read_with(&cx.cx, |chat, _| {
+                let queued_count = chat
+                    .entries
+                    .iter()
+                    .filter(|entry| matches!(entry, Entry::User(text) if text == "queued msg"))
+                    .count();
+                let uncommitted_sent = chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::User(text) if text == "half a thought"));
+                (
+                    queued_count,
+                    uncommitted_sent,
+                    chat.composer.text(),
+                    chat.queued_item.is_none(),
+                    chat.has_completed_turn,
+                )
+            });
+        assert_eq!(queued_count, 1, "the queued item sends exactly once");
+        assert!(!uncommitted_sent, "uncommitted text never auto-sends");
+        assert_eq!(
+            composer_text, "half a thought",
+            "uncommitted text stays in the composer"
+        );
+        assert!(queue_drained, "the queue is drained into the send");
+        assert!(completed, "the queued turn completes like any other");
+    }
+
+    /// D-CHAT-03, ✕ half: removing the queued item clears the drawn row,
+    /// and nothing sends when the turn ends.
+    #[gpui::test]
+    async fn removing_the_queued_item_means_nothing_sends_when_the_turn_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+        });
+        refresh_frame(cx);
+
+        focus_and_type(cx, "queued msg");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.queued_item.clone()),
+            Some("queued msg".to_string()),
+            "the ✕ row starts with the committed item"
+        );
+        refresh_frame(cx);
+        let remove = cx
+            .debug_bounds("queued-remove")
+            .expect("the queued row's remove control is drawn");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.queued_item.is_none()),
+            "the ✕ clears the queued item"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("queued-item").is_none(),
+            "the queued row is gone after the ✕"
+        );
+
+        // The turn ends (cancelled); the removed item must not send.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::TurnFooter(text) if text.contains("cancelled")))
+        });
+        // Settle past any turn-end work, then verify nothing extra arrived.
+        cx.cx
+            .executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries
+                    .iter()
+                    .all(|entry| !matches!(entry, Entry::User(text) if text == "queued msg"))
+            }),
+            "nothing sends when the queued item was removed"
+        );
+    }
+
+    /// D-CHAT-03, stop-with-queue half: queue-then-stop is the redirect
+    /// gesture — a queued item survives a stop via the control's click, and
+    /// the cancelled turn's end sends it exactly once.
+    #[gpui::test]
+    async fn stopping_via_click_with_a_queued_item_still_sends_it(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["cancel"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.streaming
+                && chat.entries.iter().any(
+                    |entry| matches!(entry, Entry::Assistant { text, .. } if text == "partial "),
+                )
+        });
+        refresh_frame(cx);
+
+        focus_and_type(cx, "queued msg");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.queued_item.clone()),
+            Some("queued msg".to_string()),
+            "the stop-with-queue test starts with the committed item"
+        );
+        refresh_frame(cx);
+
+        // Stop via a real click on the control, with the item queued.
+        let stop = cx.debug_bounds("send").expect("the stop control is drawn");
+        cx.simulate_click(stop.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.streaming),
+            "the stop click ends the streaming turn"
+        );
+
+        // The cancelled turn ends; the queued item still sends, once, and
+        // is answered as a normal turn.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .filter(|entry| matches!(entry, Entry::User(text) if text == "queued msg"))
+                .count()
+                == 1
+                && chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Assistant { text, .. } if text == "done "))
+        });
+        let (cancelled_footer, queue_drained, completed) = chat.read_with(&cx.cx, |chat, _| {
+            let cancelled_footer = chat.entries.iter().any(
+                |entry| matches!(entry, Entry::TurnFooter(text) if text.contains("cancelled")),
+            );
+            (
+                cancelled_footer,
+                chat.queued_item.is_none(),
+                chat.has_completed_turn,
+            )
+        });
+        assert!(cancelled_footer, "the cancelled turn's footer states it");
+        assert!(queue_drained, "the queue drained into the send");
+        assert!(completed, "the queued turn completes");
+    }
+
     fn configure_test_chat(chat: &mut Chat) {
         chat.has_completed_turn = true;
         chat.available_models = vec![ModelOption {
@@ -2979,6 +5284,74 @@ mod tests {
     #[test]
     fn default_agent_cwd_follows_the_process_workspace() {
         assert_eq!(default_agent_cwd(), std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn acp_program_converts_to_the_adapters_own_agent_command() {
+        // The picker contract: the chosen adapter's `AcpProgram` converts
+        // to the `AgentCommand` that launches THAT agent — never another's.
+        // This is the assertion the old acceptance test laundered:
+        // connecting successfully proves nothing; the command differing by
+        // adapter does.
+        use tiller_agents::AgentAdapter as _;
+
+        let codex = acp_agent_command(
+            tiller_agents::CodexAdapter
+                .acp_program()
+                .expect("codex ships an ACP server"),
+        );
+        assert_eq!(codex.program, PathBuf::from("npx"));
+        assert_eq!(
+            codex.args,
+            ["-y", "@agentclientprotocol/codex-acp@latest"],
+            "a Codex tab must launch Codex's ACP server, not Claude's"
+        );
+
+        let claude = acp_agent_command(
+            tiller_agents::ClaudeCodeAdapter
+                .acp_program()
+                .expect("claude ships an ACP server"),
+        );
+        assert_eq!(
+            claude.args,
+            ["-y", "@agentclientprotocol/claude-agent-acp@latest"]
+        );
+        assert_ne!(codex.args, claude.args, "the command differs by adapter");
+    }
+
+    #[gpui::test]
+    async fn launch_with_command_wires_the_given_command(cx: &mut TestAppContext) {
+        // `launch` keeps its default program; the picker path must be able
+        // to pass the chosen adapter's command straight through and still
+        // start the connection exactly like `launch` does.
+        let chat = cx.new(|cx| {
+            Chat::launch_with_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(
+                chat.agent_command.program,
+                PathBuf::from("/definitely/missing/tiller-acp-agent"),
+                "the command given to the constructor is the command wired"
+            );
+            assert!(
+                chat.entries.iter().any(|entry| matches!(
+                    entry,
+                    Entry::Error {
+                        retryable: true,
+                        ..
+                    }
+                )),
+                "launch_with_command starts the connection like launch does"
+            );
+        });
     }
 
     #[gpui::test]
@@ -3195,8 +5568,7 @@ mod tests {
         cx.executor().allow_parking();
         cx.run_until_parked();
         chat.update(cx, |chat, _| {
-            chat.composer_text = "retry".into();
-            chat.composer_cursor = chat.composer_text.len();
+            chat.composer.insert_text("retry");
         });
         chat.read_with(cx, |chat, _| {
             assert!(chat.can_send(), "a failed launch must leave Send usable");
@@ -3216,8 +5588,8 @@ mod tests {
                 "-c",
                 r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;; esac; done"#,
             ]);
-            chat.composer_text = "hello".into();
-            chat.composer_cursor = chat.composer_text.len();
+            chat.composer = Composer::new();
+            chat.composer.insert_text("hello");
             chat.send(cx);
         });
 
@@ -3257,5 +5629,468 @@ mod tests {
         });
         cx.update(|window, _| window.refresh());
         assert!(cx.debug_bounds("chat-connecting").is_some());
+    }
+
+    /// F-CHAT-09: typing `/` through the real keystroke path opens the slash
+    /// popup fed by the agent's advertised commands; a filter prefix narrows
+    /// it; up/down move the keyboard selection; Enter accepts the selected
+    /// command into a skill token that survives editing and submission; a
+    /// filter that matches nothing closes the popup; clicking a row accepts
+    /// it too.
+    #[gpui::test]
+    async fn slash_popup_filters_and_inserts_a_skill_token(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("/");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("slash-popup").is_some(),
+            "typing / opens the command popup"
+        );
+        assert!(cx.debug_bounds("slash-option-cr").is_some());
+        assert!(cx.debug_bounds("slash-option-create-plan").is_some());
+        assert!(cx.debug_bounds("slash-option-research").is_some());
+
+        // A filter prefix narrows the list; a prefix that matches nothing
+        // hides the popup entirely.
+        cx.simulate_keystrokes("c");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("slash-option-cr").is_some());
+        assert!(cx.debug_bounds("slash-option-create-plan").is_some());
+        assert!(
+            cx.debug_bounds("slash-option-research").is_none(),
+            "non-matching commands disappear from the popup"
+        );
+        cx.simulate_keystrokes("z");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("slash-popup").is_none(),
+            "a filter that matches nothing closes the popup"
+        );
+
+        // Back to a matching prefix; keyboard selection + Enter accepts.
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("slash-popup").is_some());
+        assert_eq!(chat.read_with(&cx.cx, |chat, _| chat.slash_selected), 0);
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.slash_selected),
+            1,
+            "down moves the keyboard selection"
+        );
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("slash-popup").is_none(),
+            "accepting the selection closes the popup"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().text),
+            "/create-plan  ",
+            "the accepted command lands as a skill token"
+        );
+
+        // The token survives submission: Enter sends it as the /name prefix.
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        assert!(chat.read_with(&cx.cx, |chat, _| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(text) if text.trim() == "/create-plan"))
+        }));
+
+        // Clicking a row accepts directly.
+        focus_and_type(cx, "/");
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("slash-popup").is_some());
+        let row = cx
+            .debug_bounds("slash-option-cr")
+            .expect("the click target is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("slash-popup").is_none());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().text),
+            "/cr  ",
+            "clicking a row inserts that command's skill token"
+        );
+    }
+
+    /// F-CHAT-10: typing `@` opens the mention popup fed by a real bounded
+    /// filesystem walk over the chat's working directory; clicking a listed
+    /// file inserts a file chip at the token's position, the chip survives
+    /// further typing, and sending carries the path as a mention rather than
+    /// text.
+    #[gpui::test]
+    async fn at_mention_popup_lists_files_and_inserts_a_file_chip(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.0.join("src")).expect("create src dir");
+        std::fs::write(dir.0.join("src/main.rs"), "fn main() {}").expect("write main.rs");
+        std::fs::write(dir.0.join("README.md"), "# readme").expect("write readme");
+        let cwd = dir.0.clone();
+
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
+            Chat::from_test_command(command, cwd, cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("@");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("mention-popup").is_some());
+        assert!(cx.debug_bounds("mention-option-README.md").is_some());
+        assert!(cx.debug_bounds("mention-option-src/main.rs").is_some());
+
+        let row = cx
+            .debug_bounds("mention-option-src/main.rs")
+            .expect("the file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("mention-popup").is_none(),
+            "choosing a file closes the popup"
+        );
+        assert!(
+            cx.debug_bounds("composer-chip-file").is_some(),
+            "a file chip is rendered in the composer"
+        );
+
+        // The chip survives editing after it and serializes as a mention
+        // path, not text.
+        cx.simulate_input(" check");
+        cx.run_until_parked();
+        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
+        assert_eq!(draft.text, " check");
+        assert_eq!(draft.mention_paths, vec!["src/main.rs".to_string()]);
+
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(text) if text == " check"))
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| {
+                chat.entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::User(text) if text.contains("src/main.rs")))
+            }),
+            "the mention path must not leak into the user bubble text"
+        );
+    }
+
+    /// F-CHAT-11 + F-CHAT-12: the attach control accepts exactly one PNG or
+    /// JPEG as an image chip; an unsupported file and a multiple selection
+    /// are rejected with a transient message; the chip's removal control
+    /// takes it back out before sending.
+    #[gpui::test]
+    async fn attach_control_accepts_one_image_and_rejects_the_rest(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let png = dir.0.join("photo.png");
+        std::fs::write(
+            &png,
+            b"not really a png but the type check is extension-based",
+        )
+        .expect("write png");
+        let jpeg = dir.0.join("shot.jpeg");
+        std::fs::write(&jpeg, b"jpeg bytes").expect("write jpeg");
+        let txt = dir.0.join("notes.txt");
+        std::fs::write(&txt, b"text").expect("write txt");
+
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            configure_test_chat(&mut chat);
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let attach = cx
+            .debug_bounds("attach-image")
+            .expect("the attach control is drawn");
+
+        // A supported image becomes a chip.
+        chat.update(cx, |chat, _| {
+            chat.attach_test_paths = vec![png.clone()];
+        });
+        cx.simulate_click(attach.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("composer-chip-image").is_some(),
+            "a supported image appears as an attachment chip"
+        );
+        assert!(cx.debug_bounds("attach-error").is_none());
+        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
+        assert_eq!(draft.images.len(), 1);
+        assert_eq!(draft.images[0].mime_type, "image/png");
+
+        // An unsupported file is rejected with a transient message.
+        chat.update(cx, |chat, _| {
+            chat.attach_test_paths = vec![txt.clone()];
+        });
+        cx.simulate_click(attach.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("attach-error").is_some(),
+            "an unsupported selection shows the rejection"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().images.len()),
+            1,
+            "the rejected file adds no chip"
+        );
+        pump_chat_until(cx, &chat, |chat| chat.attach_error.is_none());
+
+        // A multiple selection is rejected too.
+        chat.update(cx, |chat, _| {
+            chat.attach_test_paths = vec![jpeg.clone(), png.clone()];
+        });
+        cx.simulate_click(attach.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("attach-error").is_some(),
+            "a multiple selection shows the rejection"
+        );
+        pump_chat_until(cx, &chat, |chat| chat.attach_error.is_none());
+
+        // F-CHAT-12: the chip's removal control removes it before sending.
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("composer-chip-image").is_some());
+        let remove = cx
+            .debug_bounds("chip-remove-0")
+            .expect("the chip removal control is drawn");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("composer-chip-image").is_none(),
+            "removing the chip makes it disappear"
+        );
+        assert!(chat.read_with(&cx.cx, |chat, _| {
+            chat.composer.draft().images.is_empty()
+        }));
+    }
+
+    /// F-CHAT-14: the overflow menu toggles Follow Edited Files on and off,
+    /// and New Conversation resets the composer and transcript to a brand
+    /// new chat with a relaunched agent session.
+    #[gpui::test]
+    async fn overflow_menu_toggles_follow_and_resets_to_a_new_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        // Open the overflow menu.
+        let overflow = cx
+            .debug_bounds("composer-overflow")
+            .expect("the overflow control is drawn");
+        cx.simulate_click(overflow.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("composer-overflow-menu").is_some());
+        assert!(cx.debug_bounds("overflow-follow").is_some());
+        assert!(cx.debug_bounds("overflow-new-conversation").is_some());
+
+        // Toggle Follow Edited Files on, then off.
+        let follow = cx
+            .debug_bounds("overflow-follow")
+            .expect("the follow row is drawn");
+        cx.simulate_click(follow.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.following_edited_files),
+            "the follow toggle turns on"
+        );
+        let follow = cx
+            .debug_bounds("overflow-follow")
+            .expect("the follow row is still drawn");
+        cx.simulate_click(follow.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.following_edited_files),
+            "the follow toggle turns back off"
+        );
+
+        // Build a completed turn and a draft, then reset everything.
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        focus_and_type(cx, "draft");
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            "draft"
+        );
+
+        let overflow = cx
+            .debug_bounds("composer-overflow")
+            .expect("the overflow control is drawn again");
+        cx.simulate_click(overflow.center(), Modifiers::none());
+        cx.run_until_parked();
+        let new_conversation = cx
+            .debug_bounds("overflow-new-conversation")
+            .expect("the new-conversation row is drawn");
+        cx.simulate_click(new_conversation.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.entries.is_empty()),
+            "New Conversation clears the transcript"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            "New Conversation clears the composer"
+        );
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.has_completed_turn),
+            "New Conversation forgets the completed turn"
+        );
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some() && !chat.connecting);
+
+        // The relaunched session takes a new turn.
+        focus_and_type(cx, "again");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User(text) if text == "again"))
+                && chat.has_completed_turn
+        });
+    }
+
+    /// F-CHAT-17: the model picker offers the agent's advertised effort
+    /// levels, the current one is marked, and choosing one updates the
+    /// selection and the effort label on the model chip.
+    #[gpui::test]
+    async fn model_picker_offers_effort_levels_and_updates_the_selection(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
+        });
+        refresh_frame(cx);
+
+        // Complete a turn so the picker chip becomes interactive.
+        focus_and_type(cx, "hi");
+        cx.simulate_keystrokes("enter");
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+        refresh_frame(cx);
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("the model chip is drawn");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("model-picker").is_some());
+        assert!(cx.debug_bounds("effort-option-low").is_some());
+        assert!(cx.debug_bounds("effort-option-medium").is_some());
+        assert!(cx.debug_bounds("effort-option-high").is_some());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.effort.as_ref().and_then(|e| e.current_value.clone())
+            }),
+            Some("medium".to_string()),
+            "the fixture reported the current effort"
+        );
+
+        let high = cx
+            .debug_bounds("effort-option-high")
+            .expect("the high effort row is drawn");
+        cx.simulate_click(high.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.effort.as_ref().and_then(|e| e.current_value.clone())
+            }),
+            Some("high".to_string()),
+            "choosing an effort updates the selection"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("model-effort-label").is_some(),
+            "the model chip shows the selected effort"
+        );
+    }
+
+    /// F-CHAT-19: above the 80% threshold the context ring renders its
+    /// warning element; at 25% it does not.
+    #[gpui::test]
+    async fn context_ring_warns_above_eighty_percent(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.context_usage.is_some());
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("context-ring-warning").is_some(),
+            "85% usage renders the warning ring"
+        );
+        assert!(cx.debug_bounds("context-ring-progress").is_some());
+
+        // The 25% fixture state renders no warning.
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            configure_test_chat(&mut chat);
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+        assert!(
+            cx.debug_bounds("context-ring-warning").is_none(),
+            "25% usage stays on the calm ring"
+        );
+        assert!(cx.debug_bounds("context-ring-progress").is_some());
+    }
+
+    /// F-CHAT-36: an agent that exposes no models renders a plain agent
+    /// badge instead of the model picker chip, and the badge opens nothing.
+    #[gpui::test]
+    async fn no_models_fallback_shows_a_plain_agent_badge(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = Vec::new();
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        assert!(
+            cx.debug_bounds("agent-badge").is_some(),
+            "no models renders the plain agent badge"
+        );
+        assert!(
+            cx.debug_bounds("model-chip").is_none(),
+            "no models renders no picker chip"
+        );
+        let badge = cx.debug_bounds("agent-badge").expect("the badge is drawn");
+        cx.simulate_click(badge.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("model-picker").is_none(),
+            "the badge opens no picker"
+        );
     }
 }

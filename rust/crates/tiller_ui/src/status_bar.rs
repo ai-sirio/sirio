@@ -13,7 +13,7 @@ use std::time::Duration;
 use tiller_theme::Theme;
 use tiller_usage::{
     ClaudeUsageFetcher, CodexUsageFetcher, OpenCodeGoUsageFetcher, ProviderUsageState,
-    UsageFetchOutcome, reduce,
+    UsageFetchOutcome, UsageReason, reduce,
 };
 
 use crate::sidebar::icons::{Icon, IconElement};
@@ -232,7 +232,22 @@ impl StatusBar {
                     format!("{display_name} {}", parts.join(" · "))
                 }
             }
-            ProviderUsageState::Unavailable(_) => format!("{display_name} —"),
+            // F-SET-11: the reason is the one piece of data that tells the
+            // four unavailable states apart; a `_` wildcard here discarded
+            // it and rendered every one of them as the same bare "—". A
+            // timed-out fetch never reaches this arm on its own — `reduce`
+            // resolves it to `Stale` when there is a prior value to keep
+            // showing, or to `Unavailable(Error)` when there is none, so
+            // "the fetch timed out" is not a distinct label here; it is one
+            // of the two outcomes those states already carry.
+            ProviderUsageState::Unavailable(reason) => {
+                let reason_text = match reason {
+                    UsageReason::NotInstalled => "not found",
+                    UsageReason::LoggedOut => "logged out",
+                    UsageReason::Error => "error",
+                };
+                format!("{display_name} {reason_text}")
+            }
         }
     }
 
@@ -367,6 +382,7 @@ fn dim(color: Rgba) -> Rgba {
 mod tests {
     use super::*;
     use gpui::VisualTestContext;
+    use tiller_usage::{ProviderUsage, UsageWindow};
 
     /// P58, F-SET-10: the usage bar consumes the settings surface's
     /// visibility toggles and refresh interval. A provider hidden in
@@ -455,5 +471,79 @@ mod tests {
             prefs.refresh_interval_min, 60,
             "clamped to the stepper range"
         );
+    }
+
+    /// F-SET-11: the six states this file can distinguish (Loading and
+    /// Loaded are exercised by the drawn test above via the real fetch
+    /// loop) each render their own text. `Stale` is functionally identical
+    /// to `Loaded` here except for dimming (covered separately below), so
+    /// this proves the three reasons stay apart instead of collapsing to
+    /// one wildcard "—".
+    #[test]
+    fn unavailable_reasons_render_distinct_text() {
+        assert_eq!(
+            StatusBar::segment_text("Claude", &ProviderUsageState::Loading),
+            "Claude …"
+        );
+        assert_eq!(
+            StatusBar::segment_text(
+                "Claude",
+                &ProviderUsageState::Unavailable(UsageReason::NotInstalled)
+            ),
+            "Claude not found"
+        );
+        assert_eq!(
+            StatusBar::segment_text(
+                "Claude",
+                &ProviderUsageState::Unavailable(UsageReason::LoggedOut)
+            ),
+            "Claude logged out"
+        );
+        assert_eq!(
+            StatusBar::segment_text(
+                "Claude",
+                &ProviderUsageState::Unavailable(UsageReason::Error)
+            ),
+            "Claude error"
+        );
+        let usage = ProviderUsage {
+            session: Some(UsageWindow::new("5h", 12)),
+            weekly: None,
+            monthly: None,
+            fable_weekly: None,
+        };
+        assert_eq!(
+            StatusBar::segment_text("Claude", &ProviderUsageState::Loaded(usage.clone())),
+            "Claude 12% 5h",
+            "a loaded state still renders real numbers, not a reason"
+        );
+        assert_eq!(
+            StatusBar::segment_text("Claude", &ProviderUsageState::Stale(usage)),
+            "Claude 12% 5h",
+            "stale keeps showing the last good numbers — dimming is what marks it stale, not the text"
+        );
+    }
+
+    /// F-SET-11: only a fresh `Loaded` reads at full opacity — `Loading`,
+    /// `Stale` and every `Unavailable` reason must all look dimmed, or a
+    /// user cannot tell live numbers from a provider that has gone quiet.
+    #[test]
+    fn only_loaded_state_renders_undimmed() {
+        assert!(!StatusBar::segment_dimmed(&ProviderUsageState::Loaded(
+            ProviderUsage::default()
+        )));
+        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Loading));
+        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Stale(
+            ProviderUsage::default()
+        )));
+        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
+            UsageReason::NotInstalled
+        )));
+        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
+            UsageReason::LoggedOut
+        )));
+        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
+            UsageReason::Error
+        )));
     }
 }

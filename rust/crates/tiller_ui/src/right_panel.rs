@@ -5,8 +5,8 @@
 //! refresh callbacks with its project store without changing the row layout.
 
 use gpui::{
-    AnyElement, Context, EventEmitter, FontWeight, MouseButton, Render, Rgba, Task, Window, div,
-    prelude::*, px, uniform_list,
+    AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, KeyDownEvent,
+    MouseButton, Render, Rgba, Task, Window, div, prelude::*, px, uniform_list,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -15,6 +15,7 @@ use std::time::Duration;
 use tiller_git::status;
 use tiller_theme::Theme;
 
+use crate::editor::fs_actions;
 use crate::sidebar::icons::{Icon, IconElement};
 
 const PANEL_WIDTH: f32 = 405.0;
@@ -33,6 +34,8 @@ pub enum ActivityStatus {
     Idle,
     /// The surface is currently running.
     Running,
+    /// The agent is blocked on a user decision or answer.
+    NeedsInput,
     /// The surface completed successfully.
     Done,
     /// The surface reported an error.
@@ -48,6 +51,13 @@ pub enum RightPanelEvent {
     CloseActivity(usize),
     /// Open a file from the Files tree in the host application's tab strip.
     OpenFile(PathBuf),
+}
+
+/// Actions that need a host-owned surface beyond the existing file-open door.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RightPanelActionEvent {
+    /// Open a modified file in the host application's Diff tab.
+    OpenDiff(PathBuf),
 }
 
 /// A surface shown in the Activity section.
@@ -101,6 +111,11 @@ struct FileRow {
     depth: usize,
 }
 
+#[derive(Clone, Debug)]
+struct FileContextMenu {
+    path: PathBuf,
+}
+
 /// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
     repo_root: PathBuf,
@@ -111,12 +126,19 @@ pub struct RightPanel {
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
     walk_task: Option<Task<()>>,
+    /// Whether the top-level tree refresh is currently in flight. This is
+    /// both the single-flight guard and the loading state rendered to users.
+    refresh_started: bool,
+    refresh_error: Option<String>,
+    selected_path: Option<PathBuf>,
+    file_focus: Option<FocusHandle>,
     /// Bumped on every walk request (and on collapse): a walk that
     /// completes after a newer one was requested must not apply its
     /// result late.
     walk_generation: u64,
     /// One polling loop per panel, armed on first render.
-    refresh_started: bool,
+    refresh_loop_started: bool,
+    file_context_menu: Option<FileContextMenu>,
 }
 
 impl RightPanel {
@@ -129,8 +151,13 @@ impl RightPanel {
             activity_expanded: false,
             activity: Vec::new(),
             walk_task: None,
-            walk_generation: 0,
             refresh_started: false,
+            refresh_error: None,
+            selected_path: None,
+            file_focus: None,
+            walk_generation: 0,
+            refresh_loop_started: false,
+            file_context_menu: None,
         }
     }
 
@@ -156,27 +183,43 @@ impl RightPanel {
     /// Refreshes the changed-paths set and the directory tree off the
     /// render thread. Single-flight on the walk task.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.walk_task.is_some() {
+        if self.refresh_started || self.walk_task.is_some() {
             return;
         }
+        self.refresh_started = true;
+        self.refresh_error = None;
         let repo_root = self.repo_root.clone();
         self.walk_task = Some(cx.spawn(async move |this, cx| {
-            let snapshot = cx
+            let result = cx
                 .background_spawn(async move {
+                    // Files can browse a plain directory too; an absent Git
+                    // repository means no status dots, not an unreadable
+                    // filesystem. Root traversal remains the error boundary.
                     let changed = status(&repo_root)
-                        .unwrap_or_else(|_| tiller_git::StatusSnapshot::empty())
-                        .entries
-                        .iter()
-                        .map(|entry| entry.path.clone())
-                        .collect::<HashSet<_>>();
-                    let tree = read_tree(&repo_root, &repo_root, &changed).unwrap_or_default();
-                    (changed, tree)
+                        .map(|snapshot| {
+                            snapshot
+                                .entries
+                                .iter()
+                                .map(|entry| entry.path.clone())
+                                .collect::<HashSet<_>>()
+                        })
+                        .unwrap_or_default();
+                    let tree = read_tree(&repo_root, &repo_root, &changed)
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((changed, tree))
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
-                panel.changed_paths = snapshot.0;
-                panel.file_tree = snapshot.1;
                 panel.walk_task = None;
+                panel.refresh_started = false;
+                match result {
+                    Ok((changed, tree)) => {
+                        panel.changed_paths = changed;
+                        panel.file_tree = tree;
+                        panel.refresh_error = None;
+                    }
+                    Err(error) => panel.refresh_error = Some(error),
+                }
                 cx.notify();
             });
         }));
@@ -185,14 +228,22 @@ impl RightPanel {
     /// Arms the periodic tree refresh: once immediately, then on a fixed
     /// interval so external edits show up in the tree.
     fn ensure_tree_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.refresh_started {
+        if self.refresh_loop_started {
             return;
         }
-        self.refresh_started = true;
+        self.refresh_loop_started = true;
+        self.refresh(cx);
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |panel, cx| panel.refresh(cx)).is_err() {
+                if this
+                    .update(cx, |panel, cx| {
+                        if panel.refresh_error.is_none() {
+                            panel.refresh(cx);
+                        }
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -261,13 +312,113 @@ impl RightPanel {
         cx.emit(RightPanelEvent::OpenFile(path));
     }
 
+    fn open_file_context_menu(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.selected_path = Some(path.clone());
+        self.file_context_menu = Some(FileContextMenu { path });
+        cx.notify();
+    }
+
+    fn close_file_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.file_context_menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn render_file_context_menu(
+        menu: FileContextMenu,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let path = menu.path;
+        let mut view = div()
+            .id("file-context-menu")
+            .debug_selector(|| "file-context-menu".to_owned())
+            .absolute()
+            .left(theme.spacing.titlebar_control_spacing)
+            .top(px(HEADER_HEIGHT + TOOLBAR_HEIGHT))
+            .w(theme.spacing.menu_width)
+            .p(theme.spacing.titlebar_control_spacing)
+            .rounded(theme.radii.user_pill)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .shadow_lg();
+
+        for (label, selector) in [
+            ("Open", "file-context-open"),
+            ("Reveal in File Manager", "file-context-reveal"),
+            ("Copy Path", "file-context-copy-path"),
+        ] {
+            let action_entity = entity.clone();
+            let action_path = path.clone();
+            let mut row = div()
+                .id(selector)
+                .debug_selector(move || selector.to_owned())
+                .w_full()
+                .min_h(theme.spacing.titlebar_control_frame.height)
+                .px(theme.spacing.titlebar_control_spacing)
+                .py(theme.spacing.titlebar_control_spacing)
+                .rounded(theme.radii.control)
+                .flex()
+                .items_center()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.title)
+                .hover(|style| style.bg(theme.row_hover));
+
+            row = match selector {
+                "file-context-open" => row.on_click(move |_, _, cx| {
+                    action_entity.update(cx, |panel, cx| {
+                        panel.open_file(action_path.clone(), cx);
+                        panel.close_file_context_menu(cx);
+                    });
+                }),
+                "file-context-reveal" => row.on_click(move |_, _, cx| {
+                    if let Some(mut command) = fs_actions::reveal_command(&action_path) {
+                        command
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null());
+                        let _ = command.spawn();
+                    }
+                    action_entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
+                }),
+                "file-context-copy-path" => row.on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(fs_actions::copy_path_text(
+                        &action_path,
+                    )));
+                    action_entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
+                }),
+                _ => row,
+            };
+            view = view.child(row.child(label));
+        }
+
+        view.on_mouse_down_out(move |_, _, cx| {
+            entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
+        })
+    }
+
+    fn open_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let relative_path = path
+            .strip_prefix(&self.repo_root)
+            .map(Path::to_path_buf)
+            .unwrap_or(path);
+        cx.emit(RightPanelActionEvent::OpenDiff(relative_path));
+    }
+
     fn file_rows(&self) -> Vec<FileRow> {
         let mut rows = Vec::new();
         flatten_files(&self.file_tree, 0, &mut rows);
         rows
     }
 
-    fn render_file_row(row: FileRow, entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
+    fn render_file_row(
+        row: FileRow,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        selected: bool,
+        file_focus: FocusHandle,
+    ) -> impl IntoElement {
         let path = row.node.path.clone();
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
@@ -285,6 +436,10 @@ impl RightPanel {
         let indent = row.depth as f32 * 16.0;
         let row_id = format!("file-{}", path.display());
         let click_path = path.clone();
+        let context_path = path.clone();
+        let context_entity = entity.clone();
+        let diff_path = path.clone();
+        let diff_entity = entity.clone();
         let glyph = file_glyph(&path, is_dir);
         div()
             .id(row_id)
@@ -301,7 +456,7 @@ impl RightPanel {
             .pr(px(12.0))
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(theme.spacing.titlebar_control_spacing)
             .text_size(px(12.5))
             // Names are neutral text; the status dot carries "modified",
             // and unreadable directories dim rather than shout.
@@ -310,15 +465,28 @@ impl RightPanel {
             } else {
                 theme.title
             })
+            .when(selected, |this| this.bg(theme.selected_fill))
             .hover(|style| style.bg(theme.row_hover))
-            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
-                if is_dir {
-                    entity.update(cx, |panel, cx| panel.toggle_file(&click_path, cx));
-                } else if event.click_count >= 2 {
-                    // Files follow the inventory's double-click contract;
-                    // a single click only gives the row focus/hover.
-                    entity.update(cx, |panel, cx| panel.open_file(click_path.clone(), cx));
-                }
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                file_focus.focus(window, cx);
+                entity.update(cx, |panel, cx| {
+                    panel.select_file(click_path.clone(), cx);
+                    if is_dir {
+                        panel.toggle_file(&click_path, cx);
+                    } else if event.click_count >= 2 {
+                        // Files follow the inventory's double-click contract;
+                        // a single click only gives the row focus/hover.
+                        panel.open_file(click_path.clone(), cx);
+                    }
+                });
+            })
+            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                cx.stop_propagation();
+                context_entity.update(cx, |panel, cx| {
+                    if !is_dir {
+                        panel.open_file_context_menu(context_path.clone(), cx);
+                    }
+                });
             })
             .child(
                 div()
@@ -363,6 +531,65 @@ impl RightPanel {
                         .bg(theme.git_modified),
                 )
             })
+            .when(modified && !is_dir, |this| {
+                this.child(files_action_button(
+                    "Diff",
+                    "file-open-diff",
+                    theme,
+                    move |cx| {
+                        diff_entity.update(cx, |panel, cx| {
+                            panel.open_diff(diff_path.clone(), cx);
+                        });
+                    },
+                ))
+            })
+    }
+
+    fn select_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.selected_path != Some(path.clone()) {
+            self.selected_path = Some(path);
+            cx.notify();
+        }
+    }
+
+    fn on_file_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.file_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_path
+            .as_ref()
+            .and_then(|path| rows.iter().position(|row| &row.node.path == path));
+        match event.keystroke.key.as_str() {
+            "down" => {
+                let index = current.map_or(0, |index| (index + 1).min(rows.len() - 1));
+                self.select_file(rows[index].node.path.clone(), cx);
+            }
+            "up" => {
+                let index = current.unwrap_or(0).saturating_sub(1);
+                self.select_file(rows[index].node.path.clone(), cx);
+            }
+            "space" => {
+                if let Some(index) = current {
+                    let row = &rows[index].node;
+                    if row.is_dir {
+                        self.toggle_file(&row.path.clone(), cx);
+                    }
+                }
+            }
+            "enter" | "return" => {
+                if let Some(index) = current {
+                    let row = &rows[index].node;
+                    if row.is_dir {
+                        self.toggle_file(&row.path.clone(), cx);
+                    } else {
+                        self.open_file(row.path.clone(), cx);
+                    }
+                }
+            }
+            _ => return,
+        }
     }
 
     fn render_header(&self, theme: Theme) -> impl IntoElement {
@@ -406,47 +633,110 @@ impl RightPanel {
     ) -> AnyElement {
         let rows = self.file_rows();
         let row_entity = entity.clone();
+        let refresh_entity = entity.clone();
+        let file_focus = self
+            .file_focus
+            .as_ref()
+            .expect("Files focus is initialized")
+            .clone();
+        let selected_path = self.selected_path.clone();
+        let processor_focus = file_focus.clone();
+        let toolbar = div()
+            .h(px(TOOLBAR_HEIGHT))
+            .w_full()
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(theme.hairline)
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(px(11.5))
+                    .text_color(theme.meta)
+                    .child(self.repo_root.to_string_lossy().to_string()),
+            )
+            .child(files_action_button(
+                "Refresh",
+                "files-refresh",
+                theme,
+                move |cx| refresh_entity.update(cx, |panel, cx| panel.refresh(cx)),
+            ));
+        let body = if self.refresh_started {
+            div()
+                .id("files-loading")
+                .debug_selector(|| "files-loading".to_owned())
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(theme.typography.headline)
+                .text_color(theme.subtitle)
+                .child("Loading files…")
+                .into_any_element()
+        } else if let Some(error) = &self.refresh_error {
+            let retry_entity = entity.clone();
+            div()
+                .id("files-error")
+                .debug_selector(|| "files-error".to_owned())
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(theme.spacing.titlebar_control_spacing)
+                .p(theme.spacing.card_gap)
+                .child(
+                    div()
+                        .text_size(theme.typography.headline)
+                        .text_color(theme.git_conflict)
+                        .child(format!("Files unavailable: {error}")),
+                )
+                .child(files_action_button(
+                    "Retry",
+                    "files-retry",
+                    theme,
+                    move |cx| retry_entity.update(cx, |panel, cx| panel.refresh(cx)),
+                ))
+                .into_any_element()
+        } else {
+            let list = uniform_list(
+                "right-panel-files",
+                rows.len(),
+                cx.processor(move |_panel, range: Range<usize>, _window, _cx| {
+                    range
+                        .filter_map(|index| rows.get(index))
+                        .map(|row| {
+                            Self::render_file_row(
+                                row.clone(),
+                                row_entity.clone(),
+                                theme,
+                                selected_path.as_ref() == Some(&row.node.path),
+                                processor_focus.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .debug_selector(|| "right-panel-files".to_owned())
+            .track_focus(&file_focus)
+            .on_key_down(cx.listener(Self::on_file_key))
+            .flex_1()
+            .min_h(px(0.0));
+            list.into_any_element()
+        };
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
-            .child(
-                div()
-                    .h(px(TOOLBAR_HEIGHT))
-                    .w_full()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(theme.hairline)
-                    .child(
-                        div()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_size(px(11.5))
-                            .text_color(theme.meta)
-                            .child(self.repo_root.to_string_lossy().to_string()),
-                    ),
-            )
-            .child(
-                uniform_list(
-                    "right-panel-files",
-                    rows.len(),
-                    cx.processor(move |_panel, range: Range<usize>, _window, _cx| {
-                        range
-                            .filter_map(|index| rows.get(index))
-                            .map(|row| {
-                                Self::render_file_row(row.clone(), row_entity.clone(), theme)
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .debug_selector(|| "right-panel-files".to_owned())
-                .flex_1()
-                .min_h(px(0.0)),
-            )
+            .child(toolbar)
+            .child(body)
             .into_any_element()
     }
 }
@@ -559,6 +849,14 @@ impl RightPanel {
         theme: Theme,
     ) -> impl IntoElement {
         let status = activity_status(surface.status, theme);
+        let status_name = match surface.status {
+            ActivityStatus::Idle => "idle",
+            ActivityStatus::Running => "running",
+            ActivityStatus::NeedsInput => "needs-input",
+            ActivityStatus::Done => "done",
+            ActivityStatus::Error => "error",
+        };
+        let status_id = format!("activity-status-{status_name}-{index}");
         let select_entity = entity.clone();
         let close_entity = entity;
         div()
@@ -604,6 +902,8 @@ impl RightPanel {
             )
             .child(
                 div()
+                    .id(status_id.clone())
+                    .debug_selector(move || status_id.clone())
                     .text_size(px(11.0))
                     .text_color(status)
                     .child(activity_status_glyph(surface.status)),
@@ -625,11 +925,15 @@ impl RightPanel {
 }
 
 impl EventEmitter<RightPanelEvent> for RightPanel {}
+impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 
 impl Render for RightPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         self.ensure_tree_refresh(cx);
+        if self.file_focus.is_none() {
+            self.file_focus = Some(cx.focus_handle().tab_stop(true));
+        }
         let entity = cx.entity();
         div()
             .relative()
@@ -641,8 +945,35 @@ impl Render for RightPanel {
             .bg(theme.background)
             .child(self.render_header(theme))
             .child(self.render_files(entity.clone(), theme, cx))
+            .when_some(self.file_context_menu.clone(), |this, menu| {
+                this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
+            })
             .child(self.render_activity(entity, theme))
     }
+}
+
+fn files_action_button(
+    label: &'static str,
+    id: &'static str,
+    theme: Theme,
+    on_click: impl Fn(&mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        // The token layer has no compact-action padding yet; use its
+        // titlebar spacing as the nearest COSMIC control rhythm.
+        .px(theme.spacing.titlebar_control_spacing)
+        .py(theme.spacing.titlebar_control_spacing)
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.caption2)
+        .text_color(theme.title)
+        .hover(|style| style.bg(theme.row_hover))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            on_click(cx);
+        })
+        .child(label)
 }
 
 /// The per-type file glyph for the Files tree, resolved from the embedded
@@ -752,7 +1083,8 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
 fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
     match status {
         ActivityStatus::Idle => theme.meta,
-        ActivityStatus::Running => theme.tab_needs_input,
+        ActivityStatus::Running => theme.accent,
+        ActivityStatus::NeedsInput => theme.tab_needs_input,
         ActivityStatus::Done => theme.tab_done,
         ActivityStatus::Error => theme.tab_error,
     }
@@ -760,7 +1092,9 @@ fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
 
 fn activity_status_glyph(status: ActivityStatus) -> &'static str {
     match status {
-        ActivityStatus::Idle | ActivityStatus::Running => "○",
+        ActivityStatus::Idle => "○",
+        ActivityStatus::Running => "●",
+        ActivityStatus::NeedsInput => "?",
         ActivityStatus::Done => "✓",
         ActivityStatus::Error => "!",
     }
@@ -815,6 +1149,20 @@ mod tests {
         for i in 0..count {
             std::fs::write(dir.join(format!("file-{i:05}.txt")), "x").expect("write file");
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Pumps the test executors until `condition` holds or the budget is
@@ -1014,6 +1362,74 @@ mod tests {
         }
     }
 
+    /// F-CHG-03: the same refresh guard that prevents a second refresh from
+    /// starting must be visible as a drawn loading state, with a Refresh
+    /// affordance available in the toolbar.
+    #[gpui::test]
+    async fn a_refresh_in_flight_draws_loading_and_refresh(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("visible.txt"), "x").expect("write file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| {
+            let mut panel = RightPanel::new(dir.0.clone());
+            panel.refresh_started = true;
+            panel
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("files-loading").is_some(),
+            "an in-flight refresh reaches a loading pixel"
+        );
+        assert!(
+            cx.debug_bounds("files-refresh").is_some(),
+            "the Files toolbar keeps a Refresh action visible"
+        );
+    }
+
+    /// F-CHG-03: a failed root refresh renders Retry and a subsequent click
+    /// re-fetches the tree after the repository becomes readable again.
+    #[gpui::test]
+    async fn a_failed_refresh_draws_retry_and_recovers(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("visible.txt"), "x").expect("write file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("window");
+        std::fs::remove_dir_all(&dir.0).expect("break root refresh");
+        cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| panel.refresh_error.is_some())
+        });
+        cx.cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("files-error").is_some(),
+            "a failed refresh is drawn as an error"
+        );
+        let retry = cx
+            .debug_bounds("files-retry")
+            .expect("Retry is drawn for a failed refresh");
+
+        std::fs::create_dir_all(&dir.0).expect("restore root");
+        std::fs::write(dir.0.join("visible.txt"), "x").expect("restore file");
+        cx.simulate_click(retry.center(), Modifiers::none());
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel.refresh_error.is_none()
+                    && find_node(&panel.file_tree, &dir.0.join("visible.txt")).is_some()
+            })
+        });
+    }
+
     /// F-EDIT-09 is an interaction contract, not a pixel contract: the real
     /// file row is laid out, receives a double-click, and emits the path the
     /// shell uses to open the editor. The row's typography and icon remain a
@@ -1088,6 +1504,234 @@ mod tests {
             )),
             "the real double-click must emit the file path, got {emitted:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn right_clicking_a_file_row_draws_and_dispatches_file_actions(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let path = dir.0.join("opened.md");
+        std::fs::write(&path, "# opened\n").expect("write file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("window");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|app| {
+            app.subscribe(&panel, move |_, event: &RightPanelEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+            panel.update(app, |panel, cx| panel.refresh(cx));
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &path).is_some()
+            })
+        });
+        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let row = cx.debug_bounds("file-row").expect("the file row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("file-context-menu").is_some());
+        for selector in [
+            "file-context-open",
+            "file-context-reveal",
+            "file-context-copy-path",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "file context menu draws {selector}"
+            );
+        }
+
+        let open = cx
+            .debug_bounds("file-context-open")
+            .expect("Open action is drawn");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                RightPanelEvent::OpenFile(opened) if opened == &path
+            )),
+            "Open dispatches the existing file-open event"
+        );
+
+        // The copy action is a second real menu trial, and the clipboard
+        // value is the observable result rather than just a click counter.
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let row = cx
+            .debug_bounds("file-row")
+            .expect("the file row remains drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        let copy = cx
+            .debug_bounds("file-context-copy-path")
+            .expect("Copy Path action is drawn");
+        cx.simulate_click(copy.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(path.to_string_lossy().into_owned()),
+            "Copy Path writes the absolute file path"
+        );
+
+        // Reveal is the Linux adaptation of Show in Finder. Exercise its
+        // drawn action too; the command derivation has a headless assertion
+        // in editor::tests::reveal_command_opens_the_containing_directory_with_xdg_open.
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let row = cx
+            .debug_bounds("file-row")
+            .expect("the file row remains drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        let reveal = cx
+            .debug_bounds("file-context-reveal")
+            .expect("Reveal action is drawn");
+        cx.simulate_click(reveal.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// F-CHG-05: once a Files row has focus and selection, Return follows the
+    /// same open-file path as a double click.
+    #[gpui::test]
+    async fn return_opens_the_selected_file_row(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let path = dir.0.join("opened.md");
+        std::fs::write(&path, "# opened\n").expect("write file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("window");
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|app| {
+            app.subscribe(&panel, move |_, event: &RightPanelEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &path).is_some()
+            })
+        });
+        cx.cx.run_until_parked();
+        let row = cx.debug_bounds("file-row").expect("the file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                RightPanelEvent::OpenFile(opened) if opened == &path
+            )),
+            "Return opens the selected file through the real event path"
+        );
+    }
+
+    /// F-CHG-05: the Files focus path supports arrow selection and Space
+    /// toggles the selected directory without needing a mouse click.
+    #[gpui::test]
+    async fn arrow_keys_select_and_space_expands_the_files_tree(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let folder = dir.0.join("src");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        std::fs::write(folder.join("main.rs"), "fn main() {}\n").expect("write child");
+        std::fs::write(dir.0.join("z.txt"), "z\n").expect("write sibling");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("window");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &folder).is_some()
+            })
+        });
+        let focus = panel.read_with(&cx.cx, |panel, _| {
+            panel
+                .file_focus
+                .clone()
+                .expect("Files focus is initialized")
+        });
+        cx.update(|window, app| focus.focus(window, app));
+        cx.simulate_keystrokes("down down up space");
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel.selected_path.as_deref() == Some(folder.as_path())
+                    && find_node(&panel.file_tree, &folder)
+                        .is_some_and(|node| node.expanded && node.children.len() == 1)
+            })
+        });
     }
 
     /// F-CHG-04 is the interaction half of the explorer contract: the drawn
@@ -1351,6 +1995,99 @@ mod tests {
         assert!(
             cx.debug_bounds("activity-running-count").is_some(),
             "the running count stays visible with rows present"
+        );
+    }
+
+    /// F-CHG-22: NeedsInput has its own drawn status marker and is not the
+    /// same visual state as Idle.
+    #[gpui::test]
+    async fn activity_section_draws_needs_input_as_distinct_from_idle(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| {
+            RightPanel::with_activity(
+                std::env::temp_dir(),
+                vec![
+                    ActivitySurface::new(
+                        Icon::MessageSquare,
+                        "Waiting agent",
+                        "/repo",
+                        ActivityStatus::NeedsInput,
+                    ),
+                    ActivitySurface::new(Icon::File, "Idle surface", "/repo", ActivityStatus::Idle),
+                ],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let header = cx
+            .debug_bounds("activity-header")
+            .expect("the activity header is drawn");
+        cx.simulate_click(header.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("activity-status-needs-input-0").is_some(),
+            "NeedsInput reaches a dedicated status marker in the drawn panel"
+        );
+        assert_ne!(
+            activity_status_glyph(ActivityStatus::NeedsInput),
+            activity_status_glyph(ActivityStatus::Idle),
+            "NeedsInput is not rendered with Idle's glyph"
+        );
+    }
+
+    /// F-CHG-13: a modified file row exposes an Open diff action and sends
+    /// the exact repo-relative path to the shell boundary.
+    #[gpui::test]
+    async fn clicking_a_drawn_modified_file_open_diff_emits_its_path(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let file = dir.0.join("changed.md");
+        std::fs::write(&file, "before\n").expect("seed file");
+        git(&dir.0, &["init", "-q"]);
+        git(&dir.0, &["config", "user.email", "tests@example.invalid"]);
+        git(&dir.0, &["config", "user.name", "Tiller tests"]);
+        git(&dir.0, &["add", "changed.md"]);
+        git(
+            &dir.0,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "seed"],
+        );
+        std::fs::write(&file, "after\n").expect("modify file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("right panel entity");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|app| {
+            app.subscribe(&panel, move |_, event: &RightPanelActionEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+            panel.update(app, |panel, cx| panel.refresh(cx));
+        });
+
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel.file_tree.iter().any(|node| node.path == file)
+            })
+        });
+        cx.cx.run_until_parked();
+
+        let diff = cx
+            .debug_bounds("file-open-diff")
+            .expect("modified file draws Open diff");
+        cx.simulate_click(diff.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[RightPanelActionEvent::OpenDiff(PathBuf::from("changed.md"))],
+            "Open diff crosses the panel seam with a repo-relative path"
         );
     }
 }
