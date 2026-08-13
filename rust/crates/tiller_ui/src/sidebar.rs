@@ -12,7 +12,9 @@
 //! `TILLER_SIDEBAR_REPO`; projects without a repository path are not offered
 //! a New Worktree row, exactly like non-git projects.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
@@ -25,9 +27,10 @@ use tiller_git::{
 use tiller_project::TabKind;
 use tiller_theme::Theme;
 
+use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
+use crate::project_identity::{ProjectIcon, ProjectIconPicker};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
-use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 
 #[path = "icons.rs"]
 pub mod icons;
@@ -209,6 +212,8 @@ struct ProjectSettingsCard {
     name: String,
     path: PathBuf,
     is_git: bool,
+    icon: Rc<RefCell<ProjectIcon>>,
+    icon_picker: gpui::Entity<ProjectIconPicker>,
 }
 
 #[derive(Clone)]
@@ -773,11 +778,20 @@ impl Sidebar {
             return;
         };
         self.context_menu = None;
+        let icon = Rc::new(RefCell::new(ProjectIcon::default()));
+        let icon_for_picker = icon.clone();
+        let icon_picker = cx.new(|cx| {
+            ProjectIconPicker::with_value(icon.borrow().clone(), cx).on_change(move |value| {
+                *icon_for_picker.borrow_mut() = value;
+            })
+        });
         self.project_settings = Some(ProjectSettingsCard {
             id: project_id.to_string(),
             name: row.title.clone(),
             path,
             is_git: row.is_git,
+            icon,
+            icon_picker,
         });
         cx.notify();
     }
@@ -1711,6 +1725,9 @@ impl Sidebar {
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
+        // The picker callback writes this host-side value until the durable
+        // ProjectRecord update seam is supplied by the persistence owner.
+        let _selected_icon = card.icon.borrow().clone();
         let close_entity = entity.clone();
         div()
             .id("project-settings-sheet")
@@ -1747,6 +1764,16 @@ impl Sidebar {
                     } else {
                         "Repository: Folder"
                     }),
+            )
+            .child(
+                div()
+                    .id("project-icon-picker")
+                    .debug_selector(|| "project-icon-picker".to_owned())
+                    .w_full()
+                    .p(px(8.0))
+                    .rounded(theme.radii.control)
+                    .bg(theme.background)
+                    .child(card.icon_picker.clone()),
             )
             .child(
                 div()
@@ -3275,6 +3302,39 @@ mod tests {
         assert!(
             cx.debug_bounds("create-name-field").is_some(),
             "create form is mounted"
+        );
+    }
+
+    #[gpui::test]
+    async fn project_settings_mounts_the_icon_picker(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "Project".into(),
+                    is_git: false,
+                    root_path: PathBuf::from("/tmp/project"),
+                    worktrees: Vec::new(),
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar = cx
+            .update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-icon-picker").is_some(),
+            "project settings mounts the icon picker"
+        );
+        assert!(
+            cx.debug_bounds("project-icon-glyph-folder").is_some(),
+            "the mounted picker renders its glyph choices"
         );
     }
 
