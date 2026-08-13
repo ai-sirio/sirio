@@ -15,15 +15,34 @@ the user asked for them by name.
 
 ## Shape of the files
 
-All 63 share one format, which is why they drop into Tiller's existing pipeline unchanged:
+An earlier version of this file claimed all 63 share one format. **They do not** — measured across
+the directory, there are three, and the difference is optically visible once they are scaled into a
+common 16px box:
 
-- `viewBox="0 0 16 16"`
-- `stroke="currentColor"` with `stroke-width="1.25"`, `stroke-linecap="round"` for the line icons
-- `fill="currentColor"` for the solid brand marks (`claude-mark`, `openai-mark`, `pi-mark`,
-  `cursor-mark`, `grok-mark`, `hermes-mark`)
+| group | count | viewBox | stroke |
+|---|---|---|---|
+| line icons, house style | 52 | `0 0 24 24` | `1.5` |
+| line icons, small grid | 4 | `0 0 16 16` | `1.25` |
+| marks and solids | 7 | arbitrary — see below | fill, no stroke |
 
-`currentColor` throughout means every one of them tints through `paint_tinted_svg`
-(`tiller_ui/src/icons.rs`) with no edit.
+The 16×16 four are `check`, `close`, `plus`, `terminal` (`grok-mark` is 16×16 but a solid). A stroke
+of `1.5` on a 24-unit grid renders at `1.5 × 16/24 = 1.0px`; a stroke of `1.25` on a 16-unit grid
+renders at `1.25px`. **The small-grid icons therefore come out about 25% heavier than the other 52.**
+Setting their `stroke-width` to `1.0` matches the majority without touching a path.
+
+Three of the marks are **not square** — `claude-mark` 256×257, `openai-mark` 256×260,
+`cursor-mark` 466.73×532.09, `comet-logo` 820×940 — so how they sit in a square icon box depends on
+aspect handling, and should be checked visually rather than assumed. `pi-mark` (800×800) and `stop`
+(10×10) are square.
+
+Do not infer the family from the paint: `key-minimalistic` is fill-only despite being an ordinary
+24×24 icon.
+
+`currentColor` is the one thing that genuinely is universal here, so every file tints through
+`paint_tinted_svg` (`tiller_ui/src/icons.rs`) without an edit.
+
+Modifying the artwork is permitted — the MIT licence above covers modification, provided this notice
+stays with it.
 
 ## This is a replacement, not an addition
 

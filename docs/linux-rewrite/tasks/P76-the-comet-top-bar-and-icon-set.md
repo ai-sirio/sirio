@@ -62,9 +62,21 @@ generic title bar, and a 1px divider under it would undo the whole effect.
 `rust/assets/icons/comet/`, committed, with `ATTRIBUTION.md` beside them. **MIT, Copyright (c) 2026
 Wing.** Assets only — no comet source was copied, and none may be.
 
-They drop into the existing pipeline untouched: `viewBox="0 0 16 16"`, `stroke="currentColor"` at
-`1.25`, round caps, and `fill="currentColor"` for the brand marks — so every one tints through
-`paint_tinted_svg` in `tiller_ui/src/icons.rs` with no edit.
+**Corrected after this brief was written — measured, not assumed. The sentence that stood here said
+all 63 share one format; they do not.** 52 line icons are `viewBox="0 0 24 24"` at `stroke-width 1.5`
+— that is the house style. Four — `check`, `close`, `plus`, `terminal` — are `0 0 16 16` at `1.25`.
+The rest are marks with arbitrary viewBoxes, three of them **non-square**.
+
+Scaled into one 16px box, `1.5` on a 24 grid renders at `1.0px` while `1.25` on a 16 grid renders at
+`1.25px`, so those four come out **~25% heavier** than everything beside them — and `close`, `plus`
+and `terminal` are all in the mapping table below, which puts the mismatch straight into the titlebar
+you are building. Setting the four to `stroke-width 1.0` matches the majority without touching a
+path. Check the non-square marks visually before assuming `paint_svg` letterboxes rather than
+stretches them, and do not infer the family from the paint: `key-minimalistic` is fill-only despite
+being an ordinary 24×24 icon. Full measurements sit in `ATTRIBUTION.md` beside the assets.
+
+What *is* universal is `currentColor`, so every file tints through `paint_tinted_svg` in
+`tiller_ui/src/icons.rs` with no edit.
 
 **This is a replacement, not an addition.** Tiller's 22 are Phosphor *thin* (`caret-down-thin`,
 `chat-circle-thin`); comet's are Solar (`alt-arrow-down`, `settings-minimalistic`). Mixed, they read
