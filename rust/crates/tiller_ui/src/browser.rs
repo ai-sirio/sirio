@@ -756,6 +756,16 @@ impl BrowserSurface {
         self.state.deny_permission()
     }
 
+    /// Seeds this surface from the host's durable browser-origin grants.
+    pub fn set_allowed_origins(&mut self, origins: impl IntoIterator<Item = String>) {
+        self.state.set_allowed_origins(origins);
+    }
+
+    /// Returns the origins currently allowed by this surface.
+    pub fn allowed_origins(&self) -> impl Iterator<Item = &str> {
+        self.state.allowed_origins()
+    }
+
     /// Updates the F-BRW-05 activity marker.
     pub fn set_agent_driving(&mut self, driving: bool) {
         self.state.set_agent_driving(driving);

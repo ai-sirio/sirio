@@ -511,6 +511,13 @@ impl Render for TabBar {
                 theme,
                 false,
             ))
+            .child(Self::render_menu_item(
+                "New Browser",
+                NewTabAction::NewBrowser,
+                entity.clone(),
+                theme,
+                false,
+            ))
             .child(Self::separator(theme))
             .child(Self::render_menu_item(
                 "Claude Code",
@@ -692,6 +699,7 @@ mod tests {
                 "split-claude-code",
                 NewTabAction::SplitClaudeCode,
             ),
+            ("New Browser", "new-browser", NewTabAction::NewBrowser),
         ];
 
         for (_label, selector, expected) in entries {
@@ -738,7 +746,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn drawn_new_tab_menu_hides_unsupported_browser_action(cx: &mut TestAppContext) {
+    async fn drawn_new_tab_menu_offers_browser_action(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         let window = cx.add_window(|_window, cx| TabBar::new(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -757,8 +765,8 @@ mod tests {
 
         assert!(cx.debug_bounds("new-tab-menu").is_some());
         assert!(
-            cx.debug_bounds("new-tab-item-new-browser").is_none(),
-            "the menu must not offer an action whose browser surface is unsupported"
+            cx.debug_bounds("new-tab-item-new-browser").is_some(),
+            "the menu offers the mounted browser surface"
         );
     }
 

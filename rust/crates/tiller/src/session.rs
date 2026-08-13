@@ -827,10 +827,13 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
     let mut tabs = Vec::new();
     let mut tab_states = Vec::new();
     for record in records {
-        // Only the surfaces this shell can rebuild. Browser/editor tabs are
-        // skipped with a note, mirroring the Swift app's `unavailableContent`
-        // diagnostic; diff is a first-class shell surface.
-        if record.kind != "chat" && record.kind != "terminal" && record.kind != "diff" {
+        // Only editor tabs remain unavailable in this shell; browser is a
+        // first-class persisted surface alongside chat, terminal, and diff.
+        if record.kind != "chat"
+            && record.kind != "terminal"
+            && record.kind != "diff"
+            && record.kind != "browser"
+        {
             diagnostics.push(format!(
                 "tab {:?} ({}) is not restorable in this build; skipped",
                 record.title, record.kind
@@ -1082,6 +1085,45 @@ impl SessionStore {
             }
             Err(error) => {
                 eprintln!("[session] failed to persist session reference: {error}");
+            }
+        }
+    }
+
+    /// Loads browser-origin grants for new browser surfaces.
+    pub fn load_browser_origin_grants(&self) -> Vec<String> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return Vec::new();
+        };
+        match db.browser_origin_grants() {
+            Ok(origins) => origins,
+            Err(error) => {
+                eprintln!("[session] failed to load browser origin grants: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Persists one browser-origin grant immediately after the user allows it.
+    pub fn save_browser_origin_grant(&self, origin: &str) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match db.save_browser_origin_grant(origin) {
+            Ok(()) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!("[session] failed to persist browser origin grant: {error}");
             }
         }
     }
@@ -1349,6 +1391,31 @@ mod tests {
 
         let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
         assert_eq!(restored.tabs, tabs, "Changes remains a persisted peer tab");
+    }
+
+    #[test]
+    fn a_browser_tab_saves_and_restores_with_the_other_surfaces() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("browser-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let mut tabs = three_tabs();
+        tabs.insert(
+            1,
+            SessionTab {
+                title: "Browser".into(),
+                kind: "browser".into(),
+                agent_id: None,
+                active: false,
+            },
+        );
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&working_directory, tabs.clone()));
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
+        assert_eq!(restored.tabs, tabs, "Browser remains a persisted peer tab");
     }
 
     #[test]

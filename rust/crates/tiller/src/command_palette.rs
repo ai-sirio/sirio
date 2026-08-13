@@ -80,7 +80,6 @@ pub(crate) enum PaletteDisabledReason {
     NoSelectedWorktree,
     AlreadyPrimary,
     NotPrimary,
-    UnsupportedSurface,
 }
 
 impl PaletteDisabledReason {
@@ -95,7 +94,6 @@ impl PaletteDisabledReason {
             Self::NoSelectedWorktree => "No selected worktree",
             Self::AlreadyPrimary => "Already the primary worktree",
             Self::NotPrimary => "Worktree is not primary",
-            Self::UnsupportedSurface => "Browser surfaces are unavailable on Linux",
         }
     }
 }
@@ -404,12 +402,7 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         new_tab_entry(NewTabAction::OhMyPi, "Oh-My-Pi"),
         new_tab_entry(NewTabAction::SplitClaudeCode, "Split Claude Code"),
         new_tab_entry(NewTabAction::NewChat, "New Chat"),
-        PaletteEntry::disabled(
-            PaletteCommand::NewTab(NewTabAction::NewBrowser),
-            "New Browser",
-            None,
-            PaletteDisabledReason::UnsupportedSurface,
-        ),
+        new_tab_entry(NewTabAction::NewBrowser, "New Browser"),
         sidebar_entry(
             SidebarPaletteAction::ProjectSettings,
             "Project Settings",
@@ -540,6 +533,15 @@ mod tests {
         );
         assert!(commands.iter().any(|entry| entry.label == "Codex"));
         assert!(commands.iter().any(|entry| entry.label == "Oh-My-Pi"));
+    }
+
+    #[test]
+    fn catalog_contains_an_enabled_new_browser_command() {
+        let browser = entries(&context())
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::NewTab(NewTabAction::NewBrowser))
+            .expect("New Browser command");
+        assert!(browser.is_enabled());
     }
 
     #[test]

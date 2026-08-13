@@ -5,7 +5,7 @@ use gpui::{
     WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -34,6 +34,7 @@ use tiller_terminal::{
 };
 use tiller_theme::{Theme, ThemeMode};
 use tiller_ui::{
+    browser::{BrowserEvent, BrowserSurface},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, acp_agent_command},
     file_view::FileView,
@@ -274,6 +275,10 @@ enum ControlAction {
     SelectTab {
         position: usize,
         reply: ControlReply,
+    },
+    Browser {
+        method: String,
+        params: BTreeMap<String, String>,
     },
 }
 struct OpenTab {
@@ -1025,6 +1030,16 @@ impl ControlHandler for AppControlHandler {
                     "surface.chat.permission",
                     "surface.chat.stop",
                     "surface.chat.read",
+                    "browser.open",
+                    "browser.navigate",
+                    "browser.get",
+                    "browser.screenshot",
+                    "browser.snapshot",
+                    "browser.act",
+                    "browser.wait",
+                    "browser.eval",
+                    "browser.console",
+                    "browser.errors",
                 ];
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -1665,12 +1680,25 @@ impl ControlHandler for AppControlHandler {
             "session.restore" => {
                 self.queue_action(request, |reply| ControlAction::RestoreSession { reply })
             }
-            method if BROWSER_METHODS.contains(&method) => ControlResponse::failure(
-                &request.id,
-                format!(
-                    "{method} is unsupported on Linux: Tiller has no browser/webview surface in this build"
-                ),
-            ),
+            method if BROWSER_METHODS.contains(&method) => {
+                let Ok(mut actions) = self.control_actions.lock() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "control action queue unavailable",
+                    );
+                };
+                actions.push(ControlAction::Browser {
+                    method: method.to_string(),
+                    params: request.params.clone(),
+                });
+                Self::success(
+                    &request.id,
+                    [
+                        ("method".to_string(), method.to_string()),
+                        ("queued".to_string(), "true".to_string()),
+                    ],
+                )
+            }
             _ => ControlResponse::failure(
                 &request.id,
                 format!("unknown control method: {}", request.method),
@@ -2153,7 +2181,7 @@ fn tab_icon(kind: TabKind, has_file: bool, agent_icon: Option<Icon>) -> Icon {
         TabKind::AgentChat => Icon::MessageSquare,
         TabKind::Terminal => Icon::SquareTerminal,
         TabKind::Editor => Icon::File,
-        TabKind::Browser => unreachable!("Browser surfaces are external to the shell"),
+        TabKind::Browser => Icon::Globe,
         TabKind::Diff => Icon::File,
     }
 }
@@ -2463,6 +2491,7 @@ struct TillerWorkspace {
     /// Prevents scheduling restored scrollback more than once before the
     /// first frame mounts the terminal entities.
     restored_scrollback_scheduled: bool,
+    browser_origins: BTreeSet<String>,
 }
 
 impl TillerWorkspace {
@@ -2572,7 +2601,7 @@ impl TillerWorkspace {
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::RestoreSession { reply } => {
-                                    let result = workspace.restore_launch_snapshot(cx);
+                                    let result = workspace.restore_launch_snapshot(window, cx);
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::OpenChanges { worktree, reply } => {
@@ -2640,6 +2669,9 @@ impl TillerWorkspace {
                                 ControlAction::SelectTab { position, reply } => {
                                     workspace.select_tab_position(position, cx);
                                     let _ = reply.send(Ok(Vec::new()));
+                                }
+                                ControlAction::Browser { method, params } => {
+                                    workspace.handle_browser_action(&method, &params, window, cx);
                                 }
                             }
                         }
@@ -2710,6 +2742,10 @@ impl TillerWorkspace {
             0,
         )
         .expect("restored tabs form one valid pane group");
+        let browser_origins = session
+            .load_browser_origin_grants()
+            .into_iter()
+            .collect();
         // P58, F-SET-10: the usage bar consumes the settings surface's
         // visibility toggles and refresh interval. Observing the settings
         // entity applies every change to the bar live, so a toggle in
@@ -2758,6 +2794,7 @@ impl TillerWorkspace {
             palette_previous_focus: None,
             activity: AgentActivityModel::new(),
             restored_scrollback_scheduled: false,
+            browser_origins,
             show_settings: false,
             restore_focus_pending: false,
         };
@@ -2777,6 +2814,7 @@ impl TillerWorkspace {
             }
         })
         .detach();
+        workspace.seed_browser_origins(cx);
         workspace.schedule_save(cx);
         workspace.sync_activity(cx);
         workspace
@@ -2800,9 +2838,7 @@ impl TillerWorkspace {
                         TabKind::Editor => "file",
                         TabKind::AgentChat => "chat",
                         TabKind::Terminal => "terminal",
-                        TabKind::Browser => {
-                            unreachable!("browser tabs are unsupported in shell persistence")
-                        }
+                        TabKind::Browser => "browser",
                         TabKind::Diff => "diff",
                     }
                     .to_string(),
@@ -3399,7 +3435,7 @@ impl TillerWorkspace {
                         Some(pane_status.map_or(ActivityStatus::Idle, activity_status_for_agent))
                     }
                 }
-                TabContent::File { .. } | TabContent::Changes(_) => None,
+                TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
             };
             if candidate.is_some_and(|candidate| {
                 status.is_none_or(|current| {
@@ -3480,7 +3516,7 @@ impl TillerWorkspace {
                         let state = panel_state_from_terminal(view.read(cx).snapshot());
                         (tab.title.clone(), agent, state)
                     }
-                    TabContent::File { .. } | TabContent::Changes(_) => (
+                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
@@ -3770,6 +3806,7 @@ impl TillerWorkspace {
 
     fn restore_launch_snapshot(
         &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let snapshot = self.launch_snapshot.clone();
@@ -3791,6 +3828,7 @@ impl TillerWorkspace {
                 &self.working_directory,
                 self.next_tab_id,
                 self.next_pane_id,
+                window,
                 cx,
             );
             Self::bind_terminal_tabs(&tabs, cx);
@@ -3901,7 +3939,7 @@ impl TillerWorkspace {
         match kind {
             TabKind::AgentChat | TabKind::Editor | TabKind::Diff => CHAT_TAB_WIDTH,
             TabKind::Terminal => TERMINAL_TAB_WIDTH,
-            TabKind::Browser => unreachable!("Browser surfaces are external to the shell"),
+            TabKind::Browser => CHAT_TAB_WIDTH,
         }
     }
 
@@ -4511,6 +4549,154 @@ impl TillerWorkspace {
         cx.notify();
     }
 
+    fn add_browser_tab(
+        &mut self,
+        initial_url: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_url = initial_url.into();
+        let browser = cx.new(|cx| BrowserSurface::new(&initial_url, window, cx));
+        let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
+        browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
+        self.tabs.push(OpenTab {
+            id: self.next_tab_id,
+            group_id: self.tab_machinery.active_group(),
+            title: "Browser".to_string(),
+            kind: TabKind::Browser,
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(self.next_pane_id),
+            panes: PaneNode::leaf(self.next_pane_id, TabContent::Browser(browser)),
+            focused_pane: self.next_pane_id,
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.rebuild_tab_machinery();
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+        cx.notify();
+    }
+
+    fn browser_surface(&self) -> Option<Entity<BrowserSurface>> {
+        let mut browser = None;
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Browser(surface) = content {
+                    browser = Some(surface.clone());
+                }
+            });
+            if browser.is_some() {
+                break;
+            }
+        }
+        browser
+    }
+
+    fn handle_browser_action(
+        &mut self,
+        method: &str,
+        params: &BTreeMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if method == "browser.open" {
+            self.add_browser_tab(
+                params
+                    .get("url")
+                    .or_else(|| params.get("address"))
+                    .map(String::as_str)
+                    .unwrap_or("https://example.com"),
+                window,
+                cx,
+            );
+            return;
+        }
+
+        let browser = match self.browser_surface() {
+            Some(browser) => browser,
+            None => {
+                self.add_browser_tab("https://example.com", window, cx);
+                self.browser_surface().expect("browser tab was just added")
+            }
+        };
+        browser.update(cx, |surface, _| match method {
+            "browser.navigate" => {
+                if let Some(address) = params
+                    .get("url")
+                    .or_else(|| params.get("address"))
+                    .or_else(|| params.get("href"))
+                    && let Err(error) = surface.submit_address(address)
+                {
+                    eprintln!("[browser] navigation failed: {error}");
+                }
+            }
+            "browser.act" => {
+                if let Some(driving) = params
+                    .get("driving")
+                    .or_else(|| params.get("agentDriving"))
+                {
+                    surface.set_agent_driving(matches!(driving.as_str(), "1" | "true" | "yes"));
+                }
+            }
+            // These methods are intentionally routed to the live surface even
+            // when their transport payload is only an observation request.
+            "browser.get"
+            | "browser.screenshot"
+            | "browser.snapshot"
+            | "browser.wait"
+            | "browser.eval"
+            | "browser.console"
+            | "browser.errors" => {
+                let _ = surface.state();
+            }
+            _ => {}
+        });
+    }
+
+    fn seed_browser_origins(&self, cx: &mut Context<Self>) {
+        let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Browser(browser) = content {
+                    let origins = origins.clone();
+                    browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
+                }
+            });
+        }
+    }
+
+    fn drain_browser_events(&mut self, cx: &mut Context<Self>) {
+        let mut newly_allowed = Vec::new();
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Browser(browser) = content {
+                    browser.update(cx, |surface, _| {
+                        newly_allowed.extend(
+                            surface
+                                .allowed_origins()
+                                .map(str::to_owned)
+                                .filter(|origin| !self.browser_origins.contains(origin)),
+                        );
+                        for event in surface.take_events() {
+                            if let BrowserEvent::OpenExternal(url) = event
+                                && let Err(error) = Command::new("xdg-open").arg(url).spawn()
+                            {
+                                eprintln!("[browser] could not open external link: {error}");
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        for origin in newly_allowed {
+            if self.browser_origins.insert(origin.clone()) {
+                self.session.save_browser_origin_grant(&origin);
+            }
+        }
+    }
+
     /// Opens a tab running `adapter`'s agent CLI. Calls `prepare` first —
     /// that is what writes the worktree-local hook config the agent needs —
     /// then runs the resolved command through the user's login shell (`-lc`,
@@ -4576,9 +4762,9 @@ impl TillerWorkspace {
             NewTabAction::SplitClaudeCode => {
                 self.split_focused_agent("claude", SplitDirection::Horizontal, None, cx);
             }
-            // Browser is not part of this shell's content set yet. Keeping the
-            // action typed and ignored is preferable to opening a fake pane.
-            NewTabAction::NewBrowser => {}
+            NewTabAction::NewBrowser => {
+                self.add_browser_tab("https://example.com", window, cx);
+            }
         }
     }
 
@@ -4681,7 +4867,7 @@ impl TillerWorkspace {
                     focused_content = match content {
                         TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                         TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                        TabContent::File { .. } | TabContent::Changes(_) => None,
+                        TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
                     };
                 }
             });
@@ -4960,7 +5146,7 @@ impl TillerWorkspace {
                         replacement_content = match content {
                             TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                             TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                            TabContent::File { .. } | TabContent::Changes(_) => None,
+                            TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
                         };
                     }
                 });
@@ -5030,6 +5216,9 @@ impl TillerWorkspace {
                         div().size_full().child(view.clone()).into_any_element()
                     }
                     TabContent::Changes(view) => {
+                        div().size_full().child(view.clone()).into_any_element()
+                    }
+                    TabContent::Browser(view) => {
                         div().size_full().child(view.clone()).into_any_element()
                     }
                 };
@@ -5418,7 +5607,7 @@ impl TillerWorkspace {
                     !view.read(cx).is_failed() && view.read(cx).exit_status().is_none()
                 }
                 TabContent::Chat(chat) => chat.read(cx).is_streaming(),
-                TabContent::Changes(_) => false,
+                TabContent::Changes(_) | TabContent::Browser(_) => false,
             };
         });
         dirty
@@ -6916,6 +7105,7 @@ impl Render for TillerWorkspace {
         // render, same as the tab checkmark already does inline in
         // `render_open_tab`. `set_activity`/`set_worktree_status` both no-op
         // on an unchanged value, so this doesn't loop.
+        self.drain_browser_events(cx);
         self.sync_activity(cx);
 
         if self.show_settings {
@@ -7106,6 +7296,7 @@ fn replay_pane_events<T>(
 fn restore_tabs(
     restored: &RestoredSession,
     working_directory: &std::path::Path,
+    mut window: Option<&mut Window>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
     let mut tabs = Vec::new();
@@ -7149,6 +7340,13 @@ fn restore_tabs(
             "diff" => TabContent::Changes(
                 cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
             ),
+            "browser" => {
+                let Some(window) = window.as_deref_mut() else {
+                    continue;
+                };
+                let browser = cx.new(|cx| BrowserSurface::new("https://example.com", window, cx));
+                TabContent::Browser(browser)
+            }
             "file" => {
                 // File tabs are not restored yet: their source may disappear
                 // between launches. Session restoration skips them rather
@@ -7198,6 +7396,7 @@ fn restore_tabs(
             kind: match tab.kind.as_str() {
                 "chat" => TabKind::AgentChat,
                 "diff" => TabKind::Diff,
+                "browser" => TabKind::Browser,
                 _ => TabKind::Terminal,
             },
             agent_icon,
@@ -7218,6 +7417,7 @@ fn restore_tabs_in_workspace(
     working_directory: &std::path::Path,
     tab_id_start: usize,
     pane_id_start: usize,
+    window: &mut Window,
     cx: &mut Context<TillerWorkspace>,
 ) -> (Vec<OpenTab>, usize) {
     let mut tabs = Vec::new();
@@ -7263,6 +7463,9 @@ fn restore_tabs_in_workspace(
             "diff" => TabContent::Changes(
                 cx.new(|cx| ChangesTab::new(working_directory.to_path_buf(), cx)),
             ),
+            "browser" => TabContent::Browser(
+                cx.new(|cx| BrowserSurface::new("https://example.com", window, cx)),
+            ),
             _ => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
@@ -7284,6 +7487,8 @@ fn restore_tabs_in_workspace(
                 TabKind::AgentChat
             } else if tab.kind == "diff" {
                 TabKind::Diff
+            } else if tab.kind == "browser" {
+                TabKind::Browser
             } else {
                 TabKind::Terminal
             },
@@ -7505,8 +7710,9 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            move |_, cx| {
-                let (tabs, active_tab) = restore_tabs(&restored, &working_directory, cx);
+            move |window, cx| {
+                let (tabs, active_tab) =
+                    restore_tabs(&restored, &working_directory, Some(window), cx);
                 let activity = tabs
                     .iter()
                     .map(|tab| {
@@ -9762,7 +9968,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_methods_return_specific_linux_unsupported_errors_and_are_not_advertised() {
+    fn browser_methods_are_accepted_and_advertised() {
         let state = Arc::new(Mutex::new(ControlState {
             projects: Vec::new(),
             workspaces: Vec::new(),
@@ -9784,9 +9990,14 @@ mod tests {
                 method: method.to_string(),
                 params: BTreeMap::new(),
             });
-            assert!(!response.ok, "{method} unexpectedly succeeded");
-            let error = response.error.expect("unsupported error");
-            assert!(error.contains("unsupported on Linux"), "{error}");
+            assert!(response.ok, "{method} failed: {:?}", response.error);
+            assert_eq!(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("method")),
+                Some(&method.to_string())
+            );
         }
 
         let capabilities = handler.handle(&ControlRequest {
@@ -9814,10 +10025,20 @@ mod tests {
                 "missing capability {method}"
             );
         }
-        assert!(methods.iter().all(|row| {
-            row.get("method")
-                .is_none_or(|method| !BROWSER_METHODS.contains(&method.as_str()))
-        }));
+        for method in BROWSER_METHODS {
+            assert!(
+                methods
+                    .iter()
+                    .any(|row| row.get("method").map(String::as_str) == Some(method)),
+                "missing browser capability {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_tabs_have_shell_icon_and_width() {
+        assert_eq!(tab_icon(TabKind::Browser, false, None), Icon::Globe);
+        assert_eq!(TillerWorkspace::tab_width(TabKind::Browser), CHAT_TAB_WIDTH);
     }
 
     #[test]
@@ -10370,7 +10591,8 @@ mod tests {
             diagnostics: vec![],
         };
 
-        let (tabs, active) = cx.update(|cx| restore_tabs(&restored, &working_directory, cx));
+        let (tabs, active) =
+            cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
 
         assert_eq!(
             tabs.len(),
@@ -10395,6 +10617,7 @@ mod tests {
                     }
                     TabContent::File { .. } => {}
                     TabContent::Changes(_) => {}
+                    TabContent::Browser(_) => {}
                 });
             }
             (failed, live)
@@ -10438,7 +10661,8 @@ mod tests {
                 .flatten()
                 .expect("workspace root")
         });
-        let (tabs, active) = cx.update(|_, cx| restore_tabs(&restored, &working_directory, cx));
+        let (tabs, active) =
+            cx.update(|_, cx| restore_tabs(&restored, &working_directory, None, cx));
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs = tabs;
             workspace.active_tab = active;
@@ -10593,7 +10817,8 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let (mut tabs, _) = cx.update(|cx| restore_tabs(&restored, &working_directory, cx));
+        let (mut tabs, _) =
+            cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
         let terminal = cx.update(|cx| {
             cx.new(|cx| {
                 TerminalView::with_shell(
@@ -10647,7 +10872,8 @@ mod tests {
             diagnostics: vec![],
         };
 
-        let (tabs, active) = cx.update(|cx| restore_tabs(&restored, &working_directory, cx));
+        let (tabs, active) =
+            cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
 
         assert_eq!(active, 0, "the restored Changes tab is active");
         assert_eq!(tabs.len(), 1, "the shell retains the Changes tab");

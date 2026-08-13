@@ -5,6 +5,7 @@
 
 pub mod changes;
 pub mod chat;
+pub mod browser;
 pub mod composer;
 pub mod controls;
 pub mod editor;
