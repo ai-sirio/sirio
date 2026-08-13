@@ -105,6 +105,51 @@ fn make_repo() -> TempDir {
     repo
 }
 
+/// Creates a repository with two files that both conflict when `side` is
+/// merged into `main`.
+fn make_conflicted_repo() -> TempDir {
+    let repo = TempDir::new();
+    git(repo.path(), &["init", "-b", "main"]);
+    git(repo.path(), &["config", "user.email", "test@tiller.dev"]);
+    git(repo.path(), &["config", "user.name", "Tiller Test"]);
+    write(repo.path(), "f.txt", b"base f\n");
+    write(repo.path(), "g.txt", b"base g\n");
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-m", "base"]);
+
+    git(repo.path(), &["checkout", "-b", "side"]);
+    write(repo.path(), "f.txt", b"side f\n");
+    write(repo.path(), "g.txt", b"side g\n");
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-m", "side"]);
+
+    git(repo.path(), &["checkout", "main"]);
+    write(repo.path(), "f.txt", b"main f\n");
+    write(repo.path(), "g.txt", b"main g\n");
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-m", "main"]);
+
+    ensure_generous_timeout();
+    let output = Command::new("git")
+        .args(["merge", "side"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git merge runs");
+    assert_eq!(output.status.code(), Some(1), "merge conflicts");
+    repo
+}
+
+fn status_porcelain(repo: &Path) -> String {
+    ensure_generous_timeout();
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo)
+        .output()
+        .expect("git status runs");
+    assert!(output.status.success(), "git status succeeds");
+    String::from_utf8(output.stdout).expect("git status is utf-8")
+}
+
 /// The single status entry for `path`, panicking if absent or not unique.
 fn entry_for<'a>(
     snapshot: &'a tiller_git::StatusSnapshot,
@@ -326,36 +371,44 @@ fn crlf_files_diff_cleanly() {
 
 #[test]
 fn conflicted_file_is_reported_as_unmerged() {
-    let repo = TempDir::new();
-    git(repo.path(), &["init", "-b", "main"]);
-    git(repo.path(), &["config", "user.email", "test@tiller.dev"]);
-    git(repo.path(), &["config", "user.name", "Tiller Test"]);
-    write(repo.path(), "f.txt", b"base\n");
-    git(repo.path(), &["add", "f.txt"]);
-    git(repo.path(), &["commit", "-m", "base"]);
-
-    git(repo.path(), &["checkout", "-b", "side"]);
-    write(repo.path(), "f.txt", b"side\n");
-    git(repo.path(), &["add", "f.txt"]);
-    git(repo.path(), &["commit", "-m", "side"]);
-
-    git(repo.path(), &["checkout", "main"]);
-    write(repo.path(), "f.txt", b"main\n");
-    git(repo.path(), &["add", "f.txt"]);
-    git(repo.path(), &["commit", "-m", "main"]);
-
-    // The merge conflicts; the repo is left in the conflicted state.
-    let output = Command::new("git")
-        .args(["merge", "side"])
-        .current_dir(repo.path())
-        .output()
-        .expect("git merge runs");
-    assert_eq!(output.status.code(), Some(1), "merge conflicts");
+    let repo = make_conflicted_repo();
 
     let snapshot = status(repo.path()).expect("status runs");
     let entry = entry_for(&snapshot, "f.txt");
     assert!(entry.is_conflicted());
     assert_eq!(entry.index_status, Some(tiller_git::StatusKind::Unmerged));
+}
+
+#[test]
+fn stage_refuses_a_conflicted_path_without_changing_git() {
+    let repo = make_conflicted_repo();
+    let before = status_porcelain(repo.path());
+
+    let error = stage(repo.path(), Path::new("f.txt")).expect_err("conflict must be refused");
+
+    assert_eq!(
+        error,
+        tiller_git::GitError::ConflictedPaths {
+            paths: vec![PathBuf::from("f.txt")],
+        }
+    );
+    assert_eq!(status_porcelain(repo.path()), before);
+}
+
+#[test]
+fn stage_all_refuses_every_conflicted_path_before_mutation() {
+    let repo = make_conflicted_repo();
+    let before = status_porcelain(repo.path());
+
+    let error = stage_all(repo.path()).expect_err("batch conflict must be refused");
+
+    assert_eq!(
+        error,
+        tiller_git::GitError::ConflictedPaths {
+            paths: vec![PathBuf::from("f.txt"), PathBuf::from("g.txt")],
+        }
+    );
+    assert_eq!(status_porcelain(repo.path()), before);
 }
 
 #[test]

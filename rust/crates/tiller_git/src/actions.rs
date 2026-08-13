@@ -12,18 +12,28 @@ use std::path::Path;
 
 use crate::GitError;
 use crate::git;
-use crate::status::has_head;
+use crate::status::{has_head, status};
 
 /// Stages a single path: `git add -A -- <path>`.
 ///
 /// `-A` stages additions, modifications and deletions alike, so the same
 /// call works for a newly created file, an edited one, or a deleted one.
 pub fn stage(repo: &Path, path: &Path) -> Result<(), GitError> {
+    let conflicted = conflicted_paths(repo)?;
+    if conflicted.iter().any(|conflicted| conflicted == path) {
+        return Err(GitError::ConflictedPaths {
+            paths: vec![path.to_path_buf()],
+        });
+    }
     run_literal(&["add", "-A", "--", &path.to_string_lossy()], repo)
 }
 
 /// Stages every change in the checkout: `git add -A`.
 pub fn stage_all(repo: &Path) -> Result<(), GitError> {
+    let conflicted = conflicted_paths(repo)?;
+    if !conflicted.is_empty() {
+        return Err(GitError::ConflictedPaths { paths: conflicted });
+    }
     git::run_accepting(&["add", "-A"], repo, &[0]).map(|_| ())
 }
 
@@ -72,6 +82,17 @@ fn run_literal(arguments: &[&str], repo: &Path) -> Result<(), GitError> {
     args.push("--literal-pathspecs");
     args.extend_from_slice(arguments);
     git::run_accepting(&args, repo, &[0]).map(|_| ())
+}
+
+/// Returns the conflicted paths in the same stable order as the status
+/// snapshot. This read is the preflight door for both staging operations.
+fn conflicted_paths(repo: &Path) -> Result<Vec<std::path::PathBuf>, GitError> {
+    Ok(status(repo)?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.is_conflicted())
+        .map(|entry| entry.path)
+        .collect())
 }
 
 #[cfg(test)]
