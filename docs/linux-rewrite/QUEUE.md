@@ -801,3 +801,65 @@ Sequencing after the spike: `F-BRW-01/02/03/04` (chrome, URL, Back/Forward/Reloa
 `F-BRW-06/07/08` (Allow/Deny, persisted origins, revoke in Permissions) which needs a
 `tiller_persistence` migration — that crate is at **v10** after P70, so the browser-grants migration
 is **v11**.
+
+---
+
+## 22:30 — the largest bucket is measurably wrong, and the critic is the bottleneck
+
+**FABLE-08 landed (`b24c62f`).** Of the 141 rows marked `FAILED — absent`, **39 are already
+built**, with evidence verified by needle rather than line number and six known-stale control rows
+that make the script refuse to print when they stop matching. Artefacts: `Scripts/stale-failed-census.py`,
+`docs/linux-rewrite/STALE-FAILED-CENSUS.md`, and a pinned ledger snapshot under `pins/`.
+
+That reframes the position. The headline number is 153 of 389 critic-confirmed, but the largest
+bucket — absent — is now known to contain ~39 rows that are not absent at all. **Only pireview can
+flip a verdict**, so those 39 are not progress yet; they are queued work behind a single agent.
+
+**So the constraint is critic throughput, not builder output.** Five builders produce faster than
+one critic can independently exercise, and the goal's definition of done runs entirely through the
+critic. `FABLE-09` acts on that directly: turn the 39 into exercise recipes ordered by cost, so
+whole groups close without relaunching the binary between rows. Recipes state **what to do, never
+what to conclude** — a recipe that suggests its own answer converts the critic into a confirmer and
+destroys the only independent check the project has.
+
+### The identity chain has three links, not two
+
+Twice this was scoped as "the `main.rs` consumer half" and twice it did not close, because the
+broken link is not in `main.rs`:
+
+1. `TabRecord.agent_id` — **exists** (P70, migration v10, round-trip test green)
+2. `tiller/src/session.rs:286` `SessionTab` — **no `agent_id` field**; built at `session.rs:804`
+   from a `TabRecord` whose identity is simply never read
+3. `main.rs:6656`/`:6754` `restore_tabs` — `Chat::launch` and `agent_id: None`
+
+The identity is written to SQLite correctly and dropped one layer before `main.rs` could use it.
+Anyone reading only `main.rs` sees an identity-free `SessionTab` and concludes P70 never landed.
+`P73` covers all three links plus `RetainedChat` (`main.rs:293`) for the resume path — all inside
+codex12's own crate, so no seam and no hand-off. The test that counts round-trips a **non-default**
+agent: restoring a Claude tab and finding Claude cannot fail, because Claude is what the bug produces.
+
+### Dispatched
+
+- **codex12 → P73** — the three-link identity chain, plus P71 Half B (three `eprintln!` → notice)
+- **codex11 → P72** — the browser spike; the ownership block in that brief was written for another
+  pane, so its "(codex11)" group is codex11's own files, not a prohibition
+- **fable → FABLE-09** — exercise recipes for the 39, ordered by cost
+- **pireview** — still inside the ACP end-to-end, now on a `q1-*` sequence with a shot after send
+- **sonnet — blocked**, and not by us: `push it` sits unsent in its composer. Submitting it would
+  push, which is outward-facing and irreversible, and it was typed to sonnet rather than to the
+  orchestrator. `send-text` would destroy it. It stays untouched until the user decides.
+
+### What the pass-14 frames settled
+
+Two chats from the same binary in the same session report **different models** — `idle · Sonnet`
+against `idle · GPT-5.6-Luna`. Those names come from the ACP server that answered, so the
+per-agent launch reaches a real agent; the old hardcoded default would have made both identical.
+
+And they settled what is still open, by md5 rather than by eye: `n1-02` through `n1-05` are
+byte-identical across the whole 15s→30s window, `m2-02` through `m2-final` likewise, with the
+composer still showing its grey `Message…` placeholder and status `idle`. Connection and identity,
+yes. Message out and reply streaming, **never witnessed**.
+
+Note the reading discipline: in the *menu* frames byte-identity was the signal of **success**
+(opened and stable). In a streaming window it is the opposite. Same observation, opposite meaning,
+decided by context — which is why the frames get read rather than the filenames.
