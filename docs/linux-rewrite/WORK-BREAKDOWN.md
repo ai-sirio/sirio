@@ -115,7 +115,7 @@ P71-style into named halves. Unless a *depends* is stated, the piece dispatches 
 |---|---|---|---|
 | B-60 · agents page alive | `F-SET-16` | S — a real search input + wire the no-op Refresh to the existing `discovered()` re-run | nothing |
 | B-61 · reasons on the providers page | `F-SET-11` | S — four Unavailable reasons render one "—" today; twin of B-40's reason work | nothing |
-| B-62 · cookie auth | `F-SET-12` `F-SET-13` | M — settings UI half; **the fetch half lands in unowned `tiller_usage`** | backend owner (drift item 3's sibling) |
+| B-62 · cookie auth | `F-SET-12` `F-SET-13` | M — settings UI half; the fetch half lands in `tiller_usage` | backend half `codex12` (ruled 2026-08-13) |
 | B-63 · account actions | `F-SET-14` `F-SET-15` | M — the shipped Add Account button is a dead no-op; `F-SET-15` is design-pinned single-account (comment in code) — orchestrator note at dispatch | nothing |
 | B-64 · agent colour choice | `F-SET-22` | S — `color_swatch` gains a click; value persists via B-13 | nothing for the UI |
 
@@ -123,8 +123,8 @@ P71-style into named halves. Unless a *depends* is stated, the piece dispatches 
 
 | piece | rows it closes | halves | size | depends on |
 |---|---|---|---|---|
-| B-04 · ACP auth | `F-CHAT-02` | **A `codex11`**: `tiller_acp` authenticate flow · **B `pi`**: auth banner/flow in `chat.rs` | M | drift item 2 (P69) must be ruled first |
-| B-10 · questions beyond buttons | `F-CHAT-24` `F-CHAT-25` `F-CHAT-26` `F-CHAT-27` | **A `codex11`**: ACP text-answer/cancel/expiry · **B `pi`**: Plan card, text answers, pending bar, expired state | M+M | drift item 2 (P69) must be ruled first |
+| B-04 · ACP auth | `F-CHAT-02` | **A `codex11`**: `tiller_acp` authenticate flow · **B `pi`**: auth banner/flow in `chat.rs` | M | ruled 2026-08-13: `tiller_agents/**` is `codex11`'s, P69 stale — dispatchable |
+| B-10 · questions beyond buttons | `F-CHAT-24` `F-CHAT-25` `F-CHAT-26` `F-CHAT-27` | **A `codex11`**: ACP text-answer/cancel/expiry · **B `pi`**: Plan card, text answers, pending bar, expired state | M+M | ruled 2026-08-13: same ruling — dispatchable |
 | B-50 · agent registry + install | `F-SET-17` `F-SET-18` | **A `codex11`**: registry + install/update in `tiller_agents` · **B `sonnet`**: page wiring | L | B on A |
 | B-51 · per-file icons | `F-CORE-FILE-08` `F-SET-21` | **A `sonnet`**: `icons.rs` extension lookup (the comet set just landed) + settings choice · **B `codex11`**: tree consumption | M | B on A |
 | B-52 · project identity, catalog half | `F-PRJ-12` `F-PER-07` | **`codex12`**: editable name/repo-type fields in the `session.rs` catalog + persistence | M | nothing |
@@ -134,12 +134,13 @@ P71-style into named halves. Unless a *depends* is stated, the piece dispatches 
 | B-56 · the worktree comment | `F-SID-11` (+ heals defective `F-CTRL-WORK-01`) | **A `codex12`**: comment column + socket persist · **B `pi`**: row render/edit | S+S | B on A |
 | B-57 · Remove Worktree, the honest route | `F-SID-15` | **A `pi`**: menu item · **B `codex12`**: action arm + confirmation | S | nothing |
 | B-58 · worktree location choice | `F-PRJ-17` `F-PRJ-18` | **A `codex11`**: `tiller_git` base override · **B `codex12`**: prompt control | S+S | nothing |
+| B-59 · attach to terminal | `F-TAB-25` | **A `codex12`**: adopt-pane on the model · **B `pi`**: the sidebar menu entry that calls it | S+S | nothing — orchestrator ruling 2026-08-13: the reference has it (`App/SidebarView.swift:717`, "Attach to Current Terminal" → `model.adoptPane`); P65's refusal was a builder's own scope call, overruled |
 
-### Unowned crates — pieces with no owner under the current map
+### Formerly unowned — ruled 2026-08-13: `tiller_usage/**` is `codex12`'s
 
 | piece | rows it closes | size | note |
 |---|---|---|---|
-| B-70 · usage transport seam | `F-CORE-USG-06` `F-CORE-USG-07` | S — a trait over `http.rs` + injected tests; pure refactor | `tiller_usage` needs an owner line first (as does B-62's backend half) |
+| B-70 · usage transport seam | `F-CORE-USG-06` `F-CORE-USG-07` | S — a trait over `http.rs` + injected tests; pure refactor | `codex12` (usage is session-scoped; also takes B-62's backend half) |
 
 ## The 10 defective rows — separate list, separate economics
 
@@ -158,8 +159,8 @@ the rest are four small pieces:
 
 - `F-SID-16` `F-SID-17` — sidebar drag reorder is **removed by design** and a no-reorder test
   pins it. That is a verdict question for the orchestrator/`pireview`, not a construction job.
-- `F-TAB-25` — attach-to-terminal was **explicitly refused in P65**. Cutting a piece would
-  overrule a scope decision this doc has no authority over; needs an orchestrator call first.
+- ~~`F-TAB-25`~~ — resolved: the orchestrator verified the reference has the feature
+  (`SidebarView.swift:717`) and overruled P65's self-made refusal → now seam piece **B-59**.
 
 Folded rather than pieced: `F-CORE-DOM-03` → B-26, `F-TAB-24` → B-31, `F-PER-07` → B-52,
 `F-AGENT-OMP-02` → D-1.
@@ -180,9 +181,9 @@ Folded rather than pieced: `F-CORE-DOM-03` → B-26, `F-TAB-24` → B-31, `F-PER
   file `sonnet` just inherited, and B-60 kills the page's two dead controls in one pass. Then
   B-61, then B-51 Half A (the comet icons are already in his tree).
 
-The two rulings this order needs from the orchestrator: drift item 2 (who owns `tiller_agents/**`
-— it gates B-04 and B-10) and an owner for `tiller_usage` (it gates B-70 and B-62's backend
-half).
+Both rulings this order needed have landed (2026-08-13 23:53): `tiller_agents/**` → `codex11`
+(P69 stale; adapters and transport are one subsystem), `tiller_usage/**` → `codex12` (usage is
+session-scoped). B-04, B-10, B-70 and B-62's backend half are all dispatchable.
 
 ## Honest remainder
 
