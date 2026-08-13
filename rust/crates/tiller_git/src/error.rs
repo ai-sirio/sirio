@@ -1,6 +1,7 @@
 //! Errors produced by the git layer.
 
 use std::fmt;
+use std::path::PathBuf;
 
 /// A failure while shelling out to `git`.
 ///
@@ -20,6 +21,14 @@ pub enum GitError {
         code: i32,
         /// Everything git wrote to stderr.
         stderr: String,
+    },
+    /// Staging was refused because one or more requested paths are
+    /// unmerged. The paths are included so the caller can resolve them or
+    /// choose a different mutation without discovering conflicts one at a
+    /// time.
+    ConflictedPaths {
+        /// Repo-relative conflicted paths that blocked staging.
+        paths: Vec<PathBuf>,
     },
     /// The process succeeded but its output could not be parsed. This is a
     /// bug in this crate's parser, not in git — surfaced so callers can
@@ -53,6 +62,15 @@ impl fmt::Display for GitError {
                 } else {
                     write!(f, "git exited with status {code}: {stderr}")
                 }
+            }
+            GitError::ConflictedPaths { paths } => {
+                let noun = if paths.len() == 1 { "path" } else { "paths" };
+                let paths = paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "refusing to stage conflicted {noun}: {paths}")
             }
             GitError::InvalidOutput { message } => {
                 write!(f, "failed to parse git output: {message}")
