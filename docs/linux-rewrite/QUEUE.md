@@ -1657,3 +1657,49 @@ Run it before any claim that the tree is written from scratch:
 ```bash
 Scripts/transplant-check.py            # 0 clean · 1 candidates · 2 references missing
 ```
+
+---
+
+## 2026-08-14, 01:45 — thirteen rows are one defect, and it has a mechanism
+
+Counted across the ledger tonight: `F-PRJ-04`, `F-SET-09`, `F-SET-16`, `F-SET-22`,
+`split_disabled_reason` behind `F-TAB-11`, `clone_repository` behind six `F-PRJ` rows, and
+`F-CORE-ACT-24/25/26`, `F-CORE-DOM-03`, `F-CORE-WSP-04/08`, `F-CORE-FILE-06`. **Thirteen instances
+of one shape: logic built, usually tested, reached by nothing.** It is comfortably the most common
+defect in this port — larger than any cluster of genuinely unbuilt features.
+
+It is not carelessness, it has a mechanism. A builder told to "implement X" writes X, writes a test
+for X, watches both go green, and reports done. **Compiles, is tested, and is reachable are three
+independent properties, and the first two are the only ones anything checks.** Nothing in the loop
+ever asked the third question until the ledger was phrased from the user's side.
+
+Verified independently rather than inherited, because the ledger was wrong in this exact way about
+`F-SID-16/17`. Whole-workspace references against references inside `crates/tiller/src/`:
+
+```
+partition 2/0 · ids_to_evict 2/0 · LayoutCommand 14/0 · WorkspaceTabViewState 5/0
+default_project_base 2/0 · FileSystemEventMonitor 4/0 · clone_repository 1/0
+```
+
+`LayoutCommand` is the sharpest: fourteen references, eight commands, a `classify` function, a green
+suite, and the application has never constructed one. `clone_repository`'s single reference is its
+own `pub use`.
+
+### Why this makes them the cheapest rows on the board
+
+Two briefs went out on it — **P77** (`codex11`, six `F-PRJ` rows on the unreachable clone backend)
+and **P78** (`codex12`, the seven `F-CORE` call sites). Neither is a feature build. Both are wiring
+jobs against code that already passes its own tests.
+
+**P78 carries the warning that matters**, because the obvious fix produces the defect again: adding a
+call that compiles is not the row. Before wiring, establish which of three cases each row is —
+genuinely absent, already done by an ad-hoc path beside the tested one (then *replace*, do not call
+both), or already satisfied by another route entirely (then say which, and wire nothing). Two code
+paths computing eviction differently is worse than one dead one.
+
+### The rule this suggests for every future brief
+
+**State the observable consequence, not the symbol.** `ids_to_evict` called and discarded passes no
+row; something must be evicted and the eviction must be visible. `WorkspaceTabViewState` "persists"
+only if it survives a relaunch. A brief that names a function invites the thirteenth instance; a
+brief that names what the user would see does not.
