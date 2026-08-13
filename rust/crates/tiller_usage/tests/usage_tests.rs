@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 
 use tiller_usage::{
     ClaudeUsageFetcher, ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason,
-    classify_failure,
-    UsageWindow, parse_claude_usage, reduce,
+    UsageWindow, classify_failure, parse_claude_usage, reduce,
 };
 
 /// A throwaway directory, removed on drop.
@@ -19,10 +18,8 @@ impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tiller-usage-test-{}-{unique}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("tiller-usage-test-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create temp dir");
         Self(path)
     }
@@ -131,7 +128,10 @@ fn a_missing_state_file_yields_an_unavailable_provider() {
 
     // And the bar shows "—", not a crash: the reducer accepts it.
     let state = reduce(outcome, &ProviderUsageState::Loading);
-    assert_eq!(state, ProviderUsageState::Unavailable(UsageReason::NotInstalled));
+    assert_eq!(
+        state,
+        ProviderUsageState::Unavailable(UsageReason::NotInstalled)
+    );
 }
 
 #[test]
@@ -187,10 +187,7 @@ fn data_old_enough_to_count_as_stale_is_marked_stale_not_current() {
     let raw = std::fs::read_to_string(&path).expect("read fixture");
 
     // The provider reported fine a while ago…
-    let loaded = reduce(
-        transcript_outcome(&raw),
-        &ProviderUsageState::Loading,
-    );
+    let loaded = reduce(transcript_outcome(&raw), &ProviderUsageState::Loading);
     assert_eq!(loaded, ProviderUsageState::Loaded(expected_usage()));
 
     // …the next refresh fails to reach it (bounded timeout): the last good

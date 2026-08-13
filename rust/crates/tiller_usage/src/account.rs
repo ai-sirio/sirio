@@ -1,0 +1,272 @@
+//! Local account state: whether a provider has credentials on this
+//! machine, read synchronously from disk.
+//!
+//! This answers the settings surface's "is this provider signed in"
+//! question with what the program can actually check — the same files the
+//! CLIs themselves write (`~/.codex/auth.json`, the Claude config
+//! directory, the macOS Keychain cookie). It never validates a token
+//! (that requires the bounded network/PTY fetch the usage bar runs) and
+//! never blocks the render thread on anything but a local file read.
+//!
+//! The honest rule: **presence, not validity**. A credential file existing
+//! means the user signed in at some point; nothing here proves the token
+//! still works. The settings surface labels this "Signed in" — weaker than
+//! "Active" (which would claim the API accepted the credential), stronger
+//! than "unknown" (which would throw away real state).
+
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+use crate::UsageProvider;
+use crate::claude::claude_has_credentials_at;
+use crate::codex::codex_has_credentials_at;
+
+/// Whether a provider has local credentials on this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalAccountState {
+    /// The provider stores usable credentials on this machine.
+    SignedIn,
+    /// The provider stores no credentials here.
+    SignedOut,
+    /// This platform has no local store for this provider's credentials.
+    /// The state is *unknown* — saying "signed out" would be a guess about
+    /// a store that does not exist (e.g. OpenCode Go's cookie lives in the
+    /// macOS Keychain; there is no such store on Linux).
+    NoLocalStore,
+}
+
+/// The identity fields shown for a locally authenticated agent account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentAccountIdentity {
+    pub logged_in: bool,
+    pub email: String,
+    pub organization: Option<String>,
+}
+
+impl AgentAccountIdentity {
+    /// Parses Claude's account JSON without treating malformed input as a
+    /// logged-out claim.
+    pub fn parse_claude_json(raw: &str) -> Option<Self> {
+        let json: Value = serde_json::from_str(raw).ok()?;
+        let account = json.get("account").unwrap_or(&json);
+        let email = first_string(account, &["email", "email_address"])?;
+        let organization = first_string(
+            account,
+            &["organization", "organizationName", "organization_name"],
+        );
+        Some(Self {
+            logged_in: true,
+            email,
+            organization,
+        })
+    }
+}
+
+/// Returns the first nonempty credential-status line emitted by Codex.
+pub fn parse_codex_identity(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+impl LocalAccountState {
+    /// The label shown in the settings surface. "Unknown" is the honest
+    /// answer when there is no local state to read.
+    pub fn label(self) -> &'static str {
+        match self {
+            LocalAccountState::SignedIn => "Signed in",
+            LocalAccountState::SignedOut => "Not signed in",
+            LocalAccountState::NoLocalStore => "Unknown",
+        }
+    }
+}
+
+impl UsageProvider {
+    /// The provider's local credential state, read synchronously from disk.
+    /// Never a network call, never a PTY: the settings surface runs this
+    /// wherever it constructs its model.
+    pub fn local_account_state(self) -> LocalAccountState {
+        match self {
+            UsageProvider::Claude => {
+                if claude_has_credentials_at(&claude_credentials_file()) {
+                    LocalAccountState::SignedIn
+                } else {
+                    LocalAccountState::SignedOut
+                }
+            }
+            UsageProvider::Codex => {
+                if codex_has_credentials_at(&codex_auth_file()) {
+                    LocalAccountState::SignedIn
+                } else {
+                    LocalAccountState::SignedOut
+                }
+            }
+            UsageProvider::OpenCodeGo => opencode_go_account_state(),
+            // Ollama Cloud has no local state anywhere in this app — its
+            // usage needs a session cookie there is no store for.
+            UsageProvider::OllamaCloud => LocalAccountState::NoLocalStore,
+        }
+    }
+}
+
+/// The Codex auth file: `$CODEX_HOME/auth.json`, else
+/// `~/.codex/auth.json` — the same precedence `codex` itself uses.
+fn codex_auth_file() -> PathBuf {
+    if let Some(home) = std::env::var_os("CODEX_HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home).join("auth.json");
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".codex/auth.json"))
+        .expect("HOME must be set")
+}
+
+/// The Claude credentials file: `$CLAUDE_CONFIG_DIR/.credentials.json`,
+/// else `~/.claude/.credentials.json` — the config directory `claude`
+/// itself uses.
+fn claude_credentials_file() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir).join(".credentials.json");
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".claude/.credentials.json"))
+        .expect("HOME must be set")
+}
+
+fn opencode_go_account_state() -> LocalAccountState {
+    #[cfg(target_os = "macos")]
+    {
+        // The cookie is written into the macOS Keychain by the Swift app
+        // (`com.tiller.usage`). Read it read-only; its presence is the
+        // account state.
+        if crate::opencode_go::opencode_go_has_keychain_cookie() {
+            LocalAccountState::SignedIn
+        } else {
+            LocalAccountState::SignedOut
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // The cookie lives in the macOS Keychain; on this platform there is
+        // no local store to read, so the state is genuinely unknown rather
+        // than "signed out" — a guess about a store that does not exist.
+        LocalAccountState::NoLocalStore
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_file(name: &str, contents: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tiller-account-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("credentials");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn labels_are_honest_words() {
+        assert_eq!(LocalAccountState::SignedIn.label(), "Signed in");
+        assert_eq!(LocalAccountState::SignedOut.label(), "Not signed in");
+        assert_eq!(LocalAccountState::NoLocalStore.label(), "Unknown");
+    }
+
+    #[test]
+    fn codex_credentials_presence_reads_the_auth_file() {
+        let path = temp_file(
+            "codex-valid",
+            r#"{"auth_mode":"oauth","tokens":{"access_token":"a","refresh_token":"r"}}"#,
+        );
+        assert!(codex_has_credentials_at(&path));
+        let _ = std::fs::remove_file(&path);
+
+        let path = temp_file("codex-missing-tokens", r#"{"auth_mode":"oauth"}"#);
+        assert!(
+            !codex_has_credentials_at(&path),
+            "an auth file without tokens is not a signed-in state"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        let path = temp_file("codex-garbage", "not json");
+        assert!(!codex_has_credentials_at(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn claude_credentials_presence_reads_oauth_or_api_key() {
+        // OAuth login: `claudeAiOauth` with an access token.
+        let path = temp_file(
+            "claude-oauth",
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x","refreshToken":"r"}}"#,
+        );
+        assert!(claude_has_credentials_at(&path));
+        let _ = std::fs::remove_file(&path);
+
+        // API-key login: `hashedToken`.
+        let path = temp_file("claude-key", r#"{"hashedToken":"abc"}"#);
+        assert!(claude_has_credentials_at(&path));
+        let _ = std::fs::remove_file(&path);
+
+        // An empty credentials file is not a signed-in state.
+        let path = temp_file("claude-empty", r#"{}"#);
+        assert!(!claude_has_credentials_at(&path));
+        let _ = std::fs::remove_file(&path);
+
+        let path = temp_file("claude-garbage", "not json");
+        assert!(!claude_has_credentials_at(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn providers_without_a_local_store_report_unknown() {
+        assert_eq!(
+            UsageProvider::OllamaCloud.local_account_state(),
+            LocalAccountState::NoLocalStore,
+            "Ollama Cloud has no local credential store anywhere"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            UsageProvider::OpenCodeGo.local_account_state(),
+            LocalAccountState::NoLocalStore,
+            "the OpenCode Go cookie lives in the macOS Keychain — on other \
+             platforms the state is unknown, not signed out"
+        );
+    }
+
+    #[test]
+    fn parses_account_identity_without_inventing_logged_in_state() {
+        assert_eq!(
+            AgentAccountIdentity::parse_claude_json(
+                r#"{"account":{"email":"user@example.com","organizationName":"Acme"}}"#
+            ),
+            Some(AgentAccountIdentity {
+                logged_in: true,
+                email: "user@example.com".into(),
+                organization: Some("Acme".into())
+            })
+        );
+        assert_eq!(AgentAccountIdentity::parse_claude_json("{}"), None);
+        assert_eq!(
+            parse_codex_identity("\n Logged in using ChatGPT - user@example.com\n"),
+            Some("Logged in using ChatGPT - user@example.com".into())
+        );
+        assert_eq!(parse_codex_identity("  \n"), None);
+    }
+}

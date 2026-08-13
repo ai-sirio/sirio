@@ -92,8 +92,7 @@ fn window(body: &str, key: &str, label: &str) -> Option<UsageWindow> {
     let block = block_after(body, key)?;
     let used_percent = integer_after(&block, "usagePercent")? as u8;
     let reset_in_sec = integer_after(&block, "resetInSec")?;
-    let resets_at = std::time::SystemTime::now()
-        .checked_add(Duration::from_secs(reset_in_sec));
+    let resets_at = std::time::SystemTime::now().checked_add(Duration::from_secs(reset_in_sec));
     Some(UsageWindow {
         label: label.to_string(),
         used_percent: used_percent.min(100),
@@ -167,14 +166,7 @@ fn integer_after(text: &str, key: &str) -> Option<u64> {
 /// Reads a keychain generic password via the `security` CLI, read-only.
 fn keychain_cookie(service: &str, account: &str) -> Option<String> {
     let output = Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-        ])
+        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -182,6 +174,16 @@ fn keychain_cookie(service: &str, account: &str) -> Option<String> {
     }
     let cookie = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!cookie.is_empty()).then_some(cookie)
+}
+
+/// Whether the OpenCode Go session cookie is present in the Keychain —
+/// **presence, not validity**. macOS only (the `security` CLI does not
+/// exist elsewhere); on other platforms there is no local store to read,
+/// and [`crate::UsageProvider::local_account_state`] says so instead of
+/// guessing.
+#[cfg(target_os = "macos")]
+pub fn opencode_go_has_keychain_cookie() -> bool {
+    keychain_cookie(KEYCHAIN_SERVICE, COOKIE_KEY).is_some()
 }
 
 /// The OpenCode Go usage fetcher. **Blocking** — bounded by [`TIMEOUT`];
@@ -264,15 +266,24 @@ $R[3]={weeklyUsage:{usagePercent:34,resetInSec:200}}
 $R[4]={monthlyUsage:$R[5]={usagePercent:71,resetInSec:300}}"#;
         let usage = extract_usage(page).expect("parses");
         assert_eq!(
-            usage.session.as_ref().map(|w| (w.used_percent, w.label.as_str())),
+            usage
+                .session
+                .as_ref()
+                .map(|w| (w.used_percent, w.label.as_str())),
             Some((12, "5h"))
         );
         assert_eq!(
-            usage.weekly.as_ref().map(|w| (w.used_percent, w.label.as_str())),
+            usage
+                .weekly
+                .as_ref()
+                .map(|w| (w.used_percent, w.label.as_str())),
             Some((34, "wk"))
         );
         assert_eq!(
-            usage.monthly.as_ref().map(|w| (w.used_percent, w.label.as_str())),
+            usage
+                .monthly
+                .as_ref()
+                .map(|w| (w.used_percent, w.label.as_str())),
             Some((71, "mo"))
         );
     }

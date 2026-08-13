@@ -523,7 +523,7 @@ fn run_connection(
     let _stderr_drain = thread::Builder::new()
         .name("tiller-acp-stderr".into())
         .spawn(move || {
-            let _ = block_on(drain_stderr(stderr));
+            block_on(drain_stderr(stderr));
         });
 
     let connection_event_tx = event_tx.clone();
@@ -766,10 +766,10 @@ fn run_connection(
     });
 
     terminate_and_reap_blocking(&child);
-    if let Ok(mut ack) = shutdown_ack.lock() {
-        if let Some(ack) = ack.take() {
-            let _ = ack.send(());
-        }
+    if let Ok(mut ack) = shutdown_ack.lock()
+        && let Some(ack) = ack.take()
+    {
+        let _ = ack.send(());
     }
     if !started.load(Ordering::Acquire) {
         let error = timeout_reason

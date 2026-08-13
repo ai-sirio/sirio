@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tiller_activity::{
     AgentActivityModel, AgentStatus, CATALOG_IDS, detect_content_status,
-    identify_agent_from_process_names, identify_agent_from_title,
+    identify_agent_from_process_names, identify_agent_from_title, inspect_process_names,
 };
 
 const P1: &str = "pane-1";
@@ -15,6 +15,46 @@ const P3: &str = "pane-3";
 
 fn now() -> Instant {
     Instant::now()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_process_inspection_reads_agent_names_from_proc_children() {
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+    use std::thread;
+
+    let root = std::env::temp_dir().join(format!("tiller-activity-proc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create process fixture directory");
+    let agent = root.join("codex");
+    symlink("/bin/sleep", &agent).expect("create codex test alias");
+    let mut child = Command::new("sh")
+        .args(["-c", &format!("{} 2", agent.display())])
+        .spawn()
+        .expect("spawn shell with agent child");
+    thread::sleep(Duration::from_millis(50));
+
+    let names = inspect_process_names(child.id()).expect("read Linux process tree");
+    assert!(names.iter().any(|name| name == "codex"));
+
+    let mut model = AgentActivityModel::new();
+    let transition = model
+        .refresh_process_signal(P1, child.id())
+        .expect("refresh process signal");
+    assert_eq!(
+        transition.map(|value| value.new),
+        Some(AgentStatus::Running)
+    );
+    assert!(model.is_process_owned(P1));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    model
+        .refresh_process_signal(P1, child.id())
+        .expect("refresh disappeared process signal");
+    assert_eq!(model.status(P1), None);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn spinner() -> String {
@@ -230,7 +270,8 @@ fn out_of_order_hook_push_does_not_regress_a_pane_status() {
         "the stale push reports the standing status"
     );
     assert_eq!(
-        stale.new, AgentStatus::Done,
+        stale.new,
+        AgentStatus::Done,
         "the rejected push changes nothing"
     );
     assert_eq!(
@@ -269,7 +310,6 @@ fn a_push_with_equal_timestamp_still_applies() {
     assert_eq!(applied.new, AgentStatus::NeedsInput);
     assert_eq!(model.status(P1), Some(AgentStatus::NeedsInput));
 }
-
 
 // ---------------------------------------------------------------------------
 // Spawn and restore

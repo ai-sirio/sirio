@@ -4,10 +4,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use tiller_agents::{
-    AgentAdapter, ClaudeCodeAdapter, CodexAdapter, OhMyPiAdapter, OpenCodeAdapter, PiAdapter,
-    json_string_literal, shell_quote,
+    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, OhMyPiAdapter, OpenCodeAdapter, PiAdapter,
+    discover_availability, find_executable_in_path, json_string_literal, shell_quote,
 };
 
 const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
@@ -105,6 +106,74 @@ fn omp_command_points_at_the_worktree_local_hook() {
         OhMyPiAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
         "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
     );
+}
+
+#[test]
+fn availability_reports_each_catalog_binary_from_current_path() {
+    let availability = discover_availability();
+    assert_eq!(
+        availability
+            .iter()
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>(),
+        vec!["claude", "codex", "opencode", "pi", "omp"]
+    );
+    let available = availability
+        .iter()
+        .filter(|agent| agent.is_available())
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    let unreachable = availability
+        .iter()
+        .filter(|agent| !agent.is_available())
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+    assert_eq!(available, ["claude", "codex", "pi"]);
+    assert_eq!(unreachable, ["opencode", "omp"]);
+    assert_eq!(available.len() + unreachable.len(), 5);
+    for agent in &availability {
+        assert_eq!(
+            agent.executable,
+            find_executable_in_path(agent.id, &std::env::var_os("PATH").unwrap()),
+            "{} must use the process PATH",
+            agent.id
+        );
+        assert_eq!(agent.is_available(), agent.executable.is_some());
+        assert_eq!(
+            agent.status_label(),
+            if agent.is_available() {
+                "Available"
+            } else {
+                "Not found on PATH"
+            }
+        );
+    }
+}
+
+#[test]
+fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
+    let root = std::env::temp_dir().join(format!("tiller-agent-path-test-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create fixture directory");
+    let executable = root.join("demo-agent");
+    std::fs::write(&executable, b"not launched").expect("write fixture");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make fixture executable");
+    }
+
+    let path = std::ffi::OsString::from(root.as_os_str());
+    assert_eq!(
+        find_executable_in_path("demo-agent", &path),
+        Some(executable)
+    );
+    assert_eq!(find_executable_in_path("missing-agent", &path), None);
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 
 // ---------------------------------------------------------------------------
@@ -371,5 +440,50 @@ fn each_adapter_prepare_creates_only_its_own_files() {
             PathBuf::from(".opencode/plugin/tiller-session.js"),
             PathBuf::from(".tiller/omp-hook.ts"),
         ]
+    );
+}
+
+#[test]
+fn prepare_keeps_real_global_config_mtimes_unchanged() {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set for this test"));
+    let global_files = [
+        home.join(".claude/settings.json"),
+        home.join(".codex/config.toml"),
+    ];
+    let before = global_files
+        .iter()
+        .map(|path| {
+            (
+                path.clone(),
+                std::fs::metadata(path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok()),
+            )
+        })
+        .collect::<Vec<_>>();
+    println!("global config mtimes before: {before:?}");
+
+    let worktree = TempDir::new();
+    for adapter in ALL {
+        adapter
+            .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+            .unwrap_or_else(|error| panic!("{} prepare failed: {error}", adapter.id()));
+    }
+
+    let after = global_files
+        .iter()
+        .map(|path| {
+            (
+                path.clone(),
+                std::fs::metadata(path)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok()),
+            )
+        })
+        .collect::<Vec<(PathBuf, Option<SystemTime>)>>();
+    println!("global config mtimes after: {after:?}");
+    assert_eq!(
+        before, after,
+        "prepare must not create or modify user-global agent config"
     );
 }

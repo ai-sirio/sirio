@@ -121,6 +121,14 @@ pub fn remove_worktree(repo: &Path, path: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Initializes `directory` as a Git repository without creating a commit.
+///
+/// This is the sidebar's explicit "Initialize Git" transition for folder
+/// projects. The caller owns the follow-up discovery and UI refresh.
+pub fn init_repository(directory: &Path) -> Result<(), GitError> {
+    git::run_accepting(&["init"], directory, &[0]).map(|_| ())
+}
+
 /// The checkout path of the worktree currently on `branch`, if any.
 fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, WorktreeError> {
     let output = git::run_accepting(&["worktree", "list", "--porcelain"], repo, &[0])?;
@@ -128,10 +136,10 @@ fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, Wor
     for line in output.stdout_string().lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
             current_path = Some(PathBuf::from(path));
-        } else if let Some(worktree_branch) = line.strip_prefix("branch refs/heads/") {
-            if worktree_branch == branch {
-                return Ok(current_path);
-            }
+        } else if let Some(worktree_branch) = line.strip_prefix("branch refs/heads/")
+            && worktree_branch == branch
+        {
+            return Ok(current_path);
         }
     }
     Ok(None)
@@ -183,5 +191,21 @@ mod tests {
             resolve_parent_directory(root, None),
             PathBuf::from("/Users/me/projects")
         );
+    }
+
+    #[test]
+    fn initializes_a_folder_as_a_git_repository() {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-init-git-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create folder");
+        init_repository(&root).expect("git init succeeds");
+        assert!(root.join(".git").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

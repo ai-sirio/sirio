@@ -30,13 +30,17 @@
 //! one transactional write. `flush_now` covers quit: the window-closed hook
 //! calls it so the last action is never lost to the debounce window.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use tiller_persistence::{
-    AppDatabase, PersistenceError, ProjectRecord, SidebarState, TabRecord, WorktreeRecord,
+    AppDatabase, AppSettings, PersistenceError, ProjectRecord, SidebarState, TabRecord,
+    TabStateRecord, WorktreeRecord,
 };
 use tiller_project::{DiscoveredProject, discover_project};
 
@@ -46,6 +50,75 @@ use tiller_project::{DiscoveredProject, discover_project};
 /// collapses into a single write; `flush_now` on quit makes the window
 /// lossless.
 pub const DEBOUNCE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Per-pane scrollback is bounded so a long-running terminal cannot make the
+/// session database grow without limit. The renderer-owned capture seam is
+/// still supplied by `tiller_terminal`; this is the persistence-side bound.
+pub const SCROLLBACK_LIMIT: usize = 256 * 1024;
+
+/// A pane mutation that can be replayed through the public `PaneNode` API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PaneEvent {
+    Split {
+        focused: usize,
+        new_id: usize,
+        direction: String,
+    },
+    SetRatio {
+        path: Vec<bool>,
+        ratio_millis: u16,
+    },
+    Close {
+        id: usize,
+    },
+}
+
+/// Opaque per-tab application state. The event history lets the host restore
+/// a generic `PaneNode` without exposing its private fields to persistence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTabState {
+    #[serde(default)]
+    pub root_id: Option<usize>,
+    pub pane_events: Vec<PaneEvent>,
+    #[serde(default)]
+    pub scrollback: BTreeMap<usize, Vec<u8>>,
+}
+
+impl SessionTabState {
+    pub fn with_root(root_id: usize) -> Self {
+        Self {
+            root_id: Some(root_id),
+            ..Self::default()
+        }
+    }
+
+    pub fn bounded_scrollback(bytes: &[u8]) -> Vec<u8> {
+        let start = bytes.len().saturating_sub(SCROLLBACK_LIMIT);
+        bytes[start..].to_vec()
+    }
+
+    fn encode(&self) -> String {
+        let bounded = Self {
+            root_id: self.root_id,
+            pane_events: self.pane_events.clone(),
+            scrollback: self
+                .scrollback
+                .iter()
+                .map(|(pane_id, bytes)| (*pane_id, Self::bounded_scrollback(bytes)))
+                .collect(),
+        };
+        serde_json::to_string(&bounded).expect("session tab state is serializable")
+    }
+
+    fn decode(raw: &str) -> Result<Self, serde_json::Error> {
+        let mut state: Self = serde_json::from_str(raw)?;
+        for bytes in state.scrollback.values_mut() {
+            let bounded = Self::bounded_scrollback(bytes);
+            *bytes = bounded;
+        }
+        Ok(state)
+    }
+}
 
 /// How often the flusher thread checks for pending work. A parked thread
 /// polling a mutex every 25 ms costs nothing.
@@ -68,11 +141,11 @@ const FLUSH_POLL: Duration = Duration::from_millis(25);
 ///    lands here, so a shipped app keeps exactly one database location
 ///    across upgrades.
 ///
-/// The stable path deliberately does NOT point at the shipping Swift app's
-/// "Application Support/Tiller" database: pointing the rewrite at it opened
+/// On macOS the stable path deliberately does NOT point at the shipping Swift
+/// app's "Application Support/Tiller" database: pointing the rewrite at it opened
 /// a 21 MB production file, ran its own migrations inside it, and left two
 /// foreign tables behind. The rewrite keeps its own state until it replaces
-/// the Swift app outright.
+/// the Swift app outright. On Linux the stable root is the XDG state directory.
 pub fn database_path() -> PathBuf {
     if let Some(path) = std::env::var_os("TILLER_DB") {
         return PathBuf::from(path);
@@ -92,11 +165,50 @@ pub fn database_path() -> PathBuf {
 
 /// The root under which every TillerRust database lives: the stable
 /// `tiller.sqlite` for installed binaries plus a `checkouts/` subtree with
-/// one directory per development checkout.
+/// one directory per development checkout. Linux uses XDG_STATE_HOME (or
+/// `$HOME/.local/state`); macOS retains Application Support.
 fn app_support_root() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Application Support/TillerRust"))
-        .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"))
+    #[cfg(target_os = "macos")]
+    {
+        return std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Library/Application Support/TillerRust"))
+            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let environment: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        app_support_root_for(&environment)
+    }
+}
+
+fn app_support_root_for(environment: &std::collections::BTreeMap<String, String>) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return environment
+            .get("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library/Application Support/TillerRust"))
+            .unwrap_or_else(|| std::env::temp_dir().join("TillerRust"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let state_home = environment
+            .get("XDG_STATE_HOME")
+            .map(Path::new)
+            .filter(|path| path.is_absolute())
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                environment
+                    .get("HOME")
+                    .map(Path::new)
+                    .filter(|path| path.is_absolute())
+                    .map(|home| home.join(".local/state"))
+            })
+            .unwrap_or_else(std::env::temp_dir);
+        state_home.join("TillerRust")
+    }
 }
 
 /// Resolves where this process's session database lives.
@@ -117,9 +229,7 @@ fn database_path_for(
     if let Some(checkout) = find_checkout_root(exe) {
         return scoped_database_path(app_support_root, &checkout);
     }
-    if use_cwd_fallback
-        && let Some(checkout) = find_checkout_root(cwd)
-    {
+    if use_cwd_fallback && let Some(checkout) = find_checkout_root(cwd) {
         return scoped_database_path(app_support_root, &checkout);
     }
     app_support_root.join("tiller.sqlite")
@@ -150,7 +260,10 @@ fn scoped_database_path(app_support_root: &Path, checkout_root: &Path) -> PathBu
     let hash = fnv1a64(checkout_root.to_string_lossy().as_bytes()) & 0xffff_ffff;
     app_support_root
         .join("checkouts")
-        .join(format!("{}-{hash:08x}", sanitize_filename_component(&basename)))
+        .join(format!(
+            "{}-{hash:08x}",
+            sanitize_filename_component(&basename)
+        ))
         .join("tiller.sqlite")
 }
 
@@ -173,7 +286,7 @@ fn sanitize_filename_component(name: &str) -> String {
 pub struct SessionTab {
     /// Tab title.
     pub title: String,
-    /// Surface kind: "chat" or "terminal" (the shell's `TabKind`).
+    /// Surface kind: "chat", "terminal", or "diff" (the shell's `TabKind`).
     pub kind: String,
     /// Whether this tab is the active one.
     pub active: bool,
@@ -188,6 +301,8 @@ pub struct SessionLayout {
     pub branch: String,
     /// The open tabs, in strip order.
     pub tabs: Vec<SessionTab>,
+    /// State aligned by tab index; missing entries mean a fresh tab state.
+    pub tab_states: Vec<SessionTabState>,
 }
 
 impl SessionLayout {
@@ -209,6 +324,7 @@ impl SessionLayout {
                     active: true,
                 },
             ],
+            tab_states: vec![SessionTabState::default(), SessionTabState::default()],
         }
     }
 }
@@ -220,6 +336,8 @@ pub struct RestoredSession {
     pub working_directory: PathBuf,
     /// Tabs to rebuild, in strip order.
     pub tabs: Vec<SessionTab>,
+    /// State aligned by tab index; malformed or missing rows are defaulted.
+    pub tab_states: Vec<SessionTabState>,
     /// Human-readable notes about what was skipped or repaired.
     pub diagnostics: Vec<String>,
 }
@@ -262,25 +380,22 @@ impl ProjectCatalog {
     }
 
     pub fn add(&mut self, path: &Path) -> Result<bool, String> {
-        let root_path = path
+        let input_path = path
             .canonicalize()
             .map_err(|error| format!("cannot add {}: {error}", path.display()))?;
-        if !root_path.is_dir() {
-            return Err(format!("{} is not a directory", root_path.display()));
+        if !input_path.is_dir() {
+            return Err(format!("{} is not a directory", input_path.display()));
         }
-        if self
-            .projects
-            .iter()
-            .any(|project| {
-                root_path == project.root_path
-                    || root_path.starts_with(&project.root_path)
-                    || project.root_path.starts_with(&root_path)
-            })
-        {
+        let discovered = discover_project(&input_path).map_err(|error| error.to_string())?;
+        let root_path = catalog_root(&input_path, &discovered);
+        if self.projects.iter().any(|project| {
+            root_path == project.root_path
+                || root_path.starts_with(&project.root_path)
+                || project.root_path.starts_with(&root_path)
+        }) {
             return Ok(false);
         }
 
-        let discovered = discover_project(&root_path).map_err(|error| error.to_string())?;
         self.projects.push(catalog_project(&root_path, discovered));
         Ok(true)
     }
@@ -292,15 +407,60 @@ impl ProjectCatalog {
         self.projects.remove(index);
         true
     }
+
+    /// Re-discovers one project after an external repository transition such
+    /// as `git init`, preserving its stable catalog identity.
+    pub fn refresh_project(&mut self, id: &str) -> Result<(), String> {
+        let index = self
+            .projects
+            .iter()
+            .position(|project| project.id == id)
+            .ok_or_else(|| format!("unknown project: {id}"))?;
+        let root = self.projects[index].root_path.clone();
+        let discovered = discover_project(&root).map_err(|error| error.to_string())?;
+        let mut replacement = catalog_project(&root, discovered);
+        replacement.id = id.to_string();
+        self.projects[index] = replacement;
+        Ok(())
+    }
+
+    /// Changes the application-level primary marker for a worktree. Git's
+    /// physical primary checkout is not moved; this is sidebar metadata that
+    /// controls the `Set Primary` / `Unset Primary` affordance.
+    pub fn set_primary(&mut self, path: &Path, primary: bool) -> Result<(), String> {
+        let Some(project_index) = self.projects.iter().position(|project| {
+            project
+                .worktrees
+                .iter()
+                .any(|worktree| worktree.path == path)
+        }) else {
+            return Err(format!("unknown worktree: {}", path.display()));
+        };
+        let Some(worktree_index) = self.projects[project_index]
+            .worktrees
+            .iter()
+            .position(|worktree| worktree.path == path)
+        else {
+            return Err(format!("unknown worktree: {}", path.display()));
+        };
+        if primary {
+            for worktree in &mut self.projects[project_index].worktrees {
+                worktree.is_primary = false;
+            }
+        }
+        self.projects[project_index].worktrees[worktree_index].is_primary = primary;
+        Ok(())
+    }
 }
 
 fn catalog_project(root_path: &Path, discovered: DiscoveredProject) -> CatalogProject {
+    let root_path = catalog_root(root_path, &discovered);
     let name = root_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| root_path.to_string_lossy().into_owned());
-    let (id, _) = path_ids(root_path);
+    let id = project_id(&root_path);
     let worktrees = discovered
         .worktrees
         .into_iter()
@@ -316,7 +476,7 @@ fn catalog_project(root_path: &Path, discovered: DiscoveredProject) -> CatalogPr
                         .unwrap_or_else(|| "HEAD".into())
                 }
             }),
-            path: worktree.path,
+            path: canonical_path(&worktree.path),
             is_primary: worktree.is_primary,
         })
         .collect();
@@ -343,11 +503,56 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 /// Different directories get different ids, so several sessions can coexist
 /// in one database without clobbering each other's records; the same
 /// directory always resolves to the same ids across launches.
-fn path_ids(working_directory: &Path) -> (String, String) {
-    let hash = fnv1a64(working_directory.to_string_lossy().as_bytes());
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The project identity is the primary checkout's path, not whichever linked
+/// worktree happened to be open when the catalog was saved. Git reports the
+/// primary worktree first, so this also works when the input itself has a
+/// `.git` file and is a linked checkout.
+fn catalog_root(input_path: &Path, discovered: &DiscoveredProject) -> PathBuf {
+    discovered
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.is_primary)
+        .map(|worktree| canonical_path(&worktree.path))
+        .unwrap_or_else(|| canonical_path(input_path))
+}
+
+fn project_id(root_path: &Path) -> String {
+    let hash = fnv1a64(canonical_path(root_path).to_string_lossy().as_bytes());
+    format!("p-{hash:016x}")
+}
+
+fn worktree_id(project_id: &str, index: usize) -> String {
+    format!("{project_id}-wt-{index}")
+}
+
+/// One id convention for every persisted catalog worktree. Existing callers
+/// that only have a working directory are resolved through Git so a linked
+/// worktree still gets the primary project's id and its stable list index.
+fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
+    let working_directory = canonical_path(working_directory);
+    if let Ok(discovered) = discover_project(&working_directory)
+        && discovered.is_git
+        && !discovered.worktrees.is_empty()
+    {
+        let root = catalog_root(&working_directory, &discovered);
+        let project_id = project_id(&root);
+        let index = discovered
+            .worktrees
+            .iter()
+            .position(|worktree| canonical_path(&worktree.path) == working_directory)
+            .unwrap_or(0);
+        return (root, project_id.clone(), worktree_id(&project_id, index));
+    }
+
+    let project_id = project_id(&working_directory);
     (
-        format!("p-{hash:016x}"),
-        format!("w-{hash:016x}"),
+        working_directory,
+        project_id.clone(),
+        worktree_id(&project_id, 0),
     )
 }
 
@@ -356,21 +561,26 @@ fn path_ids(working_directory: &Path) -> (String, String) {
 /// flag normalized), and the sidebar selection (read-modify-write so other
 /// projects' expansion state survives).
 fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), PersistenceError> {
-    let (project_id, worktree_id) = path_ids(&layout.working_directory);
-    let name = layout
-        .working_directory
+    let (project_root, project_id, worktree_id) = catalog_ids_for_path(&layout.working_directory);
+    let name = project_root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| layout.working_directory.to_string_lossy().into_owned());
-    let path = layout.working_directory.to_string_lossy().into_owned();
+        .unwrap_or_else(|| project_root.to_string_lossy().into_owned());
+    let project_path = project_root.to_string_lossy().into_owned();
+    let worktree_path = layout.working_directory.to_string_lossy().into_owned();
     let branch = if layout.branch.is_empty() {
         "main".to_string()
     } else {
         layout.branch.clone()
     };
 
-    db.save_project(&ProjectRecord::new(&project_id, &name, &path))?;
-    db.save_worktree(&WorktreeRecord::new(&worktree_id, &project_id, &branch, &path))?;
+    db.save_project(&ProjectRecord::new(&project_id, &name, &project_path))?;
+    db.save_worktree(&WorktreeRecord::new(
+        &worktree_id,
+        &project_id,
+        &branch,
+        &worktree_path,
+    ))?;
 
     let tabs: Vec<TabRecord> = layout
         .tabs
@@ -386,6 +596,16 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
         })
         .collect();
     db.save_tabs(&worktree_id, &tabs)?;
+    let states: Vec<TabStateRecord> = layout
+        .tab_states
+        .iter()
+        .enumerate()
+        .take(layout.tabs.len())
+        .map(|(index, state)| {
+            TabStateRecord::new(format!("{worktree_id}-tab-{index}"), state.encode())
+        })
+        .collect();
+    db.save_tab_states(&worktree_id, &states)?;
 
     // Sidebar selection: expand our project, select our worktree, and keep
     // every other project's expansion state intact.
@@ -426,16 +646,18 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
             .worktrees
             .iter()
             .enumerate()
-            .map(|(index, _)| format!("{}-wt-{index}", project.id))
+            .map(|(index, _)| worktree_id(&project.id, index))
             .collect();
-        for worktree in db.worktrees_of_project(&project.id)? {
-            if !desired_worktree_ids.contains(&worktree.id) {
-                db.remove_worktree(&worktree.id)?;
+        if project.is_git {
+            for worktree in db.worktrees_of_project(&project.id)? {
+                if !desired_worktree_ids.contains(&worktree.id) {
+                    db.remove_worktree(&worktree.id)?;
+                }
             }
         }
         for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
             let mut record = WorktreeRecord::new(
-                format!("{}-wt-{worktree_index}", project.id),
+                worktree_id(&project.id, worktree_index),
                 &project.id,
                 &worktree.branch,
                 worktree.path.to_string_lossy(),
@@ -460,18 +682,39 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
     };
     let mut projects = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut seen_project_ids = HashSet::new();
     for record in db.projects().unwrap_or_default() {
         let root = PathBuf::from(&record.root_path);
         if !root.is_dir() {
-            diagnostics.push(format!("project {} vanished: {}", record.name, root.display()));
+            diagnostics.push(format!(
+                "project {} vanished: {}",
+                record.name,
+                root.display()
+            ));
             continue;
         }
         match discover_project(&root) {
-            Ok(discovered) => projects.push(catalog_project(&root, discovered)),
-            Err(error) => diagnostics.push(format!("project {} could not be discovered: {error}", record.name)),
+            Ok(discovered) => {
+                let project = catalog_project(&root, discovered);
+                if seen_project_ids.insert(project.id.clone()) {
+                    projects.push(project);
+                } else {
+                    diagnostics.push(format!(
+                        "project {} duplicates an existing repository and was merged",
+                        record.name
+                    ));
+                }
+            }
+            Err(error) => diagnostics.push(format!(
+                "project {} could not be discovered: {error}",
+                record.name
+            )),
         }
     }
-    RestoredCatalog { projects, diagnostics }
+    RestoredCatalog {
+        projects,
+        diagnostics,
+    }
 }
 
 /// Reads the persisted layout back. Never fails: any database problem is
@@ -488,7 +731,11 @@ pub fn restore(database: &Path, fallback_directory: &Path) -> RestoredSession {
         Ok(db) => db,
         Err(error) => {
             eprintln!("[session] database unavailable ({error}); using the default layout");
-            return default_restored(fallback_directory);
+            let mut fallback = default_restored(fallback_directory);
+            fallback
+                .diagnostics
+                .push(format!("database unavailable: {error}"));
+            return fallback;
         }
     };
     restore_from(&db, fallback_directory)
@@ -530,12 +777,23 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
         }
     };
 
+    let state_records = match db.tab_states_of_worktree(&worktree.id) {
+        Ok(records) => records
+            .into_iter()
+            .map(|record| (record.tab_id, record.state))
+            .collect::<BTreeMap<_, _>>(),
+        Err(error) => {
+            diagnostics.push(format!("failed to read tab state: {error}"));
+            BTreeMap::new()
+        }
+    };
     let mut tabs = Vec::new();
+    let mut tab_states = Vec::new();
     for record in records {
-        // Only the surfaces this shell can rebuild. Browser/editor/diff
-        // tabs are skipped with a note, mirroring the Swift app's
-        // `unavailableContent` diagnostic.
-        if record.kind != "chat" && record.kind != "terminal" {
+        // Only the surfaces this shell can rebuild. Browser/editor tabs are
+        // skipped with a note, mirroring the Swift app's `unavailableContent`
+        // diagnostic; diff is a first-class shell surface.
+        if record.kind != "chat" && record.kind != "terminal" && record.kind != "diff" {
             diagnostics.push(format!(
                 "tab {:?} ({}) is not restorable in this build; skipped",
                 record.title, record.kind
@@ -547,6 +805,23 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
             kind: record.kind,
             active: record.is_active,
         });
+        let tab_title = tabs
+            .last()
+            .map(|tab| tab.title.as_str())
+            .unwrap_or("unknown");
+        let tab_state = match state_records.get(&record.id) {
+            Some(raw) => match SessionTabState::decode(raw) {
+                Ok(state) => state,
+                Err(error) => {
+                    diagnostics.push(format!(
+                        "tab state for {tab_title:?} is invalid; using empty pane state: {error}"
+                    ));
+                    SessionTabState::default()
+                }
+            },
+            None => SessionTabState::default(),
+        };
+        tab_states.push(tab_state);
     }
 
     // The invariant is at most one active tab; if the stored layout has
@@ -558,6 +833,7 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
     RestoredSession {
         working_directory,
         tabs,
+        tab_states,
         diagnostics,
     }
 }
@@ -566,6 +842,7 @@ fn default_restored(fallback_directory: &Path) -> RestoredSession {
     RestoredSession {
         working_directory: fallback_directory.to_path_buf(),
         tabs: SessionLayout::default_in(fallback_directory.to_path_buf()).tabs,
+        tab_states: SessionLayout::default_in(fallback_directory.to_path_buf()).tab_states,
         diagnostics: Vec::new(),
     }
 }
@@ -637,26 +914,36 @@ impl SessionStore {
         // behaviour is exactly as before — the weak upgrade only fails at
         // teardown.
         let inner = Arc::downgrade(&self.inner);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(FLUSH_POLL);
-            let Some(inner) = inner.upgrade() else {
-                return;
-            };
-            flush_if_due(&inner);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(FLUSH_POLL);
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
+                flush_if_due(&inner);
+            }
         });
     }
 
     /// Records the current layout; the next flush after the debounce
     /// interval writes it. Cheap: just swaps a snapshot.
     pub fn schedule(&self, layout: SessionLayout) {
-        *self.inner.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(layout);
+        *self
+            .inner
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(layout);
     }
 
     /// Persists the user's complete project catalog while preserving tabs on
     /// worktrees that are still present. Project discovery happens before this
     /// method is called, so the database write remains small and deterministic.
     pub fn schedule_catalog(&self, catalog: &ProjectCatalog) {
-        let mut db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(db) = db.as_mut() else {
             return;
         };
@@ -666,6 +953,97 @@ impl SessionStore {
             }
             Err(error) => {
                 eprintln!("[session] failed to persist project catalog: {error}");
+            }
+        }
+    }
+
+    /// Loads the durable application settings, or their defaults when the
+    /// database is unavailable or contains an invalid value.
+    ///
+    /// This is the persistence seam for the host/UI layer. The settings
+    /// editor owns its in-memory values; callers must invoke
+    /// [`SessionStore::save_settings`] after a user-visible change.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn load_settings(&self) -> AppSettings {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return AppSettings::default();
+        };
+        match db.settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                eprintln!("[session] failed to load settings: {error}");
+                AppSettings::default()
+            }
+        }
+    }
+
+    /// Saves the complete application settings in one transaction.
+    ///
+    /// Persistence failures are logged and do not make the UI fail. This
+    /// matches the session layout's best-effort failure policy.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn save_settings(&self, settings: &AppSettings) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match db.save_settings(settings) {
+            Ok(()) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!("[session] failed to persist settings: {error}");
+            }
+        }
+    }
+
+    /// Loads pane-to-agent-session associations, or an empty map when the
+    /// database is unavailable.
+    pub fn load_session_refs(&self) -> BTreeMap<String, String> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return BTreeMap::new();
+        };
+        match db.session_refs() {
+            Ok(references) => references,
+            Err(error) => {
+                eprintln!("[session] failed to load session references: {error}");
+                BTreeMap::new()
+            }
+        }
+    }
+
+    /// Saves one pane-to-agent-session association immediately. This is a
+    /// hook write rather than a layout snapshot, so it must not wait for the
+    /// layout debounce window.
+    pub fn save_session_ref(&self, session: &str, reference: &str) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match db.save_session_ref(session, reference) {
+            Ok(()) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!("[session] failed to persist session reference: {error}");
             }
         }
     }
@@ -680,13 +1058,22 @@ impl SessionStore {
     /// debounce window. Called on window close so quitting never loses the
     /// last change.
     pub fn flush_now(&self) {
+        *self
+            .inner
+            .next_flush
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
         flush_if_due(&self.inner);
     }
 
     /// Whether the database is usable (false in fallback mode).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn persistence_enabled(&self) -> bool {
-        self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+        self.inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 }
 
@@ -718,9 +1105,9 @@ fn flush_if_due(inner: &SessionInner) {
         return;
     }
     let mut db = inner
-            .db
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .db
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(db) = db.as_mut() else {
         return; // fallback mode: the layout is deliberately forgotten
     };
@@ -738,6 +1125,7 @@ fn flush_if_due(inner: &SessionInner) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use tiller_persistence::{AppearanceMode, FileIconTheme, ProjectRecord};
 
     struct TempDir(PathBuf);
 
@@ -767,11 +1155,21 @@ mod tests {
         }
     }
 
+    fn run_git(directory: &Path, arguments: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {:?} failed: {status}", arguments);
+    }
+
     fn layout(path: &Path, tabs: Vec<SessionTab>) -> SessionLayout {
         SessionLayout {
             working_directory: path.to_path_buf(),
             branch: "main".to_string(),
             tabs,
+            tab_states: Vec::new(),
         }
     }
 
@@ -812,11 +1210,152 @@ mod tests {
             restored.working_directory, working_directory,
             "the worktree directory comes back"
         );
-        assert_eq!(restored.tabs, three_tabs(), "tabs, order and active flag come back");
+        assert_eq!(
+            restored.tabs,
+            three_tabs(),
+            "tabs, order and active flag come back"
+        );
         assert!(
             restored.diagnostics.is_empty(),
             "a healthy database restores without diagnostics"
         );
+    }
+
+    #[test]
+    fn pane_state_is_dumped_and_restored_with_the_tab() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("pane-state");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let state = SessionTabState {
+            root_id: Some(0),
+            pane_events: vec![PaneEvent::Split {
+                focused: 0,
+                new_id: 1,
+                direction: "horizontal".into(),
+            }],
+            scrollback: std::collections::BTreeMap::from([(0, b"P28_SCROLLBACK_NONCE".to_vec())]),
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![SessionTab {
+                title: "Terminal".into(),
+                kind: "terminal".into(),
+                active: true,
+            }],
+            tab_states: vec![state.clone()],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+        let db = AppDatabase::open(&db_path).expect("reopen state database");
+        let worktree_id = catalog_ids_for_path(&working_directory).2;
+        let written = db
+            .tab_states_of_worktree(&worktree_id)
+            .expect("dump written tab state");
+        assert_eq!(written.len(), 1);
+        assert!(written[0].state.contains("horizontal"));
+
+        let restored = restore(&db_path, Path::new("/tmp"));
+        assert_eq!(restored.tab_states, vec![state]);
+        assert_eq!(restored.tabs[0].title, "Terminal");
+    }
+
+    #[test]
+    fn a_changes_tab_saves_and_restores_with_the_other_surfaces() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("changes-roundtrip");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let mut tabs = three_tabs();
+        tabs.insert(
+            1,
+            SessionTab {
+                title: "Changes".into(),
+                kind: "diff".into(),
+                active: false,
+            },
+        );
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&working_directory, tabs.clone()));
+        store.flush_now();
+
+        let restored = restore(&db_path, Path::new("/nonexistent/fallback"));
+        assert_eq!(restored.tabs, tabs, "Changes remains a persisted peer tab");
+    }
+
+    #[test]
+    fn settings_round_trip_through_session_store_and_sqlite_rows() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("settings");
+        let settings = AppSettings {
+            appearance: AppearanceMode::Dark,
+            ui_font_size: 17,
+            terminal_font_size: 19,
+            file_icon_theme: FileIconTheme::Material,
+            control_socket_enabled: false,
+        };
+
+        {
+            let store = SessionStore::open(&db_path);
+            store.save_settings(&settings);
+            assert_eq!(store.load_settings(), settings);
+        }
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open settings database");
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT key, value FROM setting ORDER BY key")
+            .expect("prepare setting query")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query setting rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read setting rows");
+        assert_eq!(
+            rows,
+            vec![
+                ("appearance.fileIconTheme".into(), "material".into()),
+                ("appearance.terminalFontSize".into(), "19".into()),
+                ("appearance.theme".into(), "dark".into()),
+                ("appearance.uiFontSize".into(), "17".into()),
+                ("controlSocket.enabled".into(), "false".into()),
+            ]
+        );
+        println!("sqlite setting rows: {rows:?}");
+
+        let reopened = SessionStore::open(&db_path);
+        assert_eq!(reopened.load_settings(), settings);
+    }
+
+    #[test]
+    fn scrollback_is_bounded_at_the_persistence_seam() {
+        let mut bytes = vec![b'a'; 17];
+        bytes.extend(vec![b'x'; SCROLLBACK_LIMIT]);
+        let bounded = SessionTabState::bounded_scrollback(&bytes);
+        assert_eq!(bounded.len(), SCROLLBACK_LIMIT);
+        assert!(bounded.iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn tab_state_lives_in_its_own_schema_table() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("tab-state-schema");
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout(&dir.0, three_tabs()));
+        store.flush_now();
+        drop(store);
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open tab database");
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .expect("prepare table query")
+            .query_map([], |row| row.get(0))
+            .expect("query tab schema")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read tables");
+        assert!(tables.iter().any(|table| table == "tab_state"));
     }
 
     #[test]
@@ -833,6 +1372,13 @@ mod tests {
         let restored = restore(&db_path, Path::new("/tmp"));
         assert_eq!(restored.working_directory, PathBuf::from("/tmp"));
         assert_eq!(restored.tabs.len(), 2, "default chat + terminal");
+        assert!(
+            restored
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("database unavailable")),
+            "fallback restore must expose the corrupt-store diagnostic"
+        );
 
         // The store must also survive in fallback mode: scheduling is safe
         // and produces no writes.
@@ -918,6 +1464,31 @@ mod tests {
     }
 
     #[test]
+    fn flush_now_persists_a_new_snapshot_inside_a_later_debounce_window() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("flush-new-snapshot");
+        let store = SessionStore::open_with(&db_path, Duration::from_secs(60));
+        let first = layout(&dir.0, three_tabs());
+        store.schedule(first);
+        store.flush_now();
+
+        let mut changed_tabs = three_tabs();
+        changed_tabs[0].title = "Changed".into();
+        store.schedule(layout(&dir.0, changed_tabs.clone()));
+        store.flush_now();
+
+        assert_eq!(
+            store.writes(),
+            2,
+            "quit flush must not lose the latest state"
+        );
+        assert_eq!(
+            restore(&db_path, Path::new("/tmp")).tabs[0].title,
+            "Changed"
+        );
+    }
+
+    #[test]
     fn a_missing_worktree_directory_falls_back_with_a_diagnostic() {
         let dir = TempDir::new();
         let db_path = dir.db_path("missing-dir");
@@ -954,7 +1525,7 @@ mod tests {
 
         assert_eq!(catalog.projects().len(), 2);
         assert!(catalog.projects()[0].is_git);
-        assert!(catalog.projects()[0].worktrees.len() >= 1);
+        assert!(!catalog.projects()[0].worktrees.is_empty());
         assert!(!catalog.projects()[1].is_git);
         assert!(catalog.projects()[1].worktrees.is_empty());
     }
@@ -973,6 +1544,87 @@ mod tests {
         assert!(catalog.add(&bare_root).expect("discover bare repo"));
         assert_eq!(catalog.projects().len(), 1);
         assert!(catalog.projects()[0].worktrees.is_empty());
+    }
+
+    #[test]
+    fn restoring_a_catalog_with_primary_and_linked_rows_keeps_one_project_identity() {
+        let dir = TempDir::new();
+        let primary = dir.0.join("repo");
+        let linked = dir.0.join("repo-linked");
+        std::fs::create_dir_all(&primary).expect("repo dir");
+        run_git(&primary, &["init", "--quiet"]);
+        run_git(
+            &primary,
+            &["config", "user.email", "tiller-tests@example.com"],
+        );
+        run_git(&primary, &["config", "user.name", "Tiller Tests"]);
+        std::fs::write(primary.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&primary, &["add", "README"]);
+        run_git(&primary, &["commit", "--quiet", "-m", "fixture"]);
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", "linked"])
+            .arg(&linked)
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree add");
+        assert!(status.success(), "git worktree add failed: {status}");
+
+        let database = dir.db_path("legacy-catalog");
+        let db = AppDatabase::open(&database).expect("open database");
+        db.save_project(&ProjectRecord::new(
+            "legacy-primary",
+            "repo",
+            primary.to_string_lossy(),
+        ))
+        .expect("save primary project");
+        db.save_project(&ProjectRecord::new(
+            "legacy-linked",
+            "repo-linked",
+            linked.to_string_lossy(),
+        ))
+        .expect("save linked project");
+        drop(db);
+
+        let restored = restore_catalog(&database);
+        assert_eq!(restored.projects.len(), 1);
+        assert_eq!(restored.projects[0].root_path, primary);
+        assert_eq!(restored.projects[0].worktrees.len(), 2);
+
+        let store = SessionStore::open(&database);
+        store.schedule_catalog(&ProjectCatalog::from_projects(restored.projects.clone()));
+        let normalized = AppDatabase::open(&database).expect("reopen normalized database");
+        let projects = normalized.projects().expect("read normalized projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, restored.projects[0].id);
+        let worktrees = normalized
+            .worktrees_of_project(&projects[0].id)
+            .expect("read normalized worktrees");
+        assert_eq!(
+            worktrees
+                .iter()
+                .map(|worktree| worktree.id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                worktree_id(&projects[0].id, 0),
+                worktree_id(&projects[0].id, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_references_survive_store_reopen() {
+        let dir = TempDir::new();
+        let database = dir.db_path("session-refs");
+        {
+            let store = SessionStore::open(&database);
+            store.save_session_ref("pane-nonce", "agent-session-nonce");
+        }
+
+        let reopened = SessionStore::open(&database);
+        assert_eq!(
+            reopened.load_session_refs().get("pane-nonce"),
+            Some(&"agent-session-nonce".to_string())
+        );
     }
 
     #[test]
@@ -1006,6 +1658,7 @@ mod tests {
             working_directory: surviving.clone(),
             branch: "main".into(),
             tabs: vec![],
+            tab_states: vec![],
         });
         store.flush_now();
         let mut catalog = ProjectCatalog::default();
@@ -1017,11 +1670,16 @@ mod tests {
 
         let restored = restore_catalog(&db_path);
         assert_eq!(restored.projects.len(), 1);
-        assert_eq!(restored.projects[0].root_path, surviving.canonicalize().unwrap());
-        assert!(restored
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.contains("vanished")));
+        assert_eq!(
+            restored.projects[0].root_path,
+            surviving.canonicalize().unwrap()
+        );
+        assert!(
+            restored
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("vanished"))
+        );
     }
 
     // ---- database path scoping -----------------------------------------
@@ -1114,9 +1772,7 @@ mod tests {
         // A shipped/installed binary (inside an .app bundle, in ~/.cargo/bin,
         // anywhere without a `.git` ancestor) must keep the user-wide path.
         let dir = TempDir::new();
-        let installed = dir
-            .0
-            .join("Applications/Tiller.app/Contents/MacOS/tiller");
+        let installed = dir.0.join("Applications/Tiller.app/Contents/MacOS/tiller");
         std::fs::create_dir_all(installed.parent().expect("bundle dir")).expect("bundle");
         std::fs::write(&installed, b"").expect("binary");
 
@@ -1166,6 +1822,29 @@ mod tests {
             path,
             dir.0.join("tiller.sqlite"),
             "a git worktree gets its own database"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_session_state_uses_xdg_state_home_and_documented_fallback() {
+        let environment = std::collections::BTreeMap::from([
+            ("HOME".to_string(), "/home/alice".to_string()),
+            (
+                "XDG_STATE_HOME".to_string(),
+                "/run/user/1000/state".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            app_support_root_for(&environment),
+            PathBuf::from("/run/user/1000/state/TillerRust")
+        );
+
+        let fallback =
+            std::collections::BTreeMap::from([("HOME".to_string(), "/home/alice".to_string())]);
+        assert_eq!(
+            app_support_root_for(&fallback),
+            PathBuf::from("/home/alice/.local/state/TillerRust")
         );
     }
 }

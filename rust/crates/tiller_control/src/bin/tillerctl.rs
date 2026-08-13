@@ -626,10 +626,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .ok_or_else(|| "Missing changes path".to_string())?;
             require_ok(
                 socket,
-                &tiller_control::protocol::request::changes_stage(
-                    path,
-                    parsed.value("worktree"),
-                ),
+                &tiller_control::protocol::request::changes_stage(path, parsed.value("worktree")),
             )
         }
         ("changes", "unstage") => {
@@ -640,10 +637,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .ok_or_else(|| "Missing changes path".to_string())?;
             require_ok(
                 socket,
-                &tiller_control::protocol::request::changes_unstage(
-                    path,
-                    parsed.value("worktree"),
-                ),
+                &tiller_control::protocol::request::changes_unstage(path, parsed.value("worktree")),
             )
         }
         ("changes", "discard") => {
@@ -654,10 +648,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .ok_or_else(|| "Missing changes path".to_string())?;
             require_ok(
                 socket,
-                &tiller_control::protocol::request::changes_discard(
-                    path,
-                    parsed.value("worktree"),
-                ),
+                &tiller_control::protocol::request::changes_discard(path, parsed.value("worktree")),
             )
         }
         ("changes", "stage-all") => require_ok(

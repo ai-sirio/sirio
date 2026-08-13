@@ -110,9 +110,33 @@ fn migrate_v3(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v4 — opaque per-tab surface state. The application owns the JSON payload
+/// (pane tree history and, once the terminal seam is available, scrollback),
+/// while SQLite owns its lifetime alongside the tab row.
+fn migrate_v4(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tab_state (
+            tab_id TEXT PRIMARY KEY REFERENCES tab(id) ON DELETE CASCADE,
+            state TEXT NOT NULL
+        );",
+    )
+}
+
+/// v5 — stable agent session references reported by control hooks. The pane
+/// id is the key agents use when they reconnect after a process restart.
+fn migrate_v5(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_ref (
+            session TEXT PRIMARY KEY,
+            reference TEXT NOT NULL
+        );",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
-pub(crate) const MIGRATIONS: &[Migration] = &[migrate_v1, migrate_v2, migrate_v3];
+pub(crate) const MIGRATIONS: &[Migration] =
+    &[migrate_v1, migrate_v2, migrate_v3, migrate_v4, migrate_v5];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
 /// current, or older, are handled; a database from a *newer* schema version

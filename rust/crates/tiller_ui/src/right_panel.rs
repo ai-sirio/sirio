@@ -5,44 +5,27 @@
 //! refresh callbacks with its project store without changing the row layout.
 
 use gpui::{
-    AnyElement, App, Context, EventEmitter, FontWeight, MouseButton, PromptLevel, Render, Rgba,
-    Task, Window, div, prelude::*, px, uniform_list,
+    AnyElement, Context, EventEmitter, FontWeight, MouseButton, Render, Rgba, Task, Window, div,
+    prelude::*, px, uniform_list,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tiller_git::{
-    DiffLine, DiffOrigin, DiffStat, FileDiff, GitError, StatusEntry, diff_entry, discard,
-    discard_all, stage, stage_all, stats, status, unstage,
-};
+use tiller_git::status;
 use tiller_theme::Theme;
 
 use crate::sidebar::icons::{Icon, IconElement};
 
 const PANEL_WIDTH: f32 = 405.0;
 const HEADER_HEIGHT: f32 = 40.0;
+/// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
 const TOOLBAR_HEIGHT: f32 = 34.0;
-const ROW_HEIGHT: f32 = 24.0;
+/// File-tree rows: 12.5px text at 30px, the app's single-line row rhythm.
+pub(crate) const ROW_HEIGHT: f32 = 30.0;
 const ACTIVITY_HEADER_HEIGHT: f32 = 27.0;
-const ACTIVITY_ROW_HEIGHT: f32 = 43.0;
-/// How long a Changes view may remain stale after an external edit.
-///
-/// The poll is deliberately serialized with manual git work below: a slow
-/// status call cannot cause another call to pile up on the background
-/// executor, and a single panel owns only one long-lived timer.
-const CHANGES_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Which segment is visible in the panel.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PanelTab {
-    /// The on-disk directory tree.
-    #[default]
-    Files,
-    /// The checkout's changed paths and hunks.
-    Changes,
-}
-
+/// Two-line activity row: 5 + 18 + 2 + 15 + 5, waku's card math.
+const ACTIVITY_ROW_HEIGHT: f32 = 48.0;
 /// Status shown at the trailing edge of an activity row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivityStatus {
@@ -118,51 +101,13 @@ struct FileRow {
     depth: usize,
 }
 
-#[derive(Clone, Debug)]
-enum ChangeRow {
-    File {
-        entry: StatusEntry,
-        stat: DiffStat,
-        expanded: bool,
-    },
-    Hunk {
-        path: PathBuf,
-        header: String,
-    },
-    Line {
-        path: PathBuf,
-        line: DiffLine,
-    },
-}
-
-#[derive(Default)]
-struct GitSnapshot {
-    entries: Vec<StatusEntry>,
-    diffs: HashMap<PathBuf, FileDiff>,
-    stats: HashMap<PathBuf, DiffStat>,
-    /// The on-disk directory tree, built off the UI thread together with
-    /// the git work so the refresh path never touches the filesystem on
-    /// the render thread.
-    file_tree: Vec<FileNode>,
-}
-
-/// The GPUI right panel for one checkout.
+/// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
     repo_root: PathBuf,
-    tab: PanelTab,
-    activity_expanded: bool,
-    activity: Vec<ActivitySurface>,
     file_tree: Vec<FileNode>,
     changed_paths: HashSet<PathBuf>,
-    entries: Vec<StatusEntry>,
-    diffs: HashMap<PathBuf, FileDiff>,
-    stats: HashMap<PathBuf, DiffStat>,
-    expanded_changes: HashSet<PathBuf>,
-    git_task: Option<Task<()>>,
-    git_error: Option<String>,
-    /// One polling loop per panel, armed on first render. The detached loop
-    /// holds only a weak entity handle and exits as soon as the panel is gone.
-    changes_refresh_task_started: bool,
+    activity_expanded: bool,
+    activity: Vec<ActivitySurface>,
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
     walk_task: Option<Task<()>>,
@@ -170,53 +115,36 @@ pub struct RightPanel {
     /// completes after a newer one was requested must not apply its
     /// result late.
     walk_generation: u64,
+    /// One polling loop per panel, armed on first render.
+    refresh_started: bool,
 }
 
 impl RightPanel {
-    /// Create a panel rooted at a real checkout path.
+    /// Creates the panel for one checkout.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
-        Self::with_activity(repo_root, Vec::new())
-    }
-
-    /// Create a panel with the host application's current open surfaces.
-    pub fn with_activity(repo_root: impl Into<PathBuf>, activity: Vec<ActivitySurface>) -> Self {
-        let panel = Self {
+        Self {
             repo_root: repo_root.into(),
-            tab: PanelTab::Files,
-            activity_expanded: true,
-            activity,
             file_tree: Vec::new(),
             changed_paths: HashSet::new(),
-            entries: Vec::new(),
-            diffs: HashMap::new(),
-            stats: HashMap::new(),
-            expanded_changes: HashSet::new(),
-            git_task: None,
-            git_error: None,
-            changes_refresh_task_started: false,
+            activity_expanded: false,
+            activity: Vec::new(),
             walk_task: None,
             walk_generation: 0,
-        };
-        panel
+            refresh_started: false,
+        }
     }
 
-    /// Set the visible Files/Changes segment.
-    pub fn set_tab(&mut self, tab: PanelTab, cx: &mut Context<Self>) {
-        self.tab = tab;
-        cx.notify();
-    }
-
-    /// Return the current segment, useful to the host application's routing.
-    #[must_use]
-    pub fn tab(&self) -> PanelTab {
-        self.tab
+    /// Creates the panel with an initial activity section.
+    pub fn with_activity(repo_root: impl Into<PathBuf>, activity: Vec<ActivitySurface>) -> Self {
+        Self {
+            activity,
+            ..Self::new(repo_root)
+        }
     }
 
     /// Replace the host-provided activity rows. The host (`main.rs`) calls
-    /// this every render to stay live with `Chat`'s own state, same as it
-    /// re-fetches `Theme::get(cx)` every render rather than caching a slice
-    /// of it — so this must no-op on an unchanged value or every render
-    /// would `notify()` and trigger another render, forever.
+    /// this every render to stay live with `Chat`'s own state; it no-ops on
+    /// an unchanged value to avoid notifying every render.
     pub fn set_activity(&mut self, activity: Vec<ActivitySurface>, cx: &mut Context<Self>) {
         if self.activity == activity {
             return;
@@ -225,212 +153,51 @@ impl RightPanel {
         cx.notify();
     }
 
-    fn apply_snapshot(&mut self, snapshot: GitSnapshot) {
-        self.expanded_changes
-            .retain(|path| snapshot.entries.iter().any(|entry| &entry.path == path));
-        self.entries = snapshot.entries;
-        self.changed_paths = self
-            .entries
-            .iter()
-            .map(|entry| entry.path.clone())
-            .collect();
-        self.stats = snapshot.stats;
-        self.diffs = snapshot.diffs;
-        self.file_tree = snapshot.file_tree;
-    }
-
-    fn apply_changes_snapshot(&mut self, snapshot: GitSnapshot) {
-        self.expanded_changes
-            .retain(|path| snapshot.entries.iter().any(|entry| &entry.path == path));
-        self.entries = snapshot.entries;
-        self.changed_paths = self
-            .entries
-            .iter()
-            .map(|entry| entry.path.clone())
-            .collect();
-        self.stats = snapshot.stats;
-        self.diffs = snapshot.diffs;
-    }
-
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.git_task.is_some() {
+    /// Refreshes the changed-paths set and the directory tree off the
+    /// render thread. Single-flight on the walk task.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.walk_task.is_some() {
             return;
         }
-
         let repo_root = self.repo_root.clone();
-        self.git_error = None;
-        self.git_task = Some(cx.spawn(async move |this, cx| {
+        self.walk_task = Some(cx.spawn(async move |this, cx| {
             let snapshot = cx
-                .background_spawn(async move { load_snapshot(&repo_root) })
-                .await;
-            let _ = this.update(cx, |panel, cx| {
-                panel.apply_snapshot(snapshot);
-                panel.git_task = None;
-                cx.notify();
-            });
-        }));
-    }
-
-    /// Arms the single automatic Changes refresh loop. The timer itself runs
-    /// on GPUI's background executor; each refresh then uses the existing
-    /// background snapshot path, so neither the timer nor git status blocks
-    /// rendering. The loop exits when its entity disappears, and the held
-    /// task is cancelled when the panel is dropped.
-    fn ensure_changes_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.changes_refresh_task_started {
-            return;
-        }
-
-        self.changes_refresh_task_started = true;
-        cx.spawn(async move |this, cx| {
-            let mut initial_refresh = true;
-            loop {
-                if this
-                    .update(cx, |panel, cx| {
-                        if initial_refresh {
-                            panel.refresh(cx);
-                        } else {
-                            panel.refresh_changes(cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-                initial_refresh = false;
-                cx.background_executor()
-                    .timer(CHANGES_REFRESH_INTERVAL)
-                    .await;
-            }
-        })
-        .detach();
-    }
-
-    fn refresh_changes(&mut self, cx: &mut Context<Self>) {
-        if self.git_task.is_some() {
-            return;
-        }
-
-        let repo_root = self.repo_root.clone();
-        self.git_error = None;
-        self.git_task = Some(cx.spawn(async move |this, cx| {
-            let snapshot = cx
-                .background_spawn(async move { load_changes_snapshot(&repo_root) })
-                .await;
-            let _ = this.update(cx, |panel, cx| {
-                panel.apply_changes_snapshot(snapshot);
-                panel.git_task = None;
-                cx.notify();
-            });
-        }));
-    }
-
-    fn start_operation<F>(&mut self, operation: F, cx: &mut Context<Self>)
-    where
-        F: FnOnce(&Path) -> Result<(), GitError> + Send + 'static,
-    {
-        if self.git_task.is_some() {
-            return;
-        }
-
-        let repo_root = self.repo_root.clone();
-        self.git_error = None;
-        self.git_task = Some(cx.spawn(async move |this, cx| {
-            let outcome = cx
                 .background_spawn(async move {
-                    let result = operation(&repo_root);
-                    let snapshot = result.is_ok().then(|| load_snapshot(&repo_root));
-                    (result, snapshot)
+                    let changed = status(&repo_root)
+                        .unwrap_or_else(|_| tiller_git::StatusSnapshot::empty())
+                        .entries
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect::<HashSet<_>>();
+                    let tree = read_tree(&repo_root, &repo_root, &changed).unwrap_or_default();
+                    (changed, tree)
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
-                panel.git_task = None;
-                match outcome {
-                    (Ok(()), Some(snapshot)) => panel.apply_snapshot(snapshot),
-                    (Err(error), _) => panel.git_error = Some(error.to_string()),
-                    (Ok(()), None) => {
-                        panel.git_error = Some("git operation did not return a snapshot".into())
-                    }
-                }
+                panel.changed_paths = snapshot.0;
+                panel.file_tree = snapshot.1;
+                panel.walk_task = None;
                 cx.notify();
             });
         }));
     }
 
-    fn stage_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.start_operation(move |repo| stage(repo, &path), cx);
-    }
-
-    fn unstage_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.start_operation(move |repo| unstage(repo, &path), cx);
-    }
-
-    fn confirm_discard(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_task.is_some() {
+    /// Arms the periodic tree refresh: once immediately, then on a fixed
+    /// interval so external edits show up in the tree.
+    fn ensure_tree_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_started {
             return;
         }
-
-        let display_path = path.display().to_string();
-        let detail = format!(
-            "This will throw away the worktree changes to {display_path}. This cannot be undone."
-        );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard changes?",
-            Some(&detail),
-            &["Discard", "Cancel"],
-            cx,
-        );
+        self.refresh_started = true;
         cx.spawn(async move |this, cx| {
-            if answer.await.unwrap_or(1) != 0 {
-                return;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |panel, cx| panel.refresh(cx)).is_err() {
+                    return;
+                }
             }
-            let _ = this.update(cx, |panel, cx| {
-                panel.start_operation(move |repo| discard(repo, &path), cx)
-            });
         })
         .detach();
-    }
-
-    fn confirm_discard_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.git_task.is_some() {
-            return;
-        }
-
-        let paths = self
-            .entries
-            .iter()
-            .filter(|entry| entry.has_worktree_changes())
-            .map(|entry| entry.path.display().to_string())
-            .collect::<Vec<_>>();
-        if paths.is_empty() {
-            return;
-        }
-        let detail = format!(
-            "This will throw away the worktree changes to:\n{}\n\nThis cannot be undone.",
-            paths.join("\n")
-        );
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard all changes?",
-            Some(&detail),
-            &["Discard All", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |this, cx| {
-            if answer.await.unwrap_or(1) != 0 {
-                return;
-            }
-            let _ = this.update(cx, |panel, cx| {
-                panel.start_operation(|repo| discard_all(repo), cx)
-            });
-        })
-        .detach();
-    }
-
-    fn toggle_activity(&mut self, cx: &mut Context<Self>) {
-        self.activity_expanded = !self.activity_expanded;
-        cx.notify();
     }
 
     fn toggle_file(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -494,59 +261,6 @@ impl RightPanel {
         cx.emit(RightPanelEvent::OpenFile(path));
     }
 
-    fn toggle_change(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if self.entries.iter().any(|entry| entry.path == path) {
-            if self
-                .diffs
-                .get(path)
-                .is_some_and(|diff| !diff.hunks.is_empty())
-            {
-                if self.expanded_changes.contains(path) {
-                    self.expanded_changes.remove(path);
-                } else {
-                    self.expanded_changes.insert(path.to_path_buf());
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    fn is_expanded(&self, path: &Path) -> bool {
-        self.expanded_changes.contains(path)
-    }
-
-    fn change_rows(&self) -> Vec<ChangeRow> {
-        let mut rows = Vec::new();
-        for entry in &self.entries {
-            let expanded = self.is_expanded(&entry.path);
-            rows.push(ChangeRow::File {
-                entry: entry.clone(),
-                stat: self.stats.get(&entry.path).copied().unwrap_or(DiffStat {
-                    additions: 0,
-                    deletions: 0,
-                    is_binary: false,
-                }),
-                expanded,
-            });
-            if !expanded {
-                continue;
-            }
-            if let Some(diff) = self.diffs.get(&entry.path) {
-                for hunk in &diff.hunks {
-                    rows.push(ChangeRow::Hunk {
-                        path: entry.path.clone(),
-                        header: hunk.header.clone(),
-                    });
-                    rows.extend(hunk.lines.iter().cloned().map(|line| ChangeRow::Line {
-                        path: entry.path.clone(),
-                        line,
-                    }));
-                }
-            }
-        }
-        rows
-    }
-
     fn file_rows(&self) -> Vec<FileRow> {
         let mut rows = Vec::new();
         flatten_files(&self.file_tree, 0, &mut rows);
@@ -571,8 +285,16 @@ impl RightPanel {
         let indent = row.depth as f32 * 16.0;
         let row_id = format!("file-{}", path.display());
         let click_path = path.clone();
+        let glyph = file_glyph(&path, is_dir);
         div()
             .id(row_id)
+            .debug_selector(move || {
+                if is_dir {
+                    "file-directory-row".to_owned()
+                } else {
+                    "file-row".to_owned()
+                }
+            })
             .h(px(ROW_HEIGHT))
             .w_full()
             .pl(px(8.0 + indent))
@@ -580,21 +302,21 @@ impl RightPanel {
             .flex()
             .items_center()
             .gap(px(6.0))
-            .text_size(px(12.0))
+            .text_size(px(12.5))
+            // Names are neutral text; the status dot carries "modified",
+            // and unreadable directories dim rather than shout.
             .text_color(if read_error.is_some() {
-                // An unreadable directory renders dimmed with a warning —
-                // it must not vanish silently, and it must not panic.
                 theme.subtitle
-            } else if modified {
-                theme.git_modified
             } else {
                 theme.title
             })
             .hover(|style| style.bg(theme.row_hover))
-            .on_click(move |_, _, cx| {
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
                 if is_dir {
                     entity.update(cx, |panel, cx| panel.toggle_file(&click_path, cx));
-                } else {
+                } else if event.click_count >= 2 {
+                    // Files follow the inventory's double-click contract;
+                    // a single click only gives the row focus/hover.
                     entity.update(cx, |panel, cx| panel.open_file(click_path.clone(), cx));
                 }
             })
@@ -608,6 +330,20 @@ impl RightPanel {
                         Some(element) => element.into_any_element(),
                         None => div().into_any_element(),
                     }),
+            )
+            // The per-type file glyph — the visible subject of the "File
+            // icons" setting. It is resolved from the embedded set (the
+            // Material set, the only one this platform offers; the settings
+            // screen is gated to match, P19) and tinted like the Swift
+            // explorer's subtitle-tinted FileTypeIcon.
+            .child(
+                div()
+                    .w(px(14.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(IconElement::new(glyph, px(14.0)).text_color(theme.subtitle)),
             )
             .child(div().flex_1().overflow_hidden().text_ellipsis().child(name))
             .when(read_error.is_some(), |this| {
@@ -629,222 +365,27 @@ impl RightPanel {
             })
     }
 
-    fn render_change_row(row: ChangeRow, entity: gpui::Entity<Self>, theme: Theme) -> AnyElement {
-        match row {
-            ChangeRow::File {
-                entry,
-                stat,
-                expanded,
-            } => Self::render_change_file(entry, stat, expanded, entity, theme).into_any_element(),
-            ChangeRow::Hunk { path, header } => div()
-                .id(format!("hunk-{}-{}", path.display(), header))
-                .h(px(ROW_HEIGHT))
-                .w_full()
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .text_size(px(10.5))
-                .text_color(theme.file_link)
-                .bg(theme.diff_hunk_background)
-                .child(header)
-                .into_any_element(),
-            ChangeRow::Line { path, line } => {
-                Self::render_diff_line(path, line, theme).into_any_element()
-            }
-        }
-    }
-
-    fn render_change_file(
-        entry: StatusEntry,
-        stat: DiffStat,
-        expanded: bool,
-        entity: gpui::Entity<Self>,
-        theme: Theme,
-    ) -> impl IntoElement {
-        let path = entry.path.clone();
-        let path_for_toggle = path.clone();
-        let path_for_stage = path.clone();
-        let path_for_discard = path.clone();
-        let path_for_trash = path.clone();
-        let is_staged = entry.is_staged();
-        let stage_label = if is_staged { "Unstage" } else { "Stage" };
-        let color = status_color(&entry, theme);
-        let glyph = file_glyph(&path);
-        let additions = if stat.is_binary {
-            "·".to_owned()
-        } else {
-            format!("+{}", stat.additions)
-        };
-        let deletions = if stat.is_binary {
-            "·".to_owned()
-        } else {
-            format!("−{}", stat.deletions)
-        };
-        let entity_for_toggle = entity.clone();
-        let entity_for_stage = entity.clone();
-        let entity_for_discard = entity.clone();
-        let entity_for_trash = entity.clone();
-        div()
-            .id(format!("change-{}", path.display()))
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .text_size(px(11.5))
-            .text_color(color)
-            .hover(|style| style.bg(theme.row_hover))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                cx.stop_propagation();
-                entity_for_toggle.update(cx, |panel, cx| panel.toggle_change(&path_for_toggle, cx));
-            })
-            .child(
-                div()
-                    .w(px(10.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(if expanded {
-                        IconElement::new(Icon::ChevronDown, px(10.0)).text_color(theme.subtitle)
-                    } else {
-                        IconElement::new(Icon::ChevronRight, px(10.0)).text_color(theme.subtitle)
-                    }),
-            )
-            .child(div().w(px(14.0)).flex().items_center().justify_center().child(
-                glyph.map_or_else(
-                    || IconElement::new(Icon::File, px(12.0)).text_color(color).into_any_element(),
-                    |glyph| div().text_color(color).child(glyph).into_any_element(),
-                ),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(path.to_string_lossy().to_string()),
-            )
-            .child(div().text_color(theme.diff_deletion).child(deletions))
-            .child(div().text_color(theme.diff_addition).child(additions))
-            .when(expanded, |this| {
-                this.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(3.0))
-                        .child(destructive_action_text_button(
-                            "Discard",
-                            format!("discard-{}", path.display()),
-                            theme,
-                            move |window, cx| {
-                                entity_for_discard.update(cx, |panel, cx| {
-                                    panel.confirm_discard(path_for_discard.clone(), window, cx);
-                                });
-                            },
-                        ))
-                        .child(action_text_button(
-                            stage_label,
-                            format!("stage-{}", path.display()),
-                            theme,
-                            move |cx| {
-                                entity_for_stage.update(cx, |panel, cx| {
-                                    if is_staged {
-                                        panel.unstage_path(path_for_stage.clone(), cx);
-                                    } else {
-                                        panel.stage_path(path_for_stage.clone(), cx);
-                                    }
-                                });
-                            },
-                        ))
-                        .child(div().text_color(theme.subtitle).child("↗"))
-                        .child(destructive_action_text_button(
-                            "⌫",
-                            format!("discard-icon-{}", path.display()),
-                            theme,
-                            move |window, cx| {
-                                entity_for_trash.update(cx, |panel, cx| {
-                                    panel.confirm_discard(path_for_trash.clone(), window, cx);
-                                });
-                            },
-                        )),
-                )
-            })
-    }
-
-    fn render_diff_line(path: PathBuf, line: DiffLine, theme: Theme) -> impl IntoElement {
-        let (background, marker_color, marker) = match line.origin {
-            DiffOrigin::Context => (theme.background, theme.meta, " "),
-            DiffOrigin::Addition => (theme.diff_addition_background, theme.diff_addition, "+"),
-            DiffOrigin::Deletion => (theme.diff_deletion_background, theme.diff_deletion, "−"),
-        };
-        div()
-            .id(format!(
-                "line-{}-{}-{}",
-                path.display(),
-                line.old_line_number.unwrap_or(0),
-                line.new_line_number.unwrap_or(0)
-            ))
-            .h(px(ROW_HEIGHT))
-            .w_full()
-            .px(px(6.0))
-            .flex()
-            .items_center()
-            .text_size(px(10.5))
-            .text_color(theme.title)
-            .bg(background)
-            .child(
-                div().w(px(30.0)).text_color(theme.meta).child(
-                    line.old_line_number
-                        .map_or(String::new(), |n| n.to_string()),
-                ),
-            )
-            .child(
-                div().w(px(30.0)).text_color(theme.meta).child(
-                    line.new_line_number
-                        .map_or(String::new(), |n| n.to_string()),
-                ),
-            )
-            .child(div().w(px(12.0)).text_color(marker_color).child(marker))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(line.content),
-            )
-    }
-
-    fn render_header(&self, entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
-        let files_entity = entity.clone();
-        let changes_entity = entity.clone();
+    fn render_header(&self, theme: Theme) -> impl IntoElement {
         div()
             .h(px(HEADER_HEIGHT))
             .w_full()
             .px(px(10.0))
             .flex()
             .items_center()
-            .justify_center()
-            .gap(px(2.0))
+            .gap(px(6.0))
             .border_b_1()
             .border_color(theme.hairline)
-            .child(segment_button(
-                "Files",
-                self.tab == PanelTab::Files,
-                theme,
-                move |cx| files_entity.update(cx, |panel, cx| panel.set_tab(PanelTab::Files, cx)),
-            ))
-            .child(segment_button(
-                "Changes",
-                self.tab == PanelTab::Changes,
-                theme,
-                move |cx| {
-                    changes_entity.update(cx, |panel, cx| panel.set_tab(PanelTab::Changes, cx))
-                },
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(11.5))
+                    .text_color(theme.title)
+                    .child("Files"),
+            )
             .child(
                 div()
                     .id("close-right-panel")
-                    .ml(px(7.0))
                     .w(px(20.0))
                     .h(px(24.0))
                     .flex()
@@ -863,7 +404,6 @@ impl RightPanel {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let refresh_entity = entity.clone();
         let rows = self.file_rows();
         let row_entity = entity.clone();
         div()
@@ -885,13 +425,10 @@ impl RightPanel {
                             .flex_1()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_size(px(10.5))
+                            .text_size(px(11.5))
                             .text_color(theme.meta)
                             .child(self.repo_root.to_string_lossy().to_string()),
-                    )
-                    .child(icon_button(Icon::RefreshCw, "refresh-files", theme, move |cx| {
-                        refresh_entity.update(cx, |panel, cx| panel.refresh(cx));
-                    })),
+                    ),
             )
             .child(
                 uniform_list(
@@ -906,107 +443,27 @@ impl RightPanel {
                             .collect::<Vec<_>>()
                     }),
                 )
+                .debug_selector(|| "right-panel-files".to_owned())
                 .flex_1()
                 .min_h(px(0.0)),
             )
             .into_any_element()
     }
+}
 
-    fn render_changes(
-        &self,
-        entity: gpui::Entity<Self>,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let refresh_entity = entity.clone();
-        let stage_entity = entity.clone();
-        let discard_entity = entity.clone();
-        let rows = self.change_rows();
-        let row_entity = entity.clone();
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .child(
-                div()
-                    .h(px(TOOLBAR_HEIGHT))
-                    .w_full()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(theme.hairline)
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(12.0))
-                            .text_color(theme.title)
-                            .child("Local changes"),
-                    )
-                    .child(icon_button(Icon::RefreshCw, "refresh-changes", theme, move |cx| {
-                        refresh_entity.update(cx, |panel, cx| panel.refresh(cx));
-                    })),
-            )
-            .child(
-                div()
-                    .h(px(31.0))
-                    .w_full()
-                    .px(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .text_size(px(11.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.title)
-                            .child(format!("Changes ({})", self.entries.len())),
-                    )
-                    .child(action_text_button(
-                        "Stage all",
-                        "stage-all".to_owned(),
-                        theme,
-                        move |cx| {
-                            stage_entity.update(cx, |panel, cx| {
-                                panel.start_operation(|repo| stage_all(repo), cx);
-                            });
-                        },
-                    ))
-                    .child(destructive_action_text_button(
-                        "Discard all",
-                        "discard-all".to_owned(),
-                        theme,
-                        move |window, cx| {
-                            discard_entity.update(cx, |panel, cx| {
-                                panel.confirm_discard_all(window, cx);
-                            });
-                        },
-                    )),
-            )
-            .child(
-                uniform_list(
-                    "right-panel-changes",
-                    rows.len(),
-                    cx.processor(move |_panel, range: Range<usize>, _window, _cx| {
-                        range
-                            .filter_map(|index| rows.get(index))
-                            .map(|row| {
-                                Self::render_change_row(row.clone(), row_entity.clone(), theme)
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .flex_1()
-                .min_h(px(0.0)),
-            )
-            .into_any_element()
+impl RightPanel {
+    fn toggle_activity(&mut self, cx: &mut Context<Self>) {
+        self.activity_expanded = !self.activity_expanded;
+        cx.notify();
     }
 
     fn render_activity(&self, entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
         let toggle_entity = entity.clone();
+        let running_count = self
+            .activity
+            .iter()
+            .filter(|surface| surface.status == ActivityStatus::Running)
+            .count();
         let mut section = div()
             .absolute()
             .bottom_0()
@@ -1028,13 +485,14 @@ impl RightPanel {
             .child(
                 div()
                     .id("activity-header")
+                    .debug_selector(|| "activity-header".into())
                     .h(px(ACTIVITY_HEADER_HEIGHT))
                     .w_full()
                     .px(px(10.0))
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .text_size(px(12.0))
+                    .text_size(theme.typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.title)
                     .hover(|style| style.bg(theme.row_hover))
@@ -1046,16 +504,49 @@ impl RightPanel {
                     } else {
                         IconElement::new(Icon::ChevronRight, px(12.0)).text_color(theme.meta)
                     })
-                    .child("Activity"),
+                    .child("Activity")
+                    // F-CHG-20: the running count. A quiet meta label beside
+                    // the header, present only while something is running,
+                    // so a live worktree is visible from the collapsed
+                    // header alone.
+                    .when(running_count > 0, |this| {
+                        this.child(
+                            div()
+                                .id("activity-running-count")
+                                .debug_selector(|| "activity-running-count".into())
+                                .text_size(theme.typography.caption2)
+                                .text_color(theme.meta)
+                                .child(format!("{running_count} running")),
+                        )
+                    }),
             );
         if self.activity_expanded {
-            for (index, surface) in self.activity.iter().cloned().enumerate() {
-                section = section.child(Self::render_activity_row(
-                    surface,
-                    index,
-                    entity.clone(),
-                    theme,
-                ));
+            if self.activity.is_empty() {
+                // F-CHG-20: the no-activity empty state, only visible while
+                // the section is expanded — the collapsed header stays
+                // silent instead of shouting about nothing.
+                section = section.child(
+                    div()
+                        .id("activity-empty")
+                        .debug_selector(|| "activity-empty".into())
+                        .h(px(ACTIVITY_ROW_HEIGHT))
+                        .w_full()
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.meta)
+                        .child("No activity"),
+                );
+            } else {
+                for (index, surface) in self.activity.iter().cloned().enumerate() {
+                    section = section.child(Self::render_activity_row(
+                        surface,
+                        index,
+                        entity.clone(),
+                        theme,
+                    ));
+                }
             }
         }
         section
@@ -1072,6 +563,7 @@ impl RightPanel {
         let close_entity = entity;
         div()
             .id(format!("activity-{index}"))
+            .debug_selector(move || format!("activity-{index}"))
             .h(px(ACTIVITY_ROW_HEIGHT))
             .w_full()
             .px(px(10.0))
@@ -1099,13 +591,13 @@ impl RightPanel {
                     .gap(px(2.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(theme.typography.headline)
                             .text_color(theme.title)
                             .child(surface.title),
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(theme.typography.footnote)
                             .text_color(theme.meta)
                             .child(surface.location),
                     ),
@@ -1137,12 +629,8 @@ impl EventEmitter<RightPanelEvent> for RightPanel {}
 impl Render for RightPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
-        self.ensure_changes_refresh(cx);
+        self.ensure_tree_refresh(cx);
         let entity = cx.entity();
-        let content = match self.tab {
-            PanelTab::Files => self.render_files(entity.clone(), theme, cx),
-            PanelTab::Changes => self.render_changes(entity.clone(), theme, cx),
-        };
         div()
             .relative()
             .flex()
@@ -1151,133 +639,50 @@ impl Render for RightPanel {
             .h_full()
             .overflow_hidden()
             .bg(theme.background)
-            .child(self.render_header(entity.clone(), theme))
-            .child(content)
+            .child(self.render_header(theme))
+            .child(self.render_files(entity.clone(), theme, cx))
             .child(self.render_activity(entity, theme))
     }
 }
 
-fn segment_button(
-    label: &'static str,
-    selected: bool,
-    theme: Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(format!("segment-{label}"))
-        .h(px(24.0))
-        .px(px(14.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .text_size(px(12.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(if selected {
-            theme.title_selected
-        } else {
-            theme.title
-        })
-        .when(selected, |this| this.bg(theme.file_link))
-        .hover(|style| style.bg(theme.file_link))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(label)
-}
-
-fn icon_button(
-    icon: Icon,
-    id: &'static str,
-    theme: Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(22.0))
-        .h(px(22.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(theme.subtitle)
-        .hover(|style| style.bg(theme.row_hover).rounded(px(4.0)))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(IconElement::new(icon, px(14.0)).text_color(theme.subtitle))
-}
-
-fn action_text_button(
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .text_size(px(10.5))
-        .text_color(theme.subtitle)
-        .hover(|style| style.text_color(theme.title))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            cx.stop_propagation();
-            on_click(cx);
-        })
-        .child(label)
-}
-
-fn destructive_action_text_button(
-    label: &'static str,
-    id: String,
-    theme: Theme,
-    on_click: impl Fn(&mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .text_size(px(10.5))
-        .text_color(theme.subtitle)
-        .hover(|style| style.text_color(theme.git_conflict))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            on_click(window, cx);
-        })
-        .child(label)
-}
-
-fn load_snapshot(repo_root: &Path) -> GitSnapshot {
-    let mut snapshot = load_changes_snapshot(repo_root);
-    let changed_paths = snapshot
-        .entries
-        .iter()
-        .map(|entry| entry.path.clone())
-        .collect();
-    // The directory walk runs here, next to the git calls — both are
-    // executed by the caller on the background executor, so the refresh
-    // path never touches the filesystem on the UI thread.
-    snapshot.file_tree = read_tree(repo_root, repo_root, &changed_paths).unwrap_or_default();
-    snapshot
-}
-
-fn load_changes_snapshot(repo_root: &Path) -> GitSnapshot {
-    let entries = status(repo_root)
-        .unwrap_or_else(|_| tiller_git::StatusSnapshot::empty())
-        .entries;
-    let stats = stats(repo_root, &entries).unwrap_or_default();
-    let diffs = entries
-        .iter()
-        .filter_map(|entry| {
-            diff_entry(repo_root, entry, tiller_git::DEFAULT_CONTEXT_LINES)
-                .ok()
-                .map(|diff| (entry.path.clone(), diff))
-        })
-        .collect();
-    GitSnapshot {
-        entries,
-        diffs,
-        stats,
-        file_tree: Vec::new(),
+/// The per-type file glyph for the Files tree, resolved from the embedded
+/// icon set — the Material set, the only one this platform offers (the
+/// settings screen is gated to match: SF Symbols is macOS-only, P19).
+/// Directories get the folder mark; a handful of well-known kinds get their
+/// own glyph, mirroring the Swift `FileIconTheme` intent (shell → terminal,
+/// git → branch, env/settings → gear); everything else shares the generic
+/// file mark.
+fn file_glyph(path: &Path, is_dir: bool) -> Icon {
+    if is_dir {
+        return Icon::FolderFill;
     }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let lower = name.to_lowercase();
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if matches!(extension.as_str(), "sh" | "bash" | "zsh" | "fish")
+        || lower.starts_with(".bash")
+        || lower.starts_with(".zsh")
+        || lower == ".profile"
+    {
+        return Icon::SquareTerminal;
+    }
+    if lower.starts_with(".git")
+        || matches!(lower.as_str(), "gitignore" | "gitattributes" | "gitmodules")
+    {
+        return Icon::GitBranch;
+    }
+    if lower.starts_with(".env")
+        || matches!(lower.as_str(), ".editorconfig" | ".gitconfig" | ".npmrc")
+    {
+        return Icon::Settings;
+    }
+    Icon::File
 }
 
 fn read_tree(
@@ -1344,33 +749,6 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
     None
 }
 
-fn status_color(entry: &StatusEntry, theme: Theme) -> Rgba {
-    if entry.is_conflicted() {
-        theme.git_conflict
-    } else if entry.is_untracked() {
-        theme.git_untracked
-    } else if entry.has_worktree_changes() {
-        theme.git_modified
-    } else if entry.is_staged() {
-        theme.git_staged
-    } else {
-        theme.title
-    }
-}
-
-/// A per-type glyph for known file kinds (kept for the type-identity they
-/// carry, matching the reference's coloured file markers); the generic
-/// fallback is the Lucide file icon.
-fn file_glyph(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some("rs") => Some("◈"),
-        Some("swift") => Some("◉"),
-        Some("json") | Some("toml") | Some("yaml") | Some("yml") => Some("◇"),
-        Some("md") => Some("▤"),
-        _ => None,
-    }
-}
-
 fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
     match status {
         ActivityStatus::Idle => theme.meta,
@@ -1391,7 +769,12 @@ fn activity_status_glyph(status: ActivityStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TestAppContext,
+        VisualTestContext,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     struct TempDir(PathBuf);
@@ -1434,51 +817,69 @@ mod tests {
         }
     }
 
-    fn git(dir: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn clean_git_repo(dir: &Path) {
-        git(dir, &["init", "-q"]);
-        git(dir, &["config", "user.email", "tests@example.invalid"]);
-        git(dir, &["config", "user.name", "Tiller tests"]);
-        std::fs::write(dir.join("tracked.txt"), "initial\n").expect("seed tracked file");
-        git(dir, &["add", "tracked.txt"]);
-        git(
-            dir,
-            &[
-                "-c",
-                "commit.gpgSign=false",
-                "commit",
-                "-q",
-                "-m",
-                "initial",
-            ],
-        );
-    }
-
     /// Pumps the test executors until `condition` holds or the budget is
     /// exhausted (a real filesystem walk completes on a real thread).
+    /// Pumps the test executors until `condition` holds or the budget is
+    /// exhausted (a real filesystem walk completes on a real thread). The
+    /// budget mirrors the F-CHG-09 drawn-test pattern: generous enough that
+    /// a state landing late under parallel CI load still passes, and a
+    /// failure is a real failure, never a timing-luck win.
     fn pump_until(cx: &TestAppContext, mut condition: impl FnMut() -> bool) {
         cx.executor().allow_parking();
-        for _ in 0..200 {
+        for _ in 0..600 {
             if condition() {
                 return;
             }
+            // Advance the virtual clock so the panel's own 1s refresh timer
+            // fires; the walk itself completes on a real thread.
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(1));
             std::thread::sleep(std::time::Duration::from_millis(10));
             cx.run_until_parked();
         }
         panic!("condition never became true within the pump budget");
+    }
+
+    #[test]
+    fn file_glyph_resolves_known_kinds_from_the_embedded_set() {
+        // The Files tree's per-type glyphs come from the embedded set — the
+        // Material set, the only one this platform can render. The mapping is
+        // extension-driven so the glyph follows the file, not its folder.
+        assert_eq!(
+            file_glyph(Path::new("/repo/src/main.rs"), false),
+            Icon::File,
+            "unknown kinds share the generic file mark"
+        );
+        assert_eq!(
+            file_glyph(Path::new("/repo/deploy.sh"), false),
+            Icon::SquareTerminal
+        );
+        assert_eq!(
+            file_glyph(Path::new("/repo/.bashrc"), false),
+            Icon::SquareTerminal
+        );
+        assert_eq!(
+            file_glyph(Path::new("/repo/.gitignore"), false),
+            Icon::GitBranch
+        );
+        assert_eq!(
+            file_glyph(Path::new("/repo/gitmodules"), false),
+            Icon::GitBranch
+        );
+        assert_eq!(
+            file_glyph(Path::new("/repo/.env.local"), false),
+            Icon::Settings
+        );
+        assert_eq!(
+            file_glyph(Path::new("/repo/.editorconfig"), false),
+            Icon::Settings
+        );
+        assert_eq!(file_glyph(Path::new("/repo/Cargo.toml"), false), Icon::File);
+        assert_eq!(
+            file_glyph(Path::new("/repo/src"), true),
+            Icon::FolderFill,
+            "directories keep the folder mark"
+        );
     }
 
     #[gpui::test]
@@ -1487,7 +888,7 @@ mod tests {
         let subdir = dir.0.join("subdir");
         seed_dir_with_files(&subdir, 2000);
 
-        let panel = cx.new(|cx| RightPanel::new(dir.0.clone()));
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
@@ -1528,7 +929,7 @@ mod tests {
         seed_dir_with_files(&first, 100);
         seed_dir_with_files(&second, 100);
 
-        let panel = cx.new(|cx| RightPanel::new(dir.0.clone()));
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
@@ -1564,49 +965,13 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn changes_refresh_automatically_after_an_external_edit(cx: &mut TestAppContext) {
-        let dir = TempDir::new();
-        clean_git_repo(&dir.0);
-        let panel = cx.new(|cx| RightPanel::new(dir.0.clone()));
-        panel.update(cx, |panel, cx| panel.refresh(cx));
-
-        // Wait until the initial background snapshot completes, then arm the
-        // same task used by Render. The edit below is observed by polling,
-        // without relying on a manual refresh click.
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
-                panel.git_task.is_none()
-                    && find_node(&panel.file_tree, &dir.0.join("tracked.txt")).is_some()
-            })
-        });
-        panel.update(cx, |panel, cx| panel.ensure_changes_refresh(cx));
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
-                panel.git_task.is_none()
-                    && find_node(&panel.file_tree, &dir.0.join("tracked.txt")).is_some()
-            })
-        });
-
-        // This is the external edit: no panel method is called afterwards.
-        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("edit tracked file");
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
-                panel
-                    .entries
-                    .iter()
-                    .any(|entry| entry.path == PathBuf::from("tracked.txt"))
-            })
-        });
-    }
-
-    #[gpui::test]
     async fn an_unreadable_directory_renders_an_error(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let locked = dir.0.join("locked");
         std::fs::create_dir_all(&locked).expect("create dir");
         std::fs::write(locked.join("secret.txt"), "x").expect("write file");
 
-        let panel = cx.new(|cx| RightPanel::new(dir.0.clone()));
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
@@ -1647,5 +1012,345 @@ mod tests {
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
                 .expect("restore permissions for cleanup");
         }
+    }
+
+    /// F-EDIT-09 is an interaction contract, not a pixel contract: the real
+    /// file row is laid out, receives a double-click, and emits the path the
+    /// shell uses to open the editor. The row's typography and icon remain a
+    /// separate visual debt.
+    #[gpui::test]
+    async fn double_clicking_a_drawn_file_row_emits_open_file(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("opened.md"), "# opened\n").expect("write file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let panel = cx.update(|window, _| {
+            window
+                .root::<RightPanel>()
+                .flatten()
+                .expect("right panel root")
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&panel, move |_, event: &RightPanelEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+            panel.update(cx, |panel, cx| panel.refresh(cx));
+        });
+
+        // The tree walk runs on a real background thread; the hardened pump
+        // gives it real time plus the virtual-clock ticks the panel's own
+        // refresh timer needs, so the test cannot pass on timing luck.
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel
+                    .file_tree
+                    .iter()
+                    .any(|node| node.path == dir.0.join("opened.md"))
+            })
+        });
+        cx.cx.run_until_parked();
+        cx.update(|_, app| panel.update(app, |_, cx| cx.notify()));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let row = cx
+            .debug_bounds("file-row")
+            .expect("the file row is present in the drawn frame");
+        let position = row.center();
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        let emitted = events.borrow();
+        assert!(
+            emitted.iter().any(|event| matches!(
+                event,
+                RightPanelEvent::OpenFile(path) if *path == dir.0.join("opened.md")
+            )),
+            "the real double-click must emit the file path, got {emitted:?}"
+        );
+    }
+
+    /// F-CHG-04 is the interaction half of the explorer contract: the drawn
+    /// directory row toggles and its asynchronously loaded child becomes
+    /// part of the next drawn frame. File selection visuals remain a
+    /// separate appearance debt.
+    #[gpui::test]
+    async fn clicking_a_drawn_directory_row_expands_and_collapses_it(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let subdir = dir.0.join("src");
+        std::fs::create_dir_all(&subdir).expect("create directory");
+        std::fs::write(subdir.join("main.rs"), "fn main() {}\n").expect("write file");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let panel = cx.update(|window, _| {
+            window
+                .root::<RightPanel>()
+                .flatten()
+                .expect("right panel root")
+        });
+        cx.update(|_, cx| panel.update(cx, |panel, cx| panel.refresh(cx)));
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir).is_some()
+            })
+        });
+        cx.update(|_, app| panel.update(app, |_, cx| cx.notify()));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let folder = cx
+            .debug_bounds("file-directory-row")
+            .expect("the directory row is present in the drawn frame");
+        cx.simulate_click(folder.center(), Modifiers::none());
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir)
+                    .is_some_and(|node| node.expanded && node.children.len() == 1)
+            })
+        });
+        cx.update(|_, app| panel.update(app, |_, cx| cx.notify()));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(
+            cx.debug_bounds("file-row").is_some(),
+            "the expanded directory's child is laid out in the drawn frame"
+        );
+
+        let folder = cx
+            .debug_bounds("file-directory-row")
+            .expect("the expanded directory row remains in the drawn frame");
+        cx.simulate_click(folder.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir).is_some_and(|node| !node.expanded)
+            }),
+            "clicking the drawn directory row again collapses it"
+        );
+    }
+
+    // ── F-EDIT-12 harness capability: payload drags ─────────────────────
+    //
+    // The inventory's drag entry needs a drop target in a *pane* — that
+    // lives in the shell (`tiller/src/main.rs`), so the product half is
+    // routed to codex12 (a file row becomes the drag source, a pane the
+    // drop target). What this crate owns is the proof that the harness can
+    // express a payload drag at all: a source element with `on_drag`, a
+    // target with `on_drop`, and the real mouse-down / move / up sequence
+    // between them. The shell's F-EDIT-12 test then uses exactly this
+    // recipe against its workspace.
+
+    /// The drag preview view GPUI requires from `on_drag`.
+    struct EmptyDragPreview;
+
+    impl Render for EmptyDragPreview {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    struct DragFixture {
+        dropped: Rc<RefCell<Vec<PathBuf>>>,
+    }
+
+    impl DragFixture {
+        fn new() -> Self {
+            Self {
+                dropped: Default::default(),
+            }
+        }
+    }
+
+    impl Render for DragFixture {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let dropped = self.dropped.clone();
+            div()
+                .size_full()
+                .flex()
+                .child(
+                    div()
+                        .id("drag-source")
+                        .w(px(100.0))
+                        .h(px(100.0))
+                        .debug_selector(|| "drag-source".into())
+                        .on_drag(PathBuf::from("/repo/file.txt"), |_, _, _, cx| {
+                            cx.new(|_| EmptyDragPreview)
+                        }),
+                )
+                .child(
+                    div()
+                        .id("drag-target")
+                        .w(px(100.0))
+                        .h(px(100.0))
+                        .debug_selector(|| "drag-target".into())
+                        .on_drag_move(|_event: &gpui::DragMoveEvent<PathBuf>, _, _| {})
+                        .on_drop(move |path: &PathBuf, _, _| {
+                            dropped.borrow_mut().push(path.clone());
+                        }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    async fn a_payload_drag_reaches_the_drop_target_through_real_mouse_events(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| DragFixture::new());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<DragFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+
+        let source = cx
+            .debug_bounds("drag-source")
+            .expect("the drag source is in the drawn frame");
+        let target = cx
+            .debug_bounds("drag-target")
+            .expect("the drop target is in the drawn frame");
+
+        // The real gesture: press on the source, move past the 2px drag
+        // threshold (which starts the payload drag), move over the target,
+        // release. No drag convenience method exists — this is the mouse
+        // sequence GPUI itself uses, dispatched through the same window
+        // event path as production input.
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: gpui::point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let dropped = fixture.read_with(&cx.cx, |fixture, _| fixture.dropped.borrow().clone());
+        assert_eq!(
+            dropped,
+            vec![PathBuf::from("/repo/file.txt")],
+            "the drop target receives the drag payload through the real event path"
+        );
+    }
+
+    /// F-CHG-20 (empty half): with no activity rows, the expanded section
+    /// states No activity instead of showing nothing, and no running count
+    /// is offered.
+    #[gpui::test]
+    async fn activity_section_states_no_activity_when_empty(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx
+            .add_window(|_window, _cx| RightPanel::with_activity(std::env::temp_dir(), Vec::new()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let header = cx
+            .debug_bounds("activity-header")
+            .expect("the activity header is drawn");
+        cx.simulate_click(header.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("activity-empty").is_some(),
+            "an expanded section with no rows states No activity (F-CHG-20)"
+        );
+        assert!(
+            cx.debug_bounds("activity-running-count").is_none(),
+            "nothing runs, so no running count is offered"
+        );
+    }
+
+    /// F-CHG-20 (running-count half): with a running row in the list, the
+    /// header states the count while rows render below it.
+    #[gpui::test]
+    async fn activity_section_states_the_running_count(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| {
+            RightPanel::with_activity(
+                std::env::temp_dir(),
+                vec![
+                    ActivitySurface::new(
+                        Icon::MessageSquare,
+                        "Chat",
+                        "/repo",
+                        ActivityStatus::Running,
+                    ),
+                    ActivitySurface::new(Icon::File, "Changes", "/repo", ActivityStatus::Done),
+                ],
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // The count is visible from the collapsed header alone.
+        assert!(
+            cx.debug_bounds("activity-running-count").is_some(),
+            "the running count is stated beside the header"
+        );
+
+        let header = cx
+            .debug_bounds("activity-header")
+            .expect("the activity header is drawn");
+        cx.simulate_click(header.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("activity-0").is_some() && cx.debug_bounds("activity-1").is_some(),
+            "the activity rows render under the expanded header"
+        );
+        assert!(
+            cx.debug_bounds("activity-empty").is_none(),
+            "rows exist, so the empty state is not shown"
+        );
+        assert!(
+            cx.debug_bounds("activity-running-count").is_some(),
+            "the running count stays visible with rows present"
+        );
     }
 }

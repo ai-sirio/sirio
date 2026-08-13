@@ -22,6 +22,22 @@ impl UsageWindow {
             resets_at: None,
         }
     }
+
+    /// Constructs a window from an outside numeric percentage, clamping it
+    /// to the displayable range and treating non-finite values as unknown
+    /// zero rather than allowing them to escape as a bogus percentage.
+    pub fn from_percent(label: impl Into<String>, percent: f64) -> Self {
+        let used_percent = if percent.is_finite() {
+            percent.clamp(0.0, 100.0).floor() as u8
+        } else {
+            0
+        };
+        Self {
+            label: label.into(),
+            used_percent,
+            resets_at: None,
+        }
+    }
 }
 
 /// A provider's usage state across its windows.
@@ -90,9 +106,7 @@ pub fn reduce(outcome: UsageFetchOutcome, previous: &ProviderUsageState) -> Prov
 
 fn last_usage(state: &ProviderUsageState) -> Option<ProviderUsage> {
     match state {
-        ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => {
-            Some(usage.clone())
-        }
+        ProviderUsageState::Loaded(usage) | ProviderUsageState::Stale(usage) => Some(usage.clone()),
         ProviderUsageState::Loading | ProviderUsageState::Unavailable(_) => None,
     }
 }
@@ -114,11 +128,16 @@ mod tests {
     fn percent_is_clamped_on_construction() {
         assert_eq!(UsageWindow::new("wk", 250).used_percent, 100);
         assert_eq!(UsageWindow::new("wk", 0).used_percent, 0);
+        assert_eq!(UsageWindow::from_percent("wk", -5.0).used_percent, 0);
+        assert_eq!(UsageWindow::from_percent("wk", 105.0).used_percent, 100);
     }
 
     #[test]
     fn success_replaces_the_previous_state() {
-        let state = reduce(UsageFetchOutcome::Success(usage()), &ProviderUsageState::Loading);
+        let state = reduce(
+            UsageFetchOutcome::Success(usage()),
+            &ProviderUsageState::Loading,
+        );
         assert_eq!(state, ProviderUsageState::Loaded(usage()));
         let stale = reduce(UsageFetchOutcome::TimedOut, &state);
         assert_eq!(stale, ProviderUsageState::Stale(usage()));
@@ -129,9 +148,14 @@ mod tests {
 
     #[test]
     fn unavailable_replaces_everything() {
-        let loaded = reduce(UsageFetchOutcome::Success(usage()), &ProviderUsageState::Loading);
-        let unavailable =
-            reduce(UsageFetchOutcome::Unavailable(UsageReason::NotInstalled), &loaded);
+        let loaded = reduce(
+            UsageFetchOutcome::Success(usage()),
+            &ProviderUsageState::Loading,
+        );
+        let unavailable = reduce(
+            UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+            &loaded,
+        );
         assert_eq!(
             unavailable,
             ProviderUsageState::Unavailable(UsageReason::NotInstalled)

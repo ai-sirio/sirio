@@ -2,6 +2,7 @@
 //! project.
 
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::{ProjectId, WorktreeId};
 
@@ -29,6 +30,9 @@ pub struct Worktree {
     pub path: PathBuf,
     /// True for the project's primary checkout (the git main worktree).
     pub is_primary: bool,
+    pub comment: Option<String>,
+    pub created_at: Option<SystemTime>,
+    pub updated_at: Option<SystemTime>,
 }
 
 impl Worktree {
@@ -46,6 +50,9 @@ impl Worktree {
             branch: branch.into(),
             path,
             is_primary,
+            comment: None,
+            created_at: None,
+            updated_at: None,
         }
     }
 }

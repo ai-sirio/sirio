@@ -12,16 +12,18 @@
 //! confirmation-prompt matcher — best-effort until verified against live
 //! output.
 
+use crate::ansi::strip_ansi;
 use crate::status::AgentStatus;
 
 /// Detects a status opinion from live pane tail text.
 pub fn detect_content_status(tail_text: &str, agent_id: &str) -> Option<AgentStatus> {
+    let tail_text = strip_ansi(tail_text);
     if tail_text.is_empty() {
         return None;
     }
     match agent_id {
-        "claude" => detect_claude(tail_text),
-        "codex" | "opencode" | "pi" | "omp" => detect_generic_prompt(tail_text),
+        "claude" => detect_claude(&tail_text),
+        "codex" | "opencode" | "pi" | "omp" => detect_generic_prompt(&tail_text),
         _ => None,
     }
 }

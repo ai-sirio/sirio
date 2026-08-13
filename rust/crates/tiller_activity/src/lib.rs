@@ -6,10 +6,9 @@
 //! named pieces (`AgentTitleIdentity`, `AgentTitleStatus`,
 //! `AgentSignalMerger`, `ScreenManifest`).
 //!
-//! Pure Rust, no GPUI, no I/O: the crate decides, it does not go looking.
-//! Feed it events (a hook push, a new title, a content match, a process
-//! list) and read the resolved status; process enumeration and PTY reading
-//! belong to the caller.
+//! Pure state-machine logic has no GPUI dependency. The platform boundary in
+//! [`process`] supplies Linux `/proc` evidence, while PTY reading and event
+//! scheduling remain caller-owned.
 //!
 //! # Layers
 //!
@@ -32,13 +31,36 @@
 //! **process-owned** (cleared only by [`AgentActivityModel::process_gone`],
 //! never by an unrelated title change).
 
+mod activity;
+mod ansi;
+mod bootstrap;
 mod content;
 mod model;
+mod mount;
+mod notification;
+mod process;
+mod rows;
+mod session;
+mod sort;
 mod status;
 mod title;
 
+pub use activity::ActivityStatus;
+pub use ansi::strip_ansi;
+pub use bootstrap::{BootstrapRestoreOrder, BootstrapRestoreResult};
 pub use content::detect_content_status;
 pub use model::{AgentActivityModel, CATALOG_IDS, identify_agent_from_process_names};
+pub use mount::WorktreeMountPolicy;
+pub use notification::{NotificationPayload, NotificationPolicy};
+pub use process::{inspect_foreground_agent, inspect_process_names};
+pub use rows::{
+    ActivityRow, ActivityRowKind, ActivityTab, ActivityTabKind, ActivityWorktreeInput,
+    build_activity_rows,
+};
+pub use session::{
+    AgentSessionRef, AgentSessionRestorePlan, AgentSessionRestoreResult, TerminalContentId,
+};
+pub use sort::AttentionSort;
 pub use status::{AgentStatus, Transition};
 pub use title::{
     TITLE_DEBOUNCE, contains_braille_spinner, detect_status_from_title, identify_agent_from_title,

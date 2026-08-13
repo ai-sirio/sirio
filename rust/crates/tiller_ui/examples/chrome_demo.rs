@@ -52,9 +52,7 @@ impl Render for ChromeDemo {
 }
 
 fn main() {
-    application()
-        .with_assets(TillerAssets)
-        .run(|cx: &mut App| {
+    application().with_assets(TillerAssets).run(|cx: &mut App| {
         Theme::init(cx);
         let bounds = Bounds::centered(None, size(px(1470.0), px(833.0)), cx);
 

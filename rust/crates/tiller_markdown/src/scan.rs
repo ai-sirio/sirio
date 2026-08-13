@@ -79,7 +79,10 @@ fn opening_fence(line: &str) -> Option<(char, usize)> {
     if mark != '`' && mark != '~' {
         return None;
     }
-    let count = rest.bytes().take_while(|byte| *byte as char == mark).count();
+    let count = rest
+        .bytes()
+        .take_while(|byte| *byte as char == mark)
+        .count();
     if count < 3 {
         return None;
     }
@@ -97,8 +100,14 @@ fn is_closing_fence(line: &str, mark: char, len: usize) -> bool {
         return false;
     }
     let rest = &line[indent..];
-    let count = rest.bytes().take_while(|byte| *byte as char == mark).count();
-    count >= len && rest[count..].bytes().all(|byte| byte == b' ' || byte == b'\t')
+    let count = rest
+        .bytes()
+        .take_while(|byte| *byte as char == mark)
+        .count();
+    count >= len
+        && rest[count..]
+            .bytes()
+            .all(|byte| byte == b' ' || byte == b'\t')
 }
 
 /// An ATX heading (`### text`) or a thematic break (`---`, `***`, `___`).
@@ -112,9 +121,7 @@ fn is_heading_or_thematic_break(line: &str) -> bool {
     let bytes = rest.as_bytes();
 
     let hashes = bytes.iter().take_while(|byte| **byte == b'#').count();
-    if (1..=6).contains(&hashes)
-        && (hashes == bytes.len() || bytes.get(hashes) == Some(&b' '))
-    {
+    if (1..=6).contains(&hashes) && (hashes == bytes.len() || bytes.get(hashes) == Some(&b' ')) {
         return true;
     }
 
@@ -136,7 +143,10 @@ fn strip_list_marker(line: &str) -> &str {
         }
     }
     let bytes = line.as_bytes();
-    let digits = bytes.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    let digits = bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
     if (1..=9).contains(&digits)
         && bytes
             .get(digits)

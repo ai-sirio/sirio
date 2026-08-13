@@ -448,7 +448,7 @@ fn earlier_blocks_survive_longer_prefixes() {
     let prefix = "# One\n\nSome text with `code`.\n\n```rust\nlet a = 1;\n```";
     let longer = format!("{prefix}\n\n- more\n- items\n\n## Two");
 
-    let earlier = parse(&prefix).blocks;
+    let earlier = parse(prefix).blocks;
     let grown = parse(&longer).blocks;
     assert!(
         grown.len() >= earlier.len(),

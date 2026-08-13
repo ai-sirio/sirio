@@ -29,6 +29,16 @@ pub enum PersistenceError {
         /// The highest version this crate can read.
         supported: i64,
     },
+    /// The database's logical page count is above the package's configured
+    /// safety limit.
+    DatabaseTooLarge {
+        /// The path of the oversized database file.
+        path: PathBuf,
+        /// The logical size reported by SQLite (`page_count * page_size`).
+        bytes: u64,
+        /// The configured maximum logical size.
+        max_bytes: u64,
+    },
     /// The database is unreadable for another reason (permissions, missing
     /// file, disk error, SQL failure).
     Sqlite(rusqlite::Error),
@@ -45,6 +55,15 @@ impl fmt::Display for PersistenceError {
             PersistenceError::NewerSchema { version, supported } => write!(
                 f,
                 "database schema version {version} is newer than supported version {supported}"
+            ),
+            PersistenceError::DatabaseTooLarge {
+                path,
+                bytes,
+                max_bytes,
+            } => write!(
+                f,
+                "database at {} is {bytes} bytes, over the {max_bytes}-byte limit",
+                path.display()
             ),
             PersistenceError::Sqlite(error) => write!(f, "sqlite error: {error}"),
             PersistenceError::Io(error) => write!(f, "io error: {error}"),

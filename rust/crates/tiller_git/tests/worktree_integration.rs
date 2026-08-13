@@ -96,10 +96,10 @@ fn porcelain_branch(repo: &Path, path: &Path) -> Option<String> {
     for line in output.lines() {
         if let Some(worktree_path) = line.strip_prefix("worktree ") {
             current_path = Some(worktree_path);
-        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
-            if current_path == Some(path.to_str().unwrap()) {
-                return Some(branch.to_string());
-            }
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/")
+            && current_path == Some(path.to_str().unwrap())
+        {
+            return Some(branch.to_string());
         }
     }
     None

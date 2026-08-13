@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tiller_persistence::{
-    AppDatabase, AppSettings, AppearanceMode, FileIconTheme, PersistenceError, ProjectRecord,
-    SidebarState, TabRecord, WorktreeRecord, migrate_up_to,
+    AppDatabase, AppSettings, AppearanceMode, FileIconTheme, MAX_DATABASE_BYTES, PersistenceError,
+    ProjectRecord, SidebarState, TabRecord, TabStateRecord, WorktreeRecord, migrate_up_to,
 };
 
 /// A throwaway directory, removed on drop. Canonicalized so paths match what
@@ -120,7 +120,7 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
     // Drop closes the connection; reopen simulates a relaunch.
 
     let db = AppDatabase::open(&path).expect("reopen migrated database");
-    assert_eq!(db.schema_version().expect("version"), 3);
+    assert_eq!(db.schema_version().expect("version"), 5);
 
     let projects = db.projects().expect("load projects");
     assert_eq!(projects.len(), 2);
@@ -147,6 +147,39 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
 
     assert_eq!(db.settings().expect("load settings"), settings);
     assert_eq!(db.sidebar_state().expect("load sidebar state"), state);
+}
+
+#[test]
+fn tab_state_round_trips_and_is_removed_with_replaced_tabs() {
+    let dir = TempDir::new();
+    let path = dir.db_path("tab-state");
+    let db = AppDatabase::open(&path).expect("open database");
+    db.save_project(&sample_project("proj-1", "tiller"))
+        .expect("save project");
+    db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
+        .expect("save worktree");
+    db.save_tabs(
+        "wt-1",
+        &[sample_tab("tab-1", "wt-1", "Terminal", "terminal")],
+    )
+    .expect("save tab");
+
+    let state = TabStateRecord::new("tab-1", r#"{"events":["split"]}"#);
+    db.save_tab_states("wt-1", std::slice::from_ref(&state))
+        .expect("save tab state");
+    assert_eq!(
+        db.tab_states_of_worktree("wt-1").expect("load state"),
+        vec![state]
+    );
+
+    db.save_tabs("wt-1", &[sample_tab("tab-2", "wt-1", "Chat", "chat")])
+        .expect("replace tabs");
+    assert!(
+        db.tab_states_of_worktree("wt-1")
+            .expect("load replaced states")
+            .is_empty(),
+        "tab state must follow the tab row and not survive replacement"
+    );
 }
 
 #[test]
@@ -192,9 +225,9 @@ fn an_old_version_database_is_migrated_forward_with_rows_intact() {
         .expect("seed setting");
     }
 
-    // Opening with the real database migrates v1 -> v3.
+    // Opening with the real database migrates v1 -> v4.
     let db = AppDatabase::open(&path).expect("open migrates forward");
-    assert_eq!(db.schema_version().expect("version"), 3);
+    assert_eq!(db.schema_version().expect("version"), 5);
 
     let projects = db.projects().expect("load projects");
     assert_eq!(projects.len(), 1, "project survived the migration");
@@ -240,6 +273,82 @@ fn a_corrupt_file_returns_an_error_and_is_left_untouched() {
     assert_eq!(
         after, garbage,
         "a corrupt open must never modify or discard the user's file"
+    );
+}
+
+#[test]
+fn an_existing_empty_file_is_corrupt_not_a_fresh_store() {
+    let dir = TempDir::new();
+    let path = dir.db_path("empty-existing");
+    std::fs::File::create(&path).expect("create empty file");
+
+    let error = AppDatabase::open(&path).expect_err("empty existing file must fail");
+    assert!(matches!(error, PersistenceError::Corrupt { .. }));
+    assert_eq!(
+        std::fs::metadata(&path).expect("metadata").len(),
+        0,
+        "rejected empty file must not be initialized"
+    );
+}
+
+#[test]
+fn a_database_truncated_after_close_is_corrupt_and_untouched() {
+    let dir = TempDir::new();
+    let path = dir.db_path("truncated");
+    {
+        let db = AppDatabase::open(&path).expect("seed database");
+        db.save_project(&sample_project("proj-1", "tiller"))
+            .expect("seed row");
+    }
+    let original_len = std::fs::metadata(&path).expect("metadata").len();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open for truncation");
+    file.set_len(original_len / 2).expect("truncate database");
+    let truncated_len = std::fs::metadata(&path).expect("metadata").len();
+
+    let error = AppDatabase::open(&path).expect_err("truncated file must fail");
+    assert!(matches!(error, PersistenceError::Corrupt { .. }));
+    assert_eq!(
+        std::fs::metadata(&path).expect("metadata").len(),
+        truncated_len,
+        "rejected truncated file must not be rewritten"
+    );
+}
+
+#[test]
+fn each_database_connection_installs_a_logical_size_limit() {
+    let dir = TempDir::new();
+    let path = dir.db_path("size-limit");
+    let db = AppDatabase::open(&path).expect("open");
+    assert_eq!(
+        db.database_limit_bytes().expect("database limit"),
+        MAX_DATABASE_BYTES
+    );
+}
+
+#[test]
+fn session_references_upsert_load_and_delete() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("session-ref-lifecycle")).expect("open");
+
+    db.save_session_ref("pane-1", "session-a")
+        .expect("insert session reference");
+    db.save_session_ref("pane-1", "session-b")
+        .expect("replace session reference");
+    let references = db.session_refs().expect("load session references");
+    assert_eq!(
+        references.get("pane-1").map(String::as_str),
+        Some("session-b")
+    );
+
+    db.delete_session_ref("pane-1")
+        .expect("delete session reference");
+    assert!(
+        !db.session_refs()
+            .expect("load after delete")
+            .contains_key("pane-1")
     );
 }
 
@@ -429,12 +538,16 @@ fn a_pre_invariant_database_with_two_active_tabs_is_reconciled_on_open() {
     // Opening must not refuse the database: it migrates forward and
     // reconciles the violation to a single active tab.
     let db = AppDatabase::open(&path).expect("open reconciles legacy database");
-    assert_eq!(db.schema_version().expect("version"), 3);
+    assert_eq!(db.schema_version().expect("version"), 5);
 
     let tabs = db.tabs_of_worktree("wt-1").expect("load tabs");
     assert_eq!(tabs.len(), 2, "rows survive the migration");
     let active: Vec<_> = tabs.iter().filter(|tab| tab.is_active).collect();
-    assert_eq!(active.len(), 1, "exactly one active tab after reconciliation");
+    assert_eq!(
+        active.len(),
+        1,
+        "exactly one active tab after reconciliation"
+    );
     assert_eq!(
         active[0].id, "tab-old",
         "first in tab order wins, the same rule save_tabs applies"
@@ -470,7 +583,6 @@ fn the_unique_index_rejects_a_second_active_tab_at_the_sql_level() {
         "a raw second active tab must fail the unique index"
     );
 }
-
 
 #[test]
 fn removing_a_project_cascades_to_its_children() {
@@ -553,9 +665,8 @@ fn helper_process() {
     let go_file = std::env::var("TILLER_PERSISTENCE_GO").expect("go file env");
     let ready_file = std::env::var("TILLER_PERSISTENCE_READY").expect("ready file env");
 
-    std::fs::write(&ready_file, "ready").unwrap_or_else(|error| {
-        helper_fail(3, &format!("cannot write ready file: {error}"))
-    });
+    std::fs::write(&ready_file, "ready")
+        .unwrap_or_else(|error| helper_fail(3, &format!("cannot write ready file: {error}")));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !Path::new(&go_file).exists() {
         if std::time::Instant::now() > deadline {
@@ -568,9 +679,9 @@ fn helper_process() {
         Ok(db) => db,
         Err(error) => helper_fail(1, &format!("open failed: {error:?}")),
     };
-    let version = db.schema_version().unwrap_or_else(|error| {
-        helper_fail(4, &format!("schema version unreadable: {error:?}"))
-    });
+    let version = db
+        .schema_version()
+        .unwrap_or_else(|error| helper_fail(4, &format!("schema version unreadable: {error:?}")));
     if version != tiller_persistence::CURRENT_SCHEMA_VERSION {
         helper_fail(
             5,
@@ -607,17 +718,58 @@ fn helper_process() {
     std::process::exit(0);
 }
 
+/// A real writer child used by the concurrent-writer evidence test. Each
+/// child quits after saving disjoint records to the same SQLite file.
+#[test]
+fn writer_process() {
+    let Ok(database_path) = std::env::var("TILLER_PERSISTENCE_WRITER") else {
+        return;
+    };
+    let go_file = std::env::var("TILLER_PERSISTENCE_WRITER_GO").expect("writer go file env");
+    let ready_file =
+        std::env::var("TILLER_PERSISTENCE_WRITER_READY").expect("writer ready file env");
+    let writer_id = std::env::var("TILLER_PERSISTENCE_WRITER_ID").expect("writer id env");
+
+    std::fs::write(&ready_file, "ready").unwrap_or_else(|error| {
+        helper_fail(7, &format!("cannot write writer ready file: {error}"))
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !Path::new(&go_file).exists() {
+        if std::time::Instant::now() > deadline {
+            helper_fail(8, "writer go file never appeared");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    let db = match AppDatabase::open(Path::new(&database_path)) {
+        Ok(db) => db,
+        Err(error) => helper_fail(9, &format!("writer open failed: {error:?}")),
+    };
+    for index in 0..20 {
+        let project_id = format!("writer-{writer_id}-project-{index}");
+        let worktree_id = format!("writer-{writer_id}-worktree-{index}");
+        let tab_id = format!("writer-{writer_id}-tab-{index}");
+        db.save_project(&sample_project(&project_id, &project_id))
+            .unwrap_or_else(|error| helper_fail(10, &format!("save project failed: {error:?}")));
+        db.save_worktree(&sample_worktree(&worktree_id, &project_id, "main"))
+            .unwrap_or_else(|error| helper_fail(11, &format!("save worktree failed: {error:?}")));
+        db.save_tabs(
+            &worktree_id,
+            &[sample_tab(&tab_id, &worktree_id, "Terminal", "terminal")],
+        )
+        .unwrap_or_else(|error| helper_fail(12, &format!("save tab failed: {error:?}")));
+    }
+    println!("OK");
+    std::process::exit(0);
+}
+
 fn helper_fail(code: i32, message: &str) -> ! {
     eprintln!("helper failed: {message}");
     std::process::exit(code);
 }
 
 /// Polls `ready` until it returns true or `deadline` passes.
-fn wait_until(
-    deadline: std::time::Instant,
-    what: &str,
-    mut ready: impl FnMut() -> bool,
-) -> bool {
+fn wait_until(deadline: std::time::Instant, what: &str, mut ready: impl FnMut() -> bool) -> bool {
     while !ready() {
         if std::time::Instant::now() > deadline {
             eprintln!("timed out waiting for {what}");
@@ -631,12 +783,7 @@ fn wait_until(
 /// Spawns one child helper process; returns the child and its output
 /// handles. The child writes `ready` first and waits for `go` before
 /// opening the database.
-fn spawn_helper(
-    dir: &Path,
-    database_path: &Path,
-    ready: &Path,
-    go: &Path,
-) -> std::process::Child {
+fn spawn_helper(dir: &Path, database_path: &Path, ready: &Path, go: &Path) -> std::process::Child {
     std::process::Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", "helper_process", "--nocapture"])
         .env("TILLER_PERSISTENCE_HELPER", database_path)
@@ -649,12 +796,29 @@ fn spawn_helper(
         .expect("spawn helper process")
 }
 
+fn spawn_writer(
+    dir: &Path,
+    database_path: &Path,
+    ready: &Path,
+    go: &Path,
+    writer_id: &str,
+) -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", "writer_process", "--nocapture"])
+        .env("TILLER_PERSISTENCE_WRITER", database_path)
+        .env("TILLER_PERSISTENCE_WRITER_GO", go)
+        .env("TILLER_PERSISTENCE_WRITER_READY", ready)
+        .env("TILLER_PERSISTENCE_WRITER_ID", writer_id)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn writer process")
+}
+
 /// Waits for `children` to exit (bounded), asserting every one exited 0 with
 /// `OK` on stdout.
-fn assert_all_helpers_succeeded(
-    children: Vec<std::process::Child>,
-    deadline: std::time::Instant,
-) {
+fn assert_all_helpers_succeeded(children: Vec<std::process::Child>, deadline: std::time::Instant) {
     let mut children = children;
     while !children.is_empty() {
         children.retain_mut(|child| match child.try_wait() {
@@ -787,4 +951,42 @@ fn concurrent_opens_of_an_already_migrated_database_both_succeed() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     assert_all_helpers_succeeded(vec![child_a, child_b], deadline);
+}
+
+/// Two real app instances write disjoint records to one store and then quit.
+/// WAL plus the busy timeout must preserve every record and leave a database
+/// that passes integrity checking; the package does not promise merging two
+/// updates to the same row.
+#[test]
+fn concurrent_writers_save_disjoint_records_and_exit() {
+    let dir = TempDir::new();
+    let database_path = dir.db_path("concurrent-writers");
+    let go = dir.0.join("writer-go");
+    let ready_a = dir.0.join("writer-ready-a");
+    let ready_b = dir.0.join("writer-ready-b");
+    let child_a = spawn_writer(&dir.0, &database_path, &ready_a, &go, "a");
+    let child_b = spawn_writer(&dir.0, &database_path, &ready_b, &go, "b");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    assert!(
+        wait_until(deadline, "both writer ready files", || {
+            ready_a.exists() && ready_b.exists()
+        }),
+        "writer children never signalled ready"
+    );
+    std::fs::write(&go, "go").expect("release writer children");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    assert_all_helpers_succeeded(vec![child_a, child_b], deadline);
+
+    let db = AppDatabase::open(&database_path).expect("reopen after both writers quit");
+    assert_eq!(db.projects().expect("projects").len(), 40);
+    assert_eq!(db.worktrees().expect("worktrees").len(), 40);
+    assert_eq!(db.tabs().expect("tabs").len(), 40);
+
+    let conn = rusqlite::Connection::open(&database_path).expect("raw integrity connection");
+    let check: String = conn
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .expect("quick check");
+    assert_eq!(check, "ok", "concurrent writers left a valid SQLite store");
 }
