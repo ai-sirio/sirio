@@ -1595,10 +1595,7 @@ impl Sidebar {
         })
     }
 
-    fn render_add_project_menu(
-        entity: gpui::Entity<Self>,
-        theme: Theme,
-    ) -> impl IntoElement {
+    fn render_add_project_menu(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
         let open_entity = entity.clone();
         let clone_entity = entity.clone();
         let create_entity = entity.clone();
@@ -1629,7 +1626,9 @@ impl Sidebar {
                 "Clone Repository…",
                 "add-project-clone",
                 theme,
-                move |_, _, cx| clone_entity.update(cx, |sidebar, cx| sidebar.start_clone_project(cx)),
+                move |_, _, cx| {
+                    clone_entity.update(cx, |sidebar, cx| sidebar.start_clone_project(cx))
+                },
             ))
             .child(Self::render_add_project_item(
                 entity.clone(),
@@ -2842,7 +2841,11 @@ mod tests {
         cx.simulate_click(plus_bounds.center(), Modifiers::none());
         cx.run_until_parked();
 
-        for selector in ["add-project-open", "add-project-clone", "add-project-create"] {
+        for selector in [
+            "add-project-open",
+            "add-project-clone",
+            "add-project-create",
+        ] {
             assert!(
                 cx.debug_bounds(selector).is_some(),
                 "the + menu offers {selector}"
@@ -3322,10 +3325,12 @@ mod tests {
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        let sidebar = cx
-            .update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.open_project_settings("project", cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
         });
         cx.run_until_parked();
         assert!(

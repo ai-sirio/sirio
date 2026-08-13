@@ -2742,10 +2742,7 @@ impl TillerWorkspace {
             0,
         )
         .expect("restored tabs form one valid pane group");
-        let browser_origins = session
-            .load_browser_origin_grants()
-            .into_iter()
-            .collect();
+        let browser_origins = session.load_browser_origin_grants().into_iter().collect();
         // P58, F-SET-10: the usage bar consumes the settings surface's
         // visibility toggles and refresh interval. Observing the settings
         // entity applies every change to the bar live, so a toggle in
@@ -4633,22 +4630,15 @@ impl TillerWorkspace {
                 }
             }
             "browser.act" => {
-                if let Some(driving) = params
-                    .get("driving")
-                    .or_else(|| params.get("agentDriving"))
+                if let Some(driving) = params.get("driving").or_else(|| params.get("agentDriving"))
                 {
                     surface.set_agent_driving(matches!(driving.as_str(), "1" | "true" | "yes"));
                 }
             }
             // These methods are intentionally routed to the live surface even
             // when their transport payload is only an observation request.
-            "browser.get"
-            | "browser.screenshot"
-            | "browser.snapshot"
-            | "browser.wait"
-            | "browser.eval"
-            | "browser.console"
-            | "browser.errors" => {
+            "browser.get" | "browser.screenshot" | "browser.snapshot" | "browser.wait"
+            | "browser.eval" | "browser.console" | "browser.errors" => {
                 let _ = surface.state();
             }
             _ => {}
@@ -4867,7 +4857,9 @@ impl TillerWorkspace {
                     focused_content = match content {
                         TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                         TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                        TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
+                        TabContent::File { .. }
+                        | TabContent::Changes(_)
+                        | TabContent::Browser(_) => None,
                     };
                 }
             });
@@ -5146,7 +5138,9 @@ impl TillerWorkspace {
                         replacement_content = match content {
                             TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                             TabContent::Terminal { view } => Some(view.focus_handle(cx)),
-                            TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => None,
+                            TabContent::File { .. }
+                            | TabContent::Changes(_)
+                            | TabContent::Browser(_) => None,
                         };
                     }
                 });
@@ -10596,8 +10590,7 @@ mod tests {
             diagnostics: vec![],
         };
 
-        let (tabs, active) =
-            cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
+        let (tabs, active) = cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
 
         assert_eq!(
             tabs.len(),
@@ -10822,8 +10815,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let (mut tabs, _) =
-            cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
+        let (mut tabs, _) = cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
         let terminal = cx.update(|cx| {
             cx.new(|cx| {
                 TerminalView::with_shell(
@@ -10877,8 +10869,7 @@ mod tests {
             diagnostics: vec![],
         };
 
-        let (tabs, active) =
-            cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
+        let (tabs, active) = cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
 
         assert_eq!(active, 0, "the restored Changes tab is active");
         assert_eq!(tabs.len(), 1, "the shell retains the Changes tab");

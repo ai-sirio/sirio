@@ -3,9 +3,9 @@
 //! OWNERSHIP: this file declares modules only. Do not add rendering code here
 //! and do not edit it from a piece worktree — the integrator owns it.
 
+pub mod browser;
 pub mod changes;
 pub mod chat;
-pub mod browser;
 pub mod composer;
 pub mod controls;
 pub mod editor;
