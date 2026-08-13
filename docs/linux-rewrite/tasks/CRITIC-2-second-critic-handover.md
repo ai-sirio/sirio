@@ -91,6 +91,18 @@ not the ledger's opinion of the tree.**
 - **The harness**: `Scripts/linux-drive.sh`. Keyboard chords land **only after a real click** gives
   the app X focus — click first, then send the chord. `fable` has observed **paint lag on the first
   capture after an action**; take a second and compare before believing a frame.
+- **The display is a mutex and the harness now enforces it.** There is one X pointer and it is
+  global, so two agents driving at once corrupt each other's clicks while each photographs its own
+  window perfectly — a false negative that looks exactly like a real one. `linux-drive.sh` takes an
+  `flock` for the whole run; if another driver holds it you get **exit 6**, which is a queue, not a
+  hang. Export `TILLER_DRIVE_LABEL=<your name>` so a waiter can see who is holding it.
+
+  **This changes how the two of you divide the work.** You cannot both drive at once — but a critic
+  pass is mostly *not* driving. `fable`'s 50-minute batch was largely reading code, forming
+  hypotheses and writing the ledger. So: **do all your reading, route-finding and ledger drafting
+  freely in parallel, and queue for the display only for the drives themselves.** Batch your drives
+  so you hold the lock in a few long runs rather than many short ones, and say in your pane when you
+  take it and when you are done.
 - **The persistence DB**: WAL mode, and there is no `sqlite3` CLI on this box. Copying
   `tiller.sqlite` alone reads as *not persisted* for things that persisted fine. The working recipe
   is in `ENVIRONMENT.md`.
