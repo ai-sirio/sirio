@@ -65,6 +65,15 @@ The desktop session is **Wayland**. `DISPLAY=:1` is XWayland, and the app runs a
   cannot be reordered, whereas both of these are GPUI elements and the paint order is ours to fix.
 - **Keyboard chords land only after a real click** has given the app X focus. Click first, then send
   the chord.
+- **The first capture after an action often shows the frame from *before* it.** Observed by the
+  critic on 2026-08-14 driving a dialog: `r0` and `r1` were identical and only `r2` had changed. The
+  action had landed; the screenshot had not caught up.
+
+  **This manufactures false negatives, and they are the expensive kind** — a control that works reads
+  as a control that does nothing, so the row is marked `FAILED — absent` and somebody is sent to
+  rebuild what already works. Take a second capture and compare before believing any frame that
+  shows *no change*. A frame that shows the change you expected needs no second look; a frame that
+  shows nothing does.
 - **The portal file picker is Wayland-side and invisible to X captures.** It will not appear in a
   screenshot even when it is open.
 
