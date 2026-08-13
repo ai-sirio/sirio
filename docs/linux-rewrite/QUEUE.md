@@ -1356,3 +1356,41 @@ One process note: the spike's harness lives in `/tmp/tiller-p74-browser-be1wPZ`,
 lines and `#[path]`-includes the real `browser.rs` from the repo — so the proof **is** replayable.
 That is the right shape for a spike, and worth copying: put the logic in the tree and keep only the
 launcher outside it.
+
+### I was wrong about right-click, and the wrong answer was the expensive kind
+
+Recorded because the shape of the error matters more than the fix.
+
+Earlier tonight I diagnosed the critic's non-working right-click as an XWayland/XTEST restriction,
+told `pireview` so twice, and wrote it into `ENVIRONMENT.md` **as an established fact**. Then I read
+the harness instead of reasoning about the platform:
+
+```
+click() { xdotool mousemove --sync $((WIN_X+$1)) $((WIN_Y+$2)); sleep 0.2; xdotool click 1; sleep 0.4; }
+```
+
+`click 1`, hardcoded. **No `rclick`, no `--button`, no button-3 path anywhere in the script.** The
+right-click was never being sent. It was not failing to arrive.
+
+The evidence against my own diagnosis was in front of me the whole time: **button 1 travels that
+identical route** — same `mousemove`, same XTEST — and lands in every frame the critic has captured.
+XWayland does not discriminate by button for a focused X client. If one arrives, three arrives.
+
+**Why this class of wrong answer is the expensive one:** "the platform forbids it" closes the avenue.
+A restriction makes twelve rows permanently unverifiable and invites an `UNREACHABLE — platform`
+verdict on each. A missing helper makes them a two-line fix. I picked the pessimistic reading, then
+promoted it to a fact in the one file written specifically to stop unverified environment claims from
+circulating. Being confidently wrong in the authoritative file is worse than being wrong in a
+message, because everyone downstream inherits it without the doubt.
+
+Fixed in `df76698`: an `rclick` helper mirroring `click` verbatim, and `ENVIRONMENT.md` corrected to
+say the cause was unproven and probably false.
+
+**Handed to `pireview` with two conditions**, because a helper the orchestrator wrote is not evidence:
+verify it produces a real context menu before trusting any verdict from it; and if a genuine
+delivered button-3 still does nothing, that is a **finding, not a restriction** — the app binds 22
+`MouseButton::Right` handlers (7 `right_panel.rs`, 7 `sidebar.rs`, 5 `main.rs`,
+3 `tiller_terminal/lib.rs`), so silence would be a defect worth a verdict.
+
+**The generalisable rule: check for a missing helper before concluding a platform restriction.**
+Verify the instrument can perform the action at all before concluding the subject cannot receive it.
