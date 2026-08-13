@@ -95,6 +95,37 @@ wrong name, not unreachable for a missing install. That distinction is the whole
 Note also that the npm package `omp@1.0.0` is a squatted placeholder — its description is literally
 `"new"`. It is not the project and must not be installed.
 
+## Reading the persistence database
+
+The app's SQLite lives under one directory per checkout:
+
+```
+~/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+```
+
+`session.rs:166` derives it from `XDG_STATE_HOME` (or `$HOME/.local/state`) on Linux.
+
+**There is no `sqlite3` CLI on this box**, and none is needed — Python ships the same library:
+
+```bash
+python3 -c "
+import sqlite3, os
+db = os.path.expanduser('~/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite')
+con = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+print(con.execute('PRAGMA user_version').fetchone())
+"
+```
+
+**The database is in WAL mode, and this is a false-verdict trap.** Copying `tiller.sqlite` on its own
+gives a stale snapshot — recent writes are still in `tiller.sqlite-wal`, which was 61 KB when this was
+measured. A persistence row checked that way reads as *not persisted* when it persisted fine. Either
+open the live file read-only as above (SQLite then reads the WAL), copy **all three** of
+`.sqlite`, `-wal` and `-shm` together, or quit the app first so it checkpoints.
+
+Measured 2026-08-14: `user_version` 11, twelve tables. `browser_origin_grant` exists and is empty —
+the schema half of `F-BRW-07` is real; it has zero rows because nothing can grant an origin until the
+browser surface is mounted.
+
 ## Shared build target
 
 All panes share one cargo target directory, so a `cargo test --workspace` taken while others build
