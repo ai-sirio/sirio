@@ -42,10 +42,21 @@ running the command matches its own pattern and dies (exit 144).
 
 The desktop session is **Wayland**. `DISPLAY=:1` is XWayland, and the app runs as an X client there.
 
-- **Synthetic right-click (XTEST button 3) does not reach the app.** XTEST under XWayland reaches X
-  clients only, and events that would leak into the Wayland compositor are restricted. A right-click
-  that "does nothing" is this harness, **not** a defect — twelve rows were one step from being
-  recorded as false negatives on exactly this.
+- **Right-click: the earlier entry here was wrong about the cause, and the correction matters.**
+  This file previously stated as fact that XTEST cannot deliver button 3 under XWayland. That is
+  **unproven and probably false.** What was actually true: `Scripts/linux-drive.sh` had **no
+  button-3 path at all** — its `click()` helper hardcoded `xdotool click 1`, and there was no
+  `rclick`. Button 1 travels that same mousemove-then-XTEST route and lands on every frame the
+  critic has ever captured, and XWayland does not discriminate by button for a focused X client.
+  An `rclick` helper now exists, mirroring `click` verbatim. **Verify it before trusting a verdict
+  from it** — the app does bind right-click (22 `MouseButton::Right` handlers across `main.rs`,
+  `right_panel.rs`, `sidebar.rs` and `tiller_terminal/lib.rs`), so if it still does nothing, that is
+  a finding rather than a restriction.
+
+  The original judgement stands even though its reason did not: a right-click that "does nothing" was
+  the harness, **not** a defect, and twelve rows were one step from being recorded as false
+  negatives. The lesson is that "the platform forbids it" is the most expensive kind of wrong answer,
+  because it closes the avenue — check for a missing helper before concluding a restriction.
 - **Keyboard chords land only after a real click** has given the app X focus. Click first, then send
   the chord.
 - **The portal file picker is Wayland-side and invisible to X captures.** It will not appear in a

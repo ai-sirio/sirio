@@ -8,7 +8,8 @@
 #
 # You supply a snippet of shell run against the live window. Inside it you get:
 #     $WID    the app window id        $DISP   the X display
-#     key / type / click / shot        helpers, defined below
+#     key / type / click / rclick / shot   helpers, defined below
+#                                          (rclick = right-click, button 3)
 #
 # Example — open the second tab, type a message, send it, wait, and capture:
 #   Scripts/linux-drive.sh out.png '
@@ -128,8 +129,15 @@ export WIN_X WIN_Y LOG WID
 key()   { timeout 10 env DISPLAY="$DISP" xdotool key --clearmodifiers "$@"; sleep 0.2; }
 type()  { timeout 10 env DISPLAY="$DISP" xdotool type --clearmodifiers --delay 25 "$1"; sleep 0.2; }
 click() { timeout 10 env DISPLAY="$DISP" xdotool mousemove --sync $(( WIN_X + $1 )) $(( WIN_Y + $2 )); sleep 0.2; timeout 10 env DISPLAY="$DISP" xdotool click 1; sleep 0.4; }
+# Right-click. The harness had no button-3 path at all until now, and its
+# absence was being read as "XTEST cannot deliver a right-click under
+# XWayland" — a much more pessimistic conclusion, which would have made the
+# context-menu rows permanently unverifiable. Button 1 travels this exact
+# route and lands, and XWayland does not discriminate by button for a focused
+# X client, so the same mousemove-then-XTEST sequence is used verbatim.
+rclick() { timeout 10 env DISPLAY="$DISP" xdotool mousemove --sync $(( WIN_X + $1 )) $(( WIN_Y + $2 )); sleep 0.2; timeout 10 env DISPLAY="$DISP" xdotool click 3; sleep 0.4; }
 shot()  { timeout 30 env DISPLAY="$DISP" import -window "$WID" "${1:-$OUT}" 2>>"$LOG"; }
-export -f key type click shot
+export -f key type click rclick shot
 
 if [ -n "$ACTIONS" ]; then
   echo "--- driving ---"
