@@ -5,12 +5,12 @@
 //! literal remain deliberately:
 //!
 //! - **Component geometry** — a control's own fixed footprint (a toggle's
-//!   36×20 track, a stepper's 28px buttons, the 44×22 colour swatch) stays a
-//!   frozen literal, the same "geometry is waku's, colour/radius language is
-//!   COSMIC's" split `titlebar.rs` already established. The "full circle is
-//!   half the box" idiom from [`tiller_theme::Radii`]'s own doc comment
-//!   applies here too (the swatch's `radius(11)` for a 44×22 box, the
-//!   toggle's `radius(7)` for a 14×14 knob).
+//!   36×20 track, a stepper's 28px buttons, the 20×20 colour picker swatch)
+//!   stays a frozen literal, the same "geometry is waku's, colour/radius
+//!   language is COSMIC's" split `titlebar.rs` already established. The
+//!   "full circle is half the box" idiom from [`tiller_theme::Radii`]'s own
+//!   doc comment applies here too (the swatch's `radius(10)` for a 20×20
+//!   box, the toggle's `radius(7)` for a 14×14 knob).
 //! - **Content spacing** (gaps, padding, margins between elements) now
 //!   reads `theme.cosmic.spacing.*`, rounded to the nearest COSMIC step from
 //!   its original waku value.
@@ -19,7 +19,9 @@
 //! COSMIC *container* colour, not just a spacing/radius number — see its
 //! doc comment for the container-level decision.
 
-use gpui::{App, ClickEvent, Div, FontWeight, Rgba, Window, div, prelude::*, px, text};
+use gpui::{
+    App, ClickEvent, CursorStyle, Div, FontWeight, Rgba, Window, div, prelude::*, px, text,
+};
 use std::rc::Rc;
 use tiller_theme::Theme;
 
@@ -450,20 +452,81 @@ where
         .child(text!(id = format!("settings-button-{id}"), label))
 }
 
-/// A colour swatch pill used for agent accent values.
-///
-/// 44×22 at `radius(11)` is the "full circle is half the box" idiom
-/// [`tiller_theme::Radii`]'s own doc comment names by this exact example —
-/// component geometry, not a spacing/radius token.
-pub fn color_swatch(id: &'static str, color: Rgba, theme: Theme) -> impl IntoElement {
-    div()
+/// Like [`button`], but the caller may not have a real handler yet. `None`
+/// renders the same label muted, with no `on_click` attached at all — an
+/// honest "not wired" rather than a control that looks live and reaches
+/// nothing (the dead-control shape P75 exists to fix, P76's `titlebar.rs`
+/// cluster seams use the identical convention).
+pub fn button_maybe<F>(
+    id: &'static str,
+    label: &'static str,
+    theme: Theme,
+    callback: Option<F>,
+) -> impl IntoElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
+    let spacing = theme.cosmic.spacing;
+    let enabled = callback.is_some();
+    let mut element = div()
         .id(id)
-        .w(px(44.0))
-        .h(px(22.0))
-        .rounded(px(11.0))
-        .bg(color)
-        .border_2()
-        .border_color(theme.hairline)
+        .debug_selector(move || id.to_string())
+        .px(px(spacing.xs as f32))
+        .py(px(spacing.xxxs as f32))
+        .rounded(theme.radii.control)
+        .text_size(theme.typography.callout)
+        .text_color(if enabled { theme.title } else { theme.meta })
+        .bg(theme.primary_pill_bg)
+        .child(text!(id = format!("settings-button-{id}"), label));
+    if let Some(callback) = callback {
+        element = element
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(callback);
+    }
+    element
+}
+
+/// A row of small selectable colour swatches — the agent accent picker
+/// (F-SET-22). It replaces what used to be a single 44×22 display-only
+/// swatch pill with no `on_click`, so no colour choice existed to
+/// exercise. Each option here is its own clickable swatch; the selected
+/// one draws a highlight ring in `theme.selection_ring` instead of a
+/// checkmark glyph, so the choice stays legible without adding new
+/// iconography.
+pub fn color_picker(
+    id: &'static str,
+    options: &[(&'static str, Rgba)],
+    selected: &'static str,
+    theme: Theme,
+    callback: impl Fn(&'static str, &mut App) + 'static,
+) -> impl IntoElement {
+    let callback: Rc<dyn Fn(&'static str, &mut App)> = Rc::new(callback);
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(theme.cosmic.spacing.xxs as f32));
+    for (key, color) in options.iter().copied() {
+        let callback = callback.clone();
+        let active = key == selected;
+        row = row.child(
+            div()
+                .id(format!("{id}-{key}"))
+                .debug_selector(move || format!("{id}-{key}"))
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(10.0))
+                .bg(color)
+                .border_2()
+                .border_color(if active {
+                    theme.selection_ring
+                } else {
+                    theme.hairline
+                })
+                .cursor(CursorStyle::PointingHand)
+                .on_click(move |_, _, cx| callback(key, cx)),
+        );
+    }
+    row
 }
 
 #[cfg(test)]
