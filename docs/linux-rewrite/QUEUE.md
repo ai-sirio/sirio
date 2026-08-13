@@ -1162,3 +1162,27 @@ because `tiller_persistence` is "finished": the widening rule says otherwise.
 
 All six panes are working: `pi` F-CHAT, `sonnet` P76 then P75, `codex11` P74, `codex12` the broken
 tiller-bin cluster + the dead browser menu entry, `pireview` pass 16, `fable` FABLE-11.
+
+### Autonomous call: pass-15 frames published to the existing artifact
+
+The user asked earlier to see how the app was coming along and went to bed under a standing
+instruction to take the recommended action rather than ask. The pass-15 captures were the first
+evidence good enough to answer that question, so they were published — **updating the existing
+artifact in place** (`claude.ai/code/artifact/6093d731…`) rather than creating a second link, so
+there is one URL for this subject and not a trail of them.
+
+Nothing left the machine except that page: private by default, no repository contents, no
+credentials. Not a push.
+
+Two claims were checked before publishing rather than after, both worth keeping:
+
+- "up from nothing on 6 August" was invented. `git log --reverse -- rust/` dates the first Rust file
+  on this branch to **12 August**, which is both true and a better fact — the app in those frames is
+  two days old.
+- The verdict split on the page is the parsed ledger (188/389), not a remembered number.
+
+The strongest frame on the page is the one that shows a **defect**: `k3-01-running.png` and
+`k3-02-done.png` are both exactly 44550 bytes. Two byte-identical captures, one taken while a command
+ran and one after it exited, are the evidence for `F-TERM-PTY-05`'s missing activity signal. A
+reviewer looking at either screenshot alone sees nothing wrong, which is exactly why that row
+survived this long.
