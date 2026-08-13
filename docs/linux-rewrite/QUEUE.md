@@ -1798,3 +1798,32 @@ at "often a dozen lines" on the strength of a reference count of zero. That coun
 estimate was wrong: **a reference count tells you a seam is open, not what it costs to close.** The
 same shape as the transplant metric — the aggregate measurement was true and hid the per-file fact.
 Before sizing a mount, grep the consuming file for the variant's own name.
+
+## 2026-08-14, 03:50 — thirty-one megabytes of the project were untracked
+
+Committing `codex12`'s pass turned up that a large part of this project had never been committed at
+all. In a repo whose most recent inherited commit reads *"recover Rust/GPUI rewrite after local git
+object database loss."*
+
+- `tiller_ui/src/browser.rs` — **1283 lines, the entire browser**, cited by line number in
+  `SEAMS.md`, `P79` and `P83`
+- `tiller_ui/src/composer.rs` (746), `tiller_acp/src/chat.rs` (707) and its integration tests
+- **146 critic captures**, against 107 already tracked — so keeping them was the practice; it had
+  lapsed. Among them `p17-rclick-term.png`, the single frame that overturned a false platform claim
+  which had twice been asserted as fact and had twelve rows queued as false negatives behind it
+- about sixty task briefs, and `DEAD-MODELS`, `EVIDENCE-STANDARD`, `PASSED-AUDIT`, `SHOT-LIST`,
+  `DESIGN-LEDGER`, `COSMIC-DESIGN`
+
+**Why nobody noticed.** Everyone commits *by explicit path* — correctly, because `git add -A` in a
+four-agent worktree sweeps up somebody else's half-written file. But an explicit-path habit only ever
+commits files you are thinking about, and **a new file is exactly the one nobody is thinking about**.
+The discipline that prevents collisions also silently drops new work on the floor.
+
+It is the same shape as the seams: a rule that is right, whose blind spot nobody owned.
+
+**What this cost, or nearly did.** A ledger verdict whose evidence is an untracked screenshot is
+unreplayable the moment the file is gone — the `/tmp` failure, at 31 MB. And `git clean -fd`, which
+any agent might reasonably run, would have deleted the browser.
+
+**The check, and it takes two seconds:** `git status --short | grep '??'` before you finish a piece.
+If a file you created is in that list, it is not in the project yet.
