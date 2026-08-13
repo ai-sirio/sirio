@@ -13,7 +13,12 @@ use std::{
 use gpui::{App, Entity, KeyBinding, actions};
 use tiller_activity::{AgentActivityModel, Transition, detect_content_status};
 use tiller_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
-use tiller_ui::{changes::ChangesTab, chat::Chat, file_view::FileView};
+use tiller_ui::{
+    browser::BrowserSurface,
+    changes::ChangesTab,
+    chat::Chat,
+    file_view::FileView,
+};
 
 /// Layer D refresh cadence. 500 ms is fast enough for the sidebar to notice
 /// a native foreground agent without making `/proc` traversal a redraw-rate
@@ -527,13 +532,14 @@ pub(crate) enum PaneContent {
     Terminal { view: Entity<TerminalView> },
     File { view: Entity<FileView> },
     Changes(Entity<ChangesTab>),
+    Browser(Entity<BrowserSurface>),
 }
 
 impl PaneContent {
     pub(crate) fn terminal(&self) -> Option<Entity<TerminalView>> {
         match self {
             Self::Terminal { view } => Some(view.clone()),
-            Self::Chat(_) | Self::File { .. } | Self::Changes(_) => None,
+            Self::Chat(_) | Self::File { .. } | Self::Changes(_) | Self::Browser(_) => None,
         }
     }
 }
