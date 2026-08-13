@@ -1475,3 +1475,55 @@ the ACP subsystem at all — proposing +14 rows for it, plus 17 more it called d
 real and accepted as a finding. **The headline denominator does not move**: the user pinned 389 and
 is asleep, so the ACP rows go into a marked appendix and progress is reported as "N/389, plus 14
 newly-found ACP rows not yet in the denominator". Both numbers visible, the call left to them.
+
+## 00:45 — the browser architecture, decided by counting instead of arguing
+
+`codex11` was told not to choose an architecture until it had answered one measurable question:
+**how many of the nine `F-BRW` rows actually need GPUI chrome above the webview?** The webview is a
+native child window, so it sits above GPUI's GL surface and cannot be drawn over — proven by the P72
+capture where an accent-coloured marker reads "GPUI →" with the rest occluded.
+
+Its count, row by row from `01-inventory-app.md:122`:
+
+| needs chrome above WebKit | rows |
+|---|---|
+| no | `F-BRW-01`, `-02`, `-03`, `-04`, `-05`, `-07`, `-08`, `-09` |
+| yes | `F-BRW-06` — the Allow/Deny permission dialog |
+
+**One row out of nine.** It also drew a distinction worth keeping: `F-BRW-05` would need an overlay
+only if we chose a *floating badge*, and the inventory requires the indicator, not that position.
+Separating "what the inventory requires" from "one way to draw it" is exactly where architectural
+decisions get made by accident.
+
+### What one row does to the three options
+
+It kills two of them. Option 3 (offscreen texture) rewrites the render pipeline and re-forwards input
+by hand — for one dialog. Option 2 (override-redirect popup) adds a second GPUI surface that must
+track the parent through every move and resize — also for one dialog.
+
+**A fourth option neither of us had named is the right one: don't overlay `F-BRW-06` at all.** Real
+browsers do not put permission prompts over page content — Firefox and Chrome anchor them *below the
+address bar*, in browser chrome. That area is GPUI's, above the webview's rectangle rather than above
+its pixels. Put the prompt there and the count goes to **zero**, option 1 wins with no compromise,
+and the working spike is untouched.
+
+Sent with two real conditions, not formalities: check what the macOS reference actually does first —
+if it is a modal sheet over the page, say so rather than adapting the reference to the convenient
+answer — and if the doorhanger fails, the fallback is hiding the child webview while the dialog is up,
+not option 2.
+
+**The generalisable move: when an architectural choice looks expensive, count how many cases actually
+need the expensive property before comparing designs.** Eight of these nine rows never needed the
+argument at all.
+
+## A note on ownership, logged rather than litigated
+
+`codex11` edited `tiller/src/panes.rs`, which `OWNERSHIP.md` assigns to `codex12`. The edit is
+**correct** — the failing test passed `std::process::id()` and demanded the pane stay `Running`, but
+`refresh_process_signal` walks that pid's *children*, the test process has no agent child, so
+`processGone` and a cleared status is the right behaviour under `CLAUDE.md`'s process-owned rule. It
+asserts `None` now, and a real e2e test below it spawns an actual child.
+
+It stays. But it nearly cost real time: `codex12` had just been dispatched to investigate that exact
+test and would have redone it, or worse, reverted it. Both panes have been told. **The rule stands —
+say so before entering a file that is not yours.**
