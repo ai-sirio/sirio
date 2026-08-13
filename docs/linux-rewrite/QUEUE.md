@@ -1299,3 +1299,26 @@ itself even though the change would flatter us. Only `pireview` writes a verdict
 196 PASSED / 127 absent / 22 N/A / 15 half-proven / 13 defective / 12 not exercised / 3 unreachable /
 1 builder-claimed = 389. Up 8 PASSED since 23:00, and `builder-claimed, unverified` has collapsed
 from 8 to 1 — pass 16 is converting claims into verdicts rather than accumulating them.
+
+### A new way to manufacture a false PASSED: the chord the code binds vs the chord a user presses
+
+`chat.rs` still binds five shortcuts in macOS convention — `cmd-a` (SelectAll), `cmd-c` ×2
+(CopyTranscript), `cmd-left`/`cmd-right` (Home/End). `codex12`'s own comment at `main.rs:6055` says
+what that means here: *"GPUI's platform modifier is the cross-platform spelling of ⌘ on macOS and
+**the Super key on Linux**."*
+
+So on this machine those bind to **Super+A, Super+C, Super+Left, Super+Right**. A Linux user presses
+Ctrl+A and Ctrl+C and nothing happens; Super+Left/Right never arrive at all, because the compositor
+takes them for window tiling. That it is an oversight rather than a decision is settled by the rest
+of the tree: **`panes.rs` carries 37 correctly-translated `ctrl-` bindings**. `chat.rs` is the
+untranslated remainder.
+
+**The generalisable danger is the verification, not the binding.** The critic drives with XTEST. If
+it exercises *the chord the code binds* rather than *the chord a Linux user would press*, it can mark
+a row PASSED that no human can reach. The right test for copy is not "Super+C copies" — it is
+**"Ctrl+C copies"**. This is a false-positive shape none of the previous ones covered: not a dead
+control, not a stale verdict, but a live control reachable only through a door nobody opens.
+
+Routed to `pi` (owns `chat.rs`) with the fix — `ctrl-a`, `ctrl-c`, and delete the two `cmd-` arrows
+outright since plain `home`/`end` are already bound beside them. Affects at least `F-CHAT-29`, which
+is already in `fable`'s recipe set and therefore about to be exercised.
