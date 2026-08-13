@@ -60,28 +60,71 @@ timeout 10 env DISPLAY="$DISP" xdpyinfo >/dev/null 2>&1 || { echo "FAIL: no X se
 #
 # A documented convention would not have prevented that, because the agent
 # breaking it did not know the rule existed. So it is a mutex.
+#
+# It is NOT flock. The first version of this was `flock` on fd 9, and within
+# the hour it deadlocked the whole roster: fd 9 was inherited by a long-lived,
+# reparented `claude` process, so the kernel held the lock for a run that had
+# finished, and no diagnosis from outside could release it. Agent CLIs fork and
+# reparent constantly, which makes any fd-inheritance-based lock fragile here.
+#
+# **A stuck lock is worse than no lock.** No lock costs you the occasional
+# corrupted capture; a stuck lock blocks every drive, and driving is the
+# project's rate limit. So this lock is self-healing: it records its holder and
+# breaks itself if that holder is gone or has held it implausibly long.
 # ---------------------------------------------------------------------------
-command -v flock >/dev/null || { echo "FAIL: flock is not installed (util-linux)" >&2; exit 3; }
-LOCK="${TILLER_DRIVE_LOCK:-/tmp/tiller-drive$(printf '%s' "$DISP" | tr -c 'a-zA-Z0-9' '-').lock}"
+LOCKDIR="${TILLER_DRIVE_LOCK:-/tmp/tiller-drive$(printf '%s' "$DISP" | tr -c 'a-zA-Z0-9' '-').lockd}"
 LOCK_WAIT="${TILLER_DRIVE_LOCK_WAIT:-900}"
-exec 9>>"$LOCK" || { echo "FAIL: cannot open drive lock $LOCK" >&2; exit 3; }
-if ! flock -w "$LOCK_WAIT" 9; then
-  echo "FAIL: waited ${LOCK_WAIT}s for the drive lock on $DISP and gave up." >&2
-  # The file keeps the last holder's line after release, so this is the last
-  # RECORDED holder, not provably the current one. Say so rather than name the
-  # wrong agent — a confidently wrong diagnostic costs more than a vague one.
-  echo "      Last recorded holder: $(cat "$LOCK" 2>/dev/null || echo 'unknown')" >&2
-  echo "      This is a mutex, not a hang — two drivers share one X pointer and" >&2
-  echo "      corrupt each other's clicks. Wait, or ask the holder to yield." >&2
-  exit 6
-fi
-: >"$LOCK"
-printf 'since=%s pid=%s label=%s out=%s\n' \
-  "$(date -Is)" "$$" "${TILLER_DRIVE_LABEL:-unlabelled}" "$OUT" >>"$LOCK"
+LOCK_STALE="${TILLER_DRIVE_LOCK_STALE:-1800}"
+WE_HOLD_LOCK=""
+
+cleanup() {
+  [ -n "${APP_PID:-}" ] && kill "$APP_PID" 2>/dev/null
+  [ -n "$WE_HOLD_LOCK" ] && rm -rf "$LOCKDIR"
+  return 0
+}
+trap cleanup EXIT
+
+lock_deadline=$(( SECONDS + LOCK_WAIT ))
+while :; do
+  # mkdir is atomic and owns no file descriptor, so nothing can inherit it.
+  if mkdir "$LOCKDIR" 2>/dev/null; then
+    WE_HOLD_LOCK=1
+    printf 'pid=%s label=%s since=%s out=%s\n' \
+      "$$" "${TILLER_DRIVE_LABEL:-unlabelled}" "$(date -Is)" "$OUT" >"$LOCKDIR/holder"
+    break
+  fi
+
+  holder="$(cat "$LOCKDIR/holder" 2>/dev/null || echo 'unknown')"
+  hpid="$(sed -n 's/^pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/null)"
+
+  # Self-heal 1: the recorded holder is gone. Its drive died without cleaning up.
+  if [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; then
+    echo "NOTE: breaking a drive lock whose holder (pid $hpid) no longer exists" >&2
+    rm -rf "$LOCKDIR"; continue
+  fi
+
+  # Self-heal 2: held implausibly long. No legitimate drive batch runs this far.
+  held_since="$(stat -c %Y "$LOCKDIR" 2>/dev/null || date +%s)"
+  held_for=$(( $(date +%s) - held_since ))
+  if [ "$held_for" -gt "$LOCK_STALE" ]; then
+    echo "NOTE: breaking a drive lock held ${held_for}s (stale after ${LOCK_STALE}s): $holder" >&2
+    rm -rf "$LOCKDIR"; continue
+  fi
+
+  if [ "$SECONDS" -ge "$lock_deadline" ]; then
+    echo "FAIL: waited ${LOCK_WAIT}s for the drive lock on $DISP and gave up." >&2
+    echo "      Holder: $holder" >&2
+    echo "      This is a mutex, not a hang — two drivers share one X pointer and" >&2
+    echo "      corrupt each other's clicks. Wait, or ask the holder to yield." >&2
+    exit 6
+  fi
+  sleep 3
+done
 
 env -u WAYLAND_DISPLAY DISPLAY="$DISP" "$BIN" >"$LOG" 2>&1 &
 APP_PID=$!
-trap 'kill "$APP_PID" 2>/dev/null' EXIT
+# The EXIT trap is already installed above (cleanup) and kills APP_PID as well
+# as releasing the lock — it must not be replaced here, or the lock leaks.
 
 # The app sets no WM_NAME, so it cannot be found by title — but "the largest window on the display"
 # is worse than useless here, because several agents run this app on :1 simultaneously. Driving a
