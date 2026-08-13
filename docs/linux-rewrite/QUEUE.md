@@ -651,3 +651,49 @@ time before dispatch rather than after.
 **Open, small, and owned:** the three probe scaffolds. `probe_escape_dispatch` is in `main.rs`
 (`codex12`); `probe_sf_steps`/`probe_pixels` are in `tiller_ui/src/sfsymbol.rs`, which **no current
 brief owns**. Not urgent — they mislead a reader counting green tests, they do not break anything.
+
+## `F-PRJ` unblocked: the 18-row cluster decomposes into five pieces, and one row is two lines
+
+`F-PRJ` was held pending a three-way seam design. It is designed now. The cluster is unusually well
+adjudicated — pass 13 exercised it **on the display**, so the evidence is live rather than read —
+and it splits cleanly:
+
+| piece | rows | surface |
+|---|---|---|
+| **P71** silent failures | `F-PRJ-04` | *already exists* — see below |
+| add-flow honesty | `F-PRJ-01`, `03` | the `+` menu offering three choices; the non-git Initialize/Add-anyway prompt |
+| clone-from-URL | `F-PRJ-05`, `06`, `07` | one new form: URL field, guards, failure/retry |
+| create-new-project | `F-PRJ-08`, `09`, `10` | one new form: name field, guards, failure |
+| project settings sheet | `F-PRJ-11`, `12` | delete/trash, display-name edit, repository-type switch |
+| project icon | `F-PRJ-13`, `14`, `15`, `16` | colour+reset, avatar/GitHub/PNG, glyph grid, emoji |
+| worktree base | `F-PRJ-17`, `18` | default parent + custom location, replacing `derive_worktree_*` |
+
+Three observations that change how these should be scheduled:
+
+**The bottleneck is `sidebar.rs`, not the work.** Almost every row above lands in one file, which
+`pi` owns. Running two of these pieces at once means two builders in `sidebar.rs`. Sequence them, or
+split by *surface* (the settings sheet vs. the add flow) and confirm the split before dispatching.
+
+**Clone needs `tiller_git` (`codex11`), so `F-PRJ-05/06/07` is the one piece that is genuinely
+two-owner.** Everything else is one owner plus a `main.rs` call.
+
+**`F-PRJ-04` is not a missing surface. It is a disconnected call, and the fix is ~2 lines.** The
+ledger's wording — *"no error surface in the Linux build"* — is wrong about the cause:
+
+- `sidebar.rs:274` `notice: Option<String>`; `sidebar.rs:613` `pub fn set_notice(..)`; rendered at
+  `~1856` as `sidebar-notice`; **already used at `sidebar.rs:662`** for `could not open the folder
+  picker: {error}` — the same sentence `main.rs` prints to stderr for the *file* picker.
+- `main.rs:2304` holds `sidebar: Entity<Sidebar>` and already uses `self.sidebar.update(..)` at
+  `:2718`, `:3042`, `:3288`, `:3294`.
+
+This is the third row this week whose *wording* is the reason it looks absent (after `F-EDIT-04`'s
+`⌘S`/`ctrl-s` and `F-SET-09`'s `skill.rs`-in-the-other-crate). It is exactly the failure `FABLE-08`
+is chasing, and it is a **different** kind from those two: not old-platform vocabulary, but a row
+that names the *symptom* ("no error surface") as though it were the *cause* ("this call site does not
+use the surface"). Worth telling `fable`: search for the capability, never for the row's diagnosis.
+
+**P71 is written** (`docs/linux-rewrite/tasks/P71-the-failures-only-stderr-sees.md`) and covers the
+whole silent-failure cluster in two non-breaking halves — `codex11` gives `FileView` the setter
+`Sidebar` already has, `codex12` converts four call sites. It deliberately leaves the other 33
+`eprintln!` alone: `[control]`/`[session]`/window-open are diagnostics for whoever runs the binary,
+and promoting all of them to UI is a different and worse defect.
