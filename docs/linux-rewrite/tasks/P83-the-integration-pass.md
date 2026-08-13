@@ -96,9 +96,11 @@ Handoff, verbatim from `SEAMS.md`:
 > resulting project.
 
 Plus: the sidebar `+` currently calls `start_add_project` (`sidebar.rs:797`, called from
-`sidebar.rs:1972`). It must offer **three choices** — open, clone, create. **`sidebar.rs` is
-`codex11`'s file**: if the change lands there, it is a seam back to `codex11`, so register it rather
-than editing it. If you can present the three choices from your own side, do that instead.
+`sidebar.rs:1972`). It must offer **three choices** — open, clone, create. **`sidebar.rs` is yours**
+(`OWNERSHIP.md:38`, and `:46` records it was deliberately assigned to you rather than to `sonnet`),
+so this is **not** a seam — change it directly. An earlier draft of this brief said otherwise; it was
+wrong, and inventing a seam where one owner holds both halves is exactly the debt `SEAMS.md` warns
+about.
 
 Behind this sits `tiller_git/src/clone.rs:57 clone_repository` — real, tested, and with zero callers.
 Six rows are waiting on nothing but a call site.
@@ -121,6 +123,34 @@ layout you expect.
 The rest of `F-TERM-SPLIT-01` — recursive leaf/split hosts, cached leaf controllers, 50/50 initial
 fractions — was proven live at pass 4. **Check before declaring any of it absent.** `codex11` holds
 the terminal crate (P82); this row is yours only because the constant is in your file.
+
+---
+
+---
+
+## Seam 4 — the project icon picker (`F-PRJ-13/15/16`, the local half of `F-PRJ-14`, and `F-PER-07`)
+
+**Do this one last, and only if the first three are genuinely finished.** It was registered by
+`sonnet` in `SEAMS.md` while this brief was being written, and it is here so it does not orphan the
+way the browser did — not because the pass needs to be twenty-two rows long. **If you run short,
+stop and say which seams closed.** Three closed seams reported honestly beat four rushed.
+
+`tiller_ui/src/project_identity.rs` — `ProjectIconPicker`, by `sonnet`, P80. **Zero references
+outside its own file and tests.** Glyph grid over this port's six curated `icons.rs` variants, colour
+tint reusing the shipped `AgentAccentColor` (with Reset), grapheme-cluster-correct single-emoji
+entry, an `on_open_emoji_picker` host seam, and the Avatar tab's local-PNG source with real signature
+and size validation. Eight drawn/clicked tests.
+
+Mount it into `sidebar.rs::render_project_settings` and wire `.on_change(ProjectIcon)` to wherever
+the chosen icon should be written.
+
+**If no existing write path can hold a `ProjectIcon`-shaped value, that gap is `F-PER-07`'s — and it
+is `tiller_persistence`, which is `codex11`'s.** Register a seam back to `codex11` for the schema
+addition; do not reach into that crate. `sonnet` called this correctly in `SEAMS.md` and you should
+too.
+
+The network half of `F-PRJ-14` (GitHub avatar / favicon fetch) is **deliberately unassigned** — it is
+HTTP I/O that belongs to no existing crate. Not yours, not in this pass.
 
 ---
 
