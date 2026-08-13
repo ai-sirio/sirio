@@ -1261,3 +1261,41 @@ close P73. That is the distinction between "the test passes" and "the test can f
 `~/.cargo/bin/cargo` exists as a rustup symlink. I hit this myself earlier tonight. Unblocked with
 the absolute path. **Environment facts belong in the brief, not in this file only** — a builder does
 not read the orchestrator's queue before running its first command.
+
+### An unowned file is why three defective rows had no assignee
+
+`rust/crates/tiller/src/panes.rs` appears in **nobody's ownership map** — not in the WORK-BREAKDOWN
+table, not in any brief. Three `FAILED — defective` rows (`F-CORE-ACT-06`, `-07`, `-11`) are
+defective *solely because their cited tests fail*, reproducibly across pass 14 and pass 16 with the
+file untouched in between, and none of them were on anyone's board. Assigned to `codex12` —
+same crate as `main.rs` and `session.rs`, which it already holds.
+
+That failing test is also the likeliest reason **`Scripts/ci-linux.sh` has never printed `CI OK`**: a
+stably-red test keeps `cargo test --workspace` red no matter what is in flight. Earlier tonight the
+gate's redness was attributed entirely to `codex11`'s mid-edit enum widening. That was one cause, not
+the cause — a second, older one was sitting underneath it the whole time, and attributing a symptom
+to the first plausible cause is the exact mistake this log already records once.
+
+**The hypothesis handed over, explicitly as a hypothesis:** `panes.rs:606` ends with
+
+```
+let _ = refresh_process_signal(&mut activity, "pane-process", std::process::id());
+assert_eq!(activity.status("pane-process"), Some(AgentStatus::Running));
+```
+
+It passes the **test binary's own PID** as the shell PID and then requires the status to survive. The
+test process has no `codex` child, and `CLAUDE.md` says process-owned status clears **only** on
+`processGone` — which a child scan finding no agent *is*. So clearing may be correct and the
+**assertion** may be the thing that is wrong.
+
+Two worlds, and they lead opposite ways: if the code is wrong the rows are genuinely defective and
+get built; **if the test is wrong, the code is healthy and three rows are mis-verdicted** — they go
+back to `pireview` for a new verdict, not to a builder for construction. `codex12` was told to make
+the test fail and pass under its own hand before deciding which, and told not to mark the rows
+itself even though the change would flatter us. Only `pireview` writes a verdict.
+
+### Ledger at this point
+
+196 PASSED / 127 absent / 22 N/A / 15 half-proven / 13 defective / 12 not exercised / 3 unreachable /
+1 builder-claimed = 389. Up 8 PASSED since 23:00, and `builder-claimed, unverified` has collapsed
+from 8 to 1 — pass 16 is converting claims into verdicts rather than accumulating them.
