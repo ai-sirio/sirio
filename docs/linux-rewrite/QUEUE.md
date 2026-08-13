@@ -1186,3 +1186,78 @@ The strongest frame on the page is the one that shows a **defect**: `k3-01-runni
 ran and one after it exited, are the evidence for `F-TERM-PTY-05`'s missing activity signal. A
 reviewer looking at either screenshot alone sees nothing wrong, which is exactly why that row
 survived this long.
+
+## Rulings and corrections, late 13 Aug
+
+### I asserted the icon format from a sample instead of measuring it
+
+`ATTRIBUTION.md` and P76 both said all 63 comet icons share `viewBox="0 0 16 16"` at
+`stroke-width 1.25`. **Measured: 52 are `0 0 24 24` at `1.5`, four are `0 0 16 16` at `1.25`, and
+seven are marks with arbitrary viewBoxes — three of those non-square.** `sonnet` caught it by
+diffing two icons rather than trusting the brief, which is the behaviour that should be rewarded.
+
+It matters because the four small-grid icons are `check`, `close`, `plus`, `terminal` — and three of
+those are in the mapping table, so they land in the new titlebar. Scaled into one 16px box, `1.5` on
+a 24 grid gives `1.0px` and `1.25` on a 16 grid gives `1.25px`: **~25% heavier, right next to each
+other.** The brief that warned against re-creating the Phosphor/Solar mismatch was itself the recipe
+for re-creating it inside the new set. Both docs corrected in `fd7fd4b`; `stroke-width 1.0` on the
+four is the one-attribute fix.
+
+### FABLE-11 corrected the backlog arithmetic — 102, not 92
+
+The brief told `fable` to derive the target as 131 − 39. That assumed all 39 census-built rows were
+still inside the 131; **fourteen had already left** (8 PASSED, 5 half-proven, 1 turned defective).
+Live count at cut time was 127 absent, and 25 built-but-absent rows belong to the critic rather than
+a builder. **Target = 102 rows → 52 construction pieces + 4 defect pieces.** It re-measured instead
+of inheriting the number, which is the second time tonight that has paid.
+
+### Ownership rulings requested by FABLE-11
+
+- **`tiller_agents/**` → `codex11`.** P69's line giving it to `pi` is stale. `codex11` already owns
+  `tiller_acp/**` and has just worked inside it; adapters and transport are one subsystem. B-04 and
+  B-10 cut with the agents half to `codex11`, the `chat.rs` half to `pi`.
+- **`tiller_usage/**` → `codex12`.** Usage is session-scoped and `session.rs`/`main.rs` are his; it is
+  also the lightest backend load of the three. Unblocks B-70 and B-62's backend half.
+
+### The two no-piece rows, checked against the macOS source rather than argued
+
+Both were "a builder decided this is out of scope". The reference app is the only arbiter, so I
+looked, and **they went opposite ways** — which is the argument for looking.
+
+- **`F-SID-16` / `F-SID-17` — the builder was right.** No `onMove`, `.draggable`, `dropDestination`
+  or `NSItemProvider` anywhere in the Swift sidebar (the only `onMove` hits are a `fractionMoved`
+  local in `WorkspaceSplitController`). **macOS Tiller has no sidebar drag-reorder.** These are not
+  absent features, they are **bad inventory rows** — and the right verdict is "no referent", not
+  `FAILED — absent`. That is a verdict change, so it goes to `pireview`, not into the ledger by my
+  hand.
+- **`F-TAB-25` — the builder was wrong and it gets built.** `App/SidebarView.swift:717` is literally
+  `Button("Attach to Current Terminal") { model.adoptPane(paneId) }`. P65 refused it on its own
+  authority after building Move-to-Pane, a different feature. Builders do not narrow scope; features
+  stay Tiller's. Cut as a **seam** — Half A `codex12` (adopt on the model), Half B `pi` (the sidebar
+  menu entry that calls it).
+
+**The general shape:** two rows sat unbuildable for days because nobody asked whether the reference
+had the feature at all. `fable` is now auditing the whole inventory for that class (FABLE-12) —
+including the 22 `N/A — platform` rows, in reverse, since some may be perfectly feasible on Linux and
+archived out of convenience.
+
+### P72 is answered, and it changes what the browser can be
+
+`codex11` produced the overlap frame:
+`reference/linux-progress/p72-browser-spike-xlib-bridge-overlap.png`. **WebKit renders above GPUI,
+always.** So the in-app browser cannot be a tab inside the window — any GPUI element that should sit
+over it lands under it. Routed to `codex12`: the dead **New Browser** menu entry's honest destination
+is a window, not an in-tab surface.
+
+### P74 closed with a falsifiable proof
+
+`codex11` showed RED-before / PASS-after on the same thread-affinity test rather than only the green
+run, and measured the reap on real processes (ACP children 1 → 0). Same discipline `codex12` used to
+close P73. That is the distinction between "the test passes" and "the test can fail".
+
+### codex12 lost twenty minutes to an environment fact already in this log
+
+`cargo: command not found` — `~/.cargo/bin` is not on the codex pane's PATH, though
+`~/.cargo/bin/cargo` exists as a rustup symlink. I hit this myself earlier tonight. Unblocked with
+the absolute path. **Environment facts belong in the brief, not in this file only** — a builder does
+not read the orchestrator's queue before running its first command.
