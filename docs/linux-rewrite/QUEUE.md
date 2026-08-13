@@ -1087,3 +1087,78 @@ already been wrong twice; "the test passes" and "the test can fail" are differen
 
 `fable` closed FABLE-09 at `66b16d0` — `STALE-FAILED-RECIPES.md`, 39 recipes costed into two launches
 (30 + 7) plus 2 not UI-exercisable, which is what `pireview`'s pass 15 is consuming.
+
+---
+
+## 00:40 — The critic's "broken right-click" was the harness, and a headless critic is not possible
+
+### The 12 rows that were about to become false negatives
+
+`pireview`'s pass 15 reported *"all right-click recipes are dead on this display — XTEST button 3
+produces no state change"*, plus keys landing only after a real click, plus `ctrl-o` opening a portal
+*"invisible to X"*. Twelve rows were one pass away from being recorded `FAILED` against working code.
+
+**The session is Wayland**, measured not assumed:
+
+```
+XDG_SESSION_TYPE=wayland   WAYLAND_DISPLAY=wayland-1   DISPLAY=:1
+```
+
+`DISPLAY=:1` is XWayland. XTEST under XWayland is not a general input injector — it reaches X clients
+only, and XWayland restricts synthetic events that would otherwise leak into the compositor. That one
+fact explains all three symptoms at once, including the "invisible" portal, which is a native Wayland
+surface and was never going to appear in an X screenshot.
+
+**None of it is a product defect.** The fix routed to `pireview` is its own pass-15 discovery applied
+one step further: if *keys* need a real click to give the app X focus first, try the same before
+button 3. One line, up to 12 rows.
+
+### The headless critic: tried, does not work, do not retry
+
+The obvious next thought is a virtual X display, where XTEST is unrestricted and runs unattended.
+It does not work, and the wall is the same for both servers:
+
+| attempt | result |
+|---|---|
+| `Xvfb :99` + app | window created (`0x200001`, 1470×833), **paints nothing** — screenshot has 1 unique colour |
+| `Xvfb` + forced lavapipe (`VK_ICD_FILENAMES=lvp_icd.json`) | fatal presentation error clears, still blank |
+| `Xephyr :99` (a real nested X server) | identical — `vulkan: No DRI3 support detected - required for presentation` |
+
+**GPUI/blade requires DRI3 to present, and neither `Xvfb` nor `Xephyr` provides it.** The app launches,
+opens a window and serves its control socket on the virtual display — it simply never draws. So the
+critic stays on the real display, and its evidence stays dependent on a live session. Recorded here so
+nobody spends another hour proving it twice.
+
+One shell hazard found on the way, worth avoiding: `pkill -f "target/debug/tiller"` also matches the
+`bash -c` wrapper whose command line *contains* that string, and kills the shell running it. Use
+`pkill -x tiller`.
+
+### opencode installed; omp is a name mismatch, not a missing install
+
+`opencode` 1.18.18 is installed and runs — `F-AGENT-OPENCODE-01/02/03` are exercisable, three rows off
+`UNREACHABLE`. **`omp` is a different story.** The npm package `omp@1.0.0` has the description
+`"new"` — a squatted placeholder, not installed. The real project is `oh-my-pi`, and it ships exactly
+one binary, `oh-my-pi`, with no `omp` alias anywhere in the package. `tiller_agents/src/omp.rs:35`
+hardcodes `"omp"`.
+
+No symlink was made to paper over that. If our adapter looks for a binary the distribution does not
+provide, `F-AGENT-OMP-01/02/03` are not `UNREACHABLE — not installed`; they are defective for the
+wrong name. Routed to `pireview` to verify rather than asserted here.
+
+### State at handover
+
+P73 is **closed and proven** — `codex12` ran all four tests green *and* reintroduced `agent_id: None`
+to confirm the round-trip test genuinely fails at `main.rs:9749`, then restored it. That is the
+distinction between "the test passes" and "the test can fail", on the one chain we had already got
+wrong twice.
+
+`cargo test --workspace` is red at this instant, and it is `codex11` mid-widening, not a regression:
+it added `title` to `ChatEntry::Permission` and has not yet closed the construction sites at
+`tiller_acp/src/chat.rs:326` and `tiller_persistence/tests/persistence_integration.rs:591`, and
+`serde_json` is used at `tiller_acp/src/lib.rs:1057` without being declared in that crate's
+`Cargo.toml`. The exact list was handed to `codex11` rather than filed as a gate failure — the same
+judgement as `browser.rs`'s fmt an hour earlier. **The second site is the one that gets forgotten**,
+because `tiller_persistence` is "finished": the widening rule says otherwise.
+
+All six panes are working: `pi` F-CHAT, `sonnet` P76 then P75, `codex11` P74, `codex12` the broken
+tiller-bin cluster + the dead browser menu entry, `pireview` pass 16, `fable` FABLE-11.
