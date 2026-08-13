@@ -1,0 +1,37 @@
+   Compiling glib-sys v0.18.1
+   Compiling gobject-sys v0.18.0
+   Compiling gio-sys v0.18.1
+   Compiling gdk-sys v0.18.2
+   Compiling pango-sys v0.18.0
+   Compiling gdk-pixbuf-sys v0.18.0
+   Compiling cairo-sys-rs v0.18.2
+   Compiling atk-sys v0.18.2
+   Compiling gtk-sys v0.18.2
+   Compiling javascriptcore-rs-sys v1.1.1
+   Compiling soup3-sys v0.5.0
+   Compiling yeslogic-fontconfig-sys v6.0.1
+   Compiling freetype-sys v0.20.1
+   Compiling gdkx11-sys v0.18.2
+   Compiling webkit2gtk-sys v2.0.2
+   Compiling gtk v0.18.2
+   Compiling x11-dl v2.21.0
+   Compiling wry v0.56.1
+   Compiling zed-font-kit v0.14.1-zed (https://github.com/zed-industries/font-kit?rev=94b0f28166665e8fd2f53ff6d268a14955c82269#94b0f281)
+   Compiling gpui_wgpu v0.1.0 (https://github.com/zed-industries/zed?rev=c05e34637b4f7f100a688bf6ac71cb70877fc8ad#c05e3463)
+   Compiling glib v0.18.5
+   Compiling gpui_linux v0.1.0 (https://github.com/zed-industries/zed?rev=c05e34637b4f7f100a688bf6ac71cb70877fc8ad#c05e3463)
+   Compiling gpui_platform v0.1.0 (https://github.com/zed-industries/zed?rev=c05e34637b4f7f100a688bf6ac71cb70877fc8ad#c05e3463)
+   Compiling gio v0.18.4
+   Compiling cairo-rs v0.18.5
+   Compiling atk v0.18.2
+   Compiling javascriptcore-rs v1.1.2
+   Compiling gdk-pixbuf v0.18.5
+   Compiling pango v0.18.3
+   Compiling soup3 v0.5.0
+   Compiling gdk v0.18.2
+   Compiling gdkx11 v0.18.2
+   Compiling webkit2gtk v2.0.2
+   Compiling tiller_ui v0.1.0 (/home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/crates/tiller_ui)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.94s
+     Running `target/debug/examples/browser_spike`
+WARNING: radv is not a conformant Vulkan implementation, testing use only.

@@ -1,0 +1,5 @@
+[control] failed to start: a Tiller is already listening at /run/user/1000/TillerRust/control.sock
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+[control] failed to start: a Tiller is already listening at /run/user/1000/TillerRust/control.sock
+[control] failed to start: a Tiller is already listening at /run/user/1000/TillerRust/control.sock
+[control] listening on /run/user/1000/TillerRust/control.sock
