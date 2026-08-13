@@ -21,7 +21,11 @@
 #     sleep 20              # let the agent answer
 #   '
 #
+# Only one agent may drive at a time, and this script now enforces that with a real lock —
+# see the block below. Set TILLER_DRIVE_LABEL so a waiter can see who is holding it.
+#
 # Exit: 0 captured · 2 no binary · 3 no window/display · 4 app died · 5 frame blank
+#       6 gave up waiting for the drive lock
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +41,43 @@ mkdir -p "$(dirname "$OUT")"
 [ -x "$BIN" ] || { echo "FAIL: no binary at $BIN" >&2; exit 2; }
 command -v xdotool >/dev/null || { echo "FAIL: xdotool is not installed" >&2; exit 3; }
 timeout 10 env DISPLAY="$DISP" xdpyinfo >/dev/null 2>&1 || { echo "FAIL: no X server on $DISP" >&2; exit 3; }
+
+# ---------------------------------------------------------------------------
+# The drive lock. There is one X pointer on the display and it is global.
+#
+# This script already goes to some trouble to photograph the right window
+# (_NET_WM_PID, below) — but that only settles which window is PHOTOGRAPHED,
+# never which window RECEIVES THE CLICK. xdotool moves the one shared pointer,
+# and the click lands on whatever window is under it. So two agents driving at
+# once corrupt each other's input while each still captures its own window
+# perfectly: the frame shows a control that did nothing, about code that is
+# fine. That is a false negative, and it is indistinguishable by inspection
+# from a real one.
+#
+# This was not hypothetical. On 2026-08-14 the orchestrator drove six captures
+# while the critic was mid-batch; the same right-click-then-Open sequence
+# opened an editor in one frame and left the menu sitting open in the next.
+#
+# A documented convention would not have prevented that, because the agent
+# breaking it did not know the rule existed. So it is a mutex.
+# ---------------------------------------------------------------------------
+command -v flock >/dev/null || { echo "FAIL: flock is not installed (util-linux)" >&2; exit 3; }
+LOCK="${TILLER_DRIVE_LOCK:-/tmp/tiller-drive$(printf '%s' "$DISP" | tr -c 'a-zA-Z0-9' '-').lock}"
+LOCK_WAIT="${TILLER_DRIVE_LOCK_WAIT:-900}"
+exec 9>>"$LOCK" || { echo "FAIL: cannot open drive lock $LOCK" >&2; exit 3; }
+if ! flock -w "$LOCK_WAIT" 9; then
+  echo "FAIL: waited ${LOCK_WAIT}s for the drive lock on $DISP and gave up." >&2
+  # The file keeps the last holder's line after release, so this is the last
+  # RECORDED holder, not provably the current one. Say so rather than name the
+  # wrong agent — a confidently wrong diagnostic costs more than a vague one.
+  echo "      Last recorded holder: $(cat "$LOCK" 2>/dev/null || echo 'unknown')" >&2
+  echo "      This is a mutex, not a hang — two drivers share one X pointer and" >&2
+  echo "      corrupt each other's clicks. Wait, or ask the holder to yield." >&2
+  exit 6
+fi
+: >"$LOCK"
+printf 'since=%s pid=%s label=%s out=%s\n' \
+  "$(date -Is)" "$$" "${TILLER_DRIVE_LABEL:-unlabelled}" "$OUT" >>"$LOCK"
 
 env -u WAYLAND_DISPLAY DISPLAY="$DISP" "$BIN" >"$LOG" 2>&1 &
 APP_PID=$!
