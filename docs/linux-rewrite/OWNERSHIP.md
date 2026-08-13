@@ -4,7 +4,20 @@
 stale — `settings.rs` was still listed as `pi`'s in four briefs after it moved to `sonnet`, and P69
 still hands `pi` a crate that is `codex11`'s.
 
-Last set: 2026-08-14, early hours, by the orchestrator.
+Last set: 2026-08-14, 00:20, by the orchestrator — after the roster lost two panes.
+
+## The roster is three builders, not five
+
+At 00:15 on 2026-08-14 both `pi` panes died on an account-level `429 GoUsageLimitError` (monthly
+limit, ten days to reset). It took `pi` (builder, `deepseek-v4-flash`) and `pireview` (critic,
+`deepseek-v4-pro`) together, and with no `auth.json` present there is no second provider to fall
+back to. Neither can be recovered without spending the user's money, which is theirs to authorise.
+
+- **The critic role moved to `fable`** — see `tasks/CRITIC-pass17-handover.md`. `fable` has never
+  written Rust here, so it is independent on every row.
+- **`pi`'s files were redistributed** below. `pi` had just delivered `F-CHAT-24/25/26/27`, the ACP
+  child-exit watchdog and the `ctrl-` chord fix; that work is in the tree and gated, and whoever
+  inherits the file inherits it.
 
 ## Why every file is named
 
@@ -21,10 +34,24 @@ unowned *files inside owned crates*, which everyone assumed were somebody's.
 
 | owner | files |
 |---|---|
-| `pi` | `tiller_ui/`: `chat.rs`, `sidebar.rs`, `status_bar.rs` · `tiller_markdown/**` |
-| `codex11` | `tiller_ui/`: `changes.rs`, `right_panel.rs`, `editor.rs`, `file_view.rs`, `browser.rs` · `tiller_git/**` · `tiller_terminal/**` · `tiller_acp/**` · `tiller_agents/**` · `tiller_persistence/**` · `tiller_project/**` |
-| `codex12` | `tiller/`: `main.rs`, `session.rs`, `panes.rs`, `command_palette.rs`, `tab_machinery.rs` · `tiller_ui/tab_bar.rs` · `tiller_control/**` · `tiller_usage/**` · `tiller_activity/**` |
-| `sonnet` | `tiller_ui/`: `titlebar.rs`, `controls.rs`, `composer.rs`, `settings.rs`, `icons.rs`, `sfsymbol.rs` · `tiller_theme/**` |
+| `codex11` | `tiller_ui/`: `changes.rs`, `right_panel.rs`, `editor.rs`, `file_view.rs`, `browser.rs` · `tiller_git/**` · `tiller_terminal/**` · `tiller_acp/**` · `tiller_agents/**` · `tiller_persistence/**` · `tiller_project/**` · **`tiller_markdown/**`** |
+| `codex12` | `tiller/`: `main.rs`, `session.rs`, `panes.rs`, `command_palette.rs`, `tab_machinery.rs` · `tiller_ui/`: `tab_bar.rs`, **`sidebar.rs`** · `tiller_control/**` · `tiller_usage/**` · `tiller_activity/**` |
+| `sonnet` | `tiller_ui/`: `titlebar.rs`, `controls.rs`, `composer.rs`, `settings.rs`, `icons.rs`, `sfsymbol.rs`, **`chat.rs`**, **`status_bar.rs`** · `tiller_theme/**` |
+
+`fable` owns no source files **by design** — it is the critic, and a critic that has built something
+cannot judge it.
+
+### Why `pi`'s files went where they did
+
+- **`sidebar.rs` → `codex12`, not `sonnet`.** The obvious home was `sonnet`, which owns the rest of
+  the `tiller_ui` chrome. But `F-SID-16`/`F-SID-17` (sidebar row reorder) and `F-TAB-18` (tab
+  reorder) are **the same drag primitive**, and `tab_bar.rs` is already `codex12`'s. Split across two
+  owners, that primitive gets written twice.
+- **`chat.rs`, `status_bar.rs` → `sonnet`.** This **closes the worst seam in this file**: `sonnet`
+  owned `composer.rs` while the chat composer actually renders from `render_composer` *inside*
+  `chat.rs`. One owner now holds both halves.
+- **`tiller_markdown/**` → `codex11`,** which already consumes its file monitor from `file_view.rs`.
+  That seam closes too.
 
 Nothing is unowned. If a new file does not obviously belong to one of these, it belongs to whoever
 owns the crate it lives in; if the crate is split, ask rather than assume.
@@ -60,8 +87,11 @@ owns the crate it lives in; if the crate is split, ask rather than assume.
 These are places where one agent's file must call another's, and they are the accidents waiting to
 happen if the distinction blurs:
 
-- `composer.rs` is `sonnet`'s, but the chat composer renders from `render_composer` **inside
-  `chat.rs`**, which is `pi`'s. Any composer-area piece must name its file explicitly.
 - `tiller_project/skill.rs` (`codex11`) is called by the Install Skill button in `settings.rs`
   (`sonnet`).
-- `tiller_markdown`'s file monitor (`pi`) is consumed by `file_view.rs` (`codex11`).
+- `add_chat_tab` (`codex12`, `tiller/`) must take `&mut Window` so the composer can take focus at tab
+  creation. The `chat.rs` half is already built and waiting — `pi` left it ready before it died.
+
+Two seams that used to be listed here are **gone**, not resolved: `composer.rs`/`chat.rs` and
+`tiller_markdown`/`file_view.rs` each now sit with a single owner. Losing a pane shrank the surface
+where two owners had to agree, which is the one good thing to come out of it.

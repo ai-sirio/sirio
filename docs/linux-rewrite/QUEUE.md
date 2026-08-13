@@ -1394,3 +1394,84 @@ delivered button-3 still does nothing, that is a **finding, not a restriction** 
 
 **The generalisable rule: check for a missing helper before concluding a platform restriction.**
 Verify the instrument can perform the action at all before concluding the subject cannot receive it.
+
+---
+
+## 2026-08-14, 00:15 — the roster lost two panes, one of them the critic
+
+Both `pi` panes died within minutes of each other on the same account-level error:
+
+```
+429 {"type":"GoUsageLimitError","message":"Monthly usage limit reached. Resets in 10 days."}
+```
+
+It is not model-scoped: `deepseek-v4-flash` (`pi`, builder) and `deepseek-v4-pro` (`pireview`,
+critic) both hit it. `~/.local/share/opencode/` holds no `auth.json`, so **no second provider is
+configured** and neither pane can be moved to another model. The two exits are a paid-balance opt-in
+on the user's account or ten days. **Not taken:** the user is asleep, and authorising spend on their
+account is theirs to do, not mine.
+
+**`pi` delivered before it died**, and the work is in the tree: `F-CHAT-24/25/26/27` (Plan card,
+pending-question bar, text answer, cancel, expiry), an ACP fix worth keeping — the permission handler
+was blocking the connection's single dispatch task, so a dead agent with a pending question hung for
+five minutes, now fixed with a child-exit watchdog — and the `ctrl-` chord corrections. Its own gate
+run was clean on its own crates.
+
+### The consequence that mattered
+
+The project's completion condition is written in terms of the critic: *done only when the full-app
+critic ticks every inventory entry by exercising it live.* With `pireview` gone, verification stops
+permanently, and 193 unproven rows can never become PASSED no matter how much gets built.
+
+**The role moved to `fable`** (`tasks/CRITIC-pass17-handover.md`). This deviates from the letter of
+the user's rule and is recorded rather than done quietly. It honours the rule's purpose: `fable` has
+never written Rust in this project, so it is disqualified from judging nothing — a stronger
+independence position than `pireview` held, which had at least authored ledger entries.
+
+### A snapshot, before anything else
+
+The working tree held **+19,297 lines across 61 modified files and 150 untracked**, including whole
+source modules in no object database at all (`browser.rs`, `composer.rs`, `command_palette.rs`,
+`tiller_acp/src/chat.rs`). This repo's own history contains *"recover Rust/GPUI rewrite after local
+git object database loss"*. Two panes had just died and three more were mid-edit.
+
+Snapshotted to `../tiller-snapshots/` as a zstd tarball including `.git` — 26 MB, 1911 files,
+verified readable. **Deliberately not `git stash` and not `git add`**: five agents share one worktree,
+and touching the index would have polluted the next `git commit` any of them ran. A tar file is
+invisible to them.
+
+### `pi`'s files, and one deliberate choice
+
+`sidebar.rs` went to `codex12` rather than to `sonnet`, which owns the rest of the `tiller_ui` chrome
+and was the obvious home. `F-SID-16`/`F-SID-17` (sidebar reorder) and `F-TAB-18` (tab reorder) are
+**one drag primitive**, and `tab_bar.rs` is already `codex12`'s; split across two owners it gets
+written twice. `chat.rs`/`status_bar.rs` → `sonnet`, which closes the `composer.rs`/`render_composer`
+seam. `tiller_markdown/**` → `codex11`, which already consumed it.
+
+## The ruling I retracted, and the rule it yields
+
+`F-SID-16`, `F-SID-17` and `F-TAB-18` stay `FAILED — absent`. I had queued a change to "no referent"
+with `pireview` after grepping `SidebarView.swift` for `onDrag|onDrop|ReorderScope` and finding
+nothing. `fable` disproved it in `FABLE-12` by searching from the other end: `App/RowReorder.swift`
+is the complete machinery, wired at `SidebarView.swift:50`, `:55`, `:600` and `TabBarView.swift:221`.
+The call sites read `.reorderable(model:id:scope:)` — a project-local extension method — so the
+orthodox vocabulary sits **one indirection away and my grep could not match by construction.**
+
+The ledger was never corrupted; `pireview` died before applying it. But the evidence column on those
+rows still reads *"drag reorder removed by design"*, which is false — nothing was removed and no such
+decision was taken. An evidence string asserting a decision nobody made is worse than an empty one,
+because it closes the work instead of flagging it. `fable` will correct it.
+
+**The rule: a search that finds nothing is a fact about the query, not about the code.** Search from
+the referent's side — start at the file that would implement it and ask what cites it. This is the
+second time in one night I promoted "my probe found nothing" to "the thing is not there"; the first
+was concluding XWayland forbids right-click when the harness had no button-3 path. Same shape,
+different instrument.
+
+## The denominator stays 389
+
+`FABLE-12` measured zero rows without a referent (149 checked), and found the inventory never covered
+the ACP subsystem at all — proposing +14 rows for it, plus 17 more it called disputable. The 14 are
+real and accepted as a finding. **The headline denominator does not move**: the user pinned 389 and
+is asleep, so the ACP rows go into a marked appendix and progress is reported as "N/389, plus 14
+newly-found ACP rows not yet in the denominator". Both numbers visible, the call left to them.
