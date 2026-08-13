@@ -23,6 +23,11 @@
 
 use gpui::{App, FontWeight, Global, Pixels, Rgba, Size, WindowAppearance, px, size};
 use std::collections::HashSet;
+
+/// Pop!_OS COSMIC design tokens, consumed by [`Theme::cosmic`] — every
+/// surface that reads `Theme::get(cx)` gets a resolved [`cosmic::CosmicTheme`]
+/// with it. See `docs/linux-rewrite/COSMIC-DESIGN.md`.
+pub mod cosmic;
 use std::ops::Deref;
 use std::sync::OnceLock;
 
@@ -426,6 +431,15 @@ pub struct Spacing {
     pub titlebar_control_spacing: Pixels,
     /// Bottom usage bar height (waku's 40px sidebar footer).
     pub bottom_bar_height: Pixels,
+    /// Context-menu width — COSMIC's `m` spacing step (24px) short of the
+    /// next step up would be too narrow for a label plus a shortcut hint,
+    /// so this is a fixed 240px, not a step on the spacing scale itself.
+    /// Named for `codex12`'s tab context menu (`QUEUE.md`, P60/P63).
+    pub menu_width: Pixels,
+    /// Hairline stroke *thickness* — distinct from `Colors::hairline`,
+    /// which is the hairline's colour. One geometric pixel, COSMIC's own
+    /// hairline weight.
+    pub hairline_thickness: Pixels,
 }
 
 impl Default for Spacing {
@@ -441,6 +455,8 @@ impl Default for Spacing {
             titlebar_control_frame: size(px(26.0), px(26.0)),
             titlebar_control_spacing: px(6.0),
             bottom_bar_height: px(40.0),
+            menu_width: px(240.0),
+            hairline_thickness: px(1.0),
         }
     }
 }
@@ -660,6 +676,12 @@ pub struct Theme {
     pub spacing: Spacing,
     /// Corner-radius tokens (waku's measured scale).
     pub radii: Radii,
+    /// Pop!_OS COSMIC design tokens — container hierarchy, semantic
+    /// colours, and the COSMIC spacing/radii scales, resolved for the same
+    /// `(mode, appearance)` as the rest of this theme via
+    /// [`cosmic::CosmicTheme::resolve`]. Every surface that already reads
+    /// `Theme::get(cx)` gets these for free.
+    pub cosmic: cosmic::CosmicTheme,
     /// Typography tokens.
     pub typography: Typography,
     /// Shared opacity for translucent surfaces.
@@ -803,6 +825,7 @@ impl Theme {
             colors,
             spacing: Spacing::default(),
             radii: Radii::default(),
+            cosmic: cosmic::CosmicTheme::resolve(mode, appearance),
             typography: Typography::default(),
             translucent_surface_opacity: 0.96,
         }
@@ -1489,5 +1512,50 @@ mod tests {
         let family = Theme::dark().typography.code_family;
         assert!(!family.is_empty());
         assert_eq!(Theme::light().typography.code_family, family);
+    }
+
+    /// COSMIC-02: `Theme::dark()`/`light()` must carry a `cosmic` field
+    /// whose `is_dark` agrees with the theme's own appearance — the seam
+    /// that makes `Theme` the single source COSMIC tokens flow through,
+    /// rather than a second, independently-resolved theme a caller could
+    /// forget to install.
+    #[test]
+    fn theme_dark_and_light_carry_agreeing_cosmic_tokens() {
+        assert!(Theme::dark().cosmic.is_dark);
+        assert!(!Theme::light().cosmic.is_dark);
+    }
+
+    /// `Theme::for_mode` must resolve `.cosmic` for the same mode, not a
+    /// stale or independently-defaulted one — `System` under a light
+    /// window appearance should carry a light COSMIC container hierarchy.
+    #[test]
+    fn theme_for_mode_resolves_cosmic_for_the_same_appearance() {
+        let theme = Theme::for_mode(ThemeMode::Light, WindowAppearance::Light);
+        assert!(!theme.cosmic.is_dark);
+        assert_eq!(theme.appearance, Appearance::Light);
+
+        let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark);
+        assert!(theme.cosmic.is_dark);
+        assert_eq!(theme.appearance, Appearance::Dark);
+    }
+
+    /// A drawn pixel traces to a COSMIC token through `theme.cosmic.spacing`
+    /// and `.radii`, not just the container colours — both scales must be
+    /// populated, not left at some other default.
+    #[test]
+    fn theme_cosmic_carries_the_cosmic_spacing_and_radii_scales() {
+        let theme = Theme::dark();
+        assert_eq!(theme.cosmic.spacing, cosmic::CosmicSpacing::default());
+        assert_eq!(theme.cosmic.radii, cosmic::CosmicRadii::default());
+    }
+
+    /// The two tokens `codex12` asked for in `QUEUE.md` (P60/P63): a menu
+    /// width wide enough for a label plus a shortcut hint, and a hairline
+    /// *thickness* distinct from `Colors::hairline`'s colour.
+    #[test]
+    fn spacing_carries_menu_width_and_hairline_thickness() {
+        let spacing = Spacing::default();
+        assert_eq!(spacing.menu_width, px(240.0));
+        assert_eq!(spacing.hairline_thickness, px(1.0));
     }
 }

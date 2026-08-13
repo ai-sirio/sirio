@@ -3,7 +3,7 @@ use gpui::{
     WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
-use tiller_theme::Theme;
+use tiller_theme::{Theme, ThemeMode};
 use tiller_ui::sidebar::icons::TillerAssets;
 use tiller_ui::{status_bar::StatusBar, tab_bar::TabBar, titlebar::Titlebar};
 
@@ -53,7 +53,18 @@ impl Render for ChromeDemo {
 
 fn main() {
     application().with_assets(TillerAssets).run(|cx: &mut App| {
-        Theme::init(cx);
+        // COSMIC-02: `Theme` now carries the COSMIC token layer directly, so
+        // forcing `TILLER_COSMIC_MODE=light|dark` for screenshot capture
+        // forces the whole theme — waku colors and COSMIC tokens resolve
+        // together, the same as every other surface. Unset follows the
+        // system portal like the real app shell does. Installed before
+        // `Titlebar::new` runs so its own lazy `Theme::init` bootstrap sees
+        // a global already present and leaves this choice alone.
+        match std::env::var("TILLER_COSMIC_MODE").as_deref() {
+            Ok("light") => Theme::install(ThemeMode::Light, cx),
+            Ok("dark") => Theme::install(ThemeMode::Dark, cx),
+            _ => Theme::init(cx),
+        }
         let bounds = Bounds::centered(None, size(px(1470.0), px(833.0)), cx);
 
         cx.open_window(
