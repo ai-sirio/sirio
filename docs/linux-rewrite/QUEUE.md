@@ -747,3 +747,57 @@ The app renders: project sidebar with three worktrees, tab strip with Chat and T
 terminal with a themed prompt, the Files panel, and a status bar carrying live Claude/Codex usage.
 The New Chat submenu is correct COSMIC-flavoured chrome. Whatever else is open, *it renders* — which
 the goal makes the precondition for everything else.
+
+## SCOPE RULING (from the user): the browser is in scope, and a webview is allowed for it
+
+The nine `F-BRW` rows have sat at `FAILED — absent` since pass 8, and the open question was whether
+*"niente webview, niente HTML"* put the browser feature out of scope entirely — the `F-WIN-06`
+`N/A — platform` precedent.
+
+**The user has ruled: it does not.** *"niente webview"* bans an **Electron-style app shell** — every
+pixel of Tiller's own UI stays native GPUI — and does **not** ban a web engine behind the in-app
+browser *feature*. A webview crate is permitted **for that surface alone**.
+
+Consequences, so this is not re-litigated next pass:
+
+- The inventory denominator stays **389**, not 380. Nine rows are work, not exemptions.
+- `pireview` must not mark `F-BRW` as `N/A — platform`.
+- Adding `wry`/WebKitGTK is allowed **only** under the browser surface. It is not a precedent for any
+  other row, and Tiller's chrome around the page is still COSMIC-tokened GPUI.
+
+### What is actually there today
+
+`main.rs:4215` is an empty arm with an honest comment: *"Browser is not part of this shell's content
+set yet. Keeping the action typed and ignored is preferable to opening a fake pane."* That instinct
+is the same one that made two builders refuse a fake drag, and it was right.
+
+**The defect is that the menu offers "New Browser" anyway.** Verified on the running app rather than
+inferred — `pireview`'s frame `stage-menu-4.png` shows the entry in the open menu, and the production
+list in `tab_bar.rs` does not filter it. So the user clicks a live entry and gets nothing, with no
+feedback of any kind.
+
+Note the asymmetry: the **control socket already answers `browser.*` with a specific *unsupported*
+error**. The same feature is honest on one surface and silent on the other. That is a smaller,
+sharper row than the nine, and it is true under every possible resolution of the scope question.
+
+*(This is the genuine instance of the defect I wrongly attributed to the chat picker an hour ago and
+withdrew. The difference is method: there I inferred reachability from a code branch; here it is
+settled by a frame of the running app plus an unfiltered production list.)*
+
+### `P72` is a spike, deliberately, and not a build
+
+`docs/linux-rewrite/tasks/P72-the-browser-spike.md`. The unknown that governs all nine rows is
+whether a web engine can be **composited inside a GPUI window on Linux/X11** — GPUI paints its own
+GPU surface, and a `wry`/WebKitGTK view is a native child window, which commonly lands always-on-top,
+z-fighting, mispositioned under fractional scaling, or invisible.
+
+The brief time-boxes that question and treats **all three outcomes as success**: it composites (then
+`F-BRW-01..04` is a normal piece); it composites only as a separate top-level window (then `F-BRW-09`
+changes shape and returns to the user); or it does not work (a real finding that returns the scope
+question with facts). The one instruction that does not depend on the outcome: **fix the dead menu
+entry**, because it is a defect under all three.
+
+Sequencing after the spike: `F-BRW-01/02/03/04` (chrome, URL, Back/Forward/Reload/Stop, errors), then
+`F-BRW-06/07/08` (Allow/Deny, persisted origins, revoke in Permissions) which needs a
+`tiller_persistence` migration — that crate is at **v10** after P70, so the browser-grants migration
+is **v11**.
