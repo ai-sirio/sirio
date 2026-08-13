@@ -5,10 +5,13 @@
 
 pub mod changes;
 pub mod chat;
+pub mod composer;
 pub mod controls;
 pub mod editor;
 pub mod file_view;
+pub mod project_forms;
 pub mod right_panel;
+pub mod row_reorder;
 pub mod settings;
 pub mod sidebar;
 pub mod status_bar;

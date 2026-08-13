@@ -166,6 +166,21 @@ fn clone_from_local_repository_reports_receiving_progress() {
 }
 
 #[test]
+fn clone_from_file_url_creates_the_requested_destination() {
+    let source = repo("clone-file-url-source");
+    let destination_parent = TempDir::new("clone-file-url-destination");
+    let destination = destination_parent.path().join("file-url-clone");
+    let url = format!("file://{}", source.path().display());
+
+    GitClone::clone(&url, &destination, |_| {}).expect("file URL clone succeeds");
+
+    assert_eq!(
+        std::fs::read_to_string(destination.join("file.txt")).expect("read cloned file"),
+        "one\ntwo\nthree\n"
+    );
+}
+
+#[test]
 fn remote_parsing_supports_github_ssh_https_and_project_suffixes() {
     assert_eq!(
         GitRemote::github_owner_from_url("git@github.com:acme/widgets.git"),
