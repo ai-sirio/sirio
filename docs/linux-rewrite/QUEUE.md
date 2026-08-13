@@ -1738,3 +1738,40 @@ generate Half As faster than it consumes them. Batch the mounts into one integra
 than paying a context reset and a build cycle per seam — and where a seam looks permanent, prefer
 giving both halves to one owner, which is what killed the `chat.rs`/`composer.rs` and
 `tiller_markdown`/`file_view.rs` seams for good.
+
+---
+
+## 2026-08-14, 02:40 — the roster was the wrong shape, because the constraint is verification
+
+The stopping condition is not "the builders finished". It is *the full-app critic ticks every
+inventory entry by exercising it live*. **Critic throughput is therefore the project's rate limit**,
+and three builders against one critic was the wrong shape for it.
+
+Measured rather than guessed:
+
+- `fable` spent **44 minutes** on a plain-launch batch of roughly six rows — careful work, not slow
+  work: re-capturing to defeat paint lag, verifying its own helper before trusting a verdict from it.
+- In the same window the three builders shipped roughly **28 rows' worth** of work into the queue.
+- `ADJUDICATION-BACKLOG.md` already lists **45 rows reachable with the route named**, awaiting
+  nothing but exercise.
+
+Adding building capacity to that does not move the finish line. **`sonnet` becomes the second critic
+when P80 lands** — `tasks/CRITIC-2-second-critic-handover.md`. Builders drop to `codex11` and
+`codex12`; critics rise to two.
+
+The independence rule survives the change intact, which is the only reason it is allowed. The goal
+says the critic must never be the agent that built the piece — it names `pireview`, but the binding
+constraint is independence, not the pane. `sonnet` may not judge `F-SET-*`, `F-PRJ-13..16`,
+`F-PER-07`, `F-USE-*`, or anything resting on the files it wrote; the handover lists them and says
+that when in doubt it hands the row to `fable`. **A wrongly-claimed independence is worse than a slow
+queue.** The two critics start from opposite ends of the backlog so they do not drive the same row.
+
+### The bottleneck this does not fix
+
+`codex12` owns `main.rs`, and `main.rs` is where nearly every Half B lands. It is now carrying P79
+(nine `F-BRW` rows), P78 (seven `F-CORE` call sites) and P77's Half B (seven `F-PRJ` rows) — **23
+rows queued on one pane** while `codex11` and `sonnet` generate more Half As.
+
+Per `SEAMS.md`'s own advice the two mounts go as **one integration pass**, not two dispatches: they
+touch the same files and cost one build cycle instead of two. The deeper fix — that the ownership
+map makes one pane the integrator by construction — is recorded there and not attempted mid-flight.
