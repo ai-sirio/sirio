@@ -1827,3 +1827,46 @@ any agent might reasonably run, would have deleted the browser.
 
 **The check, and it takes two seconds:** `git status --short | grep '??'` before you finish a piece.
 If a file you created is in that list, it is not in the project yet.
+
+---
+
+## The editor you cannot type into — 2026-08-14, 04:40
+
+`codex11` owns `file_view.rs` **and** `editor.rs`, so this is a defect, not a seam. It is the
+cleanest example yet of a feature that is complete everywhere except at the keyboard.
+
+Driven live against the running app, on a disposable scratch file:
+
+| gesture | route | result |
+|---|---|---|
+| click a line | mouse | **works** — the line takes a full-width current-line highlight |
+| `Home`, `End` | `xdotool key` | **works** — caret moves |
+| `shift+End` | `xdotool key` | **works** — selects the line |
+| click `B` | mouse | **works** — wrapped exactly the selection, `X` → `**X**` |
+| `ctrl-s` | `xdotool key` | **works** — the new bytes reached disk |
+| type `TYPEDTEXT` | `xdotool type` | **nothing** |
+| `key q`, `key w`, `key x` | `xdotool key` | **nothing** |
+
+So the editor navigates, selects, formats and saves. **It cannot accept a character.**
+
+`grep` for `on_key_down`, `EntityInputHandler`, `key_down` and `on_action` in `file_view.rs` returns
+**zero hits**. `editor.rs:532` has `pub fn insert(&mut self, at: usize, text: &str)` and
+`:537 insert_indent`, and the only callers in `file_view.rs` are three `#[cfg(test)]` fixtures
+(`:1049`, `:1092`, `:1137`). The model can insert; nothing in the product ever asks it to.
+
+**This is mechanism (a) again** — built, tested, unwired — but with a twist worth naming: the
+surrounding gestures all work, so the surface *feels* like a live editor right up until you type.
+Every previous instance of (a) produced a control that visibly did nothing. This one produces a
+control that does four things out of five.
+
+**It is not the harness.** Positive control, same drive session, same `xdotool type`: clicking the
+chat composer and typing put `HELLO FROM CRITIC` on screen, focused the composer and armed its send
+arrow (`orch13-composer-type.png`). Characters reach GPUI in this app today —
+`composer.rs:214 insert_text` and `chat.rs:1520 insert_text` are the working precedent to copy.
+Without that control this finding would have been indistinguishable from an XWayland input failure,
+which is exactly how twelve rows were once queued behind a false platform claim.
+
+**Consequence for the ledger.** No inventory row owns "type a character into the editor" — the
+denominator stays 389 and no row was invented for it. But `F-EDIT-02`, `F-EDIT-04` and `F-EDIT-06`
+all now read PASSED on the strength of gestures that route *around* the missing path, and a reader
+could reasonably conclude the editor is finished. It is not.
