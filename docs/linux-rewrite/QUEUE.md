@@ -600,3 +600,54 @@ findings. Routed to `codex12`, not chased.
 
 **Token `tiller_theme` still lacks:** *compact-action padding*. `codex11` used
 `titlebar_control_spacing` as the nearest existing token rather than a literal. Queued for `sonnet`.
+
+## The test suite is not the problem — `Scripts/tests-that-cannot-fail.py`
+
+`F-PRJ-04` records that project-insertion failures are `eprintln!`-only with no error surface. That
+is the *same* defect I had just found fresh in `codex12`'s new `None` branch in `add_chat_tab`. Two
+instances of one shape is a reason to measure, so I did.
+
+**37 `eprintln!` in the app and UI crates** — 26 in `main.rs`, 10 in `session.rs` — while the UI
+crates already have a notice/banner vocabulary (`sidebar.rs` 15, `file_view.rs` 9, `chat.rs` 5). The
+worst of them, worth its own row: **`main.rs` `[files] save failed: {error}`** — Ctrl+S fails and the
+user is told on stderr. `F-EDIT-06` (the save path) was just confirmed built by exercise, so a
+"working" save sits directly beside a silent failure mode.
+
+Following that thread turned up `probe_escape_dispatch` — a `#[gpui::test]` with **zero assertions**
+and three `eprintln!`s, two of which *compute* the condition that should have been asserted
+(`cx.debug_bounds("settings-category-General").is_some()`) and print it instead. Green forever,
+counted among the workspace's passing tests.
+
+So: is the test suite itself rotten? **It is not.** `Scripts/tests-that-cannot-fail.py` says
+**5 of 747 tests contain no assertion (0%)**, and three of those five are leftover probe scaffolds
+(`probe_escape_dispatch`, `probe_sf_steps`, `probe_pixels`); the other two
+(`parses_awkward_input_without_panicking`, `system_mode_never_panics_and_always_resolves`) are
+defensible — for those, running to completion *is* the check.
+
+This is a negative result and it is worth having. Given how many false PASSEDs this project has
+found, suspecting the tests was reasonable; ruling it out mechanically means the defects are in the
+wiring, not the verification.
+
+### The tool was wrong three times before it was right, and the controls did not catch it
+
+Each false-positive class was found only by reading the code the tool had just accused:
+
+| class | example | why it looked assertion-free |
+|---|---|---|
+| project assertion helper | `dark_palette_matches_waku` | asserts entirely via `expect_color(..)` |
+| documented no-op entry point | `helper_process` | a subprocess re-exec; a no-op unless its env var is set |
+| wait-until-or-panic | `changes_refresh_automatically_after_an_external_edit` | `pump_until(..)` ends in `panic!`, so the wait *is* the assertion |
+
+**The positive controls passed on every one of those runs** — 736 tests did contain a std assertion,
+so the detector was demonstrably alive. That is the lesson worth keeping: **a control proves the
+detector is not dead. It bounds false negatives, never false positives.** Widening the vocabulary is
+the only fix, and there is no control that would have substituted for reading the code.
+
+The third class was the expensive one to get wrong: it would have accused two strict, honest tests in
+`changes.rs` and `right_panel.rs` — a file whose owner had cited them as evidence in the same hour.
+That is the clippy mistake's exact shape (broadcasting a weaker probe's output as fact), caught this
+time before dispatch rather than after.
+
+**Open, small, and owned:** the three probe scaffolds. `probe_escape_dispatch` is in `main.rs`
+(`codex12`); `probe_sf_steps`/`probe_pixels` are in `tiller_ui/src/sfsymbol.rs`, which **no current
+brief owns**. Not urgent — they mislead a reader counting green tests, they do not break anything.
