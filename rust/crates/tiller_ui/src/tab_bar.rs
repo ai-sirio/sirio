@@ -6,6 +6,7 @@ use gpui::{
 };
 use std::cell::Cell;
 use std::rc::Rc;
+use tiller_agents::{AgentAvailability, discover_availability};
 use tiller_theme::Theme;
 
 use crate::sidebar::icons::{Icon, IconElement};
@@ -29,12 +30,159 @@ pub enum NewTabAction {
     NewChat,
 }
 
+/// Commands exposed by a tab's context menu. The shell owns the transitions;
+/// this crate owns their drawn, typed surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabContextAction {
+    Dismiss,
+    OpenFile,
+    ResumeChat,
+    Rename,
+    Close,
+    CloseOthers,
+    CloseTabsToRight,
+    MoveEarlier,
+    MoveLater,
+    MoveToCurrentPane,
+    MoveToPane(usize),
+}
+
+/// One row in the shell-owned tab context menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabContextItem {
+    label: String,
+    selector: String,
+    action: TabContextAction,
+    enabled: bool,
+    disabled_reason: Option<String>,
+    separator_before: bool,
+}
+
+impl TabContextItem {
+    pub fn enabled(
+        label: impl Into<String>,
+        selector: impl Into<String>,
+        action: TabContextAction,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            selector: selector.into(),
+            action,
+            enabled: true,
+            disabled_reason: None,
+            separator_before: false,
+        }
+    }
+
+    pub fn disabled(
+        label: impl Into<String>,
+        selector: impl Into<String>,
+        action: TabContextAction,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            selector: selector.into(),
+            action,
+            enabled: false,
+            disabled_reason: Some(reason.into()),
+            separator_before: false,
+        }
+    }
+
+    pub fn separator() -> Self {
+        Self {
+            label: String::new(),
+            selector: String::new(),
+            action: TabContextAction::Dismiss,
+            enabled: false,
+            disabled_reason: None,
+            separator_before: true,
+        }
+    }
+}
+
+/// Draws a tab context menu and emits only actions for enabled rows.
+pub fn render_tab_context_menu(
+    items: Vec<TabContextItem>,
+    on_action: Rc<dyn Fn(TabContextAction, &mut Window, &mut App)>,
+    theme: Theme,
+) -> impl IntoElement {
+    let mut menu = div()
+        .id("tab-context-menu")
+        .debug_selector(|| "tab-context-menu".to_owned())
+        .w(theme.spacing.menu_width)
+        .p(theme.spacing.titlebar_control_spacing)
+        .rounded(theme.radii.user_pill)
+        .border_1()
+        .border_color(theme.hairline)
+        .bg(theme.card_fill)
+        .shadow_lg();
+
+    for item in items {
+        if item.separator_before {
+            menu = menu.child(
+                div()
+                    .mx(theme.spacing.card_gap)
+                    .my(theme.spacing.titlebar_control_spacing)
+                    .h(theme.spacing.hairline_thickness)
+                    .bg(theme.hairline),
+            );
+            continue;
+        }
+
+        let action = item.action;
+        let enabled = item.enabled;
+        let selector = item.selector.clone();
+        let selector_for_debug = selector.clone();
+        let mut row = div()
+            .id(format!("tab-command-{selector}"))
+            .debug_selector(move || format!("tab-command-{selector_for_debug}"))
+            .w_full()
+            .min_h(theme.typography.ui_line_height)
+            .px(theme.spacing.card_gap)
+            .py(theme.spacing.titlebar_control_spacing)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(theme.spacing.titlebar_control_spacing)
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.footnote)
+            .text_color(if enabled { theme.title } else { theme.meta })
+            .when(enabled, |this| {
+                this.hover(|style| style.bg(theme.row_hover))
+            })
+            .child(item.label);
+
+        if let Some(reason) = item.disabled_reason {
+            row = row.child(
+                div()
+                    .id(format!("tab-command-disabled-{selector}"))
+                    .debug_selector(move || format!("tab-command-disabled-{selector}"))
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.meta)
+                    .child(reason),
+            );
+        }
+        if enabled {
+            let callback = on_action.clone();
+            row = row.on_click(move |_, window, cx| callback(action, window, cx));
+        }
+        menu = menu.child(row);
+    }
+
+    menu
+}
+
 /// A horizontal tab strip with a callback-driven new-tab menu.
 pub struct TabBar {
     menu_open: bool,
+    chat_picker_open: bool,
     focus_handle: FocusHandle,
     anchor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     on_new_tab: Option<Rc<dyn Fn(NewTabAction)>>,
+    on_chat_agent: Option<Rc<dyn Fn(&'static str)>>,
+    chat_agents: Vec<AgentAvailability>,
 }
 
 impl TabBar {
@@ -59,10 +207,20 @@ impl TabBar {
         Self::bind_keys(cx);
         Self {
             menu_open: false,
+            chat_picker_open: false,
             focus_handle: cx.focus_handle(),
             anchor_bounds: Rc::new(Cell::new(None)),
             on_new_tab: None,
+            on_chat_agent: None,
+            chat_agents: discover_availability(),
         }
+    }
+
+    /// Overrides discovery for deterministic callers and headless tests. The
+    /// render path still applies the same availability gate as production.
+    pub fn with_chat_agents(mut self, agents: Vec<AgentAvailability>) -> Self {
+        self.chat_agents = agents;
+        self
     }
 
     /// Installs the callback used by every menu action.
@@ -71,8 +229,17 @@ impl TabBar {
         self
     }
 
+    /// Installs the callback used by a selected ACP chat provider. It is a
+    /// separate channel so sidebar actions can keep their stable NewChat
+    /// enum without growing a cross-surface variant.
+    pub fn on_chat_agent(mut self, callback: impl Fn(&'static str) + 'static) -> Self {
+        self.on_chat_agent = Some(Rc::new(callback));
+        self
+    }
+
     fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = !self.menu_open;
+        self.chat_picker_open = false;
         if self.menu_open {
             // The menu is painted through `deferred(...)`, which links its
             // subtree into the window's dispatch tree only after its own
@@ -93,17 +260,33 @@ impl TabBar {
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
-        if self.menu_open {
+        if self.menu_open || self.chat_picker_open {
             self.menu_open = false;
+            self.chat_picker_open = false;
             cx.notify();
         }
     }
 
     fn emit(&mut self, action: NewTabAction, cx: &mut Context<Self>) {
         self.menu_open = false;
+        self.chat_picker_open = false;
         if let Some(callback) = &self.on_new_tab {
             callback(action);
         }
+        cx.notify();
+    }
+
+    fn emit_chat_agent(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.chat_picker_open = false;
+        if let Some(callback) = &self.on_chat_agent {
+            callback(id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_chat_picker(&mut self, cx: &mut Context<Self>) {
+        self.chat_picker_open = !self.chat_picker_open;
         cx.notify();
     }
 
@@ -117,7 +300,7 @@ impl TabBar {
         let (icon, glyph_color) = match label {
             "New Terminal" => (Icon::SquareTerminal, theme.meta),
             "Changes" => (Icon::File, theme.meta),
-            "Claude Code" | "Split Claude Code" => (Icon::ClaudeCode, gpui::rgb(0xd97757)),
+            "Claude Code" | "Split Claude Code" => (Icon::ClaudeCode, theme.tab_focus_accent),
             "Codex" => (Icon::Codex, theme.title),
             "OpenCode" => (Icon::OpenCode, theme.title),
             "Pi" => (Icon::Pi, theme.title),
@@ -166,7 +349,107 @@ impl TabBar {
     }
 
     fn separator(theme: Theme) -> impl IntoElement {
-        div().mx(px(8.0)).h(px(1.0)).bg(theme.hairline)
+        div()
+            .mx(px(8.0))
+            .h(theme.spacing.hairline_thickness)
+            .bg(theme.hairline)
+    }
+
+    fn render_new_chat_item(
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        expanded: bool,
+    ) -> impl IntoElement {
+        div()
+            .id("New Chat")
+            .debug_selector(|| "new-tab-item-new-chat".to_owned())
+            .w_full()
+            .h(px(29.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.footnote)
+            .text_color(theme.title)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.toggle_chat_picker(cx)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                IconElement::new(Icon::MessageSquare, px(14.0))
+                                    .text_color(theme.meta),
+                            ),
+                    )
+                    .child(text!(id = "new-tab-label-New Chat", "New Chat")),
+            )
+            .child(div().text_color(theme.meta).child(IconElement::new(
+                if expanded {
+                    Icon::ChevronDown
+                } else {
+                    Icon::ChevronRight
+                },
+                px(12.0),
+            )))
+    }
+
+    fn render_chat_agent_item(
+        agent: &AgentAvailability,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let id = agent.id;
+        let selector = format!("new-tab-chat-agent-{id}");
+        let selector_for_debug = selector.clone();
+        let display_name = agent.display_name;
+        let icon = Icon::for_agent_id(id).unwrap_or(Icon::MessageSquare);
+        div()
+            .id(selector.clone())
+            .debug_selector(move || selector_for_debug.clone())
+            .w_full()
+            .h(px(29.0))
+            .pl(theme.spacing.card_gap)
+            .pr(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.footnote)
+            .text_color(theme.title)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
+            .child(IconElement::new(icon, px(14.0)).text_color(theme.title))
+            .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
+    }
+
+    fn render_chat_empty(theme: Theme) -> impl IntoElement {
+        div()
+            .id("new-chat-empty")
+            .debug_selector(|| "new-chat-empty".to_owned())
+            .w_full()
+            .px(theme.spacing.card_gap)
+            .py(theme.spacing.titlebar_control_spacing)
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.titlebar_control_spacing)
+            .text_size(theme.typography.footnote)
+            .text_color(theme.meta)
+            .child("Other agents…")
+            .child(
+                div()
+                    .text_size(theme.typography.caption2)
+                    .text_color(theme.meta)
+                    .child("No supported agent found on PATH"),
+            )
     }
 }
 
@@ -175,7 +458,34 @@ impl Render for TabBar {
         let theme = *Theme::get(cx);
         let entity = cx.entity();
         let menu_open = self.menu_open;
+        let chat_picker_open = self.chat_picker_open;
         let anchor_bounds = self.anchor_bounds.clone();
+
+        let available_chat_agents = self
+            .chat_agents
+            .iter()
+            .filter(|agent| agent.is_available() && agent.acp_program().is_some())
+            .collect::<Vec<_>>();
+        let mut chat_agent_menu = div()
+            .id("new-chat-agent-menu")
+            .debug_selector(|| "new-chat-agent-menu".to_owned())
+            .w_full()
+            .mt(theme.spacing.titlebar_control_spacing)
+            .pl(theme.spacing.titlebar_control_spacing)
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.titlebar_control_spacing);
+        if available_chat_agents.is_empty() {
+            chat_agent_menu = chat_agent_menu.child(Self::render_chat_empty(theme));
+        } else {
+            for agent in available_chat_agents {
+                chat_agent_menu = chat_agent_menu.child(Self::render_chat_agent_item(
+                    agent,
+                    entity.clone(),
+                    theme,
+                ));
+            }
+        }
 
         let menu = div()
             .id("new-tab-menu")
@@ -246,21 +556,8 @@ impl Render for TabBar {
                 false,
             ))
             .child(Self::separator(theme))
-            .child(Self::render_menu_item(
-                "New Browser",
-                NewTabAction::NewBrowser,
-                entity.clone(),
-                theme,
-                false,
-            ))
-            .child(Self::separator(theme))
-            .child(Self::render_menu_item(
-                "New Chat",
-                NewTabAction::NewChat,
-                entity,
-                theme,
-                true,
-            ));
+            .child(Self::render_new_chat_item(entity, theme, chat_picker_open))
+            .when(chat_picker_open, |this| this.child(chat_agent_menu));
 
         let menu = menu.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)));
 
@@ -357,8 +654,17 @@ mod tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Once;
+
+    fn available_agent(id: &'static str, display_name: &'static str) -> AgentAvailability {
+        AgentAvailability {
+            id,
+            display_name,
+            executable: Some(PathBuf::from(format!("/usr/bin/{id}"))),
+        }
+    }
 
     #[gpui::test]
     async fn drawn_new_tab_menu_dispatches_every_item_action(cx: &mut TestAppContext) {
@@ -366,7 +672,9 @@ mod tests {
         let actions = Rc::new(RefCell::new(Vec::new()));
         let collected = actions.clone();
         let window = cx.add_window(|_window, cx| {
-            TabBar::new(cx).on_new_tab(move |action| collected.borrow_mut().push(action))
+            TabBar::new(cx)
+                .with_chat_agents(vec![available_agent("codex", "Codex")])
+                .on_new_tab(move |action| collected.borrow_mut().push(action))
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -384,8 +692,6 @@ mod tests {
                 "split-claude-code",
                 NewTabAction::SplitClaudeCode,
             ),
-            ("New Browser", "new-browser", NewTabAction::NewBrowser),
-            ("New Chat", "new-chat", NewTabAction::NewChat),
         ];
 
         for (_label, selector, expected) in entries {
@@ -432,6 +738,128 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn drawn_new_tab_menu_hides_unsupported_browser_action(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| TabBar::new(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is in the drawn frame");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("new-tab-menu").is_some());
+        assert!(
+            cx.debug_bounds("new-tab-item-new-browser").is_none(),
+            "the menu must not offer an action whose browser surface is unsupported"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_new_chat_picker_gates_unavailable_agents_and_emits_the_selected_id(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let collected = actions.clone();
+        let selected_agents = Rc::new(RefCell::new(Vec::new()));
+        let selected_agents_for_callback = selected_agents.clone();
+        let window = cx.add_window(|_window, cx| {
+            TabBar::new(cx)
+                .with_chat_agents(vec![
+                    available_agent("codex", "Codex"),
+                    available_agent("pi", "Pi"),
+                    AgentAvailability {
+                        id: "claude",
+                        display_name: "Claude Code",
+                        executable: None,
+                    },
+                ])
+                .on_new_tab(move |action| collected.borrow_mut().push(action))
+                .on_chat_agent(move |id| selected_agents_for_callback.borrow_mut().push(id))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        let new_chat = cx
+            .debug_bounds("new-tab-item-new-chat")
+            .expect("New Chat is drawn");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("new-chat-agent-menu").is_some());
+        assert!(cx.debug_bounds("new-tab-chat-agent-codex").is_some());
+        assert!(
+            cx.debug_bounds("new-tab-chat-agent-pi").is_none(),
+            "an installed adapter without an ACP server must not be offered"
+        );
+        assert!(
+            cx.debug_bounds("new-tab-chat-agent-claude").is_none(),
+            "an unavailable adapter must not be offered"
+        );
+
+        let codex = cx
+            .debug_bounds("new-tab-chat-agent-codex")
+            .expect("the available adapter is selectable");
+        cx.simulate_click(codex.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            selected_agents.borrow().as_slice(),
+            &["codex"],
+            "choosing a chat provider must carry its stable adapter id"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_new_chat_picker_explains_when_no_agent_is_installed(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            TabBar::new(cx).with_chat_agents(vec![AgentAvailability {
+                id: "codex",
+                display_name: "Codex",
+                executable: None,
+            }])
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        let new_chat = cx
+            .debug_bounds("new-tab-item-new-chat")
+            .expect("New Chat is drawn");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("new-chat-agent-menu").is_some());
+        assert!(cx.debug_bounds("new-chat-empty").is_some());
+        assert!(cx.debug_bounds("new-tab-chat-agent-codex").is_none());
+    }
+
+    #[gpui::test]
     async fn drawn_new_tab_menu_escape_dispatches_through_the_real_key_path(
         cx: &mut TestAppContext,
     ) {
@@ -455,6 +883,65 @@ mod tests {
             cx.debug_bounds("new-tab-menu").is_none(),
             "Escape closes the drawn menu through GPUI action dispatch"
         );
+    }
+
+    struct TabContextMenuFixture {
+        actions: Rc<RefCell<Vec<TabContextAction>>>,
+        items: Vec<TabContextItem>,
+    }
+
+    impl Render for TabContextMenuFixture {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let actions = self.actions.clone();
+            render_tab_context_menu(
+                self.items.clone(),
+                Rc::new(move |action, _, _| actions.borrow_mut().push(action)),
+                *Theme::get(_cx),
+            )
+        }
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_context_menu_dispatches_enabled_actions_and_explains_disabled_ones(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window(|_window, _cx| TabContextMenuFixture {
+            actions: actions.clone(),
+            items: vec![
+                TabContextItem::enabled("Rename", "rename", TabContextAction::Rename),
+                TabContextItem::separator(),
+                TabContextItem::disabled(
+                    "Close Tabs to the Right",
+                    "close-right",
+                    TabContextAction::CloseTabsToRight,
+                    "already the last tab",
+                ),
+                TabContextItem::enabled("Close", "close", TabContextAction::Close),
+            ],
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("tab-context-menu").is_some());
+        assert!(cx.debug_bounds("tab-command-close-right").is_some());
+        assert!(
+            cx.debug_bounds("tab-command-disabled-close-right")
+                .is_some()
+        );
+
+        for (selector, expected) in [
+            ("tab-command-rename", TabContextAction::Rename),
+            ("tab-command-close", TabContextAction::Close),
+        ] {
+            let item = cx
+                .debug_bounds(selector)
+                .expect("the enabled tab command is drawn");
+            cx.simulate_click(item.center(), Modifiers::none());
+            cx.run_until_parked();
+            assert_eq!(actions.borrow().last().copied(), Some(expected));
+        }
     }
 
     // ── F-TAB-19/20/28 harness capability: modifier chords ──────────────

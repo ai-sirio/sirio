@@ -10,6 +10,7 @@ pub mod controls;
 pub mod editor;
 pub mod file_view;
 pub mod project_forms;
+pub mod project_identity;
 pub mod right_panel;
 pub mod row_reorder;
 pub mod settings;

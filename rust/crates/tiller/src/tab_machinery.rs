@@ -45,13 +45,39 @@ pub(crate) enum TabMachineryError {
     ActiveTabMissing(usize),
 }
 
-#[cfg(test)]
 pub(crate) fn strip_overflows(
     tab_widths: &[f32],
     available_width: f32,
     overflow_width: f32,
 ) -> bool {
     tab_widths.iter().copied().sum::<f32>() + overflow_width > available_width
+}
+
+/// Return how many leading tabs fit while reserving room for the overflow
+/// control. The active group owns the strip order, so keeping a prefix here
+/// makes the hidden suffix deterministic and lets the overflow menu list the
+/// complete group without relying on layout side effects.
+pub(crate) fn visible_tab_count(
+    tab_widths: &[f32],
+    available_width: f32,
+    overflow_width: f32,
+) -> usize {
+    if !strip_overflows(tab_widths, available_width, overflow_width) {
+        return tab_widths.len();
+    }
+
+    let budget = (available_width - overflow_width).max(0.0);
+    let mut used = 0.0;
+    tab_widths
+        .iter()
+        .take_while(|width| {
+            let fits = used + **width <= budget;
+            if fits {
+                used += **width;
+            }
+            fits
+        })
+        .count()
 }
 
 /// Pure placement and ordering state for tabs in pane groups.
@@ -390,6 +416,16 @@ mod tests {
     fn overflow_is_reported_only_when_the_strip_exceeds_available_width() {
         assert!(!super::strip_overflows(&[100.0, 100.0], 230.0, 24.0));
         assert!(super::strip_overflows(&[100.0, 100.0, 100.0], 220.0, 24.0));
+    }
+
+    #[test]
+    fn visible_tab_count_reserves_the_overflow_control_for_hidden_tabs() {
+        assert_eq!(super::visible_tab_count(&[100.0, 100.0], 230.0, 24.0), 2);
+        assert_eq!(
+            super::visible_tab_count(&[100.0, 100.0, 100.0], 220.0, 24.0),
+            1
+        );
+        assert_eq!(super::visible_tab_count(&[100.0], 20.0, 24.0), 0);
     }
 
     #[test]

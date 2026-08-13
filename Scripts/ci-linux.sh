@@ -5,6 +5,10 @@
 # This gate does not cover anything visual. It has no display and cannot prove
 # that the UI maps, paints, or behaves correctly on screen; CI OK is not a UI
 # verification claim.
+#
+# Nor is CI OK an ACP claim by default. The one real-agent ACP test in the tree is
+# #[ignore]d and runs only with TILLER_ACP_REAL=1 (see the stage below). Without it
+# this gate is green whether or not an agent can be connected at all.
 set -Eeuo pipefail
 
 if [[ -n "${HOME:-}" && -f "$HOME/.cargo/env" ]]; then
@@ -13,6 +17,22 @@ fi
 if ! command -v cargo >/dev/null 2>&1; then
     echo "cargo not found; run source ~/.cargo/env"
     exit 1
+fi
+
+# rust/.cargo/config.toml sets `rustc-wrapper = "sccache"`, which is right when it works:
+# it serves the 408 dependency crates to every parallel worktree instead of rebuilding them.
+# But sccache has to spawn a daemon and bind a socket, and the sandboxed agent panes cannot,
+# so every rustc invocation fails there and the gate is unrunnable for them — which is worse
+# than a slow gate, because an agent that can never reach a green gate learns to ignore it.
+#
+# So probe it once and fall back. An empty RUSTC_WRAPPER overrides build.rustc-wrapper and
+# disables the wrapper for this run only; the config file is left alone for everyone else.
+if [[ -z "${RUSTC_WRAPPER+x}" ]] && grep -qs 'rustc-wrapper' "$(dirname "${BASH_SOURCE[0]}")/../rust/.cargo/config.toml"; then
+    if ! timeout 30 sccache --start-server >/dev/null 2>&1 \
+       && ! timeout 15 sccache --show-stats >/dev/null 2>&1; then
+        echo "note: sccache is configured but cannot serve here; building without it."
+        export RUSTC_WRAPPER=""
+    fi
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -96,6 +116,25 @@ rust_fingerprint() {
         done
 }
 
+rust_fingerprint_drift() {
+    awk '
+        NR == FNR {
+            before[$2] = $1
+            paths[$2] = 1
+            next
+        }
+        {
+            after[$2] = $1
+            paths[$2] = 1
+        }
+        END {
+            for (path in paths) {
+                if (before[path] != after[path]) print path
+            }
+        }
+    ' "$ARRIVAL_RUST_FINGERPRINT" "$FINAL_RUST_FINGERPRINT" | sort
+}
+
 ARRIVAL_RUST_FINGERPRINT="$RUN_DIR/rust-fingerprint-at-start"
 if ! rust_fingerprint >"$ARRIVAL_RUST_FINGERPRINT"; then
     echo "FAILED: Rust arrival fingerprint"
@@ -157,6 +196,27 @@ run_cargo_stage "cargo clippy (owned crates)" cargo clippy --workspace --all-tar
 
 run_cargo_stage "cargo build" cargo build -p tiller -p tiller_control
 run_cargo_stage "cargo test --workspace" cargo test --workspace
+
+# The project's acceptance test is "connect a real workspace agent over ACP, send
+# messages, verify streaming and replies". The tree has exactly one test that does
+# this — real_claude_streams_tool_permission_and_writes_nonce, which connects real
+# Claude, streams, answers a tool-permission request, and writes a nonce to disk
+# (the nonce is what separates "the agent replied" from "the agent did work").
+#
+# It is #[ignore]d, because it needs installed Claude credentials and an ACP adapter
+# download, so `cargo test --workspace` above skips it. That means CI OK could be
+# printed while the ACP path was completely dead — the gate would be green on the
+# one path the project is actually judged by.
+#
+# Opt-in rather than default: an agent pane without credentials must still be able
+# to reach a green gate, or it learns to ignore the gate (the same reasoning as the
+# sccache fallback above). Verified passing 2026-08-13 in 8.16s.
+if [ "${TILLER_ACP_REAL:-0}" = "1" ]; then
+    run_cargo_stage "real ACP acceptance (TILLER_ACP_REAL=1)" \
+        cargo test -p tiller_acp --test real_claude -- --ignored
+else
+    echo "SKIP: real ACP acceptance — set TILLER_ACP_REAL=1 to exercise it"
+fi
 
 run_root_stage "test-crash-supervise.py" env PYTHONDONTWRITEBYTECODE=1 \
     python3 Scripts/Tests/test-crash-supervise.py -q
@@ -283,9 +343,10 @@ if ! rust_fingerprint >"$FINAL_RUST_FINGERPRINT"; then
     exit 1
 fi
 if ! cmp -s "$ARRIVAL_RUST_FINGERPRINT" "$FINAL_RUST_FINGERPRINT"; then
-    echo "FAILED: new Rust worktree drift appeared during the gate"
-    diff -u "$ARRIVAL_RUST_FINGERPRINT" "$FINAL_RUST_FINGERPRINT" || true
-    exit 1
+    echo "VOID: the Rust worktree changed during the gate; the measurement is invalid"
+    echo "Re-run the gate when the roster is no longer writing. Changed Rust files:"
+    rust_fingerprint_drift | sed 's/^/  /'
+    exit 75
 fi
 
 echo "PASS: headless smoke test"

@@ -5,9 +5,74 @@
 //! workspace can therefore redraw the tree without recreating a terminal or a
 //! chat transcript.
 
+use std::{
+    io,
+    time::{Duration, Instant},
+};
+
 use gpui::{App, Entity, KeyBinding, actions};
-use tiller_terminal::TerminalView;
+use tiller_activity::{AgentActivityModel, Transition, detect_content_status};
+use tiller_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
 use tiller_ui::{changes::ChangesTab, chat::Chat, file_view::FileView};
+
+/// Layer D refresh cadence. 500 ms is fast enough for the sidebar to notice
+/// a native foreground agent without making `/proc` traversal a redraw-rate
+/// poll; it also leaves the interval easy to tune in the one place the app's
+/// subscription contract names.
+pub(crate) const PROCESS_SIGNAL_INTERVAL: Duration = Duration::from_millis(500);
+
+#[allow(dead_code)]
+pub(crate) fn process_signal_interval() -> Duration {
+    PROCESS_SIGNAL_INTERVAL
+}
+
+/// Routes a terminal's typed PTY evidence into the workspace's one activity
+/// model. The app owns the model; this module owns the translation seam so
+/// context-menu `SetTitle` events cannot accidentally be treated as OSC data.
+pub(crate) fn apply_terminal_activity_event(
+    activity: &mut AgentActivityModel,
+    pane_id: &str,
+    event: &TerminalActivityEvent,
+    now: Instant,
+) -> Option<Transition> {
+    match event {
+        TerminalActivityEvent::OscTitle(title) => activity.handle_title_change(pane_id, title, now),
+        TerminalActivityEvent::OutputSettled { scrollback } => {
+            let agent_id = activity.agent_id(pane_id)?;
+            let status = detect_content_status(scrollback, agent_id)?;
+            activity.apply_content_signal(pane_id, status, now)
+        }
+        TerminalActivityEvent::ChildExited { status } => {
+            // Process- and title-owned identities have independent clearing
+            // paths. A PTY child-exit notification is the spawn-owned path;
+            // never let it clear or rewrite either of the other two kinds.
+            if activity.is_process_owned(pane_id) || activity.is_title_owned(pane_id) {
+                return None;
+            }
+            activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
+        }
+    }
+}
+
+/// Performs one Layer-D refresh for a pane. The caller schedules this once per
+/// terminal at [`PROCESS_SIGNAL_INTERVAL`]; process ownership and clearing
+/// remain inside `AgentActivityModel`.
+pub(crate) fn refresh_process_signal(
+    activity: &mut AgentActivityModel,
+    pane_id: &str,
+    shell_pid: u32,
+) -> io::Result<Option<Transition>> {
+    activity.refresh_process_signal(pane_id, shell_pid)
+}
+
+fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
+    match status {
+        TerminalExitStatus::Success => 0,
+        TerminalExitStatus::Code(code) => code,
+        TerminalExitStatus::Signal(signal) => 128 + signal,
+        TerminalExitStatus::Unknown => 1,
+    }
+}
 
 actions!(
     pane_commands,
@@ -73,6 +138,17 @@ pub(crate) fn bind_keys(cx: &mut App) {
 pub(crate) enum SplitDirection {
     Horizontal,
     Vertical,
+}
+
+/// Which side of the focused pane receives the newly-created pane.
+///
+/// Keeping placement separate from the axis preserves the existing focus and
+/// navigation API while allowing left/above splits to share the same tree
+/// representation and persistence format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SplitPlacement {
+    Before,
+    After,
 }
 
 #[allow(dead_code)]
@@ -231,8 +307,25 @@ impl<T> PaneNode<T> {
         direction: SplitDirection,
         content: T,
     ) -> bool {
+        self.split_focused_with_placement(
+            focused,
+            new_id,
+            direction,
+            SplitPlacement::After,
+            content,
+        )
+    }
+
+    pub(crate) fn split_focused_with_placement(
+        &mut self,
+        focused: usize,
+        new_id: usize,
+        direction: SplitDirection,
+        placement: SplitPlacement,
+        content: T,
+    ) -> bool {
         let mut content = Some(content);
-        self.split_focused_inner(focused, new_id, direction, &mut content)
+        self.split_focused_inner(focused, new_id, direction, placement, &mut content)
     }
 
     fn split_focused_inner(
@@ -240,6 +333,7 @@ impl<T> PaneNode<T> {
         focused: usize,
         new_id: usize,
         direction: SplitDirection,
+        placement: SplitPlacement,
         content: &mut Option<T>,
     ) -> bool {
         match self {
@@ -247,24 +341,40 @@ impl<T> PaneNode<T> {
                 let old_id = *id;
                 let old_content = old.take().expect("rendered pane has content");
                 let new_content = content.take().expect("new pane content is available");
+                let (first, second) = match placement {
+                    SplitPlacement::Before => (
+                        Self::Leaf {
+                            id: new_id,
+                            content: Some(new_content),
+                        },
+                        Self::Leaf {
+                            id: old_id,
+                            content: Some(old_content),
+                        },
+                    ),
+                    SplitPlacement::After => (
+                        Self::Leaf {
+                            id: old_id,
+                            content: Some(old_content),
+                        },
+                        Self::Leaf {
+                            id: new_id,
+                            content: Some(new_content),
+                        },
+                    ),
+                };
                 *self = Self::Split {
                     direction,
                     ratio: 0.5,
-                    first: Box::new(Self::Leaf {
-                        id: old_id,
-                        content: Some(old_content),
-                    }),
-                    second: Box::new(Self::Leaf {
-                        id: new_id,
-                        content: Some(new_content),
-                    }),
+                    first: Box::new(first),
+                    second: Box::new(second),
                 };
                 true
             }
             Self::Leaf { .. } => false,
             Self::Split { first, second, .. } => {
-                first.split_focused_inner(focused, new_id, direction, content)
-                    || second.split_focused_inner(focused, new_id, direction, content)
+                first.split_focused_inner(focused, new_id, direction, placement, content)
+                    || second.split_focused_inner(focused, new_id, direction, placement, content)
             }
         }
     }
@@ -494,12 +604,83 @@ fn remove_node<T>(node: PaneNode<T>, target: usize) -> (Option<PaneNode<T>>, Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        PaneNode, PaneSize, SplitDirection, SplitDisabledReason, TabSelection,
+        PaneNode, PaneSize, SplitDirection, SplitDisabledReason, SplitPlacement, TabSelection,
+        apply_terminal_activity_event, process_signal_interval, refresh_process_signal,
         split_disabled_reason,
     };
+    use std::time::{Duration, Instant};
+    use tiller_activity::{AgentActivityModel, AgentStatus};
+    use tiller_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalShell, TerminalView};
 
     fn tree() -> PaneNode<&'static str> {
         PaneNode::leaf(0, "root")
+    }
+
+    #[test]
+    fn terminal_events_feed_title_and_settled_content_into_the_one_model() {
+        let now = Instant::now();
+        let mut activity = AgentActivityModel::new();
+
+        let title = apply_terminal_activity_event(
+            &mut activity,
+            "pane-title",
+            &TerminalActivityEvent::OscTitle("✳ idle".to_string()),
+            now,
+        );
+        assert_eq!(
+            title.map(|transition| transition.new),
+            Some(AgentStatus::NeedsInput)
+        );
+
+        activity.agent_spawned("pane-content", "claude", now);
+        let content = apply_terminal_activity_event(
+            &mut activity,
+            "pane-content",
+            &TerminalActivityEvent::OutputSettled {
+                scrollback: "Do you want to proceed?\n1. Yes".to_string(),
+            },
+            now + Duration::from_millis(1),
+        );
+        assert_eq!(
+            content.map(|transition| transition.new),
+            Some(AgentStatus::NeedsInput)
+        );
+    }
+
+    #[test]
+    fn process_owned_status_survives_title_and_child_exit_events() {
+        let now = Instant::now();
+        let mut activity = AgentActivityModel::new();
+        activity.process_identified("pane-process", "codex");
+
+        let title = apply_terminal_activity_event(
+            &mut activity,
+            "pane-process",
+            &TerminalActivityEvent::OscTitle("zsh".to_string()),
+            now,
+        );
+        assert_eq!(title, None);
+        assert_eq!(activity.status("pane-process"), Some(AgentStatus::Running));
+        assert!(activity.is_process_owned("pane-process"));
+
+        let exit = apply_terminal_activity_event(
+            &mut activity,
+            "pane-process",
+            &TerminalActivityEvent::ChildExited {
+                status: TerminalExitStatus::Success,
+            },
+            now,
+        );
+        assert_eq!(exit, None);
+        assert_eq!(activity.status("pane-process"), Some(AgentStatus::Running));
+
+        // The real periodic caller supplies the shell PID to this helper; the
+        // process model, not a title or child-exit event, owns the clearing.
+        assert_eq!(process_signal_interval(), Duration::from_millis(500));
+        let refresh = refresh_process_signal(&mut activity, "pane-process", std::process::id());
+        assert!(matches!(refresh, Ok(None)));
+        assert_eq!(activity.status("pane-process"), None);
+        assert!(!activity.is_process_owned("pane-process"));
     }
 
     #[test]
@@ -518,6 +699,20 @@ mod tests {
         assert_eq!(tree.leaf_ids(), vec![0, 1]);
         assert_eq!(tree.neighbor(0, SplitDirection::Vertical, true), Some(1));
         assert_eq!(tree.neighbor(1, SplitDirection::Vertical, false), Some(0));
+    }
+
+    #[test]
+    fn splitting_before_the_focused_pane_places_the_new_pane_on_the_requested_side() {
+        let mut tree = tree();
+        assert!(tree.split_focused_with_placement(
+            0,
+            1,
+            SplitDirection::Horizontal,
+            SplitPlacement::Before,
+            "left",
+        ));
+        assert_eq!(tree.leaf_ids(), vec![1, 0]);
+        assert_eq!(tree.neighbor(0, SplitDirection::Horizontal, false), Some(1));
     }
 
     #[test]
@@ -629,5 +824,292 @@ mod tests {
             split_disabled_reason(SplitDirection::Vertical, PaneSize::new(600.0, 500.0), 2,),
             None
         );
+    }
+
+    #[test]
+    fn layer_a_debounce_still_suppresses_two_title_events_in_order() {
+        let started = Instant::now();
+        let mut activity = AgentActivityModel::new();
+        activity.agent_spawned("pane-debounce", "claude", started);
+        activity.notify(
+            "pane-debounce",
+            AgentStatus::Running,
+            started + Duration::from_millis(500),
+        );
+
+        assert_eq!(
+            apply_terminal_activity_event(
+                &mut activity,
+                "pane-debounce",
+                &TerminalActivityEvent::OscTitle("✳ idle".to_string()),
+                started + Duration::from_secs(1),
+            ),
+            None,
+            "the first contradictory OSC title is inside Layer A's debounce"
+        );
+        assert_eq!(
+            apply_terminal_activity_event(
+                &mut activity,
+                "pane-debounce",
+                &TerminalActivityEvent::OscTitle("✳ idle".to_string()),
+                started + Duration::from_secs(2),
+            )
+            .map(|transition| transition.new),
+            Some(AgentStatus::NeedsInput),
+            "the second OSC title is eligible after the debounce window"
+        );
+    }
+
+    /// This is the app seam, not a model-only test: a real PTY emits two
+    /// different signals, and the observable activity state follows first
+    /// Layer B and then settled Layer C output.
+    #[gpui::test]
+    async fn real_pty_activity_status_follows_osc_title_then_settled_content(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::{Arc, Mutex};
+        use tiller_theme::Theme;
+
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-pane-activity-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "sleep 0.1; printf '\\033]0;. working\\007'; sleep 0.2; printf 'Do you want to proceed?\\n'; exec sleep 1"
+                    .to_string(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let observed = Arc::new(Mutex::new((AgentActivityModel::new(), Vec::new())));
+        let _subscription = cx.update(|_, app| {
+            let observed = observed.clone();
+            app.subscribe(&terminal, move |_, event: &TerminalActivityEvent, _| {
+                let mut observed = observed.lock().expect("activity lock");
+                let _ = apply_terminal_activity_event(
+                    &mut observed.0,
+                    "pane-real-pty",
+                    event,
+                    Instant::now(),
+                );
+                let status = observed.0.status("pane-real-pty");
+                observed.1.push((event.clone(), status));
+            })
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if observed
+                .lock()
+                .expect("activity lock")
+                .1
+                .iter()
+                .any(|(event, status)| {
+                    matches!(event, TerminalActivityEvent::OutputSettled { scrollback }
+                    if scrollback.contains("Do you want to proceed?"))
+                        && *status == Some(AgentStatus::NeedsInput)
+                })
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let observed = observed.lock().expect("activity lock");
+        assert!(
+            observed.1.iter().any(|(event, status)| {
+                event == &TerminalActivityEvent::OscTitle(". working".to_string())
+                    && *status == Some(AgentStatus::Running)
+            }),
+            "the real OSC title must identify Claude as working"
+        );
+        assert!(
+            observed.1.iter().any(|(event, status)| {
+                matches!(event, TerminalActivityEvent::OutputSettled { scrollback }
+                if scrollback.contains("Do you want to proceed?"))
+                    && *status == Some(AgentStatus::NeedsInput)
+            }),
+            "settled real PTY text must drive Layer C"
+        );
+        drop(observed);
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::{Arc, Mutex};
+        use tiller_theme::Theme;
+
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-pane-debounce-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf '\\033]0;. working\\007'; IFS= read -r _; printf '\\033]0;✳ idle\\007'; sleep 1.7; printf '\\033]0;✳ idle\\007'; exec sleep 1"
+                    .to_string(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let observed = Arc::new(Mutex::new((AgentActivityModel::new(), Vec::new())));
+        let state = observed.clone();
+        let _subscription = cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalActivityEvent, _| {
+                let mut state = state.lock().expect("activity lock");
+                if let TerminalActivityEvent::OscTitle(title) = event {
+                    if title == ". working" {
+                        let _ = apply_terminal_activity_event(
+                            &mut state.0,
+                            "pane-debounce-pty",
+                            event,
+                            Instant::now(),
+                        );
+                        state
+                            .0
+                            .notify("pane-debounce-pty", AgentStatus::Running, Instant::now());
+                    } else if title == "✳ idle" {
+                        let status_before = state.0.status("pane-debounce-pty");
+                        state.1.push((Instant::now(), status_before));
+                        let _ = apply_terminal_activity_event(
+                            &mut state.0,
+                            "pane-debounce-pty",
+                            event,
+                            Instant::now(),
+                        );
+                    }
+                }
+            })
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut released = false;
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let (running, first_title_arrived) = {
+                let state = observed.lock().expect("activity lock");
+                (
+                    state.0.status("pane-debounce-pty") == Some(AgentStatus::Running),
+                    state.1.len() >= 1,
+                )
+            };
+            if running && !released {
+                terminal.update(&mut cx.cx, |terminal, _| terminal.input("\n"));
+                released = true;
+            }
+            if first_title_arrived {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        {
+            let state = observed.lock().expect("activity lock");
+            assert_eq!(
+                state.1.len(),
+                1,
+                "the first real contradictory title arrived"
+            );
+            assert_eq!(
+                state.0.status("pane-debounce-pty"),
+                Some(AgentStatus::Running),
+                "Layer A must suppress the first real OSC idle title"
+            );
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let state = observed.lock().expect("activity lock");
+            if state.1.len() >= 2
+                && state.0.status("pane-debounce-pty") == Some(AgentStatus::NeedsInput)
+            {
+                break;
+            }
+            drop(state);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let state = observed.lock().expect("activity lock");
+        assert_eq!(
+            state.1.len(),
+            2,
+            "the second real contradictory title arrived"
+        );
+        assert_eq!(
+            state.0.status("pane-debounce-pty"),
+            Some(AgentStatus::NeedsInput),
+            "Layer B becomes eligible after 1.5 seconds"
+        );
+        drop(state);
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_refresh_preserves_process_ownership_until_process_gone() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+
+        let root =
+            std::env::temp_dir().join(format!("tiller-pane-process-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create process fixture");
+        let agent = root.join("codex");
+        symlink("/bin/sleep", &agent).expect("create matching comm alias");
+        let mut child = Command::new("sh")
+            .args(["-c", &format!("{} 2", agent.display())])
+            .spawn()
+            .expect("spawn shell with a real matching child");
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut activity = AgentActivityModel::new();
+        let transition = refresh_process_signal(&mut activity, "pane-process-e2e", child.id())
+            .expect("refresh process signal");
+        assert_eq!(
+            transition.map(|transition| transition.new),
+            Some(AgentStatus::Running)
+        );
+        assert!(activity.is_process_owned("pane-process-e2e"));
+        assert_eq!(
+            apply_terminal_activity_event(
+                &mut activity,
+                "pane-process-e2e",
+                &TerminalActivityEvent::OscTitle("zsh".to_string()),
+                Instant::now(),
+            ),
+            None
+        );
+        assert_eq!(
+            activity.status("pane-process-e2e"),
+            Some(AgentStatus::Running),
+            "an unrelated title cannot clear process-owned state"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        refresh_process_signal(&mut activity, "pane-process-e2e", child.id())
+            .expect("refresh after child exit");
+        assert_eq!(activity.status("pane-process-e2e"), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
