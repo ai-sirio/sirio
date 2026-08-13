@@ -23,6 +23,45 @@ pub(crate) const HEIGHT: f32 = 40.0;
 /// The Swift default: refresh every five minutes (60..3600 allowed).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 
+/// The settings the usage bar consumes from the settings surface
+/// (F-SET-10): which provider segments are visible and how often the
+/// fetches run. Before P58 these values changed in the settings screen and
+/// nothing read them — the bar now derives its behaviour from the
+/// persistence contract's snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsageBarPrefs {
+    pub claude_visible: bool,
+    pub codex_visible: bool,
+    pub opencode_visible: bool,
+    /// Refresh interval in minutes, the settings surface's unit (1..=60).
+    pub refresh_interval_min: i32,
+}
+
+impl Default for UsageBarPrefs {
+    fn default() -> Self {
+        Self {
+            claude_visible: true,
+            codex_visible: true,
+            opencode_visible: false,
+            refresh_interval_min: 5,
+        }
+    }
+}
+
+impl UsageBarPrefs {
+    /// Derives the bar's preferences from the settings contract. This is
+    /// the only mapping between the two surfaces — the host routes the
+    /// snapshot here at construction and on every settings change.
+    pub fn from_snapshot(snapshot: &crate::settings::SettingsSnapshot) -> Self {
+        Self {
+            claude_visible: snapshot.claude_show_in_bar,
+            codex_visible: snapshot.codex_show_in_bar,
+            opencode_visible: snapshot.opencode_show_in_bar,
+            refresh_interval_min: snapshot.refresh_interval.clamp(1, 60),
+        }
+    }
+}
+
 /// Plain data source for [`StatusBar`]: the worktree context shown at the
 /// right edge. The usage numbers come from the real fetchers, not here.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +89,11 @@ pub struct StatusBar {
     opencode_go: ProviderUsageState,
     /// How often the usage segments re-fetch.
     refresh_interval: Duration,
+    /// The settings the bar consumes: segment visibility and the refresh
+    /// interval (F-SET-10). Replaced wholesale by
+    /// [`StatusBar::apply_preferences`] whenever the settings surface
+    /// changes.
+    prefs: UsageBarPrefs,
     /// Lazily armed on first render (the constructor has no context to spawn
     /// with).
     refresh_task_started: bool,
@@ -65,6 +109,7 @@ impl StatusBar {
             codex: ProviderUsageState::Loading,
             opencode_go: ProviderUsageState::Loading,
             refresh_interval: REFRESH_INTERVAL,
+            prefs: UsageBarPrefs::default(),
             refresh_task_started: false,
             on_settings: None,
             on_refresh: None,
@@ -73,6 +118,25 @@ impl StatusBar {
 
     pub fn new_with_default_context() -> Self {
         Self::new(UsageBarData::default_context())
+    }
+
+    /// Sets the preferences the bar starts with, derived from the settings
+    /// contract by the host.
+    pub fn with_preferences(mut self, prefs: UsageBarPrefs) -> Self {
+        self.prefs = prefs;
+        self.refresh_interval =
+            Duration::from_secs(self.prefs.refresh_interval_min.clamp(1, 60) as u64 * 60);
+        self
+    }
+
+    /// Applies the settings surface's current visibility and refresh
+    /// interval. The interval is read live by the fetch loop, so a change
+    /// takes effect at the next cycle without re-arming the task.
+    pub fn apply_preferences(&mut self, prefs: UsageBarPrefs, cx: &mut Context<Self>) {
+        self.prefs = prefs;
+        self.refresh_interval =
+            Duration::from_secs(self.prefs.refresh_interval_min.clamp(1, 60) as u64 * 60);
+        cx.notify();
     }
 
     pub fn on_settings(mut self, callback: impl Fn() + 'static) -> Self {
@@ -116,13 +180,14 @@ impl StatusBar {
 
     /// Arms the periodic refresh task once: fetches immediately, then on
     /// the interval. The loop awaits the background fetches, so the render
-    /// thread never blocks.
+    /// thread never blocks. The interval is read from the bar's current
+    /// preferences on every cycle, so a settings change takes effect
+    /// without re-arming the task.
     fn ensure_refresh_task(&mut self, cx: &mut Context<Self>) {
         if self.refresh_task_started {
             return;
         }
         self.refresh_task_started = true;
-        let interval = self.refresh_interval;
         cx.spawn(async move |this, cx| {
             loop {
                 let executor = cx.background_executor();
@@ -130,14 +195,13 @@ impl StatusBar {
                 let codex = executor.spawn(async move { CodexUsageFetcher::fetch() });
                 let opencode_go = executor.spawn(async move { OpenCodeGoUsageFetcher::fetch() });
                 let (claude, codex, opencode_go) = (claude.await, codex.await, opencode_go.await);
-                if this
-                    .update(cx, |bar, cx| {
-                        bar.apply_outcomes(claude, codex, opencode_go, cx);
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                let interval = match this.update(cx, |bar, cx| {
+                    bar.apply_outcomes(claude, codex, opencode_go, cx);
+                    bar.refresh_interval
+                }) {
+                    Ok(interval) => interval,
+                    Err(_) => return,
+                };
                 cx.background_executor().timer(interval).await;
             }
         })
@@ -230,6 +294,7 @@ impl Render for StatusBar {
                 // element ids make GPUI drop all but one segment.
                 let text_id = format!("{display_name}-usage-text");
                 div()
+                    .debug_selector(move || format!("{display_name}-usage-text"))
                     .flex()
                     .items_center()
                     .gap(px(5.0))
@@ -239,35 +304,39 @@ impl Render for StatusBar {
                     .child(text!(id = text_id, text))
             };
 
-        let left = div()
-            .flex()
-            .items_center()
-            .gap(px(12.0))
-            .child(
-                icon_button("status-settings", Icon::Settings).on_click(move |_, _, _| {
-                    if let Some(callback) = &settings {
-                        callback();
-                    }
-                }),
-            )
-            .child(provider_segment(
+        // The segments follow the settings surface's "Show in usage bar"
+        // toggles (F-SET-10): a provider hidden there does not render here.
+        let mut left = div().flex().items_center().gap(px(12.0)).child(
+            icon_button("status-settings", Icon::Settings).on_click(move |_, _, _| {
+                if let Some(callback) = &settings {
+                    callback();
+                }
+            }),
+        );
+        if self.prefs.claude_visible {
+            left = left.child(provider_segment(
                 "Claude",
                 Icon::ClaudeCode,
                 claude_color,
                 Self::segment_text("Claude", &self.claude),
-            ))
-            .child(provider_segment(
+            ));
+        }
+        if self.prefs.codex_visible {
+            left = left.child(provider_segment(
                 "Codex",
                 Icon::Codex,
                 codex_color,
                 Self::segment_text("Codex", &self.codex),
-            ))
-            .child(provider_segment(
+            ));
+        }
+        if self.prefs.opencode_visible {
+            left = left.child(provider_segment(
                 "OpenCode Go",
                 Icon::OpenCode,
                 opencode_go_color,
                 Self::segment_text("OpenCode Go", &self.opencode_go),
             ));
+        }
 
         div()
             .w_full()
@@ -291,5 +360,100 @@ fn dim(color: Rgba) -> Rgba {
         g: color.g,
         b: color.b,
         a: color.a * 0.55,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::VisualTestContext;
+
+    /// P58, F-SET-10: the usage bar consumes the settings surface's
+    /// visibility toggles and refresh interval. A provider hidden in
+    /// settings does not render a segment, and the interval the fetch loop
+    /// uses follows the setting (minutes -> seconds).
+    #[gpui::test]
+    async fn usage_bar_consumes_visibility_and_interval_preferences(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // Defaults: Claude and Codex visible, OpenCode Go hidden.
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_some(),
+            "a visible provider renders its segment"
+        );
+        assert!(cx.debug_bounds("Codex-usage-text").is_some());
+        assert!(
+            cx.debug_bounds("OpenCode Go-usage-text").is_none(),
+            "a provider hidden in settings renders no segment"
+        );
+
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+        bar.update(&mut cx, |bar, cx| {
+            bar.apply_preferences(
+                UsageBarPrefs {
+                    claude_visible: false,
+                    codex_visible: true,
+                    opencode_visible: true,
+                    refresh_interval_min: 7,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_none(),
+            "hiding a provider in settings removes its segment"
+        );
+        assert!(cx.debug_bounds("Codex-usage-text").is_some());
+        assert!(
+            cx.debug_bounds("OpenCode Go-usage-text").is_some(),
+            "showing a provider in settings adds its segment"
+        );
+
+        let interval = cx.update(|window, cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+                .read(cx)
+                .refresh_interval
+        });
+        assert_eq!(
+            interval,
+            Duration::from_secs(7 * 60),
+            "the fetch interval follows the settings stepper (minutes)"
+        );
+    }
+
+    /// P58, F-SET-10: `UsageBarPrefs::from_snapshot` is the single mapping
+    /// from the persistence contract to the bar; it clamps the interval
+    /// into the stepper's range so a stored out-of-range value cannot arm
+    /// a pathological timer.
+    #[test]
+    fn prefs_derive_from_the_settings_snapshot_and_clamp() {
+        let snapshot = crate::settings::SettingsSnapshot {
+            claude_show_in_bar: false,
+            codex_show_in_bar: true,
+            opencode_show_in_bar: true,
+            refresh_interval: 999,
+            ..Default::default()
+        };
+        let prefs = UsageBarPrefs::from_snapshot(&snapshot);
+        assert!(!prefs.claude_visible);
+        assert!(prefs.codex_visible);
+        assert!(prefs.opencode_visible);
+        assert_eq!(
+            prefs.refresh_interval_min, 60,
+            "clamped to the stepper range"
+        );
     }
 }

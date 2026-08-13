@@ -440,6 +440,13 @@ pub struct Spacing {
     /// which is the hairline's colour. One geometric pixel, COSMIC's own
     /// hairline weight.
     pub hairline_thickness: Pixels,
+    /// The compact, icon-only action button used inside dense rows and
+    /// cards — smaller than `titlebar_control_frame` (waku's 26px chrome
+    /// buttons), sized for a control that sits *in* content rather than
+    /// *above* it. Comet's 24px top-bar cluster buttons (P76) are this
+    /// token's first consumer; a settings row's "Refresh"/color-swatch
+    /// controls (P75) are the next.
+    pub compact_action: Pixels,
 }
 
 impl Default for Spacing {
@@ -457,6 +464,7 @@ impl Default for Spacing {
             bottom_bar_height: px(40.0),
             menu_width: px(240.0),
             hairline_thickness: px(1.0),
+            compact_action: px(24.0),
         }
     }
 }
@@ -505,6 +513,87 @@ impl Default for Radii {
             toast: px(10.0),
             user_pill: px(12.0),
             composer: px(13.0),
+        }
+    }
+}
+
+/// The comet-derived top-bar chrome (P76): the traffic-light cluster and the
+/// button cluster beside it. Measured from comet's own source
+/// (`Theme::TITLEBAR_HEIGHT`, `CLUSTER_BUTTONS_WIDTH` — dimensions, not
+/// code, transcribed under `docs/linux-rewrite/tasks/P76-*`), except the
+/// traffic lights themselves and [`Self::cluster_start`]: comet never draws
+/// them (macOS decorates its own), so there is nothing there to measure —
+/// [`Self::cluster_start`] documents the derivation.
+///
+/// Deliberately separate from `Spacing`'s `title_strip_height` /
+/// `traffic_light_inset` / `titlebar_control_*` fields, which stay exactly
+/// as they were: that waku-era vocabulary is read by `tab_bar.rs`,
+/// `right_panel.rs`, `file_view.rs`, `changes.rs`, `tiller_terminal` and
+/// `main.rs` for their own compact chrome, none of which this brief owns —
+/// changing those values would silently reflow surfaces P76 has no mandate
+/// to touch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrowserChrome {
+    /// The bar's total height (comet: 38px).
+    pub bar_height: Pixels,
+    /// Diameter of one traffic-light dot. Not a comet measurement — comet's
+    /// lights are OS-drawn on macOS and absent on Linux, so there is no
+    /// dimension to transcribe. 12px matches the widely-documented real-world
+    /// size of macOS's own dots, chosen independently for legibility at a
+    /// 38px bar height (12 / 38 ≈ 0.32 of the bar), not copied from any
+    /// comet inset constant.
+    pub traffic_light_diameter: Pixels,
+    /// Edge-to-edge gap between adjacent lights (8px — with a 12px diameter
+    /// this gives a 20px centre-to-centre pitch, the commonly cited macOS
+    /// spacing; derived for legibility, not read from comet, which never
+    /// lays this out itself).
+    pub traffic_light_gap: Pixels,
+    /// Left inset of the first light. Reuses comet's own **non-macOS**
+    /// baseline (`cluster_buttons_start(is_macos: false, ..) == 10.0`) —
+    /// "how close to the edge do our own, non-OS-drawn controls sit" — rather
+    /// than macOS's `{14, 15}` inset, which is calibrated to Apple's dot
+    /// size and chrome, not ours.
+    pub traffic_light_inset: Pixels,
+    /// Gap between the last light and the first cluster button (8px — the
+    /// same rhythm as `traffic_light_gap`, so the light group reads as one
+    /// unit and the handoff to the cluster does not look accidental).
+    pub traffic_light_cluster_gap: Pixels,
+    /// Gap between adjacent cluster buttons — comet's own measurement
+    /// (`CLUSTER_BUTTONS_WIDTH = 24.0 * 3.0 + 2.0 * 2.0`, i.e. 2px gaps).
+    /// Button *size* is `Spacing::compact_action`, not duplicated here —
+    /// one 24px "small icon action" token for the whole app, not a second
+    /// name for the same number.
+    pub cluster_button_gap: Pixels,
+}
+
+impl BrowserChrome {
+    /// Where the button cluster starts, in px from the window's left edge —
+    /// **derived, not copied from comet's 88px** (that number is macOS's own
+    /// OS-drawn inset, sized to Apple's dot geometry, which this bar does
+    /// not use).
+    ///
+    /// `traffic_light_inset + 3 lights + 2 inter-light gaps +
+    /// traffic_light_cluster_gap` = `10 + 3×12 + 2×8 + 8` = **70px** at the
+    /// default values — between comet's own two boundary numbers (10px with
+    /// no lights, 88px with macOS's own), which is the expected place for a
+    /// bar that, unlike either reference, draws smaller lights of its own.
+    pub fn cluster_start(&self) -> Pixels {
+        self.traffic_light_inset
+            + self.traffic_light_diameter * 3.0
+            + self.traffic_light_gap * 2.0
+            + self.traffic_light_cluster_gap
+    }
+}
+
+impl Default for BrowserChrome {
+    fn default() -> Self {
+        Self {
+            bar_height: px(38.0),
+            traffic_light_diameter: px(12.0),
+            traffic_light_gap: px(8.0),
+            traffic_light_inset: px(10.0),
+            traffic_light_cluster_gap: px(8.0),
+            cluster_button_gap: px(2.0),
         }
     }
 }
@@ -682,6 +771,10 @@ pub struct Theme {
     /// [`cosmic::CosmicTheme::resolve`]. Every surface that already reads
     /// `Theme::get(cx)` gets these for free.
     pub cosmic: cosmic::CosmicTheme,
+    /// The comet-derived top-bar chrome (P76): traffic-light and
+    /// button-cluster geometry, distinct from `Spacing`'s waku-era chrome
+    /// tokens (see [`BrowserChrome`]'s own docs for why they don't merge).
+    pub browser_chrome: BrowserChrome,
     /// Typography tokens.
     pub typography: Typography,
     /// Shared opacity for translucent surfaces.
@@ -826,6 +919,7 @@ impl Theme {
             spacing: Spacing::default(),
             radii: Radii::default(),
             cosmic: cosmic::CosmicTheme::resolve(mode, appearance),
+            browser_chrome: BrowserChrome::default(),
             typography: Typography::default(),
             translucent_surface_opacity: 0.96,
         }
@@ -844,7 +938,7 @@ impl Theme {
 fn in_test_harness() -> bool {
     std::thread::current()
         .name()
-        .is_some_and(|name| name.contains("::tests::"))
+        .is_some_and(|name| name.starts_with("tests::") || name.contains("::tests::"))
 }
 
 /// Queries the XDG desktop portal for the preferred color scheme.
@@ -918,6 +1012,19 @@ fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn libtest_root_thread_name_is_recognized_as_test_harness() {
+        let thread = std::thread::Builder::new()
+            .name("tests::theme_portal_guard".into())
+            .spawn(in_test_harness)
+            .expect("spawn named test-harness probe");
+        assert!(
+            thread.join().expect("named test-harness probe completes"),
+            "libtest names test threads tests::<name>, without a leading ::"
+        );
+    }
 
     fn expect_color(actual: Rgba, expected: (f32, f32, f32, f32)) {
         for (actual, expected, name) in [
@@ -1557,5 +1664,55 @@ mod tests {
         let spacing = Spacing::default();
         assert_eq!(spacing.menu_width, px(240.0));
         assert_eq!(spacing.hairline_thickness, px(1.0));
+    }
+
+    /// The compact icon-only action token (P76's cluster buttons; P75's
+    /// dead-control rows are its next consumer).
+    #[test]
+    fn spacing_carries_compact_action() {
+        assert_eq!(Spacing::default().compact_action, px(24.0));
+    }
+
+    /// The bar height and traffic-light geometry P76 measured/derived —
+    /// pinned here so a future edit has to be a deliberate re-derivation,
+    /// not an accidental drift.
+    #[test]
+    fn browser_chrome_matches_the_comet_measured_spec() {
+        let chrome = BrowserChrome::default();
+        assert_eq!(chrome.bar_height, px(38.0), "comet Theme::TITLEBAR_HEIGHT");
+        assert_eq!(chrome.traffic_light_diameter, px(12.0));
+        assert_eq!(chrome.traffic_light_gap, px(8.0));
+        assert_eq!(
+            chrome.traffic_light_inset,
+            px(10.0),
+            "comet's own non-macOS cluster_buttons_start baseline"
+        );
+        assert_eq!(
+            chrome.cluster_button_gap,
+            px(2.0),
+            "comet CLUSTER_BUTTONS_WIDTH = 24*3 + 2*2"
+        );
+    }
+
+    /// The cluster-start derivation must never silently become comet's
+    /// macOS 88px (calibrated to Apple's own dot size, not ours) nor its
+    /// no-lights 10px (we draw lights, comet's Linux build does not).
+    #[test]
+    fn browser_chrome_cluster_start_is_derived_between_comets_two_reference_numbers() {
+        let start = BrowserChrome::default().cluster_start();
+        assert_eq!(start, px(70.0), "10 + 3*12 + 2*8 + 8 = 70");
+        assert!(
+            start > px(10.0),
+            "we draw lights comet's Linux bar does not"
+        );
+        assert!(
+            start < px(88.0),
+            "our lights are smaller than macOS's own dot geometry"
+        );
+    }
+
+    #[test]
+    fn theme_carries_browser_chrome() {
+        assert_eq!(Theme::dark().browser_chrome, BrowserChrome::default());
     }
 }

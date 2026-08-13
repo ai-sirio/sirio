@@ -2,12 +2,21 @@
 
 use crate::controls;
 use crate::sidebar::icons::{Icon, IconElement};
-use gpui::{Context, Entity, FontWeight, Render, Rgba, Window, div, prelude::*, px, text};
+use gpui::{
+    App, Context, Entity, FocusHandle, FontWeight, KeyBinding, KeyDownEvent, MouseButton, Render,
+    Rgba, Window, actions, div, prelude::*, px, text,
+};
 use std::path::PathBuf;
 use std::rc::Rc;
 use tiller_agents::{AgentAvailability, discover_availability};
+use tiller_project::SkillInstallCommand;
 use tiller_theme::{Theme, ThemeMode};
 use tiller_usage::{LocalAccountState, UsageProvider};
+
+// The action bound to Escape while the summarizer picker menu is focused.
+// Scoped to the menu's key context so the shell's own Escape handling is
+// untouched whenever the menu is not the focused thing.
+actions!(settings_summarizer, [CloseSummarizerPicker]);
 
 /// The settings content column — the frozen 720px content column of
 /// `docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` (waku
@@ -190,11 +199,141 @@ fn file_icons_segment(choice: FileIconChoice) -> usize {
         .unwrap_or(0)
 }
 
+/// The agent used to summarize sessions into short tab titles
+/// (F-SET-05's summarizer picker). The choice is one of the five supported
+/// agent CLIs; the persisted value is [`SummarizerChoice::id`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummarizerChoice {
+    Claude,
+    Codex,
+    OpenCode,
+    Pi,
+    OhMyPi,
+}
+
+impl SummarizerChoice {
+    /// The choices offered by the picker, in display order.
+    pub const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Codex,
+        Self::OpenCode,
+        Self::Pi,
+        Self::OhMyPi,
+    ];
+
+    /// The stable agent id, used as the persisted value.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+            Self::OhMyPi => "omp",
+        }
+    }
+
+    /// The user-visible agent name.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Pi => "Pi",
+            Self::OhMyPi => "Oh-My-Pi",
+        }
+    }
+
+    /// Parses a persisted agent id; anything unknown falls back to the
+    /// default summarizer (Claude Code), exactly like the other persisted
+    /// settings fall back to their defaults on an unparseable value.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|choice| choice.id() == value)
+    }
+}
+
+/// A per-agent accent colour choice (F-SET-22). A small fixed palette,
+/// not a full colour picker: every variant resolves to a [`Theme`] token
+/// that already carries meaning elsewhere in the app (a status colour, a
+/// rail accent, …), so offering it here stays honest to "colours from
+/// `Theme`, never a literal" instead of inventing eight new hex values
+/// nobody else uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentAccentColor {
+    Coral,
+    Amber,
+    Green,
+    Red,
+    Blue,
+    Purple,
+    Gold,
+    Slate,
+}
+
+impl AgentAccentColor {
+    /// The choices offered by the picker, in display order.
+    pub const ALL: [Self; 8] = [
+        Self::Coral,
+        Self::Amber,
+        Self::Green,
+        Self::Red,
+        Self::Blue,
+        Self::Purple,
+        Self::Gold,
+        Self::Slate,
+    ];
+
+    /// The stable id, used as the persisted value and as the picker's
+    /// per-swatch element id.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Coral => "coral",
+            Self::Amber => "amber",
+            Self::Green => "green",
+            Self::Red => "red",
+            Self::Blue => "blue",
+            Self::Purple => "purple",
+            Self::Gold => "gold",
+            Self::Slate => "slate",
+        }
+    }
+
+    /// The `Theme` token this choice draws with.
+    pub fn resolve(self, theme: Theme) -> Rgba {
+        match self {
+            Self::Coral => theme.accent,
+            Self::Amber => theme.tab_needs_input,
+            Self::Green => theme.tab_done,
+            Self::Red => theme.tab_error,
+            Self::Blue => theme.gauge,
+            Self::Purple => theme.rail_task,
+            Self::Gold => theme.favorite,
+            Self::Slate => theme.rail_tool,
+        }
+    }
+
+    /// Parses a persisted id; anything unknown falls back to `Coral`,
+    /// exactly like the other persisted settings fall back to their
+    /// defaults on an unparseable value.
+    pub fn parse(value: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|choice| choice.id() == value)
+            .unwrap_or(Self::Coral)
+    }
+}
+
 /// The persistence-facing values owned by the settings surface.
 ///
 /// This deliberately contains plain UI data rather than a persistence or
 /// database type. The host supplies the initial snapshot and receives a new
 /// one through [`Settings::on_change`].
+///
+/// P58: the snapshot is the *whole* persistence contract — every control
+/// that holds a value the user can change flows through here, so nothing
+/// the surface draws can be report-only. The five original keys keep their
+/// Swift-parity names; the values added in P58 are Linux-rewrite keys (the
+/// Swift app has no such settings), named after the settings report's own
+/// field names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsSnapshot {
     pub theme: ThemeMode,
@@ -206,6 +345,31 @@ pub struct SettingsSnapshot {
     /// runtime state (the path the live socket listens on), not a persisted
     /// setting — the host fills it, and the surface only displays it.
     pub socket_path: String,
+    /// "Resume agent sessions on launch" (F-SET-04).
+    pub resume_agent_sessions: bool,
+    /// "Auto-rename tabs and agents" (F-SET-05).
+    pub auto_naming: bool,
+    /// "Limit stored chats" (F-SET-06).
+    pub limit_chat_history: bool,
+    /// "Keep chats per worktree" (F-SET-06), 5..=500.
+    pub chat_retention: i32,
+    /// "Limit mounted worktrees" (F-SET-07).
+    pub limit_mounted_worktrees: bool,
+    /// "Keep mounted" (F-SET-07), 2..=50.
+    pub mounted_worktrees: i32,
+    /// The summarizer agent picker (F-SET-05), gated on `auto_naming`.
+    pub summarizer_agent: SummarizerChoice,
+    /// "Show in usage bar" per provider (F-SET-10), consumed by the status
+    /// bar's segment visibility.
+    pub claude_show_in_bar: bool,
+    pub codex_show_in_bar: bool,
+    pub opencode_show_in_bar: bool,
+    /// "Refresh interval" in minutes (F-SET-10), consumed by the status
+    /// bar's fetch loop.
+    pub refresh_interval: i32,
+    /// Per-agent accent colour choice, in `SummarizerChoice::ALL` order —
+    /// Claude Code, Codex, OpenCode, Pi, Oh-My-Pi (F-SET-22).
+    pub agent_colors: [AgentAccentColor; 5],
 }
 
 impl Default for SettingsSnapshot {
@@ -217,6 +381,29 @@ impl Default for SettingsSnapshot {
             file_icons: FileIconChoice::SfSymbols,
             control_socket_enabled: true,
             socket_path: String::new(),
+            resume_agent_sessions: true,
+            auto_naming: false,
+            limit_chat_history: true,
+            chat_retention: 100,
+            limit_mounted_worktrees: false,
+            mounted_worktrees: 6,
+            summarizer_agent: SummarizerChoice::Claude,
+            claude_show_in_bar: true,
+            codex_show_in_bar: true,
+            opencode_show_in_bar: false,
+            refresh_interval: 5,
+            // Preserves four of the five defaults the surface drew before
+            // the picker existed (Claude amber, Codex coral, Pi green,
+            // Oh-My-Pi purple); OpenCode moves off the amber it happened to
+            // share with Claude onto blue, since a picker existing implies
+            // each row should read as distinct by default.
+            agent_colors: [
+                AgentAccentColor::Amber,
+                AgentAccentColor::Coral,
+                AgentAccentColor::Blue,
+                AgentAccentColor::Green,
+                AgentAccentColor::Purple,
+            ],
         }
     }
 }
@@ -394,14 +581,75 @@ pub struct Settings {
     chat_retention: i32,
     limit_mounted_worktrees: bool,
     mounted_worktrees: i32,
+    /// The agent used to summarize sessions into tab titles, gated on
+    /// `auto_naming` (F-SET-05).
+    summarizer_agent: SummarizerChoice,
     control_socket_enabled: bool,
     socket_path: String,
+    /// Whether the summarizer picker's agent menu is open (F-SET-05).
+    summarizer_popover_open: bool,
+    /// Focus handle for the picker menu, so Escape closes the menu alone:
+    /// the menu's own scoped Escape binding beats the shell's global one
+    /// while the menu holds focus (GPUI resolves the more specific context
+    /// first), so the keystroke never reaches the workspace handler.
+    summarizer_focus: gpui::FocusHandle,
+    /// Focus handle for the settings surface. The surface must hold focus
+    /// while it is open: GPUI dispatches keys and actions along the focus
+    /// path, and the shell's Escape handler lives on that path (the
+    /// workspace root). With nothing in the surface focused, the fallback
+    /// dispatch path is the window's synthetic root, which carries no
+    /// handlers — Escape would be dead (F-SET-02). The host requests this
+    /// focus through [`Settings::request_surface_focus`] when the surface
+    /// opens; the popover requests it again when it closes.
+    surface_focus: gpui::FocusHandle,
+    /// Set whenever something must take focus back (the surface opening,
+    /// the picker menu closing); the next render schedules the focus on
+    /// the following frame (focus cannot move during render).
+    surface_focus_pending: bool,
     /// Discovery results for every supported agent CLI, from the crate that
     /// owns the catalog. The Agents screen renders only this data.
     provider_availability: Vec<AgentAvailability>,
     /// Account state for the three AI Provider cards, derived from local
     /// credential files at construction — never a mock default.
     provider_accounts: ProviderAccountStates,
+    /// Host callback for the Agent Skill card's Install button (F-SET-09).
+    /// The provisioner (`tiller_project::agent_skill_install_command`) is
+    /// tested and reachable from here; running the resulting command (in a
+    /// terminal or in the background) is the host's call, not this crate's
+    /// — `chat.rs`/`tiller_terminal` own process spawning, and neither is
+    /// mine to touch. Unset, the button renders muted and does not respond
+    /// to clicks, the same dead-control avoidance P76's `on_back` seam
+    /// uses: a click that reaches nothing is exactly the defect this brief
+    /// exists to close, so an unwired button must not look wired.
+    on_install_skill: Option<Rc<dyn Fn(SkillInstallCommand)>>,
+    /// Host callback for a provider card's Add Account button (F-SET-14).
+    /// The payload is the provider's stable id (`"claude"`, `"codex"`,
+    /// `"opencode"` — [`UsageProvider::id`]'s own convention), not a
+    /// command: unlike the macOS original, this app never holds isolated
+    /// per-provider credentials of its own — [`ProviderAccountStates`]
+    /// only ever reads the one credential file the provider's CLI already
+    /// manages on this machine (see the "System default" row's comment in
+    /// [`Settings::render_provider_card`]). So "Add", "re-authenticate" and
+    /// "remove" are not three distinct account-scoped actions here; they
+    /// collapse to the one thing this surface can honestly offer: handing
+    /// the host "the user wants to manage this provider's account" and
+    /// letting it decide what that means (most plausibly, opening the
+    /// provider CLI's own login flow) — the same "the mechanism is the
+    /// host's call, not this crate's" seam [`Settings::on_install_skill`]
+    /// uses. Unset, the button renders muted and does not respond to
+    /// clicks.
+    on_manage_account: Option<Rc<dyn Fn(&'static str)>>,
+    /// Live text of the Agents screen's search field (F-SET-16). Transient
+    /// UI state, not part of the persistence contract — nothing durable
+    /// depends on what was last typed into a filter box.
+    agent_search: String,
+    /// Focus handle for the Agents screen's search field, the same
+    /// click-to-focus + raw-keystroke pattern `sidebar.rs`'s project filter
+    /// already uses and tests successfully.
+    agent_search_focus: FocusHandle,
+    /// Per-agent accent colour choice (F-SET-22), in `SummarizerChoice::ALL`
+    /// order. Part of the persistence contract — see [`SettingsSnapshot::agent_colors`].
+    agent_colors: [AgentAccentColor; 5],
 }
 
 /// The display data for one AI Provider card — everything the renderer
@@ -445,7 +693,8 @@ impl Settings {
     }
 
     /// Creates the settings model from the host's durable snapshot.
-    pub fn with_snapshot(_cx: &mut Context<Self>, initial: SettingsSnapshot) -> Self {
+    pub fn with_snapshot(cx: &mut Context<Self>, initial: SettingsSnapshot) -> Self {
+        Self::bind_keys(cx);
         Self {
             category: SettingsCategory::Appearance,
             on_back: None,
@@ -459,16 +708,6 @@ impl Settings {
             // that exists here, so the surface never shows a choice it
             // cannot render.
             file_icons: clamp_file_icons(initial.file_icons),
-            claude_show_in_bar: true,
-            codex_show_in_bar: true,
-            opencode_show_in_bar: false,
-            refresh_interval: 5,
-            resume_agent_sessions: true,
-            auto_naming: false,
-            limit_chat_history: true,
-            chat_retention: 100,
-            limit_mounted_worktrees: false,
-            mounted_worktrees: 6,
             control_socket_enabled: initial.control_socket_enabled,
             // The Agents screen reports what discovery finds on this
             // machine — never a fixed list of "Available" claims.
@@ -477,7 +716,40 @@ impl Settings {
             // on this machine — never a fixed list of "Active" claims.
             provider_accounts: ProviderAccountStates::discovered(),
             socket_path: initial.socket_path,
+            summarizer_popover_open: false,
+            summarizer_focus: cx.focus_handle(),
+            surface_focus: cx.focus_handle(),
+            surface_focus_pending: false,
+            resume_agent_sessions: initial.resume_agent_sessions,
+            auto_naming: initial.auto_naming,
+            limit_chat_history: initial.limit_chat_history,
+            chat_retention: initial.chat_retention.clamp(5, 500),
+            limit_mounted_worktrees: initial.limit_mounted_worktrees,
+            mounted_worktrees: initial.mounted_worktrees.clamp(2, 50),
+            summarizer_agent: initial.summarizer_agent,
+            claude_show_in_bar: initial.claude_show_in_bar,
+            codex_show_in_bar: initial.codex_show_in_bar,
+            opencode_show_in_bar: initial.opencode_show_in_bar,
+            refresh_interval: initial.refresh_interval.clamp(1, 60),
+            on_install_skill: None,
+            on_manage_account: None,
+            agent_search: String::new(),
+            agent_search_focus: cx.focus_handle(),
+            agent_colors: initial.agent_colors,
         }
+    }
+
+    /// Installs the Escape binding that closes the summarizer picker menu.
+    /// The binding is scoped to the menu's key context, so it consumes the
+    /// keystroke only while the menu is focused — the shell's own Escape
+    /// handling (P58, F-SET-02) keeps closing the settings surface when the
+    /// menu is not the focused thing.
+    fn bind_keys(cx: &mut App) {
+        cx.bind_keys([KeyBinding::new(
+            "escape",
+            CloseSummarizerPicker,
+            Some("SettingsSummarizerPopover"),
+        )]);
     }
 
     /// Pins the provider cards' account states to explicit values.
@@ -513,6 +785,22 @@ impl Settings {
         self
     }
 
+    /// Installs the host callback that actually runs the Agent Skill
+    /// install command (F-SET-09). Unset, the Install Skill button renders
+    /// muted and inert — see the field doc on [`Settings::on_install_skill`].
+    pub fn on_install_skill(mut self, callback: impl Fn(SkillInstallCommand) + 'static) -> Self {
+        self.on_install_skill = Some(Rc::new(callback));
+        self
+    }
+
+    /// Installs the host callback for a provider card's Add Account button
+    /// (F-SET-14). Unset, the button renders muted and inert — see the
+    /// field doc on [`Settings::on_manage_account`].
+    pub fn on_manage_account(mut self, callback: impl Fn(&'static str) + 'static) -> Self {
+        self.on_manage_account = Some(Rc::new(callback));
+        self
+    }
+
     /// Returns the current values that belong to the persistence contract.
     pub fn snapshot(&self) -> SettingsSnapshot {
         SettingsSnapshot {
@@ -522,6 +810,18 @@ impl Settings {
             file_icons: self.file_icons,
             control_socket_enabled: self.control_socket_enabled,
             socket_path: self.socket_path.clone(),
+            resume_agent_sessions: self.resume_agent_sessions,
+            auto_naming: self.auto_naming,
+            limit_chat_history: self.limit_chat_history,
+            chat_retention: self.chat_retention,
+            limit_mounted_worktrees: self.limit_mounted_worktrees,
+            mounted_worktrees: self.mounted_worktrees,
+            summarizer_agent: self.summarizer_agent,
+            claude_show_in_bar: self.claude_show_in_bar,
+            codex_show_in_bar: self.codex_show_in_bar,
+            opencode_show_in_bar: self.opencode_show_in_bar,
+            refresh_interval: self.refresh_interval,
+            agent_colors: self.agent_colors,
         }
     }
 
@@ -596,6 +896,23 @@ impl Settings {
         }
     }
 
+    /// Sets one agent's accent colour (F-SET-22). `agent_index` follows
+    /// `SummarizerChoice::ALL` order, the same order the Agent Colors rows
+    /// render in; out-of-range indices are ignored rather than panicking,
+    /// since the index comes from an enumerated render loop, not user input.
+    fn set_agent_color(
+        &mut self,
+        agent_index: usize,
+        color: AgentAccentColor,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(slot) = self.agent_colors.get_mut(agent_index) {
+            *slot = color;
+            self.changed();
+            cx.notify();
+        }
+    }
+
     fn set_control_socket_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.control_socket_enabled = enabled;
         self.changed();
@@ -621,6 +938,7 @@ impl Settings {
             ProviderKind::Codex => self.codex_show_in_bar = enabled,
             ProviderKind::OpenCodeGo => self.opencode_show_in_bar = enabled,
         }
+        self.changed();
         cx.notify();
     }
 
@@ -634,6 +952,132 @@ impl Settings {
 
     fn set_refresh_interval(&mut self, value: i32, cx: &mut Context<Self>) {
         self.refresh_interval = value.clamp(1, 60);
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_resume_agent_sessions(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.resume_agent_sessions = enabled;
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_auto_naming(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.auto_naming = enabled;
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_limit_chat_history(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.limit_chat_history = enabled;
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_chat_retention(&mut self, value: i32, cx: &mut Context<Self>) {
+        self.chat_retention = value.clamp(5, 500);
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_limit_mounted_worktrees(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.limit_mounted_worktrees = enabled;
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_mounted_worktrees(&mut self, value: i32, cx: &mut Context<Self>) {
+        self.mounted_worktrees = value.clamp(2, 50);
+        self.changed();
+        cx.notify();
+    }
+
+    fn set_summarizer_agent(&mut self, choice: SummarizerChoice, cx: &mut Context<Self>) {
+        self.summarizer_agent = choice;
+        self.close_summarizer_picker(cx);
+        self.changed();
+        cx.notify();
+    }
+
+    /// Re-reads the provider cards' account states from disk. This is what
+    /// "Refresh now" means on this surface: the cards show local credential
+    /// state, so a refresh is a fresh read — a user who just ran
+    /// `claude login` in a terminal gets the card to match without a
+    /// relaunch (F-SET-10).
+    fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
+        self.provider_accounts = ProviderAccountStates::discovered();
+        cx.notify();
+    }
+
+    /// Re-runs agent discovery for the Agents screen's "↻ Refresh" button
+    /// (F-SET-16), the same re-read-from-disk meaning "Refresh now" already
+    /// has on the AI Providers screen: an agent installed or removed since
+    /// launch shows up without a relaunch.
+    fn refresh_agent_availability(&mut self, cx: &mut Context<Self>) {
+        self.provider_availability = discover_availability();
+        cx.notify();
+    }
+
+    /// Raw-keystroke handling for the Agents screen's search field
+    /// (F-SET-16), the same backspace/character pattern `sidebar.rs`'s
+    /// project filter already uses.
+    fn on_agent_search_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "backspace" || key == "delete" {
+            self.agent_search.pop();
+        } else if let Some(character) = event.keystroke.key_char.as_deref()
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            self.agent_search.push_str(character);
+        }
+        cx.notify();
+    }
+
+    /// Tells the surface to take focus on its next render. Called by the
+    /// host when the settings surface opens, so the shell's Escape handler
+    /// (attached to the workspace root, which the focused surface's dispatch
+    /// path includes) can receive the keystroke (F-SET-02).
+    pub fn request_surface_focus(&mut self) {
+        self.surface_focus_pending = true;
+    }
+
+    /// Whether the summarizer picker may open: the picker chooses the agent
+    /// that auto-renames tabs, so it is disabled while auto-naming is off
+    /// (F-SET-05's VERIFY clause: "the summarizer picker is disabled when
+    /// off and enabled when on").
+    fn summarizer_picker_enabled(&self) -> bool {
+        self.auto_naming
+    }
+
+    fn toggle_summarizer_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.summarizer_picker_enabled() {
+            return;
+        }
+        self.summarizer_popover_open = !self.summarizer_popover_open;
+        if self.summarizer_popover_open {
+            let focus = self.summarizer_focus.clone();
+            window.focus(&focus, cx);
+        } else {
+            self.surface_focus_pending = true;
+        }
+        cx.notify();
+    }
+
+    fn close_summarizer_picker(&mut self, cx: &mut Context<Self>) {
+        if !self.summarizer_popover_open {
+            return;
+        }
+        self.summarizer_popover_open = false;
+        // The menu held focus; hand it back to the surface so the shell's
+        // Escape keeps closing settings rather than dying on the stale
+        // focus the closed menu left behind.
+        self.surface_focus_pending = true;
         cx.notify();
     }
 
@@ -824,7 +1268,7 @@ impl Settings {
         let files_card =
             controls::card(theme).child(controls::row("File icons", None, file_icons, theme));
 
-        let agent_card = self.render_agent_colors(theme);
+        let agent_card = self.render_agent_colors(theme, entity.clone());
 
         div()
             .w(px(CONTENT_WIDTH))
@@ -837,19 +1281,25 @@ impl Settings {
             .child(settings_section("Agent Colors", agent_card, theme))
     }
 
-    fn render_agent_colors(&self, theme: Theme) -> gpui::Div {
-        let agents: [(&str, &str, Rgba); 5] = [
-            ("✳", "Claude Code", theme.rail_question),
-            ("◉", "Codex", theme.tab_focus_accent),
-            ("▣", "OpenCode", theme.tab_needs_input),
-            ("π", "Pi", theme.tab_done),
-            ("π", "Oh-My-Pi", theme.rail_task),
+    fn render_agent_colors(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
+        let agents: [(&str, &str); 5] = [
+            ("✳", "Claude Code"),
+            ("◉", "Codex"),
+            ("▣", "OpenCode"),
+            ("π", "Pi"),
+            ("π", "Oh-My-Pi"),
         ];
+        let palette: Vec<(&'static str, Rgba)> = AgentAccentColor::ALL
+            .iter()
+            .map(|choice| (choice.id(), choice.resolve(theme)))
+            .collect();
         let mut card = controls::card(theme);
-        for (index, (glyph, name, color)) in agents.into_iter().enumerate() {
+        for (index, (glyph, name)) in agents.into_iter().enumerate() {
             if index > 0 {
                 card = card.child(controls::separator(theme));
             }
+            let selected = self.agent_colors[index];
+            let color = selected.resolve(theme);
             let label = div()
                 .flex()
                 .items_center()
@@ -863,6 +1313,20 @@ impl Settings {
                         .child(text!(id = ("settings-agent-color-glyph", index), glyph)),
                 )
                 .child(text!(id = ("settings-agent-color-name", index), name));
+            let picker_id: &'static str = match index {
+                0 => "agent-color-claude",
+                1 => "agent-color-codex",
+                2 => "agent-color-opencode",
+                3 => "agent-color-pi",
+                _ => "agent-color-omp",
+            };
+            let picker_entity = entity.clone();
+            let picker =
+                controls::color_picker(picker_id, &palette, selected.id(), theme, move |id, cx| {
+                    picker_entity.update(cx, |this, cx| {
+                        this.set_agent_color(index, AgentAccentColor::parse(id), cx);
+                    });
+                });
             card = card.child(
                 div()
                     .id(("settings-agent-color-row", index))
@@ -874,17 +1338,7 @@ impl Settings {
                     .items_center()
                     .justify_between()
                     .child(label)
-                    .child(controls::color_swatch(
-                        match index {
-                            0 => "agent-color-claude",
-                            1 => "agent-color-codex",
-                            2 => "agent-color-opencode",
-                            3 => "agent-color-pi",
-                            _ => "agent-color-omp",
-                        },
-                        color,
-                        theme,
-                    )),
+                    .child(picker),
             );
         }
         card
@@ -980,6 +1434,19 @@ impl Settings {
                 refresh_entity.update(cx, |this, cx| this.set_refresh_interval(value, cx));
             },
         );
+        let refresh_now_entity = entity.clone();
+        let refresh_now = controls::button(
+            match provider {
+                ProviderKind::Claude => "refresh-claude-now",
+                ProviderKind::Codex => "refresh-codex-now",
+                ProviderKind::OpenCodeGo => "refresh-opencode-now",
+            },
+            "Refresh now",
+            theme,
+            move |_, _, cx| {
+                refresh_now_entity.update(cx, |this, cx| this.refresh_provider_accounts(cx));
+            },
+        );
 
         let mut card = controls::card(theme)
             .child(controls::row_view(status_label, status_value, theme))
@@ -993,26 +1460,32 @@ impl Settings {
                 theme,
             ))
             .child(controls::separator(theme))
-            .child(controls::action_row(
-                controls::button(
-                    match provider {
-                        ProviderKind::Claude => "refresh-claude-now",
-                        ProviderKind::Codex => "refresh-codex-now",
-                        ProviderKind::OpenCodeGo => "refresh-opencode-now",
-                    },
-                    "Refresh now",
-                    theme,
-                    |_, _, _| {},
-                ),
-                theme,
-            ))
+            .child(controls::action_row(refresh_now, theme))
             .child(controls::separator(theme));
 
+        // F-SET-14: this app never holds its own per-provider credentials
+        // (see the "System default" row's comment below), so "Add Account"
+        // cannot open an isolated in-app account the way the macOS original
+        // does — it hands the host "manage this provider's account,"
+        // identified by the provider's stable id, and lets the host decide
+        // what that means (most plausibly, the provider CLI's own login
+        // flow). Unset, the button renders muted and does not respond to
+        // clicks, same as [`Settings::on_install_skill`].
+        let provider_id = match provider {
+            ProviderKind::Claude => "claude",
+            ProviderKind::Codex => "codex",
+            ProviderKind::OpenCodeGo => "opencode",
+        };
+        let manage_account_handler = self.on_manage_account.clone().map(|handler| {
+            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| {
+                handler(provider_id);
+            }
+        });
         card = card
             .child(controls::subsection_header(
                 "Accounts",
                 "Showing accounts for this device. New accounts are added there.",
-                controls::button(
+                controls::button_maybe(
                     match provider {
                         ProviderKind::Claude => "add-claude-account",
                         ProviderKind::Codex => "add-codex-account",
@@ -1020,7 +1493,7 @@ impl Settings {
                     },
                     "Add Account",
                     theme,
-                    |_, _, _| {},
+                    manage_account_handler,
                 ),
                 theme,
             ))
@@ -1108,13 +1581,59 @@ impl Settings {
         }
     }
 
-    fn render_agents(&self, theme: Theme) -> gpui::Div {
+    /// The ACP chat badge for one provider row. An adapter with no ACP
+    /// server is clearly marked: a chat tab must never silently connect it
+    /// to another agent's server. Colours are theme tokens — the neutral
+    /// raised pill for supported agents, the waku warning tone for the
+    /// terminal-only ones.
+    fn render_acp_badge(availability: &AgentAvailability, theme: Theme) -> impl IntoElement {
+        let badge_id = format!("settings-agent-acp-{}", availability.id);
+        let label = availability.acp_status_label();
+        match availability.acp_program() {
+            Some(_) => div()
+                .id(badge_id.clone())
+                .debug_selector(move || badge_id.clone())
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(theme.radii.row_card)
+                .text_size(theme.typography.caption2)
+                .text_color(theme.subtitle)
+                .bg(theme.primary_pill_bg)
+                .child(text!(label)),
+            None => div()
+                .id(badge_id.clone())
+                .debug_selector(move || badge_id)
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(theme.radii.row_card)
+                .text_size(theme.typography.caption2)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.title_selected)
+                .bg(theme.tab_needs_input)
+                .child(text!(label)),
+        }
+    }
+
+    fn render_agents(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> gpui::Div {
+        // F-SET-16: filtering hides non-matching rows but must not renumber
+        // the ones that stay — `settings-agent-row-{index}` ids are keyed to
+        // the original `provider_availability` position, and an existing
+        // test asserts against those exact indices.
+        let query = self.agent_search.trim().to_lowercase();
         let mut agent_rows = controls::card(theme);
+        let mut first_visible_row = true;
         for (index, availability) in self.provider_availability.iter().enumerate() {
-            if index > 0 {
+            let row = provider_row(availability);
+            if !query.is_empty()
+                && !row.name.to_lowercase().contains(&query)
+                && !row.description.to_lowercase().contains(&query)
+            {
+                continue;
+            }
+            if !first_visible_row {
                 agent_rows = agent_rows.child(controls::separator(theme));
             }
-            let row = provider_row(availability);
+            first_visible_row = false;
             let label = div()
                 .flex()
                 .items_center()
@@ -1152,11 +1671,23 @@ impl Settings {
                     .debug_selector(move || format!("settings-agent-row-{index}"))
                     .child(controls::row_view(
                         label,
-                        Self::render_provider_status(availability, theme),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(Self::render_provider_status(availability, theme))
+                            .child(Self::render_acp_badge(availability, theme)),
                         theme,
                     )),
             );
         }
+
+        let search_focus = self.agent_search_focus.clone();
+        let search_is_focused = search_focus.is_focused(window);
+        let search_text = self.agent_search.clone();
+        let search_click_entity = entity.clone();
+        let search_key_entity = entity.clone();
+        let refresh_entity = entity;
 
         div()
             .w(px(CONTENT_WIDTH))
@@ -1171,25 +1702,167 @@ impl Settings {
                     .justify_between()
                     .child(
                         div()
+                            .id("agent-search-field")
+                            .debug_selector(|| "agent-search-field".to_string())
+                            .track_focus(&search_focus)
                             .w(px(260.0))
                             .h(px(28.0))
                             .px(px(10.0))
                             .flex()
                             .items_center()
+                            .gap(px(6.0))
                             .rounded(theme.radii.control)
-                            .bg(theme.primary_pill_bg)
+                            .bg(theme.filter_field_bg)
+                            .border_1()
+                            .border_color(if search_is_focused {
+                                theme.selection_ring
+                            } else {
+                                theme.hairline
+                            })
+                            .cursor(gpui::CursorStyle::IBeam)
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                search_click_entity.update(cx, |this, cx| {
+                                    this.agent_search_focus.focus(window, cx);
+                                });
+                            })
+                            .on_key_down(move |event, window, cx| {
+                                search_key_entity.update(cx, |this, cx| {
+                                    this.on_agent_search_key(event, window, cx);
+                                });
+                            })
                             .text_size(theme.typography.callout)
-                            .text_color(theme.subtitle)
-                            .child(text!("Search agents")),
+                            .text_color(if search_text.is_empty() {
+                                theme.meta
+                            } else {
+                                theme.title
+                            })
+                            .child(text!(if search_text.is_empty() {
+                                "Search agents".to_string()
+                            } else {
+                                search_text
+                            })),
                     )
                     .child(controls::button(
                         "refresh-agents",
                         "↻ Refresh",
                         theme,
-                        |_, _, _| {},
+                        move |_, _, cx| {
+                            refresh_entity
+                                .update(cx, |this, cx| this.refresh_agent_availability(cx));
+                        },
                     )),
             )
             .child(agent_rows)
+    }
+
+    /// The summarizer agent trigger (F-SET-05): a button showing the
+    /// current choice. The menu itself is rendered at the surface level
+    /// (see [`Settings::render_summarizer_menu`]) — a card's `overflow_hidden`
+    /// would clip its hitboxes, making the options unclickable. The menu is
+    /// disabled — drawn muted, unopenable — while auto-naming is off, per
+    /// the row's VERIFY clause; the choice itself persists through the
+    /// snapshot contract like every other control here.
+    fn render_summarizer_trigger(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
+        let enabled = self.summarizer_picker_enabled();
+        let selected = self.summarizer_agent;
+        let toggle_entity = entity.clone();
+        div()
+            .id("general-summarizer")
+            .debug_selector(|| "general-summarizer".into())
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.callout)
+            .text_color(if enabled { theme.title } else { theme.meta })
+            .bg(theme.primary_pill_bg)
+            .when(enabled, |this| {
+                this.hover(|style| style.bg(theme.row_hover))
+            })
+            .on_click(move |_, window, cx| {
+                toggle_entity.update(cx, |this, cx| this.toggle_summarizer_picker(window, cx));
+            })
+            .child(text!(selected.title()))
+            .child(
+                IconElement::new(Icon::ChevronDown, px(12.0)).text_color(if enabled {
+                    theme.meta
+                } else {
+                    theme.hairline
+                }),
+            )
+    }
+
+    /// The summarizer picker menu, rendered at the settings surface root —
+    /// outside any card, so no `overflow_hidden` clips its hitboxes. It
+    /// floats bottom-right of the surface, the same anchoring the chat
+    /// model picker uses (a real anchor under the trigger needs layout
+    /// information GPUI does not expose at render time).
+    fn render_summarizer_menu(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self.summarizer_agent;
+        let mut menu = div()
+            .id("summarizer-popover")
+            .debug_selector(|| "summarizer-popover".into())
+            .key_context("SettingsSummarizerPopover")
+            .track_focus(&self.summarizer_focus)
+            .on_action(cx.listener(|this, _: &CloseSummarizerPicker, _, cx| {
+                this.close_summarizer_picker(cx);
+            }))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_summarizer_picker(cx)))
+            .absolute()
+            .right(px(24.0))
+            .bottom(px(24.0))
+            .w(px(200.0))
+            .p(px(4.0))
+            .rounded(theme.radii.user_pill)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .shadow_lg();
+        for choice in SummarizerChoice::ALL {
+            let is_selected = choice == selected;
+            let choice_entity = entity.clone();
+            menu = menu.child(
+                div()
+                    .id(format!("summarizer-option-{}", choice.id()))
+                    .debug_selector(move || format!("summarizer-option-{}", choice.id()))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.callout)
+                    .text_color(if is_selected {
+                        theme.title_selected
+                    } else {
+                        theme.title
+                    })
+                    .when(is_selected, |this| this.bg(theme.selected_fill))
+                    .hover(|style| style.bg(theme.row_hover))
+                    .on_click(move |_, _, cx| {
+                        choice_entity.update(cx, |this, cx| {
+                            this.set_summarizer_agent(choice, cx);
+                        });
+                    })
+                    .child(text!(choice.title()))
+                    .when(is_selected, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.tab_focus_accent)
+                                .child(text!("✓")),
+                        )
+                    }),
+            );
+        }
+        menu
     }
 
     fn render_general(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
@@ -1204,8 +1877,7 @@ impl Settings {
             theme,
             move |_, _, cx| {
                 resume_entity.update(cx, |this, cx| {
-                    this.resume_agent_sessions = !this.resume_agent_sessions;
-                    cx.notify();
+                    this.set_resume_agent_sessions(!this.resume_agent_sessions, cx);
                 });
             },
         );
@@ -1214,10 +1886,7 @@ impl Settings {
             self.auto_naming,
             theme,
             move |_, _, cx| {
-                auto_entity.update(cx, |this, cx| {
-                    this.auto_naming = !this.auto_naming;
-                    cx.notify();
-                });
+                auto_entity.update(cx, |this, cx| this.set_auto_naming(!this.auto_naming, cx));
             },
         );
         let history = controls::toggle(
@@ -1226,8 +1895,7 @@ impl Settings {
             theme,
             move |_, _, cx| {
                 history_entity.update(cx, |this, cx| {
-                    this.limit_chat_history = !this.limit_chat_history;
-                    cx.notify();
+                    this.set_limit_chat_history(!this.limit_chat_history, cx);
                 });
             },
         );
@@ -1237,8 +1905,7 @@ impl Settings {
             theme,
             move |_, _, cx| {
                 mounted_entity.update(cx, |this, cx| {
-                    this.limit_mounted_worktrees = !this.limit_mounted_worktrees;
-                    cx.notify();
+                    this.set_limit_mounted_worktrees(!this.limit_mounted_worktrees, cx);
                 });
             },
         );
@@ -1252,7 +1919,13 @@ impl Settings {
                 });
             },
         );
-        let mut about = controls::card(theme).child(controls::row(
+        // The About card states the version. "Check for Updates" is not
+        // offered: there is no updater on this platform (no Sparkle, no
+        // update channel), so a button that could never check would state
+        // something untrue about the program (P58, F-SET-03 — same
+        // platform-gating as the Permissions category and the file-icon
+        // sets).
+        let about = controls::card(theme).child(controls::row(
             "Version",
             None,
             div()
@@ -1262,17 +1935,6 @@ impl Settings {
                 .child(text!("0.1.0")),
             theme,
         ));
-        about = about
-            .child(controls::separator(theme))
-            .child(controls::action_row(
-                controls::button(
-                    "general-check-updates",
-                    "Check for Updates",
-                    theme,
-                    |_, _, _| {},
-                ),
-                theme,
-            ));
 
         let agents = controls::card(theme).child(controls::row(
             "Resume agent sessions on launch",
@@ -1297,7 +1959,7 @@ impl Settings {
             .child(controls::row(
                 "Summarizer agent",
                 Some("Falls back to the session's own agent when it fails.".into()),
-                controls::button("general-summarizer", "Claude Code", theme, |_, _, _| {}),
+                self.render_summarizer_trigger(theme, entity.clone()),
                 theme,
             ));
         let history_card = controls::card(theme)
@@ -1314,10 +1976,7 @@ impl Settings {
             self.chat_retention,
             theme,
             move |value, cx| {
-                history_stepper_entity.update(cx, |this, cx| {
-                    this.chat_retention = value.clamp(5, 500);
-                    cx.notify();
-                });
+                history_stepper_entity.update(cx, |this, cx| this.set_chat_retention(value, cx));
             },
         );
         let history_card = history_card.child(controls::row(
@@ -1332,10 +1991,7 @@ impl Settings {
             self.mounted_worktrees,
             theme,
             move |value, cx| {
-                mounted_stepper_entity.update(cx, |this, cx| {
-                    this.mounted_worktrees = value.clamp(2, 50);
-                    cx.notify();
-                });
+                mounted_stepper_entity.update(cx, |this, cx| this.set_mounted_worktrees(value, cx));
             },
         );
         let performance = controls::card(theme)
@@ -1369,6 +2025,11 @@ impl Settings {
                     .text_color(theme.subtitle)
                     .child(text!(format!("Socket path: {}", self.socket_path))),
             );
+        // The tillerctl card shows the bundled binary's name. "Copy install
+        // command" is not offered: no install mechanism exists on this
+        // platform (F-CTRL-CLI-02 is its own absent row), so there is no
+        // real command to copy — a button that copied a made-up one would
+        // lie (P58, F-SET-08).
         let control = controls::card(theme)
             .child(
                 controls::row_view(socket_label, socket, theme)
@@ -1384,23 +2045,23 @@ impl Settings {
                     .text_color(theme.subtitle)
                     .child(text!("tillerctl")),
                 theme,
-            ))
-            .child(controls::separator(theme))
-            .child(controls::action_row(
-                controls::button(
-                    "general-install-path",
-                    "Copy install command",
-                    theme,
-                    |_, _, _| {},
-                ),
-                theme,
             ));
+        // F-SET-09: the provisioner (`agent_skill_install_command`) is
+        // built and tested; this button's job is only to reach it and hand
+        // the resulting command to whoever the host wires as
+        // `on_install_skill` — running it (terminal or background) is the
+        // host's call, not this crate's.
+        let install_skill_handler = self.on_install_skill.clone().map(|handler| {
+            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| {
+                handler(tiller_project::agent_skill_install_command());
+            }
+        });
         let skill = controls::card(theme).child(controls::action_row(
-            controls::button(
+            controls::button_maybe(
                 "general-install-skill",
                 "Install Skill",
                 theme,
-                |_, _, _| {},
+                install_skill_handler,
             ),
             theme,
         ));
@@ -1645,21 +2306,22 @@ impl Settings {
 }
 
 impl Render for Settings {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
         let mode = Theme::get(cx).mode;
         let entity = cx.entity();
         let category_sidebar = self.render_categories(theme, entity.clone());
         let detail = match self.category {
-            SettingsCategory::AiProviders => self.render_ai_providers(theme, entity),
-            SettingsCategory::Agents => self.render_agents(theme),
-            SettingsCategory::General => self.render_general(theme, entity),
+            SettingsCategory::AiProviders => self.render_ai_providers(theme, entity.clone()),
+            SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window),
+            SettingsCategory::General => self.render_general(theme, entity.clone()),
             SettingsCategory::Permissions => self.render_permissions(theme),
-            SettingsCategory::Appearance => self.render_appearance(theme, mode, entity),
+            SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
         };
 
-        div()
+        let mut surface = div()
             .id("settings-surface")
+            .track_focus(&self.surface_focus)
             .size_full()
             .flex()
             .flex_col()
@@ -1683,7 +2345,22 @@ impl Render for Settings {
                             .overflow_y_scroll()
                             .child(detail),
                     ),
-            )
+            );
+        // The summarizer menu floats above the whole surface — outside the
+        // cards, so no `overflow_hidden` clips its hitboxes.
+        surface = surface.when(self.summarizer_popover_open, |surface| {
+            surface.child(self.render_summarizer_menu(theme, entity, cx))
+        });
+        // Take focus on the next frame when something requested it (the
+        // host opening the surface, or the picker menu closing). Focus
+        // cannot move during render; the deferred focus lands before the
+        // next frame's input dispatch.
+        if self.surface_focus_pending {
+            self.surface_focus_pending = false;
+            let focus = self.surface_focus.clone();
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        }
+        surface
     }
 }
 
@@ -1691,6 +2368,7 @@ impl Render for Settings {
 mod tests {
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
+    use std::cell::{Cell, RefCell};
 
     #[test]
     fn settings_snapshot_defaults_match_the_persisted_contract() {
@@ -1705,6 +2383,42 @@ mod tests {
             snapshot.socket_path.is_empty(),
             "the socket path is runtime state routed by the host, never a baked-in template"
         );
+
+        // P58: every control that holds a user-changeable value is part of
+        // the persistence contract — none of the General-screen values may
+        // be report-only. The defaults are exactly what the surface draws
+        // on a first launch, so the contract's defaults never change what
+        // the user sees.
+        assert!(snapshot.resume_agent_sessions);
+        assert!(!snapshot.auto_naming);
+        assert!(snapshot.limit_chat_history);
+        assert_eq!(snapshot.chat_retention, 100);
+        assert!(!snapshot.limit_mounted_worktrees);
+        assert_eq!(snapshot.mounted_worktrees, 6);
+        assert_eq!(snapshot.summarizer_agent, SummarizerChoice::Claude);
+        assert!(snapshot.claude_show_in_bar);
+        assert!(snapshot.codex_show_in_bar);
+        assert!(!snapshot.opencode_show_in_bar);
+        assert_eq!(snapshot.refresh_interval, 5);
+    }
+
+    #[test]
+    fn summarizer_choice_ids_and_titles_are_stable_and_parse_round_trips() {
+        // The persisted value is the agent id; the picker displays the
+        // title. Every offered choice must parse back to itself, and an
+        // unknown stored value must fall back rather than guess.
+        assert_eq!(SummarizerChoice::ALL.len(), 5);
+        for choice in SummarizerChoice::ALL {
+            assert_eq!(SummarizerChoice::parse(choice.id()), Some(choice));
+            assert!(!choice.title().is_empty());
+        }
+        assert_eq!(SummarizerChoice::parse("banana"), None);
+        assert_eq!(
+            SummarizerChoice::parse("claude"),
+            Some(SummarizerChoice::Claude)
+        );
+        assert_eq!(SummarizerChoice::Claude.title(), "Claude Code");
+        assert_eq!(SummarizerChoice::OhMyPi.id(), "omp");
     }
 
     #[test]
@@ -1905,6 +2619,221 @@ mod tests {
         assert_eq!(
             rendered, expected,
             "the surface renders exactly what discovery returned"
+        );
+    }
+
+    /// F-SET-16: typing in the Agents screen's search field narrows the
+    /// drawn rows to the matching agent, and clearing it restores every
+    /// row — the same contract `sidebar.rs`'s project filter already has.
+    /// Filtering must not renumber surviving rows: ids stay keyed to the
+    /// original discovery position, so a filtered-out row 1 does not
+    /// become the new row 0.
+    #[gpui::test]
+    async fn agent_search_narrows_rows_and_clearing_restores_them(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "claude",
+                display_name: "Claude Code",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            },
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: None,
+            },
+            AgentAvailability {
+                id: "omp",
+                display_name: "Oh-My-Pi",
+                executable: None,
+            },
+        ];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Focus the search field the way a user does: click it.
+        let search = cx
+            .debug_bounds("agent-search-field")
+            .expect("the search field is drawn");
+        cx.simulate_click(search.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.simulate_input("claude");
+        cx.run_until_parked();
+
+        let search_state = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .agent_search
+                .clone()
+        });
+        assert_eq!(
+            search_state, "claude",
+            "the keystrokes reached the search state"
+        );
+
+        assert!(
+            cx.debug_bounds("settings-agent-row-0").is_some(),
+            "the matching row stays drawn"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-1").is_none(),
+            "row 1 is filtered out while the search reads 'claude'"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-2").is_none(),
+            "row 2 is filtered out while the search reads 'claude'"
+        );
+
+        // Clearing the search restores every row.
+        cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace");
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("settings-agent-row-0").is_some());
+        assert!(
+            cx.debug_bounds("settings-agent-row-1").is_some(),
+            "row 1 returns after the search is cleared"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-2").is_some(),
+            "row 2 returns after the search is cleared"
+        );
+    }
+
+    /// F-SET-16: the Agents screen's "↻ Refresh" button re-runs agent
+    /// discovery, the same re-read-from-disk meaning "Refresh now" already
+    /// has on the AI Providers screen — a pinned fixture is replaced by a
+    /// fresh read.
+    #[gpui::test]
+    async fn refresh_agents_re_runs_agent_discovery(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let pinned = vec![AgentAvailability {
+            id: "not-a-real-agent",
+            display_name: "Not A Real Agent",
+            executable: None,
+        }];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(pinned)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let refresh = cx
+            .debug_bounds("refresh-agents")
+            .expect("Refresh renders on the Agents screen");
+        cx.simulate_click(refresh.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let rendered = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .provider_availability
+                .clone()
+        });
+        assert_eq!(
+            rendered,
+            discover_availability(),
+            "Refresh replaces the pinned fixture with a fresh discovery read"
+        );
+    }
+
+    #[gpui::test]
+    async fn agent_rows_mark_adapters_without_an_acp_server(cx: &mut gpui::TestAppContext) {
+        // An adapter without an ACP server must be visibly marked: a chat
+        // tab must never silently connect it to another agent's server.
+        // Every row draws an ACP badge whose content comes from the same
+        // availability surface the machine tests assert.
+        cx.update(Theme::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "claude",
+                display_name: "Claude Code",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+            },
+            AgentAvailability {
+                id: "codex",
+                display_name: "Codex",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/codex")),
+            },
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: Some(PathBuf::from("/opt/homebrew/bin/opencode")),
+            },
+            AgentAvailability {
+                id: "omp",
+                display_name: "Oh-My-Pi",
+                executable: None,
+            },
+        ];
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for badge_id in [
+            "settings-agent-acp-claude",
+            "settings-agent-acp-codex",
+            "settings-agent-acp-opencode",
+            "settings-agent-acp-omp",
+        ] {
+            assert!(
+                cx.debug_bounds(badge_id).is_some(),
+                "every provider row renders an ACP chat badge ({badge_id})"
+            );
+        }
+
+        let rendered = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .provider_availability
+                .clone()
+        });
+        let omp = rendered.iter().find(|a| a.id == "omp").expect("omp row");
+        assert_eq!(omp.acp_program(), None);
+        assert_eq!(
+            omp.acp_status_label(),
+            "No ACP server",
+            "a terminal-only adapter says so rather than falling back"
+        );
+        let codex = rendered
+            .iter()
+            .find(|a| a.id == "codex")
+            .expect("codex row");
+        assert!(
+            codex.acp_program().is_some(),
+            "an ACP-backed adapter keeps its own server"
         );
     }
 
@@ -2139,13 +3068,15 @@ mod tests {
         );
     }
 
-    /// F-SET-03 (what exists): General settings state the version and the
-    /// Check for Updates control is drawn and clickable. The button's
-    /// handler is empty in the Linux rewrite, so the checking/up-to-date/
-    /// error result states of the VERIFY clause are recorded as absent —
-    /// this test proves the reachable half only.
+    /// P58, F-SET-03/08: controls whose feature does not exist on this
+    /// platform must not draw as though they work. "Check for Updates" has
+    /// no updater here and "Copy install command" has no install mechanism
+    /// (F-CTRL-CLI-02 is its own absent row), so both are gone — a drawn
+    /// test asserts the absence with a validated probe: the same
+    /// `debug_bounds` mechanism first proves it finds the controls that DO
+    /// exist, then proves the removed ids do not.
     #[gpui::test]
-    async fn general_settings_state_the_version_and_the_updates_control_is_clickable(
+    async fn general_settings_state_the_version_and_no_dead_controls(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
@@ -2160,18 +3091,686 @@ mod tests {
         cx.simulate_click(general.center(), Modifiers::none());
         cx.run_until_parked();
 
+        // Probe validation: the mechanism finds present controls.
         assert!(
             cx.debug_bounds("settings-version").is_some(),
             "the app version is stated in General settings"
         );
-        let check = cx
-            .debug_bounds("general-check-updates")
-            .expect("Check for Updates is drawn");
-        cx.simulate_click(check.center(), Modifiers::none());
+        assert!(
+            cx.debug_bounds("settings-control-socket-row").is_some(),
+            "the tillerctl card renders"
+        );
+
+        // The removed no-ops, absent.
+        assert!(
+            cx.debug_bounds("general-check-updates").is_none(),
+            "Check for Updates is not drawn — there is no updater on this platform"
+        );
+        assert!(
+            cx.debug_bounds("general-install-path").is_none(),
+            "Copy install command is not drawn — no install mechanism exists"
+        );
+    }
+
+    /// F-SET-09: clicking Install Skill reaches the wired host callback
+    /// with the exact command `tiller_project::agent_skill_install_command`
+    /// builds — this crate's job is only to reach that provisioner and hand
+    /// its result off; running it is the host's call.
+    #[gpui::test]
+    async fn install_skill_click_reaches_the_wired_host_callback(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let calls = Rc::new(RefCell::new(Vec::<SkillInstallCommand>::new()));
+        let recorder = calls.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_skill(move |command| recorder.borrow_mut().push(command))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let install = cx
+            .debug_bounds("general-install-skill")
+            .expect("Install Skill renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let recorded = calls.borrow();
+        assert_eq!(
+            recorded.as_slice(),
+            [tiller_project::agent_skill_install_command()],
+            "the click hands the host the exact provisioned command"
+        );
+    }
+
+    /// F-SET-09: unset, Install Skill must not look wired — it renders
+    /// muted and a click reaches nothing, the same dead-control-avoidance
+    /// convention P76's titlebar cluster seams use.
+    #[gpui::test]
+    async fn install_skill_renders_muted_and_inert_when_unwired(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let install = cx
+            .debug_bounds("general-install-skill")
+            .expect("Install Skill still renders, muted");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// F-SET-14: clicking a provider card's Add Account button hands the
+    /// host that provider's stable id — the seam this app can honestly
+    /// offer, since it never holds isolated per-provider credentials of
+    /// its own (see [`Settings::on_manage_account`]'s field doc).
+    #[gpui::test]
+    async fn manage_account_click_reaches_the_wired_host_callback_with_the_providers_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let calls = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let recorder = calls.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_manage_account(move |provider_id| recorder.borrow_mut().push(provider_id))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let add_codex = cx
+            .debug_bounds("add-codex-account")
+            .expect("Codex card's Add Account renders");
+        cx.simulate_click(add_codex.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["codex"],
+            "the click hands the host the Codex card's own stable id, not another card's"
+        );
+    }
+
+    /// F-SET-14: unset, Add Account must not look wired — it renders muted
+    /// and a click reaches nothing, the same convention Install Skill's
+    /// unwired test (F-SET-09) proves.
+    #[gpui::test]
+    async fn add_account_renders_muted_and_inert_when_unwired(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let add_claude = cx
+            .debug_bounds("add-claude-account")
+            .expect("Claude card's Add Account still renders, muted");
+        cx.simulate_click(add_claude.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// P58, F-SET-04/05/06/07: every General-screen control must flow into
+    /// the persistence contract — the snapshot the host saves on `on_change`.
+    /// Before P58 these values were drawn, clamped, and dropped on quit;
+    /// this test proves each toggle and stepper lands in the snapshot and
+    /// reaches the host callback with the flipped value.
+    #[gpui::test]
+    async fn general_surface_settings_flow_into_the_persistence_contract(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let changes = Rc::new(RefCell::new(Vec::<SettingsSnapshot>::new()));
+        let recorder = changes.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_change(move |snapshot| recorder.borrow_mut().push(snapshot))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Resume agent sessions: on by default, flip it off.
+        let target = cx
+            .debug_bounds("general-resume-sessions")
+            .expect("resume toggle renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        // Auto-rename tabs: off by default, flip it on.
+        let target = cx
+            .debug_bounds("general-auto-naming")
+            .expect("auto-naming toggle renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        // Limit stored chats: on by default, flip it off.
+        let target = cx
+            .debug_bounds("general-chat-history")
+            .expect("chat-history toggle renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        // Limit mounted worktrees: off by default, flip it on.
+        let target = cx
+            .debug_bounds("general-mounted-worktrees")
+            .expect("mounted-worktrees toggle renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        // Steppers: retention 100 -> 101, mounted 6 -> 7.
+        let target = cx
+            .debug_bounds("general-chat-retention-increment")
+            .expect("retention stepper renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("general-mounted-count-increment")
+            .expect("mounted stepper renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+
+        let snapshot = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .snapshot()
+        });
+        assert!(!snapshot.resume_agent_sessions);
+        assert!(snapshot.auto_naming);
+        assert!(!snapshot.limit_chat_history);
+        assert_eq!(snapshot.chat_retention, 101);
+        assert!(snapshot.limit_mounted_worktrees);
+        assert_eq!(snapshot.mounted_worktrees, 7);
+
+        // The host callback received every change with the same values the
+        // surface shows — nothing is report-only anymore.
+        let recorded = changes.borrow();
+        assert_eq!(recorded.len(), 6, "one on_change per control");
+        assert!(!recorded[0].resume_agent_sessions);
+        assert!(recorded[1].auto_naming);
+        assert!(!recorded[2].limit_chat_history);
+        assert!(recorded[3].limit_mounted_worktrees);
+        assert_eq!(recorded[4].chat_retention, 101);
+        assert_eq!(recorded[5].mounted_worktrees, 7);
+    }
+
+    /// P58, F-SET-05: the summarizer picker is disabled while auto-naming
+    /// is off and enabled once it is on, and a chosen agent lands in the
+    /// persistence contract. Before P58 the button was a literal no-op.
+    #[gpui::test]
+    async fn summarizer_picker_is_gated_on_auto_naming_and_selects(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Auto-naming is off: the trigger draws muted and refuses to open.
+        let trigger = cx
+            .debug_bounds("general-summarizer")
+            .expect("the summarizer trigger renders");
+        cx.simulate_click(trigger.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(
-            cx.debug_bounds("general-check-updates").is_some(),
-            "the update control stays in the frame after the click"
+            cx.debug_bounds("summarizer-popover").is_none(),
+            "the picker does not open while auto-naming is off"
+        );
+
+        // Enable auto-naming; the trigger now opens the menu with all five
+        // agents.
+        let target = cx
+            .debug_bounds("general-auto-naming")
+            .expect("auto-naming toggle renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("general-summarizer")
+            .expect("summarizer trigger renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("summarizer-popover").is_some(),
+            "the picker opens while auto-naming is on"
+        );
+        for option_id in [
+            "summarizer-option-claude",
+            "summarizer-option-codex",
+            "summarizer-option-opencode",
+            "summarizer-option-pi",
+            "summarizer-option-omp",
+        ] {
+            assert!(
+                cx.debug_bounds(option_id).is_some(),
+                "{option_id} is offered"
+            );
+        }
+
+        // Choose Codex: the selection lands in the snapshot and the menu
+        // closes.
+        let target = cx
+            .debug_bounds("summarizer-option-codex")
+            .expect("codex option renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("summarizer-popover").is_none(),
+            "choosing an agent closes the menu"
+        );
+        let snapshot = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .snapshot()
+        });
+        assert_eq!(snapshot.summarizer_agent, SummarizerChoice::Codex);
+
+        // Reopen the menu and dismiss it with Escape: the menu's own key
+        // binding consumes the keystroke (it is focused), and the surface
+        // asks for focus back so the shell's Escape keeps working after the
+        // menu is gone.
+        let target = cx
+            .debug_bounds("general-summarizer")
+            .expect("summarizer trigger renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("summarizer-popover").is_some(),
+            "the picker reopens"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("summarizer-popover").is_none(),
+            "Escape closes the picker menu — the menu's scoped binding beats
+            the shell's global one while it holds focus"
+        );
+    }
+
+    /// P58, F-SET-10: "Refresh now" re-runs provider discovery — the cards
+    /// re-read the local credential files instead of keeping whatever they
+    /// were pinned to. A pinned, obviously-wrong state is replaced by a
+    /// fresh read, which is exactly what the button's handler must do.
+    #[gpui::test]
+    async fn refresh_now_re_runs_provider_discovery(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let pinned = ProviderAccountStates {
+            claude: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
+            codex: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
+            opencode_go: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
+        };
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_account_states(pinned)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let refresh = cx
+            .debug_bounds("refresh-claude-now")
+            .expect("Refresh now renders on the Claude card");
+        cx.simulate_click(refresh.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let rendered = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .provider_accounts
+        });
+        assert_eq!(
+            rendered,
+            ProviderAccountStates::discovered(),
+            "Refresh now replaces the shown states with a fresh disk read"
+        );
+    }
+
+    /// F-SET-19 / F-SET-20: the Appearance screen's real controls drive
+    /// the snapshot — clicking the Light segment flips the theme mode,
+    /// the translucency toggle flips the flag, and the interface font
+    /// stepper increments the persisted value.
+    #[gpui::test]
+    async fn appearance_controls_drive_theme_translucency_and_font_size(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        // Open the Appearance section the way a user does.
+        let appearance = cx
+            .debug_bounds("settings-category-Appearance")
+            .expect("Appearance is offered as a category");
+        cx.simulate_click(appearance.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Light: the second segment of the theme control.
+        let light = cx
+            .debug_bounds("appearance-theme-1")
+            .expect("the theme segment control offers three choices");
+        cx.simulate_click(light.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            settings.read_with(&cx.cx, |settings, _| settings.snapshot().theme),
+            ThemeMode::Light,
+            "clicking the Light segment flips the theme mode"
+        );
+
+        // Translucency: the toggle flips from its default.
+        let toggle = cx
+            .debug_bounds("appearance-translucency")
+            .expect("the translucency toggle is drawn");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            settings.read_with(&cx.cx, |settings, _| settings.translucency),
+            "clicking the toggle turns translucency on"
+        );
+
+        // Interface font size: the stepper increments 13 to 14.
+        let increment = cx
+            .debug_bounds("interface-font-size-increment")
+            .expect("the interface font stepper is drawn");
+        cx.simulate_click(increment.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            settings.read_with(&cx.cx, |settings, _| settings
+                .snapshot()
+                .interface_font_size),
+            14,
+            "the + half of the stepper raises the interface font size"
+        );
+    }
+
+    /// F-SET-22: clicking a swatch on an Agent Colors row selects that
+    /// colour for that agent and flows into the persistence contract — the
+    /// control that used to draw a display-only pill with no `on_click`
+    /// now reaches `on_change` through a real click, and only the clicked
+    /// row's choice moves.
+    #[gpui::test]
+    async fn agent_color_click_selects_a_new_accent_and_persists(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let changes = Rc::new(RefCell::new(Vec::<SettingsSnapshot>::new()));
+        let recorder = changes.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_change(move |snapshot| recorder.borrow_mut().push(snapshot))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        let appearance = cx
+            .debug_bounds("settings-category-Appearance")
+            .expect("Appearance is offered as a category");
+        cx.simulate_click(appearance.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            settings.read_with(&cx.cx, |settings, _| settings.snapshot().agent_colors[1]),
+            AgentAccentColor::Coral,
+            "Codex starts on its default colour"
+        );
+
+        // Codex is row 1; pick Purple, a colour that is not its default.
+        let purple = cx
+            .debug_bounds("agent-color-codex-purple")
+            .expect("the Codex row's Purple swatch is drawn");
+        cx.simulate_click(purple.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let snapshot = settings.read_with(&cx.cx, |settings, _| settings.snapshot());
+        assert_eq!(
+            snapshot.agent_colors[1],
+            AgentAccentColor::Purple,
+            "clicking the Purple swatch selects Purple for Codex"
+        );
+        assert_eq!(
+            snapshot.agent_colors[0],
+            AgentAccentColor::Amber,
+            "Claude Code's colour is untouched by Codex's row"
+        );
+        assert_eq!(
+            changes
+                .borrow()
+                .last()
+                .expect("on_change fired")
+                .agent_colors[1],
+            AgentAccentColor::Purple,
+            "the click reaches the host's persistence callback"
+        );
+    }
+
+    // The shell's Escape contract (F-SET-02), tested with a faithful host
+    // instead of the real workspace: the real shell's harness cannot run in
+    // this test scheduler (its control poll loop does real filesystem work,
+    // which the deterministic scheduler flags — the quarantined palette-test
+    // family). This host replicates exactly the workspace's three pieces:
+    // the global `escape` binding, an action handler on the host root, and
+    // requesting the surface's focus when it opens.
+    actions!(settings_escape_harness, [EscapeClosesSurface]);
+
+    struct EscapeHost {
+        settings: Entity<Settings>,
+        closed: Rc<Cell<bool>>,
+    }
+
+    impl Render for EscapeHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let closed = self.closed.clone();
+            div()
+                .size_full()
+                .on_action(move |_: &EscapeClosesSurface, _, _| {
+                    closed.set(true);
+                })
+                .child(self.settings.clone())
+        }
+    }
+
+    #[gpui::test]
+    async fn shell_escape_closes_settings_through_the_focused_surface(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(|cx| {
+            cx.bind_keys([KeyBinding::new("escape", EscapeClosesSurface, None)]);
+        });
+        let closed = Rc::new(Cell::new(false));
+        let host_closed = closed.clone();
+        let window = cx.add_window(|_window, cx| {
+            let settings = cx.new(|cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+            EscapeHost {
+                settings,
+                closed: host_closed,
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let host = cx.update(|window, _| {
+            window
+                .root::<EscapeHost>()
+                .flatten()
+                .expect("escape host root")
+        });
+
+        // Without the surface focused, the global binding has no handler on
+        // its dispatch path (the fallback path is the window's synthetic
+        // root) — Escape is a no-op, exactly the defect F-SET-02 named.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            !closed.get(),
+            "before the surface is focused the action has no handler on the dispatch path"
+        );
+
+        // The host opens settings the way the workspace does: request the
+        // surface's focus, then let the next frame land it.
+        host.update(&mut cx, |host, cx| {
+            host.settings.update(cx, |settings, cx| {
+                settings.request_surface_focus();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        let surface_focused = cx.update(|window, app| {
+            host.read(app)
+                .settings
+                .read(app)
+                .surface_focus
+                .is_focused(window)
+        });
+        assert!(surface_focused, "the surface holds focus after the request");
+
+        // Escape now reaches the host's handler through the focused
+        // surface's dispatch path.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            closed.get(),
+            "with the surface focused, Escape dispatches the close action to the host"
+        );
+    }
+
+    #[gpui::test]
+    async fn shell_escape_does_not_close_while_the_picker_menu_is_focused(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(|cx| {
+            cx.bind_keys([KeyBinding::new("escape", EscapeClosesSurface, None)]);
+        });
+        let closed = Rc::new(Cell::new(false));
+        let host_closed = closed.clone();
+        let window = cx.add_window(|_window, cx| {
+            let settings = cx.new(|cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+            EscapeHost {
+                settings,
+                closed: host_closed,
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let host = cx.update(|window, _| {
+            window
+                .root::<EscapeHost>()
+                .flatten()
+                .expect("escape host root")
+        });
+        host.update(&mut cx, |host, cx| {
+            host.settings.update(cx, |settings, cx| {
+                settings.request_surface_focus();
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+
+        // Open the picker menu (auto-naming on first): the menu takes
+        // focus, and its own scoped Escape binding resolves before the
+        // shell's global one.
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("general-auto-naming")
+            .expect("auto-naming toggle renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("general-summarizer")
+            .expect("summarizer trigger renders")
+            .center();
+        cx.simulate_click(target, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("summarizer-popover").is_some(),
+            "the picker menu is open"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("summarizer-popover").is_none(),
+            "Escape closes the menu"
+        );
+        assert!(
+            !closed.get(),
+            "the menu's scoped binding consumed Escape — settings stays open"
+        );
+
+        // The menu handed focus back to the surface; the next Escape closes
+        // settings through the host.
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            closed.get(),
+            "after the menu closes, Escape reaches the shell's handler again"
         );
     }
 }
