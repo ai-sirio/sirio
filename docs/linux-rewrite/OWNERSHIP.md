@@ -89,9 +89,18 @@ happen if the distinction blurs:
 
 - `tiller_project/skill.rs` (`codex11`) is called by the Install Skill button in `settings.rs`
   (`sonnet`).
-- `add_chat_tab` (`codex12`, `tiller/`) must take `&mut Window` so the composer can take focus at tab
-  creation. The `chat.rs` half is already built and waiting — `pi` left it ready before it died.
+
+**Open seams now live in `SEAMS.md`, and that file is the record — not this one.** This section
+kept going stale, which is the whole problem it was meant to solve: it listed `add_chat_tab`'s
+`&mut Window` as waiting long after `codex12` had shipped it (`main.rs:4201`, verified 2026-08-14).
+A seam tracked in prose in two places is a seam nobody dispatches.
+
+**A brief that cuts a seam registers Half B in `SEAMS.md` in the same commit.** Half A landing is
+not the end of a seam; a row moving is. Thirteen ledger rows currently read `FAILED — absent` for
+code that exists, and at least one of them — the 1283-line browser — is orphaned because ownership
+discipline correctly stopped `codex11` from mounting it and nothing tracked the other half.
 
 Two seams that used to be listed here are **gone**, not resolved: `composer.rs`/`chat.rs` and
 `tiller_markdown`/`file_view.rs` each now sit with a single owner. Losing a pane shrank the surface
-where two owners had to agree, which is the one good thing to come out of it.
+where two owners had to agree, which is the one good thing to come out of it — and it is the
+cheapest fix available whenever a seam looks permanent: give both halves to one owner.

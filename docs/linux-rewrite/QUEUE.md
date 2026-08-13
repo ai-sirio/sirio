@@ -1703,3 +1703,38 @@ paths computing eviction differently is worse than one dead one.
 row; something must be evicted and the eviction must be visible. `WorkspaceTabViewState` "persists"
 only if it survives a relaunch. A brief that names a function invites the thirteenth instance; a
 brief that names what the user would see does not.
+
+### Correction, 02:05 — the dead-control shape has a second mechanism, and it is the orchestrator's
+
+The entry above blamed the builder's loop: writes X, tests X, reports done. That is true of some of
+the thirteen. It is **not** true of the largest one, and the correction matters more than the count.
+
+`codex11` finished a 1283-line browser tonight — `BrowserState` with address handling,
+back/forward/reload/stop, navigation lifecycle, errors, permission allow/deny/revoke, agent-driving
+and link routing, plus `BrowserSurface` with `Render`. Verified reachability:
+
+```
+BrowserState     0 references outside browser.rs
+BrowserSurface   2 references outside browser.rs — both in crates/tiller_ui/examples/
+```
+
+**A browser no user can open.** But `codex11` did exactly what it was told: its report says
+*"lib.rs, main.rs, settings.rs non toccati: seam d'integrazione lasciata all'integratore"*, and
+`main.rs` is `codex12`'s file. Ownership discipline **required** it not to mount.
+
+So the second mechanism is: **the orchestrator cuts a two-half seam and dispatches only Half A.**
+Half A is a brief. Half B is one line in someone else's file, named in prose at the bottom of that
+brief, and never dispatched. Nothing in this project tracked it — seams are named across P53, P67,
+P69, P71, P73, P77, P78, FABLE-11 and a dozen QUEUE entries, in prose, with no place that says
+whether the other half ever shipped.
+
+`docs/linux-rewrite/SEAMS.md` now exists as that record, and `OWNERSHIP.md` points at it instead of
+keeping a second stale copy — it had `add_chat_tab`'s `&mut Window` listed as waiting long after
+`codex12` shipped it at `main.rs:4201`.
+
+**The structural fact underneath:** `codex12` owns `main.rs`, and `main.rs` is where nearly every
+Half B lands. The map makes one pane the integration bottleneck by construction while three builders
+generate Half As faster than it consumes them. Batch the mounts into one integration pass rather
+than paying a context reset and a build cycle per seam — and where a seam looks permanent, prefer
+giving both halves to one owner, which is what killed the `chat.rs`/`composer.rs` and
+`tiller_markdown`/`file_view.rs` seams for good.
