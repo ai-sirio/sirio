@@ -1026,3 +1026,64 @@ context reverts a pane to the global default and the stronger model is lost with
 then the builder holding **48 of the 100 remaining rows** is doing GPUI work with drawn tests on the
 weaker model, and nothing anywhere would report it. pi's context is at 7.2% (`↑31k ↓8.7k`, $0.006),
 i.e. freshly reset — which is exactly when that reset happens.
+
+---
+
+## 23:55 — The gate's red was misattributed, and the build was down for everyone
+
+Three findings, all from running the gate's own commands instead of paraphrasing them.
+
+### 1. The clippy red does not exist. It was mine to check and I had accepted it on report.
+
+`pireview` reported clippy red at `tiller_theme/src/cosmic/live.rs:111` and `cosmic/theme.rs:88`,
+and I told it I would fix them. Running the gate's literal stage-175 invocation:
+
+```
+cargo clippy --workspace --all-targets --exclude tiller --exclude tiller_ui -- -D warnings
+→ EXIT 0, zero warnings, zero errors
+```
+
+Scoped to `tiller_theme` alone: also clean, and the crate is committed at `ce02a06` with no
+uncommitted drift. **Those two `file:line` pairs come out of no failing stage.**
+
+The generalisable mistake is worth more than the correction. `fmt` and `clippy` are **separate
+stages** (`ci-linux.sh:169` and `:175`), and clippy **excludes `tiller` and `tiller_ui`**. A red
+reported as `file:line` with no command attached cannot be assigned to a stage at all — and a file
+that clippy never lints will still happily produce a *fmt* diff at some line number. Standing rule
+from here: **name the stage and the command, never just the file.**
+
+### 2. The one real fmt failure, and it is a single file
+
+`cargo fmt --all -- --check` → EXIT 1. Sole offender in the entire workspace:
+`tiller_ui/src/browser.rs`, 8 diffs, all mechanical (import order, `use` collapsing, match nesting).
+`codex11`'s in-flight P72 spike. Routed to `codex11`, not fixed by me — it is being edited live, and
+formatting another agent's open file is the collision the ownership map exists to prevent.
+
+### 3. P72's dependency took the whole product build down, not just its own surface
+
+`cargo build -p tiller -p tiller_control` (stage 178) → **EXIT 101**: `gdk-3.0`, `atk`, `cairo`,
+`pango` all missing. `wry`/WebKitGTK drags in the GTK3 stack, and without the system headers
+**nothing in `tiller` compiles** — so `codex12` finished P73 and could not run a single one of its
+tests, and `pireview` could not launch the app.
+
+Fixed at the machine level, which is orchestrator work and no agent's file:
+`libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libxdo-dev`. Same command now → **EXIT 0**.
+
+`codex11` had been working around it with a private `spike_sysroot` and a custom `PKG_CONFIG_PATH`.
+Told to drop it: a workaround inside `PKG_CONFIG_PATH` is a hidden prerequisite that breaks the next
+machine without telling it why. Told to report the system requirement as a **spike result** — the
+cost of outcome 1 is not only z-order, scaling and input routing, it is that the product no longer
+builds without system GTK headers, and that belongs next to `ci-linux.sh:17`'s existing cargo check.
+
+### The shape this session keeps producing: written, never executed
+
+P73 widened all three links (`session.rs:286` `SessionTab.agent_id`, `RetainedChat`, restore and
+resume) and added `drawn_restore_round_trips_codex_identity_through_quit_and_relaunch` and
+`drawn_tab_context_resume_chat_reopens_the_retained_session`. **Neither has ever run** — the build
+was down when they were written. A test that has never executed has the evidential weight of a
+comment. `codex12` is now running them, and has been told to **reintroduce the regression on purpose**
+(`agent_id: None` back in the restore arm) and confirm the test goes red. On this exact chain we have
+already been wrong twice; "the test passes" and "the test can fail" are different claims.
+
+`fable` closed FABLE-09 at `66b16d0` — `STALE-FAILED-RECIPES.md`, 39 recipes costed into two launches
+(30 + 7) plus 2 not UI-exercisable, which is what `pireview`'s pass 15 is consuming.
