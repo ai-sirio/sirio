@@ -907,3 +907,40 @@ says, and there is no gap at all. **What settles it:** press Ctrl+A / Ctrl+C / C
 composer on the running Linux build and report what happens. Until someone does, this row is a
 question, not an accusation — filing it as a defect would be the same error as GAP 2 wearing a
 different hat.
+
+## 22:55 — "the gate stops on unrelated tests" is unfalsifiable as stated, and half of it is implausible
+
+Five agents have now reported, in almost the same words, that `Scripts/ci-linux.sh` gets past fmt
+and clippy and then *"stopped at workspace tests on unrelated tiller/panes and palette tests"*. It
+has been repeated all day and **never once verified**, because each report names a **file**, not a
+**test**. Read the file and the claim splits in two:
+
+- **Pure logic tests** — `splitting_preserves_the_original_leaf_and_adds_a_focusable_leaf`,
+  `splitting_the_focused_pane_down_preserves_both_panes`, `focus_movement_returns_the_neighbour…`,
+  `removing_a_leaf_collapses_the_parent`, `ratios_are_clamped_and_survive_nested_splits`,
+  `tab_cycle_wraps_forward_and_backward`, `jumping_to_a_tab_uses_one_based_positions…`. Synchronous
+  `#[test]`, in-memory tree, assertions only, no clock, no fs, no threads. **Load cannot make these
+  fail.** If one of them is red, something is genuinely broken and "concurrency noise" is a wrong
+  attribution that has been protecting a real defect all day.
+- **One real-PTY end-to-end test** — `panes.rs:806`
+  `real_pty_activity_status_follows_osc_title_then_settled_content`: async, spawns an actual PTY,
+  `sleep 0.1` / `sleep 0.2` inside the shell command, `Instant::now()` deadlines at `:770`/`:806`,
+  temp dir under `std::env::temp_dir()`. **This one can absolutely be load-flaky**, and with five
+  builders compiling it usually is. Here the attribution is fair.
+
+So the sentence is simultaneously true and useless: it is correct for one test in the file and
+almost certainly wrong for the other seven, and as written nobody can tell which happened.
+`FLAKY_TEST_FINDINGS.md` (2026-08-09, Swift suite) recorded the same shape — *"standalone runs green
+(41/41)"* against *"11 fail/12 runs under load 7-8"* — so load-induced failure is a documented
+reality in this project and is not a smell being invented here.
+
+**Standing reporting rule, effective now — add it to every brief:** when the gate is red, name the
+**failing test**, not the file, and paste the assertion line. "unrelated tests in `panes.rs`" is not
+a report; `real_pty_activity_status_follows_osc_title_then_settled_content` timed out at 2s under
+load 9" is. A file name lets a real failure hide behind a flaky neighbour indefinitely — which,
+given that this has run all day, may be exactly what happened.
+
+**Why this is not being dispatched as a task.** Settling it needs the gate run in a **quiet tree**,
+and the tree has not been quiet once today; running it now, with five agents compiling, would
+reproduce the very load that makes the honest half of the claim true. It is a scheduling
+constraint, not a work item: run it in the first genuine idle window, with the failing test named.
