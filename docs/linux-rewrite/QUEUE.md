@@ -697,3 +697,53 @@ whole silent-failure cluster in two non-breaking halves — `codex11` gives `Fil
 `Sidebar` already has, `codex12` converts four call sites. It deliberately leaves the other 33
 `eprintln!` alone: `[control]`/`[session]`/window-open are diagnostics for whoever runs the binary,
 and promoting all of them to UI is a different and worse defect.
+
+## CORRECTION: the "menu item that does nothing" does not exist
+
+I reported a second gap alongside the half-fixed picker: that `add_chat_tab`'s `None` branch made
+New Chat → pi/omp/opencode a silent no-op, and I sent it to **both `codex12` and `pireview`** as fact.
+
+**It is false.** `tab_bar.rs:467` builds the chat picker with:
+
+```rust
+.filter(|agent| agent.is_available() && agent.acp_program().is_some())
+```
+
+Non-ACP agents are never offered. `pireview`'s own live frame `stage-picker-5.png` shows the New Chat
+submenu containing exactly **Claude Code** and **Codex**; the top-level OpenCode / Pi / Oh-My-Pi rows
+are *terminal launchers*, a different action entirely. The `None` branch is a defensive guard on an
+unreachable state and is correct as written. Both agents corrected; `P71` amended to three sites with
+the withdrawal recorded in the brief rather than deleted from it.
+
+**How it happened:** I read the code branch and *inferred* the menu instead of reading the menu. The
+inference was plausible — an early `return` with only an `eprintln!` genuinely is the shape of a dead
+menu item — and it was wrong because the reachability question is answered in a different file, by a
+filter I never looked for.
+
+This is the same failure as the clippy episode and as the assertion census: **a probe weaker than the
+claim it is used to support.** The pattern is stable enough to state as a rule — *when a finding is
+about what a user can reach, code alone cannot settle it; the surface has to be looked at.* The
+critic's frames settled both of today's reachability questions in seconds.
+
+Twice in this session the frames overruled me. Earlier I read eight byte-identical `stage-menu`
+frames as "the menu will not open" — they were the menu **staged open and stable**, which is the
+success signal for that harness. Same error in the other direction: inferring from a proxy rather
+than looking at the artefact.
+
+### Two findings from the critic's frames worth keeping
+
+- **The `acp-01..10` series exercised bash, not an agent.** `acp-08-done-50s.png` shows the nonce
+  prompt *"Reply with exactly CRIT14-DONE-8219 and nothing else"* typed into the **Terminal** tab,
+  with bash answering `Comando «Reply» non trovato`. Any verdict resting on that series would have
+  been an ACP claim proven against a shell. The later staged menu/picker approach is the sound one.
+- **Critic evidence lives in `/tmp` and does not survive.** The only commit that has ever preserved
+  critic frames is `5e55ed0` — the accidental bulk checkpoint. `pass 14`'s 45 frames (3.8 MB) are in
+  `/tmp/crit14`. A verdict whose evidence has been deleted cannot be re-checked by anyone, including
+  the critic that wrote it. Asked `pireview` to land them under `reference/linux-progress/`.
+
+### What the frames show that is simply good news
+
+The app renders: project sidebar with three worktrees, tab strip with Chat and Terminal, a working
+terminal with a themed prompt, the Files panel, and a status bar carrying live Claude/Codex usage.
+The New Chat submenu is correct COSMIC-flavoured chrome. Whatever else is open, *it renders* — which
+the goal makes the precondition for everything else.

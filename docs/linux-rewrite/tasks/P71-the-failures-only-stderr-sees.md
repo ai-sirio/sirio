@@ -17,7 +17,15 @@ of them in `main.rs`. The worst:
 | `main.rs` `[files] save failed: {error}` | presses Ctrl+S; the write fails | nothing |
 | `main.rs` `[files] could not open the file picker: {error}` | clicks Open File | nothing |
 | `main.rs:~2939-2940` `[projects] …` | adds a project that is nested/duplicate, or fails | nothing |
-| `main.rs` `[chat] …` `None` branch | picks an agent with no ACP server | nothing |
+
+**A fourth site was listed here and has been withdrawn.** I had claimed `add_chat_tab`'s `None`
+branch was a reachable dead end — pick an agent with no ACP server, get nothing. It is not
+reachable: `tab_bar.rs:467` builds the chat picker with
+`.filter(|agent| agent.is_available() && agent.acp_program().is_some())`, so non-ACP agents are never
+offered. The critic's own frame (`stage-picker-5.png`) shows the New Chat submenu listing exactly
+Claude Code and Codex; the top-level OpenCode/Pi/Oh-My-Pi entries are *terminal launchers*, a
+different action. That branch is a defensive guard and is correct as written — **leave it alone.**
+I had inferred the menu from the code branch instead of reading the menu.
 
 The save one is the sharpest: `F-EDIT-06` (the save path) was confirmed **built, by exercise**, on
 the same day. A working save sits directly beside a failure mode the user cannot perceive.
@@ -64,14 +72,13 @@ Mirror `Sidebar`'s exact shape, because a second idiom for the same job is its o
   must be told about, not an error. **This closes `F-PRJ-04` and is roughly two lines.**
 - `[files] save failed` and `[files] could not open the file picker` → Half A's setter, **once Half A
   has landed**. If it has not, do the project half and say so; do not add a second notice mechanism.
-- The `add_chat_tab` `None` branch → tell the user the adapter has no ACP server. `pi` already built
-  the vocabulary: `tiller_agents::AgentAvailability::acp_status_label()` returns `"No ACP server"`,
-  and Settings already shows it as a badge. Reuse that string; do not write a third phrasing.
+**Do not touch `add_chat_tab`'s `None` branch** — see the withdrawal above. It guards an unreachable
+state, and adding a toast there would be UI for something a user cannot produce.
 
 **Leave the rest of the 37 alone.** `[control] …`, `[session] …` and the window-open failure are
 diagnostics for whoever runs the binary from a terminal, and turning every one of them into UI is a
-different, worse defect. Four sites are in scope. If you think a fifth belongs, name it rather than
-doing it.
+different, worse defect. **Three sites are in scope.** If you think a fourth belongs, name it rather
+than doing it — one was already withdrawn for exactly that reason.
 
 ## Evidence
 
