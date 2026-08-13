@@ -1602,3 +1602,58 @@ somebody to rebuild what is already built. It is a **z-order defect and its own 
 It also must not be merged with the P72 webview occlusion despite the resemblance. There, a native
 child window sits above GPUI's GL surface and cannot be reordered — a constraint. Here both elements
 are GPUI's and the paint order is ours — a bug. One is architecture, the other is a fix.
+
+---
+
+## 2026-08-14, 01:10 — the transplant rule got its first mechanical check, and it found two files
+
+The goal says it without qualification: *"Da tutti i riferimenti si prende ispirazione, mai codice:
+ogni riga di Tiller va scritta da zero. Se il critico trova codice trapiantato da un riferimento, è
+un gap, sempre."* Nobody had ever checked it. `Scripts/transplant-check.py` now does.
+
+**`rust/crates/tiller/examples/hw.rs` and `examples/bisect.rs` were Zed's `gpui/examples/hello_world.rs`,
+117 of 119 lines verbatim** — same `HelloWorld` struct, same `rgb(0x505050)` on `rgb(0x0000ff)`
+border, same `format!("Hello, {}!", self.text)`. The only edits were a window size and a stripped
+`#![cfg_attr(target_family = "wasm", …)]`. Both came in with `c63378e`, the recovery commit, so no
+current pane wrote them; nothing in the tree referenced them. **Deleted.** They had already done
+their job — proving GPUI paints on this box — and that finding lives in `ENVIRONMENT.md`, which is
+where it belongs.
+
+### The first measurement said clean, and it was the wrong measurement
+
+The check was run twice. The first pass counted **shared lines** and found ~2% overlap, worst case
+13 of 701 in `chat.rs` — I read that as clean and said so. It was true and it was useless. A
+119-line verbatim copy is a rounding error in a 145-file tree, and the aggregate hid it completely.
+
+**When the rule is per-artefact, the metric has to be per-artefact.** The second pass counted
+**consecutive** substantive lines, and that is the metric that holds up: two people solving the same
+problem against the same API land on the same signatures, but they do not land on the same three
+statements in the same order.
+
+### The other 54 hits are convergence, and the test for it is not similarity
+
+54 of the 56 candidates are noise, but *"they look alike"* is not why. The question is **whether an
+alternative existed**:
+
+- **`icons.rs`, 17 hits against `zed:img.rs`** — `type PrepaintState = Option<Hitbox>`, `fn id()`,
+  `fn source_location()`, `fn request_layout(`. These are GPUI's `Element` trait members in the order
+  the trait declares them. Every implementor emits this run. No alternative exists.
+- **`chat.rs` against `waku:input.rs`** — the `request_layout` parameter list. Same reason.
+- **`file_link.rs` against `waku:right_panel.rs`** — `b'0'..=b'9' => Some(byte - b'0')` and its two
+  siblings. That is *the* hex-nibble match; writing it differently would be writing it worse.
+- **`.file_name().map(…to_string_lossy…).filter(|n| !n.is_empty())`** in three of our files and in
+  waku. Idiomatic Rust. Worth noting it appears three times **in our own tree** — that is
+  duplication to fold up, a different smell entirely, and not a transplant.
+
+### Keep the tool honest about what it cannot prove
+
+`transplant-check.py` **exits 2 when `_tiller-refs` is absent** rather than passing. A check that
+finds nothing because it looked at nothing must not report the same result as a check that looked
+and found nothing. Precision is deliberately poor — 2 real in 56 — because the failure that matters
+is the missed transplant, and every candidate gets a human read.
+
+Run it before any claim that the tree is written from scratch:
+
+```bash
+Scripts/transplant-check.py            # 0 clean · 1 candidates · 2 references missing
+```
