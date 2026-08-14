@@ -137,14 +137,13 @@ ctl() {
   local method="$1"; shift
   CTL_METHOD="$method" CTL_ARGS="$*" python3 - <<'PY'
 import json, os, socket, sys
+# Every param is a string. ControlRequest deserialises params as a map of String to String, so
+# sending `index=0` as a JSON integer is rejected outright:
+#   invalid type: integer `0`, expected a string
 params = {}
 for pair in os.environ.get("CTL_ARGS", "").split():
-    if "=" not in pair:
-        continue
-    k, v = pair.split("=", 1)
-    try:                      # let callers pass numbers, booleans and JSON without shell quoting
-        params[k] = json.loads(v)
-    except ValueError:
+    if "=" in pair:
+        k, v = pair.split("=", 1)
         params[k] = v
 req = {"id": "drive", "method": os.environ["CTL_METHOD"], "params": params}
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
