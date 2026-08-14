@@ -37,3 +37,43 @@ driven from any input path, live or socket — the function has zero callers out
 crate's tests. The half already proven (`project_name`, 8 app references incl.
 `tiller_ui/src/project_forms.rs:704`) stands as previously recorded; not re-driven here since
 the ledger already treats it as proven and this pass targeted only the missing half.
+
+## F-TAB-08 (ledger line 124, half-proven)
+
+Missing half per current ledger note: the "Other agents…" / "No supported agent found on
+PATH" fallback that renders when bare-PATH launch finds no ACP-capable agent — clicking it is
+claimed to NOT open Agents settings (no click handler).
+
+Source read first (`tiller_ui/src/tab_bar.rs`): `render_chat_agent_item` (the normal per-agent
+row) attaches `.on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id,
+cx)))`. `render_chat_empty` (the fallback shown when `available_chat_agents.is_empty()`) has an
+`.id("new-chat-empty")` and `.debug_selector` but **no `.on_click` at all** — structurally
+confirms the missing half before any drive.
+
+Live-drove it on the Wayland lane, `TILLER_WL_LABEL=drive-E11-git+tab+win`, launching the app
+with `PATH=/usr/bin:/bin` (strips `~/.local/bin/claude`, `~/.local/bin/codex`,
+`~/.nvm/.../bin/opencode`, `~/.nvm/.../bin/pi` — confirmed via `which` before the drive — while
+leaving `grim`/`sway`/`swaymsg`/`wtype`/`gcc`/`wayland-scanner` reachable at `/usr/bin`, which
+the drive script itself needs). Sequence (captures in
+`reference/linux-progress/drive-E11-git+tab+win/f-tab-08f/`):
+
+1. `ctl project.add path=.../tiller-linux` — added/selected the project.
+2. `click 1290 50` on the tab-bar `+` → `03-menu-open.png` shows the full add-tab menu (New
+   Terminal, Changes, New Browser, per-agent rows, Split Claude Code, `New Chat ›`).
+3. `click 1035 348` on the `New Chat` row → `04-picker-open.png` shows the submenu expanded
+   with **only** the fallback: `Other agents…` / `No supported agent found on PATH` — no agent
+   rows, confirming the bare-PATH condition actually took effect for the chat picker (even
+   though the top-level per-agent terminal/split items still list all 5 agents, since those
+   don't gate on PATH the same way).
+4. `click 1345 400` — squarely inside the fallback row's bounds (row spans roughly
+   x=1284–1450, y=372–432 at this capture's 1715×972 resolution; cursor lands at the row's
+   trailing edge in the frame) → `05-after-fallback-click.png`: **the menu is unchanged** —
+   same items, same "Other agents…" fallback still showing, no Settings surface, no
+   navigation, no visual change beyond the pre-existing hover state. Clicking the fallback is a
+   no-op.
+
+**Claim: exercised-broken.** Drove the exact gesture (bare-PATH launch → open New Chat →
+click the "Other agents…" fallback) and it does nothing — no Agents settings surface opens.
+This is the row's previously-unproven half; the first half (fallback renders with correct
+wording under bare PATH) was already proven at pass 15 and is corroborated again here by
+`04-picker-open.png`.
