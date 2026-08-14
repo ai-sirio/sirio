@@ -348,3 +348,84 @@ a larger structural change than adding the fields directly to `SessionTabState`.
   layout.rs` itself needs no change; it's reference shape, not the file to extend
 - **size**: L — a real per-surface state-capture feature across three UI surfaces, not a
   wiring fix.
+
+---
+
+## `F-CORE-FILE-03` — NOT EXERCISED
+
+**Needs: exercise**, and again the instrument is the blocker, not the code. Per
+`ENVIRONMENT.md:76-78`: "XDND drags are equally out of reach: `xdotool` has no source window
+to negotiate the protocol, so file-drop rows are unexercisable by this harness (a human hand
+can still do them — record NOT EXERCISED with the instrument reason, never FAILED)." The data
+layer this clause names (`terminal_file_drop`/`classify_file_drop`,
+`rust/crates/tiller_project/src/file.rs`) is real and, per `DEAD-MODULES.md`'s correction, is
+consumed: `F-TERM-PTY-06`'s own evidence names `tiller_project::terminal_file_drop` directly.
+Gesture: a human hand drags a file with spaces/quotes/non-ASCII in its name onto a real
+terminal pane and confirms the shell receives one shell-quoted, space-separated path string
+with no trailing newline — this cannot be synthesized through the current Wayland virtual
+pointer (no press/motion/release primitive), so it needs either a real desktop session or a
+different drive tool than `xdotool`/the current virtual pointer.
+
+- **files**: none (exercise only, environment-limited)
+- **size**: S
+
+---
+
+## `F-CORE-FILE-04` — FAILED — defective
+
+**Needs: build.** Confirmed exactly as recorded: `resolve_file_link`
+(`rust/crates/tiller_project/src/file_link.rs:12`) has zero callers anywhere outside its own
+file — only its own tests and the `pub use` re-export in `lib.rs:62`. Grepped `on_click`,
+link-related handlers, and `make_link` across `rust/crates/tiller_ui/src/{file_view,
+editor}.rs`: the only link-shaped code found is `Editor::make_link`
+(`rust/crates/tiller_ui/src/editor.rs:790`), which *writes* a new `[label](url)` Markdown link
+into the buffer — nothing that reads an existing rendered link and opens it. No
+click/cmd-click/ctrl-click handler on a rendered link span exists anywhere in the crate. The
+line/column-stripping and path-resolution logic itself (`resolve_file_link`'s tests) is real
+and correct — this is purely a missing UI wire, same shape as the terminal's own link click
+convention, which already exists and could be mirrored directly:
+`rust/crates/tiller_terminal/src/link_router.rs:4`'s `opens_terminal_link(platform_modifier:
+bool)` — "Linux uses GPUI's `platform` modifier for the Super key" per the P82 ruling recorded
+in `SEAMS.md`.
+
+Build: add a click handler on rendered Markdown link spans in the file/editor preview surface
+that extracts the raw link text, calls `resolve_file_link`, and — on a resolved in-worktree
+target — opens it through whatever the app's existing "open a document tab" path is (the same
+one the Files panel's right-click "Open" already uses, per `F-EDIT-10`'s route,
+`right_panel.rs:369/375/385`).
+
+- **files**: `rust/crates/tiller_ui/src/file_view.rs` (Markdown preview render — needs the
+  click handler on link spans; this is also where the existing `MarkdownFormatOp::Link`
+  handling lives), `rust/crates/tiller_ui/src/editor.rs` (if the preview delegates rendering
+  through here), `rust/crates/tiller_project/src/file_link.rs` (no change expected;
+  `resolve_file_link` is already correct and tested), `rust/crates/tiller/src/main.rs`
+  (only if opening the resolved target needs a workspace-level dispatch not already reachable
+  from within `tiller_ui`)
+- **size**: M
+
+---
+
+## `F-CORE-FILE-06` — NOT EXERCISED
+
+**Needs: exercise**, and the manifest's own evidence plus `DEAD-MODULES.md`'s characterization
+of this symbol are both now stale against the live tree — worth flagging even though the
+row's verdict already matches what I'd give it. `DEAD-MODULES.md` (correction section) frames
+`FileSystemEventMonitor::poll` as "watcher built, editor never subscribes" and names
+`F-CORE-FILE-06` as its unbuilt owner. That's no longer accurate: reading
+`rust/crates/tiller_ui/src/file_view.rs` directly shows a real, wired subscription —
+`FileSystemEventMonitor::new` is constructed per-file at `file_view.rs:104`, a background
+`cx.spawn` task polls it every 100ms (`file_view.rs:105-118`) and calls
+`poll_file_system_events` (`file_view.rs:199`), which drains events into
+`handle_file_system_event` -> `check_external` (`file_view.rs:183-194`), which in turn calls
+`editor.check_external()` — the same dirty/conflict-detection path the F-EDIT-05 Reload/Keep
+banner already covers. This is genuinely built and wired, not a dead module; the manifest's
+own "Report overclaim" phrase was about a *different* claim (conflating the git Changes panel
+refresh, a separate component, with this one) — not about this code being absent.
+
+Gesture: open a file in the editor, externally modify/delete/rename the underlying file (from
+a shell, not through Tiller), wait for the 100ms poll, and confirm the F-EDIT-05 Reload/Keep
+banner appears with the correct dirty/conflict/deleted distinction — all without local edits
+first, then repeat with local edits present to hit the conflict branch specifically.
+
+- **files**: none (exercise only — code already correct and wired)
+- **size**: S
