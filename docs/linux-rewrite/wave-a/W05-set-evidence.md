@@ -63,3 +63,63 @@ used for F-SET-12 (coordinates recomputed from a fresh crop of the Ollama Cloud 
 still empty when the click misses),`11-ollama-typed2.png`, `12-ollama-after-save2.png`.
 
 ---
+
+## `F-SET-14` — ledger line 302, currently **FAILED — defective**
+
+**Approach taken:** triage's premise ("dead control claim is false") checked against source: read
+`settings.rs`'s `manage_account_handler` (line 2007-2015) and `launch_account_login` (line 1244).
+It really does fall back to a self-contained handler when no host callback is wired:
+`if let Some(handler) = host_manage_account.as_ref() { handler(provider_id) } else {
+settings.launch_account_login(provider, cx) }`, and `launch_account_login` spawns
+`x-terminal-emulator -e <program> <args>` with a real `provider_login_command(provider)`. Grep
+confirms `main.rs` never calls `.on_manage_account(...)` (only caller of the *builder method* is
+the test at settings.rs:4946), so production always takes the fallback branch, not a stub.
+
+**Live drive (this session, not reused from P120-report.md):** opened Settings → AI Providers,
+clicked the real "Add Account" button on the Claude Code card at its live coordinates
+(`13-before-click.png` / `14-after-add-account-click.png`).
+- The captured frame shows no visible change — no dialog, no spinner, no error text, cursor just
+  sitting on an unchanged button. Read alone this looks exactly like the old "dead control"
+  verdict.
+- `ps aux` at that moment told the other half of the story: `x-terminal-emulator -e claude auth
+  login` was a real running child process (pid 4058172) — the click really did reach
+  `launch_account_login`, which really did spawn a genuine OAuth-login subprocess with the
+  correct provider command. Killed the process afterward to avoid leaving a stray terminal.
+
+**Claim:** exercised-working for the fallback-login path — reconfirms the ledger's current,
+already-corrected reasoning (self-contained `launch_account_login` fires, no host wiring needed)
+independently, from a fresh click rather than reused evidence. The frame alone is not proof of
+anything here (a null screenshot result is not evidence per the lane's own rule) — the process
+list is what closes it. The remaining named gap (no in-app waiting/cancel/retry affordance while
+the spawned terminal runs) is still true: nothing in either capture renders such a control, and
+none exists in `settings.rs` for this path.
+
+**Captures:** `reference/linux-progress/wavea-W05-set/13-before-click.png`,
+`14-after-add-account-click.png` (screenshots only prove the click landed on the right pixel;
+the discriminating evidence is the live process list, recorded in this entry since a process
+list isn't a screenshot).
+
+---
+
+## `F-SET-15` — ledger line 303, currently **half-proven**
+
+**Approach taken:** triage says this row shares F-SET-14's premise but the underlying claim (no
+multi-account model) is independently true by explicit design. Re-checked live rather than assume.
+
+**Observed:** same `14-after-add-account-click.png` frame used for F-SET-14 also answers this row:
+every provider card (Claude, Codex, OpenCode Go) shows exactly one "System default / This device /
+Active" row under Accounts, both before and after the Add Account click and its real spawned
+login subprocess — the click does not add a second row, cannot (the login command means "reuse
+your CLI's session on this device," not "create a new isolated slot"), and there is nowhere in the
+UI to reach a second account without a source edit. Grep reconfirms `on_manage_account`
+(settings.rs:799/967) has exactly one call site workspace-wide and it is the test at
+settings.rs:4946.
+
+**Claim:** exercised-working for the "single account slot, Active hardwired" half (freshly
+reconfirmed, not reused) — the half this row's clause can actually resolve. The other half (can a
+user reach a *second* account) remains could-not-reach without a source edit, structurally, same
+as the existing ledger note; nothing new closes it and nothing regressed it.
+
+**Captures:** `reference/linux-progress/wavea-W05-set/14-after-add-account-click.png`.
+
+---
