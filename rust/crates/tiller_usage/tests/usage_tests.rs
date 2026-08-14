@@ -171,12 +171,12 @@ fn a_state_file_with_unexpected_json_shape_is_handled_not_parsed() {
 
     assert_eq!(parse_claude_usage(&text), None);
     // A transcript that never renders is a timeout, and a timeout with no
-    // previous value is unavailable — the bar shows "—".
+    // previous value remains distinguishable from a provider error.
     let state = reduce(transcript_outcome(&text), &ProviderUsageState::Loading);
     assert_eq!(
         state,
-        ProviderUsageState::Unavailable(UsageReason::Error),
-        "no panic, no fabricated numbers"
+        ProviderUsageState::Unavailable(UsageReason::TimedOut),
+        "no panic, no fabricated numbers, and no collapsed timeout reason"
     );
 }
 
