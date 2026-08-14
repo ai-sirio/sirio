@@ -4,8 +4,9 @@
 //! usage fetch that runs on the background executor (never the render
 //! thread), refreshes on a fixed interval, and can be triggered manually
 //! from the refresh button. A provider that is missing, unreadable or
-//! malformed renders as "—"; a timed-out refresh keeps the last good
-//! numbers visibly dimmed rather than showing them as current.
+//! malformed renders its specific unavailable reason; a timed-out refresh
+//! keeps the last good numbers visibly dimmed rather than showing them as
+//! current.
 
 use gpui::{Context, Render, Rgba, Window, div, prelude::*, px, text};
 use std::rc::Rc;
@@ -235,15 +236,15 @@ impl StatusBar {
             // F-SET-11: the reason is the one piece of data that tells the
             // four unavailable states apart; a `_` wildcard here discarded
             // it and rendered every one of them as the same bare "—". A
-            // timed-out fetch never reaches this arm on its own — `reduce`
-            // resolves it to `Stale` when there is a prior value to keep
-            // showing, or to `Unavailable(Error)` when there is none, so
-            // "the fetch timed out" is not a distinct label here; it is one
-            // of the two outcomes those states already carry.
+            // A timed-out fetch with a previous value is represented by
+            // `Stale`; without a previous value it remains
+            // `Unavailable(TimedOut)` so the user can distinguish it from a
+            // provider error.
             ProviderUsageState::Unavailable(reason) => {
                 let reason_text = match reason {
                     UsageReason::NotInstalled => "not found",
                     UsageReason::LoggedOut => "logged out",
+                    UsageReason::TimedOut => "timed out",
                     UsageReason::Error => "error",
                 };
                 format!("{display_name} {reason_text}")
@@ -473,12 +474,13 @@ mod tests {
         );
     }
 
-    /// F-SET-11: the six states this file can distinguish (Loading and
+    /// F-SET-11: the seven states this file can distinguish (Loading and
     /// Loaded are exercised by the drawn test above via the real fetch
     /// loop) each render their own text. `Stale` is functionally identical
     /// to `Loaded` here except for dimming (covered separately below), so
     /// this proves the three reasons stay apart instead of collapsing to
-    /// one wildcard "—".
+    /// one wildcard "—". The four unavailable reasons must each retain their
+    /// own text: not found, logged out, timed out, and error.
     #[test]
     fn unavailable_reasons_render_distinct_text() {
         assert_eq!(
@@ -498,6 +500,13 @@ mod tests {
                 &ProviderUsageState::Unavailable(UsageReason::LoggedOut)
             ),
             "Claude logged out"
+        );
+        assert_eq!(
+            StatusBar::segment_text(
+                "Claude",
+                &ProviderUsageState::Unavailable(UsageReason::TimedOut)
+            ),
+            "Claude timed out"
         );
         assert_eq!(
             StatusBar::segment_text(
@@ -541,6 +550,9 @@ mod tests {
         )));
         assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
             UsageReason::LoggedOut
+        )));
+        assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
+            UsageReason::TimedOut
         )));
         assert!(StatusBar::segment_dimmed(&ProviderUsageState::Unavailable(
             UsageReason::Error

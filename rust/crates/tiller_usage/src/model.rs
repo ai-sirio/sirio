@@ -66,6 +66,9 @@ pub enum UsageReason {
     NotInstalled,
     /// The provider needs credentials that are missing or invalid.
     LoggedOut,
+    /// The bounded usage fetch exceeded its time budget before any value was
+    /// available to keep as stale data.
+    TimedOut,
     /// The provider exists but could not be read.
     Error,
 }
@@ -99,7 +102,7 @@ pub fn reduce(outcome: UsageFetchOutcome, previous: &ProviderUsageState) -> Prov
         UsageFetchOutcome::Unavailable(reason) => ProviderUsageState::Unavailable(reason),
         UsageFetchOutcome::TimedOut => match last_usage(previous) {
             Some(usage) => ProviderUsageState::Stale(usage),
-            None => ProviderUsageState::Unavailable(UsageReason::Error),
+            None => ProviderUsageState::Unavailable(UsageReason::TimedOut),
         },
     }
 }
@@ -162,6 +165,10 @@ mod tests {
         );
         // A timed-out fetch with no previous good value is unavailable too.
         let timed = reduce(UsageFetchOutcome::TimedOut, &ProviderUsageState::Loading);
-        assert_eq!(timed, ProviderUsageState::Unavailable(UsageReason::Error));
+        assert_eq!(
+            timed,
+            ProviderUsageState::Unavailable(UsageReason::TimedOut),
+            "a timeout must remain distinguishable from a provider error"
+        );
     }
 }
