@@ -100,10 +100,13 @@ impl MarkdownDocument {
         };
         let external = String::from_utf8(bytes).map_err(DocumentError::InvalidUtf8)?;
         if external == self.saved_text {
+            self.conflict = false;
+            self.deleted = false;
             return Ok(DocumentChange::Unchanged);
         }
         if self.dirty {
             self.conflict = true;
+            self.deleted = false;
             return Ok(DocumentChange::Conflict);
         }
         self.text = external.clone();
@@ -116,9 +119,6 @@ impl MarkdownDocument {
     pub fn save(&mut self) -> Result<(), DocumentError> {
         if self.conflict {
             return Err(DocumentError::Conflict);
-        }
-        if self.deleted {
-            return Err(DocumentError::Deleted);
         }
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         let name = self
@@ -139,6 +139,21 @@ impl MarkdownDocument {
         self.conflict = false;
         self.deleted = false;
         Ok(())
+    }
+
+    /// Dismisses an external-change banner while preserving the local text.
+    /// The current disk content becomes the new comparison baseline; if the
+    /// file is still deleted, the old baseline remains so a later save can
+    /// recreate it.
+    pub fn keep_external(&mut self) {
+        if let Ok(bytes) = std::fs::read(&self.path)
+            && let Ok(external) = String::from_utf8(bytes)
+        {
+            self.saved_text = external;
+            self.deleted = false;
+        }
+        self.conflict = false;
+        self.dirty = self.text != self.saved_text;
     }
 }
 
@@ -197,6 +212,24 @@ mod tests {
             DocumentChange::Deleted
         );
         assert!(document.is_deleted());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleted_document_can_be_saved_again_after_external_removal() {
+        let (path, dir) = fixture();
+        let mut document = MarkdownDocument::load(&path).unwrap();
+        document.set_text("recreated\n");
+        fs::remove_file(&path).unwrap();
+
+        assert_eq!(
+            document.refresh_from_disk().unwrap(),
+            DocumentChange::Deleted
+        );
+        document.save().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "recreated\n");
+        assert!(!document.is_deleted());
+        assert!(!document.is_dirty());
         let _ = fs::remove_dir_all(dir);
     }
 }
