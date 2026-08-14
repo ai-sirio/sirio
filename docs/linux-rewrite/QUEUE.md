@@ -1958,3 +1958,55 @@ grep -n "N/A — platform" docs/linux-rewrite/INVENTORY-LEDGER.md | grep -i "<th
 attractive ones: they are driven through the control socket rather than the screen, so they can be
 exercised while the single X pointer is busy elsewhere — the one class of verification this project
 can run in parallel with everything else.
+
+## `..Default::default()` meets a full overwrite — found 2026-08-14, 06:30
+
+The `FAILED — absent` sweep turned up a defect nobody had recorded, and its shape is worth keeping
+because the language makes it invisible.
+
+`main.rs:7582`'s `app_settings_from_snapshot` maps five of sixteen persisted settings and closes the
+struct with `..AppSettings::default()`. `save_settings` (`db.rs:745`) writes **all sixteen** keys in
+one transaction. Put those two facts together: changing *any* setting writes defaults over the other
+eleven. Toggling the theme resets your chat retention, your summarizer agent, your usage-bar
+visibility and your worktree cap, in the same commit that saves the theme.
+
+**Three things conspired to hide it, and each generalises.**
+
+**1. The idiom reads as safe.** `..Default::default()` is ordinary Rust and signals "fill in the
+rest sensibly". It means something entirely different on the write side of a full overwrite, where
+"the rest" is not filled in but *destroyed*. A partial converter is harmless in front of a merging
+writer and destructive in front of a replacing one — and nothing at the call site says which kind of
+writer is downstream. When you see struct-update syntax feeding a persistence call, that is the
+question to ask.
+
+**2. The test was written in the shape of the bug.** `session.rs:1436` round-trips settings and
+asserts `load_settings() == settings` — but builds its *expected* value with the same
+`..AppSettings::default()`. Both sides share the blind spot, so the assertion passes over eleven
+fields it never really tests. This is mechanism (c) — a test that pins the stub in place — in its
+most deceptive form, because the test genuinely exercises the real writer and the real reader. **A
+round-trip assertion is only as strong as the non-default values on its expected side.**
+
+**3. The comment made the debt look like a decision.** The load-side stub says the fields "start at
+their defaults **until the persisted schema carries them**". True when written; the schema has since
+grown all sixteen keys, and the mapping never grew to match. This is mechanism (f) — a premise that
+expired — but in *code* rather than in a verdict, and it is worse there, because a comment
+explaining why something is deliberately incomplete reads as closed to every future reader. **A TODO
+whose precondition has since been met is indistinguishable from a design note.** If you write one,
+write the check that fires when it expires, not just the reason.
+
+**The cheap general sweep.** Struct-update syntax feeding a persistence boundary:
+
+```bash
+grep -rn --include=*.rs -B12 "\.\.\w*::default()" rust/crates | grep -iE "save_|persist|store|write"
+```
+
+**What it was worth.** Two functions, no migration — both halves already existed and only the
+converters between them were stubbed. It is the missing DB half of five `half-proven` rows at once
+(`F-SET-04`, `-05`, `-06`, `-07`, `-10`), which is a better return than any single feature in the
+queue. Briefed as `P88`.
+
+**And a caution against overclaiming.** The `setting` table is empty in all seven databases under
+`~/.local/state/TillerRust/checkouts/` — `save_settings` has never executed on this machine, so the
+defect is real but has never yet destroyed anyone's data. That empty table is also independent
+corroboration that those five rows' "DB half unproven" verdicts were right all along. The ledger was
+not wrong here; it simply did not know *why*.
