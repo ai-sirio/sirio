@@ -73,3 +73,25 @@ only the paste-elsewhere half is intrinsically right-click-only.
 
 **Captures:** `reference/linux-progress/wavea-W04-chat/f29/b1-before.png`,
 `reference/linux-progress/wavea-W04-chat/f29/b2-after.png`
+
+## F-CHAT-30 — code-block Copy + confirmation
+
+**Drove:** re-used the F-CHAT-29 finding rather than re-running an identical failed-geometry
+drive (same transcript, same `control_entry_row` instrument, same compositor). Confirmed the
+code-block control's selector is per-block and per-entry
+(`code-block-copy-{entry}-{id}`, chat.rs:2973-2974) — even less predictable geometry than the
+assistant-response control, since its position depends on where inside a multi-line assistant
+reply the fenced block itself starts, which in turn depends on the model's actual generated
+markdown (not knowable in advance, not queryable after).
+
+**Claim:** could-not-reach, for the same two structural reasons as `F-CHAT-29`: (1) no
+selector-to-pixel mapping is exposed anywhere on the control socket — `control_entry_row` never
+serializes code-block-level detail at all, only the parent entry's `kind`/`text`/`status` — so a
+code block's Copy control has strictly less locatable information than the assistant-row
+control that was already unreachable; (2) the clause's paste-confirmation half needs a paste
+path this lane cannot invoke (no keyboard paste binding anywhere in the app; the only `Paste`
+action is the terminal's right-click context menu, out of scope per `WAYLAND-LANE.md`). Backend
+half already established by triage from the drawn test `code_block_copy_writes_code_and_confirms`
+(0ecbd525) — not disputed here.
+
+**Captures:** none new; see `F-CHAT-29`'s captures for the shared compositor-baseline finding.
