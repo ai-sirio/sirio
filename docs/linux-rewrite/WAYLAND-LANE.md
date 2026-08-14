@@ -19,11 +19,47 @@ one cannot work — it is verified working, with screenshots in `reference/linux
 | ✅ **Visual comparison against the bar** | COSMIC/comet screenshots can be compared against a capture taken any time, by anyone, in parallel |
 | ✅ **Socket-driven state is visible** | drive a change over the control socket, force a repaint, and see it — e.g. `project.add` populated the sidebar with `tiller`, its two worktrees, and the `Primary` badge |
 | ✅ **Layout at any size** | change the output resolution and capture the reflow |
+| ✅ **Surfaces open and navigate over the socket** | `surface.settings.open`/`.select`, `surface.changes.open`, `browser.open`, `project.add`, `panel.*`, `tab.*`, `pane.*` — see "Driving without a pointer" below |
 | ❌ **No synthetic input** | clicks and keystrokes **do not reach the client** — see trap 3. Anything gated on a pointer or keyboard gesture (context menus, drag-and-drop, typing) still needs `DISPLAY=:1` |
 
 **A row whose `VERIFY` line names a click, a right-click, a drag or typed text cannot be closed
 here.** Use the drive lock for those. A screenshot that merely *contains* a control is not proof the
 control works — that is the same mistake that produced this project's false `PASSED`s.
+
+## Driving without a pointer — what this lane can actually close
+
+Verified 2026-08-14 (afternoon). `system.capabilities` advertises **54 methods**, and the ones that
+move a *visible surface* turn this lane into a real second drive lane — no lock, no display, any
+number of agents in parallel:
+
+```bash
+python3 ctl.py surface.settings.open                    # → Settings renders, full state returned
+python3 ctl.py surface.settings.select section=general  # → section switches, state returned
+python3 ctl.py surface.changes.open                     # → Changes surface, changed[] + loading
+python3 ctl.py browser.open url=https://example.com     # → ok, returns surface:N
+python3 ctl.py project.add path=/abs/path               # → sidebar populates
+```
+
+The capture then shows the result. One round trip proved it: `surface.settings.open` followed by a
+forced repaint rendered Appearance in full — the System/Light/Dark segmented control, the
+Translucency toggle, Interface and Terminal font sizes, File icons, and the five Agent Colors rows.
+
+**And here is the line you must not cross.** Driving a surface over the socket proves **the handler
+and the render**. It does **not** prove the gesture. A row whose clause says *click the Light
+segment* is not closed by a socket call that switches the theme — that is precisely the
+"declared path passes for a control nobody can reach" failure this project has already paid for.
+Socket-driving closes a row's **state half**; the gesture half stays owed and stays `half-proven`.
+Say which half you drove, every time.
+
+Two observations handed off rather than concluded, because one launch is not a verdict:
+
+- `surface.chat.open` returns `error: "no current workspace"` on an instance whose UI is showing a
+  restored terminal tab. The socket's workspace notion and the restored UI disagree about whether a
+  workspace exists — related to `P100`'s defect 2, where restore also fails to tell a model something
+  it needs.
+- `browser.open` returned `ok` with `surface:3`, and the visible surface **stayed on Settings**. It
+  may create without focusing; it may be `P90`'s "socket that says yes" again. Do not record it
+  either way without driving it properly.
 
 ## Setup
 
@@ -98,6 +134,14 @@ grim -o HEADLESS-1 /path/to/shot.png
 
    **Every input tool here reports success while doing nothing.** Never infer that a gesture landed;
    confirm with a forced-repaint capture, and if the frame is unchanged, the gesture did not happen.
+
+   **Re-proved 2026-08-14 against the trap-2 objection.** The original finding rested on
+   before/after captures with identical MD5s — which trap 2 says proves nothing, since an unchanged
+   frame is the app's normal state. Redone properly: `wtype "echo WAYLAND_INPUT_PROOF_42"` then
+   `wtype -k Return` (both exit 0), then a capture at a **different resolution**, so the frame is
+   provably fresh — the layout reflowed and the Files panel re-wrapped. The terminal's prompt was
+   still empty. The gesture did not land, and this time the negative is evidenced rather than
+   assumed. Keep the conclusion; do not re-derive it from identical MD5s, which do not support it.
 
 4. **Clean up by matching on the environment, never on the process name.** `pkill sway` or
    `pkill tiller` will kill other agents' instances, and on a machine where the user runs a Wayland
