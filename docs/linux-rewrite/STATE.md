@@ -84,11 +84,15 @@ than the row it would close.
 | Pane | Piece | Territory |
 |---|---|---|
 | `sonnet` (w1:p5) | `P109` — the 34 gestures `P106` could not reach; **holds the `:1` drive lock** | critic, drives only |
-| `codex11` (w1:p2) | `P114` — the four chat rows the census found absent | `chat.rs`, `composer.rs` |
-| `codex12` (w1:p3) | `P110` — four empty states nobody built, incl. the stale-data `F-CHG-02` | `sidebar.rs`, terminal + changes surfaces |
+| `codex11` (w1:p2) | `P117` — **a completed chat turn draws nothing**; done `P114` | `chat.rs`, `composer.rs` |
+| `codex12` (w1:p3) | `P118` — project-icon + `notification.create` clusters; done `P110` | `sidebar.rs`, notification handler in `main.rs` |
 | `fable` (w1:pD) | `P111` — settings + adapter absent rows, two of which may be `N/A — platform` | `settings.rs`, `status_bar.rs`, `tiller_agents`, `tiller_usage` |
-| `pi` (w1:p4) | `P112` — can the Wayland lane take synthetic input | `Scripts/` only |
-| `pireview` (w1:p6) | `P115` — are the three cited tests actually red | critic; **sole owner of `INVENTORY-LEDGER.md`** |
+| `pi` (w1:p4) | `P119` — what survives a restart; done `P112`, `P116` Slice C | diagnosis only, no `rust/` |
+| `pireview` (w1:p6) | `P116` Slice A non-chat 10 rows; done `P113`, `P115` | critic; **sole owner of `INVENTORY-LEDGER.md`** |
+
+Updated 17:55. `codex11` runs `gpt-5.6-luna high` — it was `terra high` until a rate-limit prompt
+was answered with a typed digit, which confirms the highlighted default instead of the digit. Answer
+those menus with `send-keys down`/`enter` and read the cursor back.
 
 **Ownership is by file, not by feature.** Two agents in one worktree otherwise overwrite each other
 silently — not as a git conflict, but as one agent reading a file, thinking, and writing over
@@ -376,6 +380,23 @@ are errors, not warnings.
   the code exists to receive a call; only exercising it shows the call does anything (see F-009).
 
 ---
+
+## 2026-08-14 17:40 — the finding that outranks the backlog
+
+**A completed chat turn renders nothing.** The agent runs, answers, and finishes; the tab shows a
+completed-turn ✓, the composer resets, the context ring falls to 5%, and `surface.chat.read` returns
+`user → assistant("ORCHVIS") → turn`. **The transcript draws none of it.** Reproduced twice with
+different messages on a binary containing every chat commit through `c23da36`.
+
+This is why the project's rule exists: **134 tests pass over a transcript that draws nothing.**
+Every row whose evidence is "the transcript shows X" is unprovable until `P117` lands, and any such
+row already marked `PASSED` from a drawn test rather than a live frame should be treated as suspect.
+
+A second content region has the same smell: the Changes list loads 50 real files and is **clipped to
+about 150 px**, cutting its `Untracked` header mid-row. Whether that is one root cause or two is the
+first question `P117` must answer. Full evidence, with capture paths, is in
+`CRITIC-visual-baseline.md` under the 17:40 heading.
+
 
 ## HISTORICAL — 2026-08-13's display crisis (superseded 2026-08-14)
 
