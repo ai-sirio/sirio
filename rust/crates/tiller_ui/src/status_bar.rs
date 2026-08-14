@@ -36,6 +36,10 @@ pub struct UsageBarPrefs {
     pub opencode_visible: bool,
     /// Refresh interval in minutes, the settings surface's unit (1..=60).
     pub refresh_interval_min: i32,
+    /// OpenCode Go workspace-ID override (F-SET-12). A non-empty value is
+    /// routed straight into the fetch, skipping `/_server` discovery;
+    /// empty keeps discovery.
+    pub opencode_workspace_id_override: String,
 }
 
 impl Default for UsageBarPrefs {
@@ -45,6 +49,7 @@ impl Default for UsageBarPrefs {
             codex_visible: true,
             opencode_visible: false,
             refresh_interval_min: 5,
+            opencode_workspace_id_override: String::new(),
         }
     }
 }
@@ -59,6 +64,7 @@ impl UsageBarPrefs {
             codex_visible: snapshot.codex_show_in_bar,
             opencode_visible: snapshot.opencode_show_in_bar,
             refresh_interval_min: snapshot.refresh_interval.clamp(1, 60),
+            opencode_workspace_id_override: snapshot.opencode_workspace_id_override.clone(),
         }
     }
 }
@@ -191,10 +197,22 @@ impl StatusBar {
         self.refresh_task_started = true;
         cx.spawn(async move |this, cx| {
             loop {
+                // The workspace override is read fresh each cycle, so a
+                // settings edit reaches the next fetch without re-arming
+                // the task (F-SET-12).
+                let workspace_override = match this.update(cx, |bar, _| {
+                    let trimmed = bar.prefs.opencode_workspace_id_override.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                };
                 let executor = cx.background_executor();
                 let claude = executor.spawn(async move { ClaudeUsageFetcher::fetch() });
                 let codex = executor.spawn(async move { CodexUsageFetcher::fetch() });
-                let opencode_go = executor.spawn(async move { OpenCodeGoUsageFetcher::fetch() });
+                let opencode_go = executor.spawn(async move {
+                    OpenCodeGoUsageFetcher::fetch(workspace_override.as_deref())
+                });
                 let (claude, codex, opencode_go) = (claude.await, codex.await, opencode_go.await);
                 let interval = match this.update(cx, |bar, cx| {
                     bar.apply_outcomes(claude, codex, opencode_go, cx);
@@ -420,6 +438,7 @@ mod tests {
                     codex_visible: true,
                     opencode_visible: true,
                     refresh_interval_min: 7,
+                    ..Default::default()
                 },
                 cx,
             );
@@ -462,6 +481,7 @@ mod tests {
             codex_show_in_bar: true,
             opencode_show_in_bar: true,
             refresh_interval: 999,
+            opencode_workspace_id_override: "wrk_prefs".into(),
             ..Default::default()
         };
         let prefs = UsageBarPrefs::from_snapshot(&snapshot);
@@ -471,6 +491,10 @@ mod tests {
         assert_eq!(
             prefs.refresh_interval_min, 60,
             "clamped to the stepper range"
+        );
+        assert_eq!(
+            prefs.opencode_workspace_id_override, "wrk_prefs",
+            "the override rides the same snapshot mapping (F-SET-12)"
         );
     }
 

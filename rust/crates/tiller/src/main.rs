@@ -8014,6 +8014,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         codex_show_in_bar: settings.codex_show_in_bar,
         opencode_show_in_bar: settings.opencode_show_in_bar,
         refresh_interval: settings.refresh_interval_min.clamp(1, 60) as i32,
+        opencode_workspace_id_override: settings.opencode_workspace_id_override,
         // F-SET-22 has no AppSettings field yet; do not pretend this UI-only
         // picker is persisted until its schema follow-up lands.
         agent_colors: SettingsSnapshot::default().agent_colors,
@@ -8045,6 +8046,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         codex_show_in_bar: snapshot.codex_show_in_bar,
         opencode_show_in_bar: snapshot.opencode_show_in_bar,
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
+        opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
     }
 }
 
@@ -9939,7 +9941,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_settings_round_trip_maps_all_sixteen_fields_explicitly() {
+    fn persisted_settings_round_trip_maps_all_seventeen_fields_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
@@ -9957,6 +9959,7 @@ mod tests {
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
             refresh_interval_min: 11,
+            opencode_workspace_id_override: "wrk_main".into(),
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -9982,6 +9985,7 @@ mod tests {
         assert!(!snapshot.codex_show_in_bar);
         assert!(snapshot.opencode_show_in_bar);
         assert_eq!(snapshot.refresh_interval, 11);
+        assert_eq!(snapshot.opencode_workspace_id_override, "wrk_main");
 
         let restored = app_settings_from_snapshot(snapshot);
         assert_eq!(restored.appearance, persisted.appearance);
@@ -10014,6 +10018,10 @@ mod tests {
         assert_eq!(
             restored.refresh_interval_min,
             persisted.refresh_interval_min
+        );
+        assert_eq!(
+            restored.opencode_workspace_id_override,
+            persisted.opencode_workspace_id_override
         );
 
         let mut invalid_summarizer = persisted;
@@ -10051,6 +10059,7 @@ mod tests {
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
             refresh_interval_min: 11,
+            opencode_workspace_id_override: "wrk_main".into(),
         };
         store.save_settings(&persisted);
 

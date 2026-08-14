@@ -12,8 +12,8 @@ use tiller_agents::{AgentAvailability, DiscoveryError, try_discover_availability
 use tiller_project::SkillInstallCommand;
 use tiller_theme::{Theme, ThemeMode};
 use tiller_usage::{
-    AgentAccountIdentity, LocalAccountState, UsageProvider, codex_auth_file_path,
-    parse_codex_identity,
+    AgentAccountIdentity, CredentialStore, CredentialStoreError, LocalAccountState,
+    OpenCodeGoUsageFetcher, UsageProvider, codex_auth_file_path, parse_codex_identity,
 };
 
 // The action bound to Escape while the summarizer picker menu is focused.
@@ -359,6 +359,13 @@ pub struct SettingsSnapshot {
     /// "Refresh interval" in minutes (F-SET-10), consumed by the status
     /// bar's fetch loop.
     pub refresh_interval: i32,
+    /// OpenCode Go workspace-ID override (F-SET-12): a `wrk_…` id pasted
+    /// from the opencode.ai URL. Empty means the usage fetch discovers the
+    /// workspace itself; the status bar routes a non-empty value into
+    /// [`OpenCodeGoUsageFetcher::fetch`]. The session cookie is *not*
+    /// here — secrets live in [`CredentialStore`], never the settings
+    /// database.
+    pub opencode_workspace_id_override: String,
     /// Per-agent accent colour choice, in `SummarizerChoice::ALL` order —
     /// Claude Code, Codex, OpenCode, Pi, Oh-My-Pi (F-SET-22).
     pub agent_colors: [AgentAccentColor; 5],
@@ -384,6 +391,7 @@ impl Default for SettingsSnapshot {
             codex_show_in_bar: true,
             opencode_show_in_bar: false,
             refresh_interval: 5,
+            opencode_workspace_id_override: String::new(),
             // Preserves four of the five defaults the surface drew before
             // the picker existed (Claude amber, Codex coral, Pi green,
             // Oh-My-Pi purple); OpenCode moves off the amber it happened to
@@ -715,6 +723,29 @@ pub struct Settings {
     /// Last failure while handing account management to an external terminal.
     /// A failed spawn must be visible rather than implying that login started.
     account_action_error: Option<(ProviderKind, String)>,
+    /// The OpenCode Go session cookie being typed (F-SET-12). Transient UI
+    /// state: Save moves it into [`CredentialStore`], and the field only
+    /// ever renders mask dots — the value is never drawn back or persisted
+    /// through the settings contract.
+    opencode_cookie_input: String,
+    /// Focus handle for the cookie field — the agents search field's
+    /// click-to-focus + raw-keystroke pattern.
+    opencode_cookie_focus: FocusHandle,
+    /// Last failure writing the credential store. A Save that failed must
+    /// say so: the one outcome this control may not have is silently
+    /// dropping the pasted cookie (the macOS original surfaces "Failed to
+    /// update Keychain…" in the same spot).
+    opencode_cookie_error: Option<String>,
+    /// The workspace-ID override (F-SET-12) — part of the persistence
+    /// contract, see [`SettingsSnapshot::opencode_workspace_id_override`].
+    opencode_workspace_id_override: String,
+    /// Focus handle for the override field.
+    opencode_override_focus: FocusHandle,
+    /// Where the cookie is saved: the app's own on-disk store (macOS uses
+    /// the Keychain instead). `None` only when no home directory exists to
+    /// place the store — Save then reports the failure instead of
+    /// pretending it worked.
+    credential_store: Option<CredentialStore>,
     /// Durable grants remembered by the in-app browser. The host seeds this
     /// from its session store and receives revoke callbacks below.
     browser_origins: BTreeSet<String>,
@@ -823,6 +854,12 @@ impl Settings {
             on_install_skill: None,
             on_manage_account: None,
             account_action_error: None,
+            opencode_cookie_input: String::new(),
+            opencode_cookie_focus: cx.focus_handle(),
+            opencode_cookie_error: None,
+            opencode_workspace_id_override: initial.opencode_workspace_id_override,
+            opencode_override_focus: cx.focus_handle(),
+            credential_store: CredentialStore::from_env().ok(),
             browser_origins: BTreeSet::new(),
             on_revoke_browser_origin: None,
             on_revoke_all_browser_origins: None,
@@ -862,6 +899,16 @@ impl Settings {
     /// controlled environment without touching the real `PATH`.
     pub fn with_availability(mut self, availability: Vec<AgentAvailability>) -> Self {
         self.provider_availability = availability;
+        self
+    }
+
+    /// Pins the credential store to an explicit location (F-SET-12).
+    ///
+    /// Production code resolves the store from the environment; this seam
+    /// exists for tests that must exercise Save/Clear against a fixture
+    /// file without touching the user's real store.
+    pub fn with_credential_store(mut self, store: CredentialStore) -> Self {
+        self.credential_store = Some(store);
         self
     }
 
@@ -970,6 +1017,7 @@ impl Settings {
             codex_show_in_bar: self.codex_show_in_bar,
             opencode_show_in_bar: self.opencode_show_in_bar,
             refresh_interval: self.refresh_interval,
+            opencode_workspace_id_override: self.opencode_workspace_id_override.clone(),
             agent_colors: self.agent_colors,
         }
     }
@@ -1256,6 +1304,119 @@ impl Settings {
         {
             self.agent_search.push_str(character);
         }
+        cx.notify();
+    }
+
+    /// Raw-keystroke handling for the OpenCode Go cookie field (F-SET-12),
+    /// the agents search field's backspace/character pattern. The typed
+    /// text stays transient — Save moves it into the credential store.
+    fn on_opencode_cookie_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "backspace" || key == "delete" {
+            self.opencode_cookie_input.pop();
+        } else if let Some(character) = event.keystroke.key_char.as_deref()
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            self.opencode_cookie_input.push_str(character);
+        }
+        cx.notify();
+    }
+
+    /// Raw-keystroke handling for the workspace-ID override (F-SET-12).
+    /// Unlike the cookie this *is* the durable value, so every edit goes
+    /// through the persistence contract — the macOS original binds the
+    /// same field to `@AppStorage` and refreshes usage on change, which
+    /// here falls out of the host routing the changed snapshot into the
+    /// status bar's preferences.
+    fn on_opencode_override_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "backspace" || key == "delete" {
+            self.opencode_workspace_id_override.pop();
+        } else if let Some(character) = event.keystroke.key_char.as_deref()
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            self.opencode_workspace_id_override.push_str(character);
+        }
+        self.changed();
+        cx.notify();
+    }
+
+    /// Saves the typed cookie into the credential store (F-SET-12). On
+    /// success the input clears, the account state flips to signed in and
+    /// the provider's usage bar segment turns on through the persistence
+    /// contract — the macOS Save button's exact side effects (its
+    /// `showInBar = true` + `refreshOpencodeGo` pair rides the existing
+    /// visibility plumbing: `changed()` → host persists → the status bar
+    /// re-derives its preferences and refetches). On failure the input is
+    /// *kept* alongside a visible error: this control's one forbidden
+    /// outcome is dropping the pasted value silently.
+    fn save_opencode_cookie(&mut self, cx: &mut Context<Self>) {
+        let cookie = self.opencode_cookie_input.trim().to_string();
+        if cookie.is_empty() {
+            return;
+        }
+        let outcome = match &self.credential_store {
+            Some(store) => store.set(OpenCodeGoUsageFetcher::COOKIE_KEY, &cookie),
+            None => Err(CredentialStoreError::NoHome),
+        };
+        match outcome {
+            Ok(()) => {
+                self.opencode_cookie_input.clear();
+                self.opencode_cookie_error = None;
+                // Presence in the store we just wrote is known — no disk
+                // re-read needed, and none would say more (presence, not
+                // validity, is the account-state contract).
+                self.provider_accounts.opencode_go =
+                    ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn);
+                self.set_provider_visibility(ProviderKind::OpenCodeGo, true, cx);
+            }
+            Err(error) => {
+                self.opencode_cookie_error =
+                    Some(format!("Failed to update the credential store — {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Deletes the stored cookie (F-SET-12): the account state flips to
+    /// not signed in and the provider leaves the usage bar, mirroring the
+    /// macOS Clear button.
+    fn clear_opencode_cookie(&mut self, cx: &mut Context<Self>) {
+        let outcome = match &self.credential_store {
+            Some(store) => store.delete(OpenCodeGoUsageFetcher::COOKIE_KEY),
+            None => Err(CredentialStoreError::NoHome),
+        };
+        match outcome {
+            Ok(()) => {
+                self.opencode_cookie_error = None;
+                self.provider_accounts.opencode_go =
+                    ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut);
+                self.set_provider_visibility(ProviderKind::OpenCodeGo, false, cx);
+            }
+            Err(error) => {
+                self.opencode_cookie_error =
+                    Some(format!("Failed to update the credential store — {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Clears the workspace-ID override back to discovery (F-SET-12).
+    fn clear_opencode_override(&mut self, cx: &mut Context<Self>) {
+        self.opencode_workspace_id_override.clear();
+        self.changed();
         cx.notify();
     }
 
@@ -1571,6 +1732,7 @@ impl Settings {
         view: ProviderCardView,
         entity: Entity<Self>,
         theme: Theme,
+        window: &Window,
     ) -> gpui::Div {
         let ProviderCardView {
             kind: provider,
@@ -1695,6 +1857,13 @@ impl Settings {
             .child(controls::action_row(refresh_now, theme))
             .child(controls::separator(theme));
 
+        // F-SET-12: only OpenCode Go authenticates with a pasted web
+        // cookie — Claude and Codex read the credential files their own
+        // CLIs write, so their cards have no equivalent rows.
+        if provider == ProviderKind::OpenCodeGo {
+            card = self.opencode_cookie_section(card, entity.clone(), theme, window);
+        }
+
         // F-SET-14: this app never holds its own per-provider credentials
         // (see the "System default" row's comment below), so "Add Account"
         // cannot open an isolated in-app account the way the macOS original
@@ -1762,7 +1931,217 @@ impl Settings {
         card
     }
 
-    fn render_ai_providers(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
+    /// One text-entry row for the OpenCode Go section (F-SET-12): the
+    /// agents search field's click-to-focus + raw-keystroke shape, reused
+    /// for the cookie (masked) and the workspace override (plain).
+    #[allow(clippy::too_many_arguments)]
+    fn opencode_text_field(
+        id: &'static str,
+        display_text: String,
+        placeholder: &'static str,
+        is_empty: bool,
+        focus: FocusHandle,
+        is_focused: bool,
+        theme: Theme,
+        on_focus: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        on_key: impl Fn(&mut Self, &KeyDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        entity: Entity<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let click_entity = entity.clone();
+        let key_entity = entity;
+        div()
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .track_focus(&focus)
+            .w(px(300.0))
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(theme.radii.control)
+            .bg(theme.filter_field_bg)
+            .border_1()
+            .border_color(if is_focused {
+                theme.selection_ring
+            } else {
+                theme.hairline
+            })
+            .cursor(gpui::CursorStyle::IBeam)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                click_entity.update(cx, |this, cx| on_focus(this, window, cx));
+            })
+            .on_key_down(move |event, window, cx| {
+                key_entity.update(cx, |this, cx| on_key(this, event, window, cx));
+            })
+            .text_size(theme.typography.callout)
+            .text_color(if is_empty { theme.meta } else { theme.title })
+            .child(text!(if is_empty {
+                placeholder.to_string()
+            } else {
+                display_text
+            }))
+    }
+
+    /// A caption line under a cookie-section row, the same footnote tone
+    /// `controls::row` uses for descriptions.
+    fn opencode_caption(
+        id: &'static str,
+        caption: &'static str,
+        theme: Theme,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .px(px(theme.cosmic.spacing.xs as f32))
+            .pb(px(theme.cosmic.spacing.xxxs as f32))
+            .text_size(theme.typography.footnote)
+            .text_color(theme.subtitle)
+            .child(text!(caption))
+    }
+
+    /// The OpenCode Go card's session-cookie and workspace-override rows
+    /// (F-SET-12), between the usage controls and the Accounts subsection.
+    fn opencode_cookie_section(
+        &self,
+        mut card: gpui::Div,
+        entity: Entity<Self>,
+        theme: Theme,
+        window: &Window,
+    ) -> gpui::Div {
+        let spacing = theme.cosmic.spacing;
+        let cookie_text = self.opencode_cookie_input.clone();
+        let cookie_is_empty = cookie_text.is_empty();
+        // The cookie renders as mask dots only — the real value is never
+        // drawn, matching the macOS SecureField.
+        let masked = "•".repeat(cookie_text.chars().count());
+        let cookie_field = Self::opencode_text_field(
+            "provider-opencode-cookie-field",
+            masked,
+            "Session cookie",
+            cookie_is_empty,
+            self.opencode_cookie_focus.clone(),
+            self.opencode_cookie_focus.is_focused(window),
+            theme,
+            |this, window, cx| this.opencode_cookie_focus.focus(window, cx),
+            |this, event, window, cx| this.on_opencode_cookie_key(event, window, cx),
+            entity.clone(),
+        );
+
+        // Save is inert while the trimmed input is empty — the same
+        // muted "not wired" rendering every unwirable control here uses,
+        // and the macOS Save button's own disabled condition.
+        let save_entity = entity.clone();
+        let save_handler = if cookie_text.trim().is_empty() {
+            None
+        } else {
+            Some(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                save_entity.update(cx, |this, cx| this.save_opencode_cookie(cx));
+            })
+        };
+        let clear_cookie_entity = entity.clone();
+
+        card = card
+            .child(
+                div()
+                    .w_full()
+                    .px(px(spacing.xs as f32))
+                    .py(px(spacing.xxs as f32))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(cookie_field)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(controls::button_maybe(
+                                "save-opencode-cookie",
+                                "Save",
+                                theme,
+                                save_handler,
+                            ))
+                            .child(controls::button(
+                                "clear-opencode-cookie",
+                                "Clear",
+                                theme,
+                                move |_, _, cx| {
+                                    clear_cookie_entity.update(cx, |this, cx| {
+                                        this.clear_opencode_cookie(cx)
+                                    });
+                                },
+                            )),
+                    ),
+            )
+            .child(Self::opencode_caption(
+                "provider-opencode-cookie-caption",
+                "Paste either the raw token value (e.g. Fe26.2**…) or the full cookie \
+                 header (e.g. auth=Fe26.2**…). Find it in your browser's DevTools → \
+                 Network → any opencode.ai request → Cookie header.",
+                theme,
+            ));
+        if let Some(error) = self.opencode_cookie_error.clone() {
+            card = card.child(
+                div()
+                    .id("provider-opencode-cookie-error")
+                    .debug_selector(|| "provider-opencode-cookie-error".to_string())
+                    .px(px(spacing.xs as f32))
+                    .py(px(spacing.xxxs as f32))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.tab_error)
+                    .child(text!(error)),
+            );
+        }
+        card = card.child(controls::separator(theme));
+
+        let override_text = self.opencode_workspace_id_override.clone();
+        let override_is_empty = override_text.is_empty();
+        let override_field = Self::opencode_text_field(
+            "provider-opencode-workspace-override",
+            override_text.clone(),
+            "Workspace ID override",
+            override_is_empty,
+            self.opencode_override_focus.clone(),
+            self.opencode_override_focus.is_focused(window),
+            theme,
+            |this, window, cx| this.opencode_override_focus.focus(window, cx),
+            |this, event, window, cx| this.on_opencode_override_key(event, window, cx),
+            entity.clone(),
+        );
+        let clear_override_entity = entity;
+        let clear_override_handler = if override_is_empty {
+            None
+        } else {
+            Some(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                clear_override_entity.update(cx, |this, cx| this.clear_opencode_override(cx));
+            })
+        };
+        card.child(
+            div()
+                .w_full()
+                .px(px(spacing.xs as f32))
+                .py(px(spacing.xxs as f32))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(override_field)
+                .child(controls::button_maybe(
+                    "clear-opencode-workspace-override",
+                    "Clear",
+                    theme,
+                    clear_override_handler,
+                )),
+        )
+        .child(Self::opencode_caption(
+            "provider-opencode-workspace-caption",
+            "Find this in the URL after logging into opencode.ai \
+             (e.g. opencode.ai/workspace/wrk_…/go).",
+            theme,
+        ))
+        .child(controls::separator(theme))
+    }
+
+    fn render_ai_providers(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
         let cards = [
             ProviderCardView::new(
@@ -1794,7 +2173,7 @@ impl Settings {
         for card in cards {
             page = page.child(settings_section(
                 card.title,
-                self.render_provider_card(card, entity.clone(), theme),
+                self.render_provider_card(card, entity.clone(), theme, window),
                 theme,
             ));
         }
@@ -2641,7 +3020,7 @@ impl Render for Settings {
         let entity = cx.entity();
         let category_sidebar = self.render_categories(theme, entity.clone());
         let detail = match self.category {
-            SettingsCategory::AiProviders => self.render_ai_providers(theme, entity.clone()),
+            SettingsCategory::AiProviders => self.render_ai_providers(theme, entity.clone(), window),
             SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window),
             SettingsCategory::General => self.render_general(theme, entity.clone()),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
@@ -3391,6 +3770,356 @@ mod tests {
             assert_eq!(command.program, program);
             assert_eq!(command.args, args);
         }
+    }
+
+    fn cookie_test_states() -> ProviderAccountStates {
+        ProviderAccountStates {
+            claude: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
+            codex: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
+            opencode_go: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
+        }
+    }
+
+    /// F-SET-12: typing a cookie and clicking Save writes the credential
+    /// store, clears the input, signs the provider in and turns its usage
+    /// bar segment on through the persistence contract — the macOS Save
+    /// button's exact side effects, driven through the real click/key path.
+    #[gpui::test]
+    async fn opencode_cookie_save_stores_signs_in_and_shows_in_bar(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-cookie-save-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Empty input: Save is inert — clicking it must write nothing.
+        let save = cx
+            .debug_bounds("save-opencode-cookie")
+            .expect("the Save button is drawn");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            CredentialStore::at(&store_path)
+                .get(OpenCodeGoUsageFetcher::COOKIE_KEY)
+                .is_none(),
+            "an inert Save writes nothing"
+        );
+
+        // Focus the field the way a user does, type, save.
+        let field = cx
+            .debug_bounds("provider-opencode-cookie-field")
+            .expect("the cookie field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Fe26demo");
+        cx.run_until_parked();
+        let save = cx
+            .debug_bounds("save-opencode-cookie")
+            .expect("Save stays drawn with text in the field");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            CredentialStore::at(&store_path).get(OpenCodeGoUsageFetcher::COOKIE_KEY),
+            Some("Fe26demo".to_string()),
+            "Save writes the typed cookie into the store"
+        );
+        assert!(
+            cx.debug_bounds("provider-opencode-cookie-error").is_none(),
+            "a successful Save shows no error"
+        );
+        let (input, signed_in, show_in_bar) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.opencode_cookie_input.clone(),
+                settings.provider_accounts.opencode_go.signed_in,
+                settings.opencode_show_in_bar,
+            )
+        });
+        assert!(input.is_empty(), "a saved cookie clears the input");
+        assert!(signed_in, "the account state flips to signed in");
+        assert!(show_in_bar, "Save turns the usage bar segment on");
+        let last = saved
+            .borrow()
+            .last()
+            .cloned()
+            .expect("Save routed a snapshot through on_change");
+        assert!(
+            last.opencode_show_in_bar,
+            "the persisted snapshot carries the visibility for the status bar"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-12: Clear deletes the stored cookie, signs the provider out
+    /// and removes it from the usage bar — the macOS Clear button's side
+    /// effects. The masked field never echoed the stored value, so there
+    /// is nothing to blank.
+    #[gpui::test]
+    async fn opencode_cookie_clear_deletes_and_signs_out(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-cookie-clear-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let store = CredentialStore::at(&store_path);
+        store
+            .set(OpenCodeGoUsageFetcher::COOKIE_KEY, "auth-seeded")
+            .expect("seed the stored cookie");
+
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                let mut states = cookie_test_states();
+                states.opencode_go =
+                    ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn);
+                let snapshot = SettingsSnapshot {
+                    opencode_show_in_bar: true,
+                    ..Default::default()
+                };
+                Settings::with_snapshot(cx, snapshot)
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(states)
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let clear = cx
+            .debug_bounds("clear-opencode-cookie")
+            .expect("the Clear button is drawn");
+        cx.simulate_click(clear.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            store.get(OpenCodeGoUsageFetcher::COOKIE_KEY).is_none(),
+            "Clear deletes the stored cookie"
+        );
+        let (signed_in, show_in_bar) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.provider_accounts.opencode_go.signed_in,
+                settings.opencode_show_in_bar,
+            )
+        });
+        assert!(!signed_in, "clearing the cookie signs the provider out");
+        assert!(!show_in_bar, "Clear removes the provider from the usage bar");
+        let last = saved
+            .borrow()
+            .last()
+            .cloned()
+            .expect("Clear routed a snapshot through on_change");
+        assert!(!last.opencode_show_in_bar);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-12's forbidden outcome, inverted into a test: a Save that
+    /// cannot write the store must keep the typed value and show the
+    /// failure — never silently drop the cookie.
+    #[gpui::test]
+    async fn opencode_cookie_save_failure_keeps_the_input_and_reports(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        // The store path's parent is a regular *file*, so creating the
+        // store directory fails deterministically — no chmod games, no
+        // root special-casing.
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-cookie-fail-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        std::fs::write(dir.join("blocker"), b"").expect("create blocking file");
+        let store_path = dir.join("blocker").join("credentials.json");
+
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("provider-opencode-cookie-field")
+            .expect("the cookie field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Fe26demo");
+        cx.run_until_parked();
+        let save = cx
+            .debug_bounds("save-opencode-cookie")
+            .expect("the Save button is drawn");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("provider-opencode-cookie-error").is_some(),
+            "a failed Save is visible"
+        );
+        let (input, signed_in, show_in_bar, error) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.opencode_cookie_input.clone(),
+                settings.provider_accounts.opencode_go.signed_in,
+                settings.opencode_show_in_bar,
+                settings.opencode_cookie_error.clone(),
+            )
+        });
+        assert_eq!(
+            input, "Fe26demo",
+            "a failed Save keeps the typed cookie — dropping it silently is the defect"
+        );
+        assert!(!signed_in, "a failed Save must not claim the provider signed in");
+        assert!(!show_in_bar, "a failed Save must not turn the bar segment on");
+        let error = error.expect("the failure message is held");
+        assert!(
+            error.starts_with("Failed to update the credential store —"),
+            "the message names the store, not a Keychain this platform lacks: {error}"
+        );
+        assert!(
+            saved.borrow().is_empty(),
+            "a failed Save persists nothing through on_change"
+        );
+        assert!(!store_path.exists(), "no store file appears behind the failure");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-12: the workspace override is a durable settings value —
+    /// every edit flows through the persistence contract, and Clear
+    /// resets it to discovery.
+    #[gpui::test]
+    async fn opencode_workspace_override_edits_persist_and_clear(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-override-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("provider-opencode-workspace-override")
+            .expect("the override field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("wrkdemo");
+        cx.run_until_parked();
+
+        let snapshot = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .snapshot()
+        });
+        assert_eq!(
+            snapshot.opencode_workspace_id_override, "wrkdemo",
+            "the keystrokes reached the persistence contract"
+        );
+        assert_eq!(
+            saved
+                .borrow()
+                .last()
+                .expect("edits routed through on_change")
+                .opencode_workspace_id_override,
+            "wrkdemo"
+        );
+
+        let clear = cx
+            .debug_bounds("clear-opencode-workspace-override")
+            .expect("the override Clear button is drawn");
+        cx.simulate_click(clear.center(), Modifiers::none());
+        cx.run_until_parked();
+        let snapshot = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .snapshot()
+        });
+        assert_eq!(
+            snapshot.opencode_workspace_id_override, "",
+            "Clear resets the override to discovery"
+        );
+        assert_eq!(
+            saved
+                .borrow()
+                .last()
+                .expect("Clear routed a snapshot through on_change")
+                .opencode_workspace_id_override,
+            ""
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[gpui::test]

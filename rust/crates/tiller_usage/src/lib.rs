@@ -10,12 +10,14 @@
 //!   `$CODEX_HOME/auth.json` — the file `codex` itself writes) and calls
 //!   `chatgpt.com/backend-api/wham/usage`, refreshing the access token
 //!   through OpenAI's token endpoint when it is rejected ([`codex`]).
-//! - **OpenCode Go** reads its session cookie from the macOS Keychain (the
-//!   `com.tiller.usage` item the Swift app writes) and scrapes its usage
-//!   page on opencode.ai ([`opencode_go`]).
+//! - **OpenCode Go** reads its session cookie from this platform's local
+//!   store — the app's own [`CredentialStore`] here, the `com.tiller.usage`
+//!   Keychain item on macOS — and scrapes its usage page on opencode.ai
+//!   ([`opencode_go`]).
 //!
-//! Ollama Cloud is not implemented: it needs a session cookie this app has
-//! no store for, and no local state exists to read instead.
+//! Ollama Cloud is not implemented: it needs a session cookie whose store
+//! integration has not been built yet, and no local state exists to read
+//! instead.
 //!
 //! # Contract
 //!
@@ -35,12 +37,14 @@
 mod account;
 mod claude;
 mod codex;
+mod credentials;
 mod http;
 mod model;
 mod ollama;
 mod opencode_go;
 
 pub use account::{AgentAccountIdentity, LocalAccountState, parse_codex_identity};
+pub use credentials::{CredentialStore, CredentialStoreError};
 pub use claude::{
     ClaudeUsageFetcher, classify_failure, claude_config_dir, claude_has_credentials_at,
     parse_claude_usage,
