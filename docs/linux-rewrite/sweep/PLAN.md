@@ -81,6 +81,24 @@ fast slices wait for the slow one.
   one file is a check-then-write race; they emit structured verdicts and one writer applies
   them.
 
+## Capacity, measured rather than assumed
+
+Seven nested compositors sounded like the risk, so it was measured before being accepted.
+One instance under `TILLER_WL_KEEP=1`, with processes identified by their **environment**
+(`grep TILLER_WL_LABEL` in `/proc/<pid>/environ`) rather than by name:
+
+| process | RSS |
+|---|---|
+| `target/debug/tiller` | 257 MB |
+| `sway` | 51 MB |
+| **one instance** | **307 MB** |
+
+Seven instances ≈ 2.1 GB against 15 GB free on a 12-core, 32 GB machine. The Workflow
+concurrency cap here is `min(16, CPUs − 2) = 10`, so all seven slices start at once and
+memory is not the binding constraint. The probe was killed by the same env-var match that
+found it — never by process name, per `WAYLAND-LANE.md` trap 4, because a name match would
+have taken every sibling agent's app down with it.
+
 ## Pre-flight, in order
 
 1. Wait for all four worker panes to leave `working`. Do not interrupt a live dispatch.
