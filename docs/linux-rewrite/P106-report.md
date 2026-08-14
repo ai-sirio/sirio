@@ -198,3 +198,152 @@ ctl surface.settings.read
 ```
 
 The response reported `fileIcons:"Material"`. The capture rendered a File icons control showing only `Material`; no second selectable icon set was present: `/tmp/codex12-p2-shots/07-settings-appearance.png`. The chooser surface was visible, but no segment click could be delivered and no icon-set change was observed. The second-option/change half remains owed to a lane with pointer input.
+
+## codex11 — core, usage, control, and agents
+
+Operator: `codex11`. The requested Wayland lane was attempted with label `p106-c11`, but sway
+could not bind a nested `wayland-N` socket (`Unable to open wayland socket`); it produced no
+usable frame. A private X11 app instance on `DISPLAY=:1` was then driven only through
+`/tmp/p106-c11.sock`, with `/tmp/p106-c11.sqlite`. No shared-display pointer, keyboard, or
+capture was used. The X11 app process was live for the socket exercises below.
+
+### Rows 1–10
+
+### F-BRW-08
+
+Drove:
+
+```text
+surface settings open --section permissions
+surface settings read
+```
+
+Both CLI calls returned `settings\tPermissions`. The raw `surface.settings.open` response was
+`{"ok":true}` with `sectionId:"permissions"`, `section:"Permissions"`, and the five available
+sections including Permissions. It contained no browser-origin rows or grant list. There is no
+control-socket action for per-origin Revoke or Revoke all, and no browser grant was created, so no
+revoke effect or prompt reappearance was observed. No capture: the Wayland compositor failed
+before the first frame, and this row's browser-content path is outside the headless X11 evidence.
+
+### F-USE-03
+
+Drove:
+
+```text
+surface settings open --section ai-providers
+surface settings read
+```
+
+The raw response reported Claude Code, Codex, OpenCode, Pi, and Oh-My-Pi as `available:"true"`
+and `status:"Available"`; it reported `claudeShowInBar:"true"`, `codexShowInBar:"true"`, and
+`opencodeShowInBar:"false"`. This is provider/settings state, not a usage-bar readback: the
+control socket exposes no usage-state injection or status-bar read method. Loading, stale,
+logged-out, and error transitions were not reached live.
+
+The `tiller_usage` package run exercised the existing parser/outcome tests, including
+`codex::tests::refresh_401_is_classified_by_its_provider_reason`, credential-file loading, stale
+credentials, missing credentials, bounded fetch, and unavailable-state replacement; the package
+reported 27 unit, 3 account, 1 location, and 7 usage integration tests passed. A narrow
+`tiller_ui` status-bar test could not start because an unrelated concurrent edit in
+`rust/crates/tiller_ui/src/chat.rs` does not initialize/match the new `Entry::Permission.dismissed`
+field (two compile errors before tests ran). No UI capture was obtained.
+
+### F-CORE-USG-06
+
+The built classification path was exercised by the existing
+`refresh_401_is_classified_by_its_provider_reason` test in the `tiller_usage` run. The live app
+has no control method for substituting controlled OAuth responses. Static reachability showed
+`CodexTokenRefresher`'s production path posts to the fixed `https://auth.openai.com/oauth/token`
+through `tiller_usage/src/http.rs::post`, which shells out directly to `curl`; no injectable
+transport or test-server URL is available. I did not refresh or rotate the user's real Codex
+tokens. Controlled success, reused, revoked, expired, and other-error HTTP observations were
+therefore not obtained from the running app. No capture.
+
+### F-CORE-USG-07
+
+The same `tiller_usage` run exercised credential loading, missing/old refresh timestamps, real
+usage parsing, bounded fetch, and unavailable/error reducer tests. The private app's Settings
+socket response exposed provider availability but no usage-fetch control or outcome injection.
+`CodexUsageFetcher::fetch` reaches the same fixed ChatGPT backend through the direct `curl` helper;
+there is no controlled credential/backend seam. I did not run a live fetch against the user's
+credentials or mutate the auth file. Valid, refresh-needed, missing, and rejected credential
+outcomes were not all observed in the running app. No capture.
+
+### F-CTRL-CLI-02
+
+Drove a real Tiller-created shell pane:
+
+```text
+panel create --cmd 'printf P106_TILLERCTL_PATH=; command -v tillerctl || true; printf P106_TILLERCTL_SIBLING=; readlink -f /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl'
+panel wait pane-491706-1 --timeout-ms 2000
+panel read pane-491706-1
+```
+
+`panel create` returned `pane-491706-1`; `panel wait` returned `0`. Decoding the base64
+`panel read` result produced exactly:
+
+```text
+P106_TILLERCTL_PATH=P106_TILLERCTL_SIBLING=/home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl
+```
+
+The first field is empty: bare `command -v tillerctl` found nothing in the spawned shell's PATH.
+The sibling executable resolved by the second probe exists. `panel list --json` showed the new
+control pane alongside the restored Chat and Terminal panes. No agent-launch control method was
+available to trigger `prepare`/hook execution; the generated-hook install path was not reached
+by this socket-only exercise. No capture.
+
+### F-USE-01
+
+Drove:
+
+```text
+current-workspace --json
+surface settings open --section appearance
+surface settings read
+```
+
+`current-workspace --json` returned the selected `linux/gpui-waku` worktree at
+`/home/enzopalmisano/Scrivania/Progetti/tiller-linux`. The Settings response carried
+`refreshInterval:"5"`, `socketPath:"/tmp/p106-c11.sock"`, and the current theme/font values.
+There is no socket method that reads the bottom usage bar or invokes its refresh control. The
+worktree-selection state was reached; the visible gear/refresh/worktree bar and refresh gesture
+were not observed. No capture.
+
+### F-USE-02
+
+Drove the AI Providers section and read the same live response. Its provider visibility fields
+were `Claude=true`, `Codex=true`, `OpenCode=false`, and all five installed provider paths were
+reported Available. This confirms the settings state carried into the app instance, but no
+control call returns the rendered provider segments or their unavailable tooltips, and no pointer
+input was sent. The segment/tooltip behavior was not observed visually. No capture.
+
+### F-CORE-ACT-24
+
+The built planner was exercised by:
+
+```text
+cargo test -p tiller_activity --test activity_domain_integration
+```
+
+`f_core_act_24_restore_plan_keys_refs_by_stable_content_not_live_pane` passed. Its observed plan
+had one resumable reference for live stable content `terminal-stable` and one prunable reference
+for absent content with session ref `session-b`. The missing runtime half was rechecked with:
+`rg 'AgentSessionRestorePlan::plan' rust/crates`; the only call is the integration test, not
+`crates/tiller/src`. No launch/relaunch restore observation or capture.
+
+### F-CORE-ACT-25
+
+The same activity integration run passed
+`f_core_act_25_bootstrap_prioritizes_selected_open_worktree_and_defers_the_rest`: selected `w3`
+was first, open `w1` second, and closed/deferred `w2` was deferred. Re-running
+`rg 'BootstrapRestoreOrder::partition' rust/crates` found only the integration test, with no
+production launch-restoration caller. No multi-worktree relaunch observation or capture.
+
+### F-CORE-ACT-26
+
+The same run passed
+`f_core_act_26_mount_policy_evicts_only_safe_oldest_worktrees_until_cap`: with cap 2, selected
+`w4`, running `w2`, unsaved error `w3`, and done `w1`, the returned eviction list was exactly
+`["w1"]`. Re-running `rg 'WorktreeMountPolicy::ids_to_evict' rust/crates` found only the
+integration test, with no production mount/eviction caller. No cap-driven live mount observation
+or capture.
