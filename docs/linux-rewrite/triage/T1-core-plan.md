@@ -241,3 +241,110 @@ partial eviction path to find; both the policy and the trigger are absent togeth
 - **size**: M
 - **sharedCause**: shares its root with the mount-cap half of `F-CORE-SET-01` below — one
   missing "read `mount_cap`, call `ids_to_evict` when it's exceeded" call site closes both.
+
+---
+
+## `F-CORE-DOM-03` — NOT EXERCISED
+
+**Needs: exercise**, and the instrument, not the code, is the blocker. `Add Project` calls
+`cx.prompt_for_paths` (`rust/crates/tiller/src/main.rs:6491`) — GPUI's native file-dialog
+wrapper, which on Linux routes through the xdg-desktop-portal `FileChooser`. That's the
+correct, real call; there's nothing to build. `docs/linux-rewrite/ENVIRONMENT.md:77` already
+documents why the capture came back empty: "the portal file picker is Wayland-side and
+invisible to X captures... will not appear in a screenshot even when it is open." The nested
+compositor this pass ran under can't render a portal dialog owned by the host desktop
+session. Gesture: repeat the click from a lane with a real portal backend visible to the
+capture tool (a host-desktop Wayland session, not the nested/headless one), or accept a
+human-hand confirmation per `ENVIRONMENT.md`'s own guidance for portal/XDND cases.
+
+- **files**: none (exercise only, environment-limited)
+- **size**: S
+
+---
+
+## `F-CORE-DOM-07` — NOT EXERCISED
+
+**Needs: build.** Confirmed: `AutoNamingThrottle`/`should_request`/`record_request`
+(`rust/crates/tiller_project/src/domain.rs:92-114`) have zero callers outside `domain.rs`
+itself and its own test. Separately, `rust/crates/tiller/src/main.rs:7822-7829`'s
+`generated_worktree_branch()` — the `wt-<seconds>` fallback namer P116's evidence actually
+observed — is a plain unrelated timestamp-based default branch name for a *new* worktree; it
+has nothing to do with throttled LLM-generated naming from a growing chat transcript. The
+`auto_naming` setting itself is real (a persisted boolean, `main.rs:1855,8026`,
+`SummarizerChoice`-backed) but only gates *whether the feature is enabled* — no call site
+anywhere feeds a growing transcript's length into `AutoNamingThrottle::should_request`, asks
+the chosen summarizer agent for a name, or renames anything as a result. The whole
+generate-and-apply path this row's clause describes doesn't exist yet; only its settings
+plumbing (`auto_naming`, `summarizer_agent`) does.
+
+- **files**: `rust/crates/tiller/src/main.rs` (new call site: on chat/terminal transcript
+  growth in an auto-naming-enabled worktree, check `AutoNamingThrottle::should_request`, and
+  on a hit, invoke the chosen `summarizer_agent` adapter and apply the generated name to the
+  worktree/tab), `rust/crates/tiller_project/src/domain.rs` (no change expected; throttle
+  logic already correct and tested in isolation)
+- **size**: M
+
+---
+
+## `F-CORE-WSP-04` — NOT EXERCISED
+
+**Needs: build.** Confirmed: `LayoutCommand`/`classify_layout_command`
+(`rust/crates/tiller_project/src/layout.rs:282,333`) have no consumption anywhere outside
+`layout.rs` itself — the only hits in `lib.rs` are `pub use` re-exports, which
+`DEAD-MODULES.md`'s own rule 1 ("publication is not consumption") already establishes don't
+count. Grepped `rust/crates/tiller/src` and `rust/crates/tiller_ui/src` directly: zero.
+`panel.split` (what P116 actually drove) goes through `PaneRegistry::split`
+(`main.rs:1131`) — a separate, simpler raw-PTY split mechanism with no relationship to
+`LayoutCommand`'s insert/move/close/activate/divider/view-state/rename vocabulary. This
+matches `SEAMS.md`'s open "Terminal pane composition" seam almost exactly: Half A
+(`tiller_terminal`'s pane-cache/focus-by-content-id machinery) is credited there to `codex11`;
+Half B — composing the recursive pane tree through this actual `LayoutCommand` vocabulary in
+`main.rs` — is still unowned/unstarted. Whoever picks this up should read that SEAMS.md entry
+first; it's the same gap from the pane-composition side, this row is it from the
+command-vocabulary side.
+
+- **files**: `rust/crates/tiller/src/main.rs` (the real integration point — replace or wrap
+  `PaneRegistry::split`'s raw path with `classify_layout_command`-driven handling for insert,
+  move, close, activate, divider-fraction, view-state, rename), `rust/crates/tiller_project/
+  src/layout.rs` (no change expected; the command classification is already correct and
+  tested in isolation)
+- **size**: L — this is the SEAMS.md pane-composition Half B, not a small wiring fix.
+
+---
+
+## `F-CORE-WSP-08` — NOT EXERCISED
+
+**Needs: build.** Confirmed, and worth being blunt about scope: `WorkspaceTabViewState`
+(`rust/crates/tiller_project/src/layout.rs:113-123` — editor caret/selection/scroll/folds,
+chat draft/attachments/transcript/follows-tail, terminal viewport) has **zero references
+anywhere outside `layout.rs`** — it's part of the same unwired `LayoutCommand` subsystem as
+WSP-04 above (same file, same dead cluster). But the deeper finding is that the app's *actual*
+persisted tab model is a completely separate, parallel type: `SessionTab`/`SessionTabState`
+(`rust/crates/tiller/src/session.rs:79,286`) — the one `main.rs` genuinely persists and
+restores tabs through (33 references in `main.rs`) — has **none of these fields**. Its
+`SessionTabState` carries only `root_id`, `pane_events` (a split/close/resize event log), and
+bounded terminal `scrollback`. There is no editor caret/scroll/folds field, no chat
+draft/attachments/transcript/follows-tail field, anywhere in the model that's actually wired
+to persistence. This is exactly the "parallel-model trap" `DEAD-MODULES.md` already named for
+`sidebar.rs:33`'s duplicated `ActivityStatus` — a real, working model exists in one crate,
+and a second, unrelated, unused one sits in another, and only the second one has the shape
+this row's clause describes.
+
+Building this for real means adding these fields to the model that's actually live
+(`SessionTabState`, not `WorkspaceTabViewState`), populating them from the editor/chat/terminal
+views when a tab closes or the app quits, and restoring them when a tab reopens — a genuine
+per-surface state-capture feature, not a wiring fix. `WorkspaceTabViewState` may still be worth
+reading as a reference for the field shape, but adopting it as the live type would mean
+threading `tiller_project::layout` into the actual persistence path (`tiller/src/session.rs`),
+a larger structural change than adding the fields directly to `SessionTabState`.
+
+- **files**: `rust/crates/tiller/src/session.rs` (`SessionTabState`/`SessionTab` need new
+  fields and (de)serialization for them), `rust/crates/tiller/src/main.rs` (capture on
+  tab-close/quit from `Editor`/`ChatSession`/terminal views, restore on tab-open — the editor,
+  chat, and terminal view types all live in `tiller_ui`/`tiller_terminal` but are driven from
+  here), `rust/crates/tiller_ui/src/editor.rs` and `rust/crates/tiller_ui/src/file_view.rs`
+  (expose caret/selection/scroll/fold state to capture), `rust/crates/tiller_ui/src/chat.rs`
+  (expose draft/attachments/follows-tail state to capture) — `rust/crates/tiller_project/src/
+  layout.rs` itself needs no change; it's reference shape, not the file to extend
+- **size**: L — a real per-surface state-capture feature across three UI surfaces, not a
+  wiring fix.
