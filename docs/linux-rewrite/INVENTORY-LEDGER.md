@@ -432,7 +432,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-CTRL-NOTIFY-01` | PASSED | agent statuses accepted, unknown rejected; user mode listable | pass 6 |
 | `F-CTRL-NOTIFY-02` | PASSED | replayed `tillerctl_rejects_ambiguous_notify_modes` green (pass 14) — title combined with agent-mode options errors before socket use | pass 14 |
 | `F-CTRL-SESSION-01` | PASSED | session.ref survived relaunch; resumed real claude session | pass 6 |
-| `F-CTRL-WORK-01` | FAILED — defective | worktree.set comment gone after relaunch; no comment column | pass 6 |
+| `F-CTRL-WORK-01` | FAILED — defective | verdict stands, **evidence corrected — the pass-6 "no comment column" is false and would have sent someone to build what exists**. The column is real: `migrations.rs:156` adds it, `model.rs:73` carries `comment: Option<String>`, and `db.rs:244` writes it in the worktree upsert (`comment = excluded.comment`). The actual cause is one line up the stack — `main.rs:328` declares the `worktree.set` annotation a runtime field and comments it **"intentionally not persisted"**. So the comment is lost by design, not for want of storage, and the fix is to route `worktree.set` into the existing column rather than to add one. Whoever takes this should also settle whether the contract wants persistence at all, since the code states the opposite intent deliberately | orchestrator audit, 2026-08-14 |
 | `F-CTRL-SYS-01` | PASSED | replayed `tillerctl_ping_prints_pong` green (tillerctl bin tests, pass 14) — app responds with documented `{pong:true}` | pass 14 |
 | `F-CTRL-SYS-02` | PASSED | explicit workspace / TILLER_PANE_ID env / fallback / no-context live | pass 6 |
 | `F-CTRL-WORK-02` | PASSED | rows sorted, selected flag live | pass 6 |
@@ -466,8 +466,8 @@ touched the entry — those rows do **not** count toward done.
 | `F-AGENT-OPENCODE-03` | FAILED — absent | no summarizer-command generator exists in the port (grep `run --pure`/summarizer → nothing in tiller_agents/tiller_project; the only summarizer code is the settings SummarizerChoice, no command); opencode itself is now installed (1.18.18) so this is absence, not environment | pass 16 |
 | `F-AGENT-PI-01` | PASSED | bare launch + resume shape; pi --print ran live | pass 6 |
 | `F-AGENT-PI-02` | PASSED | bare launch + resume shape; pi --print ran live | pass 6 |
-| `F-AGENT-OMP-01` | FAILED — defective | wrong binary name: the real distribution installs `oh-my-pi` (package.json bin = {oh-my-pi}, no alias — verified pass 16), but the adapter's id/command use `omp` (omp.rs:35,65) — `find_executable_on_path("omp")` is None and `omp --hook …` would fail at spawn; the product IS installed, the name the adapter seeks does not exist | pass 16 |
-| `F-AGENT-OMP-02` | FAILED — defective | unreachable because of the same wrong-name defect as OMP-01 (adapter seeks `omp`, distribution ships `oh-my-pi`); the hook file generation itself (omp-hook.ts) is name-correct but the session can never launch to emit start/turn/shutdown events | pass 16 |
+| `F-AGENT-OMP-01` | NOT EXERCISED | **the pass-16 defect is fixed at source and the row is stale.** The adapter now separates the two names it was conflating: `id()` returns `"omp"` (omp.rs:35 — a Tiller-internal identifier, and the line pass 16 read as a binary name) while `executable_name()` returns `"oh-my-pi"` (:43), and both command builders spawn the real name — `oh-my-pi --hook …` (:69) and `oh-my-pi --hook … --resume=…` (:81). That matches the installed distribution (`oh-my-pi` 0.2.0). **Not upgraded past NOT EXERCISED**: no omp session has been launched through Tiller, and code-correct is not exercised. This is now a cheap live row — the binary exists on this box | orchestrator audit, 2026-08-14 |
+| `F-AGENT-OMP-02` | NOT EXERCISED | the stated cause is void: this row's whole evidence was "unreachable because of OMP-01's wrong-name defect", and that defect is fixed (see `F-AGENT-OMP-01`). The hook file generation was already noted name-correct. Nothing now blocks a launch, and nothing has yet exercised one — so the start/turn/shutdown events remain unobserved. **Verify with the hook, not the process**: `tillerctl notify` arriving from the omp hook is the clause, and a session that launches without emitting is a different failure than one that cannot launch | orchestrator audit, 2026-08-14 |
 | `F-AGENT-OMP-03` | FAILED — absent | two layers: no summarizer-command generator exists anywhere in the port (grep summarizer → only the settings choice, no command), and the launch name `omp` doesn't match the distribution's `oh-my-pi` (OMP-01) | pass 16 |
 | `F-AGENT-SAFE-01` | half-proven | worktree-local half measured pass 11 (fake HOME unchanged); skill-provisioning half absent — only the npx command builder exists (in `tiller_project`, not `tiller_agents`: scope correction to the pass-11 evidence), no management-marker or overwrite-refusal logic anywhere (pass 14 re-check) | pass 14 |
 | `F-AGENT-SAFE-02` | UNREACHABLE | the three migration tests are real and green, and the row's own note — "nothing invokes `ClaudeHookMigrator` at launch/session" — is the disproof of its own verdict. Re-swept 2026-08-14: `ClaudeHookMigrator` (exported `tiller_agents/src/lib.rs:20`) has **0 references** in the app crates. Stale `tillerctl` hook paths are therefore never migrated on a real launch. Note this compounds `P87`: the app writes the literal `"tillerctl"` (main.rs:4706/4713/5035/5046), and the migrator that would repair such paths never runs | orchestrator audit, grep evidence, 2026-08-14 |
@@ -570,10 +570,10 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 | PASSED | **196** |
 | half-proven | **24** |
 | FAILED — absent | **88** |
-| FAILED — defective | **29** |
+| FAILED — defective | **27** |
 | UNREACHABLE | **20** |
 | N/A — platform | **12** |
-| NOT EXERCISED | **19** |
+| NOT EXERCISED | **21** |
 | NOT EXERCISED — blocked on display | **0** |
 | builder-claimed, unverified | **1** |
 | **total** | **389** |

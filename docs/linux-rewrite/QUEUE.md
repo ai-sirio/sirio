@@ -2169,3 +2169,46 @@ The Files panel paints **over** the open context menu and truncates its long lab
 elements, so paint order is ours to fix — unlike the P72 webview occlusion, where a native child
 window sits above the GL surface and cannot be reordered. Recorded on `F-TERM-UI-01` so whoever
 drives that row does not report it as a missing menu.
+
+## A wrong fact in a frozen reference outlives the row it came from — 2026-08-14, 08:55
+
+Sweeping `FAILED — defective` (29 rows, never audited) for staleness. Most are recent and hold. Two
+did not, and the second one matters more than its row.
+
+**`F-AGENT-OMP-01` / `-02` — the adapter was never broken.** Pass 16 read `omp.rs:35` as the binary
+name and recorded "adapter seeks `omp`, distribution ships `oh-my-pi`". Line 35 is `id()`, Tiller's
+internal identifier. The binary comes from `executable_name()` at :43, which returns `"oh-my-pi"`,
+and both command builders spawn that name (:69, :81). The adapter matches the installed
+distribution. Both rows move to `NOT EXERCISED` — **not `PASSED`**, because nobody has launched an
+omp session and code-correct is not exercised. They are now among the cheapest live rows on the
+board: the binary is installed and nothing blocks a launch.
+
+### The part worth keeping
+
+That wrong reading had been copied into `ENVIRONMENT.md`, which is a frozen reference every brief is
+told to link to instead of restating. So for two passes the file told builders, as measured fact,
+that the omp adapter looks for a binary that does not exist — and it carried a *reason* ("no symlink
+was created to paper over that"), which is what made it convincing.
+
+**A ledger row is read by whoever works that row; a reference file is read by everyone.** A wrong
+fact in the ledger costs one agent an hour. The same fact in `ENVIRONMENT.md` sets the prior for
+every agent who reads it, and it is the one file nobody re-derives, precisely because we told them
+not to. Corrected in place with the correction marked, not silently — the previous claim was
+specific enough that somebody may have acted on it.
+
+**When a ledger row is overturned, grep the reference files for the claim it rested on.** The row and
+the doc were written by the same pass from the same misreading, and only the row is on anyone's list
+to re-check.
+
+### `F-CTRL-WORK-01` — right verdict, evidence that would have misdirected the fix
+
+Pass 6: "worktree.set comment gone after relaunch; **no comment column**". The column has existed for
+some time — `migrations.rs:156` adds it, `model.rs:73` carries it, `db.rs:244` writes it in the
+worktree upsert. The real cause is `main.rs:328`, which declares the `worktree.set` annotation a
+runtime field and comments it **"intentionally not persisted"**.
+
+The verdict was right and the evidence was wrong, which is the most expensive combination: nobody
+re-checks a row that already reads `FAILED`, and the first person to fix it would have written a
+migration for a column that is already there. Whoever takes it now also has to settle a question
+pass 6 could not see — the code states non-persistence as *intent*, so this may be a contract
+disagreement rather than a bug.

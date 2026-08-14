@@ -180,9 +180,30 @@ blankness.
 | `oh-my-pi` | 0.2.0 — **ships the binary `oh-my-pi`, with no `omp` alias** |
 | `pi` | installed |
 
-`tiller_agents/src/omp.rs:35` hardcodes `"omp"`. **No symlink was created to paper over that**: if
-our adapter looks for a binary the distribution does not provide, the omp rows are defective for the
-wrong name, not unreachable for a missing install. That distinction is the whole verdict.
+**Corrected 2026-08-14.** This section previously stated that `tiller_agents/src/omp.rs:35`
+hardcodes `"omp"` and that the adapter therefore seeks a binary the distribution does not ship. That
+reading was of the wrong function. The adapter keeps two distinct names, and only one of them is a
+binary:
+
+```rust
+fn id(&self)              -> &'static str { "omp" }        // :35 — Tiller's internal identifier
+fn executable_name(&self) -> &'static str { "oh-my-pi" }   // :43 — the actual binary
+// and both command builders spawn the real name:
+//   :69  oh-my-pi --hook <file>
+//   :81  oh-my-pi --hook <file> --resume=<ref>
+```
+
+`id()` is what pass 16 read as a binary name. The launch path uses `oh-my-pi`, which is what the
+distribution installs, so the adapter is name-correct today.
+
+**No symlink was ever created**, and none is needed — that decision still stands and is still the
+right one: papering over a name mismatch with a symlink would have hidden whether the adapter or the
+environment was wrong. Keep it that way if this ever regresses.
+
+The omp rows are therefore *unexercised*, not defective: nothing blocks a launch and nobody has
+launched one. Verify through the hook — `tillerctl notify` arriving from the generated hook file is
+the clause — because a session that launches but emits nothing is a different failure from one that
+cannot launch at all.
 
 Note also that the npm package `omp@1.0.0` is a squatted placeholder — its description is literally
 `"new"`. It is not the project and must not be installed.
