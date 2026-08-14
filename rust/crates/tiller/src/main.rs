@@ -5234,9 +5234,12 @@ impl TillerWorkspace {
                 let entity_for_click = entity.clone();
                 let entity_for_close = entity.clone();
                 let surface = match content {
-                    TabContent::Chat(chat) => {
-                        div().size_full().child(chat.clone()).into_any_element()
-                    }
+                    TabContent::Chat(chat) => div()
+                        .id("pane-surface")
+                        .debug_selector(|| "pane-surface".into())
+                        .size_full()
+                        .child(chat.clone())
+                        .into_any_element(),
                     TabContent::Terminal { view } => {
                         div().size_full().child(view.clone()).into_any_element()
                     }
@@ -5252,6 +5255,7 @@ impl TillerWorkspace {
                 };
                 div()
                     .id(format!("pane-{pane_id}"))
+                    .debug_selector(|| "pane-leaf".into())
                     .relative()
                     .size_full()
                     .min_w(px(MIN_SPLIT_PANE_SIZE))
@@ -5391,6 +5395,7 @@ impl TillerWorkspace {
                 .map(|tab_index| {
                     div()
                         .id(format!("pane-group-surface-{}", group.id))
+                        .debug_selector(|| "pane-group-surface".into())
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
@@ -6357,7 +6362,15 @@ impl TillerWorkspace {
 
         let centre_surface = if self.has_current_worktree() {
             div()
+                .id("group-surfaces-wrapper")
+                .debug_selector(|| "group-surfaces-wrapper".into())
                 .relative()
+                // P117: this wrapper declared no height at all. `flex_1` grows it along its
+                // parent's main axis, which is a *row* — so it sized width and left height to
+                // content. Everything below inherits that, and a chat pane whose content is a
+                // virtualized `list()` has no intrinsic height, so the whole subtree collapsed to
+                // MIN_SPLIT_PANE_SIZE. That is the 160px in the P117 measurements.
+                .h_full()
                 .flex_1()
                 .w_full()
                 .overflow_hidden()
@@ -6437,6 +6450,8 @@ impl TillerWorkspace {
                 )
                 .child(
                     div()
+                        .id("centre-surface")
+                        .debug_selector(|| "centre-surface".into())
                         .flex_1()
                         .w_full()
                         .overflow_hidden()
@@ -9184,6 +9199,66 @@ mod tests {
 
         terminal.update(cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
+    }
+
+    /// P117: a completed chat turn returns a full transcript over the control socket and draws
+    /// nothing on screen. The frame shows the composer at the *top* of the pane with ~670 px of
+    /// empty below it, which is the layout a `flex_col` produces when its first child measured
+    /// zero. This pins the geometry so the defect cannot come back silently.
+    ///
+    /// This is a test, not the proof — see `docs/linux-rewrite/P117-report.md` for the frame.
+    #[gpui::test]
+    async fn drawn_chat_transcript_gets_the_full_center_surface_height(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let chat = cx.new(|cx| {
+                Chat::launch_with_command(
+                    AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                    std::env::temp_dir(),
+                    cx,
+                )
+            });
+            workspace.tabs[0] = OpenTab {
+                id: 0,
+                persistence_id: "test-chat".into(),
+                group_id: 0,
+                title: "Chat".into(),
+                kind: TabKind::AgentChat,
+                agent_icon: Some(Icon::Codex),
+                agent_id: Some("codex".into()),
+                session_state: SessionTabState::with_root(0),
+                panes: PaneNode::leaf(0, TabContent::Chat(chat)),
+                focused_pane: 0,
+            };
+            workspace.rebuild_tab_machinery();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let centre = cx
+            .debug_bounds("centre-surface")
+            .expect("the centre surface wrapper is mounted");
+        let root = cx
+            .debug_bounds("chat-root")
+            .expect("the chat root is mounted");
+        let transcript = cx
+            .debug_bounds("chat-transcript")
+            .expect("the chat transcript is mounted");
+        assert!(
+            transcript.size.height > px(200.0),
+            "the mounted chat transcript must receive the center surface height; \
+             centre-surface={:?} group-surfaces-wrapper={:?} pane-group-surface={:?} \
+             pane-leaf={:?} pane-surface={:?} chat-root={:?} chat-transcript={:?}",
+            centre.size,
+            cx.debug_bounds("group-surfaces-wrapper").map(|b| b.size),
+            cx.debug_bounds("pane-group-surface").map(|b| b.size),
+            cx.debug_bounds("pane-leaf").map(|b| b.size),
+            cx.debug_bounds("pane-surface").map(|b| b.size),
+            root.size,
+            transcript.size
+        );
     }
 
     #[gpui::test]

@@ -5515,6 +5515,8 @@ impl Render for Chat {
         let question_answer = self.question_answer.clone();
 
         div()
+            .id("chat-root")
+            .debug_selector(|| "chat-root".into())
             .size_full()
             .flex()
             .flex_col()
