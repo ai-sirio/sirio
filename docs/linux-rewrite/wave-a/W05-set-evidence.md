@@ -123,3 +123,36 @@ as the existing ledger note; nothing new closes it and nothing regressed it.
 **Captures:** `reference/linux-progress/wavea-W05-set/14-after-add-account-click.png`.
 
 ---
+
+## `F-SET-17` — ledger line 305, currently **FAILED — absent**
+
+**Approach taken:** triage says built (commit 2dcbc1d, `try_discover_availability()` fallible +
+registry-error banner + Retry via the existing Refresh button) and already live-photographed
+(commit ec53f40). This session re-drove it independently rather than reuse that photograph, using
+a fresh negative control: a *second* Tiller instance on the same Wayland lane label family
+(`wavea-W05-set-patherr`, its own nested sway + socket + DB, `TILLER_SOCKET=/tmp/wavea-W05-set-
+patherr.sock`), launched with `PATH` fully unset in the app's own environment (not the driving
+shell's — the compositor/grim/python3 calls used the normal PATH throughout).
+
+**Observed:**
+- `panel`/`surface.settings` state read back over the fresh instance's socket:
+  `"providers":"[]"` — zero rows, not stale ones.
+- `16-patherr-agents.png` — the Agents screen renders the real banner text from
+  `registry_error_message`: "⚠ Could not load the agent registry: PATH is not set in the
+  environment", with an empty rows list and the Refresh button still present (the same button
+  serves as Retry, per source: `refresh_agent_availability` calls
+  `apply_agent_discovery(try_discover_availability())`).
+
+Positive control for the same code path was already captured this session for F-SET-11/14/15's
+work: the main `wavea-W05-set` instance's own AI Providers screen shows 5 real, non-empty provider
+rows with genuine account state (`13-before-click.png`), so an empty/error state is not this
+lane's default — it took the deliberate PATH removal to produce it.
+
+**Claim:** exercised-working. The registry-error banner and its zero-false-row behavior are real
+and reachable live, independently reproduced from a fresh drive (not reused evidence). Did not
+re-drive the Retry-clears-the-banner half (already proven in ec53f40's own capture) to keep this
+row's time-box tight; nothing here contradicts it.
+
+**Captures:** `reference/linux-progress/wavea-W05-set/16-patherr-agents.png`.
+
+---
