@@ -1,0 +1,12 @@
+F-AGENT-API-01 -- ctl system.capabilities against the live p120a control socket
+instrument: rendered Wayland lane (p120a), control socket (via wl-helper.sh's ctl())
+
+Request: {"id":"drive","method":"system.capabilities","params":{}}
+
+Response (verbatim, re-run and re-captured this pass):
+{"id":"drive","ok":true,"result":{"enabled":"true","methods":"[{\"method\":\"system.ping\"},{\"method\":\"system.capabilities\"},{\"method\":\"system.identify\"},{\"method\":\"system.quit\"},{\"method\":\"project.list\"},{\"method\":\"project.add\"},{\"method\":\"workspace.list\"},{\"method\":\"workspace.create\"},{\"method\":\"workspace.select\"},{\"method\":\"workspace.current\"},{\"method\":\"workspace.close\"},{\"method\":\"worktree.set\"},{\"method\":\"notify\"},{\"method\":\"panel.create\"},{\"method\":\"panel.split\"},{\"method\":\"panel.list\"},{\"method\":\"panel.write\"},{\"method\":\"panel.key\"},{\"method\":\"panel.read\"},{\"method\":\"panel.state\"},{\"method\":\"panel.scrollback\"},{\"method\":\"panel.wait\"},{\"method\":\"panel.focus\"},{\"method\":\"panel.close\"},{\"method\":\"pane.split\"},{\"method\":\"pane.focus\"},{\"method\":\"pane.close\"},{\"method\":\"tab.cycle\"},{\"method\":\"tab.select\"},{\"method\":\"notification.create\"},{\"method\":\"notification.list\"},{\"method\":\"notification.clear\"},{\"method\":\"session.ref\"},{\"method\":\"session.restore\"},{\"method\":\"surface.changes.open\"},{\"method\":\"surface.changes.read\"},{\"method\":\"surface.changes.stage\"},{\"method\":\"surface.changes.unstage\"},{\"method\":\"surface.changes.discard\"},{\"method\":\"surface.changes.stage_all\"},{\"method\":\"surface.changes.discard_all\"},{\"method\":\"surface.settings.open\"},{\"method\":\"surface.settings.select\"},{\"method\":\"surface.settings.read\"},{\"method\":\"surface.chat.open\"},{\"method\":\"surface.chat.send\"},{\"method\":\"surface.chat.compose\"},{\"method\":\"surface.chat.permission\"},{\"method\":\"surface.chat.stop\"},{\"method\":\"surface.chat.read\"},{\"method\":\"browser.open\"},{\"method\":\"browser.navigate\"},{\"method\":\"browser.act\"}]","socketEnabled":"true","socketPath":"/tmp/p120a.sock"}}
+
+53 methods total, counted directly from the array above. No method with "summar" anywhere in its
+name (the closest neighbors are the surface.chat.* and notification.* families, neither of which is
+a summarizer trigger). This is the full live, real control-socket surface of a real running
+instance -- not a doc/spec read.

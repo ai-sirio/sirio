@@ -81,6 +81,17 @@ Byte-identical. `prepare()` did not touch user-global config. To confirm `prepar
 `reference/linux-progress/p120/logs/safe02-sha256-before-after.txt`,
 `safe02-worktree-local-hooks.json`.
 
+### F-AGENT-API-01
+
+Queried the real, live control socket of the running `p120a` instance directly (`ctl
+system.capabilities`, via `wl-helper.sh`'s `ctl()`), not a doc or spec read. The response lists 53
+methods verbatim — `system.*`, `project.*`, `workspace.*`, `worktree.set`, `notify`, `panel.*`,
+`pane.*`, `tab.*`, `notification.*`, `session.*`, `surface.changes.*`, `surface.settings.*`,
+`surface.chat.*`, `browser.*`. No method name contains "summar" anywhere — the ledger's premise (no
+summarizer-triggering control method exists) holds against the real, current method registry of a
+real running process, not just against source. Capture:
+`reference/linux-progress/p120/logs/api01-system-capabilities.json`.
+
 ## Instrument 1 — the rendered Wayland lane
 
 ### F-CORE-FILE-08
@@ -144,6 +155,46 @@ unexercised, and I don't think it can be exercised responsibly from this instrum
 disposable/sandboxed OAuth client or explicit user participation. Capture:
 `1786725547285656214-after-auth01-abort.png` (state after abort, account untouched).
 
+### F-CORE-DOM-03
+
+Clicked the sidebar's "+ Add Project" affordance on the rendered Wayland lane. No dialog, no new
+toplevel, and no native file-picker appeared anywhere inside the nested compositor's own output or
+window tree, and `/tmp/p120a.log` shows no error around the click. That is not a clean disproof,
+though: the host also runs real `xdg-desktop-portal` / `xdg-desktop-portal-gtk` /
+`xdg-desktop-portal-cosmic` daemons (confirmed via `ps aux` — pids 2732, 2809, 3199), and a portal
+file-chooser call from inside my isolated nested sway instance could plausibly get routed to and
+rendered by the **real host desktop's** portal backend rather than into my nested compositor's own
+output — in which case `grim -o HEADLESS-1` (scoped to my nested instance) would never see it even
+if the call fired and succeeded. A read-only, non-input check on the real `:1` desktop
+(`wmctrl -l`, `xdotool search`) found only one anonymous X11 window at the time, which is
+inconclusive for a native Wayland toplevel and which I did not attempt to click into, for the same
+real-desktop safety reasons documented in "Instrument 1b" below. I lean toward **`UNREACHABLE` from
+the Wayland lane as currently built** — I can't rule out the gesture working invisibly on the real
+desktop, and confirming that one way or the other needs either a portal backend scoped to the
+nested instance or a safe way to observe the real desktop's own portal surface, neither of which I
+have this pass.
+
+### F-GIT-RUN-02
+
+Clicked "New Worktree..." in the sidebar. A real inline form opened — "New worktree in tiller", a
+focused branch-name text field, "Enter to create · Esc to cancel" — confirming the affordance
+itself is live, not dead. I could type into the field (`wtype` text injection landed real characters
+in a real focused GPUI text input, confirmed twice). I could not, however, submit it: `wtype -k
+Return`, an explicit press/release pair, and a literal embedded newline all failed to submit the
+form, and `wtype -k Escape` (the form's own documented cancel gesture) likewise had no effect. A
+cross-check ruled out "this field's Enter handler specifically is broken" — the exact same
+"typed text lands, Return/Escape do nothing" failure reproduced in the completely unrelated Chat
+message box. Full diagnostic, capture list, and reasoning:
+`reference/linux-progress/p120/logs/gitrun02-return-key-diagnostic.txt`.
+
+I could not get past submitting the form, so I could not observe whether worktree creation streams
+progress incrementally — the row's actual `VERIFY` claim (`GitRunner`/`run_streaming` has 0
+references in the app crates per the ledger). This is **`UNREACHABLE` from this instrument as
+currently built**: the blocker is that `wtype`'s non-printable-keysym delivery does not register in
+this app on this compositor/GPUI stack at all (not specific to worktree creation), so the correct
+next step is a driver that can deliver a real Return keypress — or a mouse-only submit affordance,
+if one exists that I didn't find — not another retry of the same injection method.
+
 ## Instrument 2 — the filesystem
 
 ### F-CORE-FILE-06
@@ -163,32 +214,89 @@ transitions, each read back live with no app restart:
 `FileSystemEventMonitor` → `FileView::poll_file_system_events` → `check_external` is live and reacts
 to real out-of-band filesystem changes without requiring the app to have caused them.
 
-## Instrument — code trace confirming the correct instrument, not yet reachable this pass
+## Instrument 1b — the `:1` lane, and why it stops here for these two rows
+
+`Scripts/linux-drive.sh`'s `:1` display is **not an isolated headless X server — it is the real,
+currently-in-use COSMIC desktop** (`Xwayland :1 -rootless` under a live `sway`/Smithay session on
+`tty1`, with `cosmic-panel`, `cosmic-term`, and other panes' real `claude`/`herdr` processes visibly
+running on it at the time I drove it). `xdotool` on this display moves the operator's actual pointer
+and injects real XTEST input system-wide, exactly as the script's own comments warn. I did not
+appreciate this distinction until partway through driving `F-TERM-UI-02` on it.
+
+I first acquired the drive lock legitimately: it was held by `pid=1728940 label=sonnet` since
+17:11:51, 6448s past its own 1800s staleness window, and `linux-drive.sh` self-healed it on my first
+`mkdir` attempt exactly as designed (`NOTE: breaking a drive lock held 6448s...`). I drove a real
+worktree/terminal, typed `echo https://example.com/p120-term-link-test` into it, and confirmed via a
+`PATH`-shadowed `xdg-open` recorder (`/tmp/p120-xdgopen-bin/xdg-open`, prepended onto `PATH` for the
+launched app only) that a genuine `cx.open_url` call would be caught. I then held `Super` via
+`xdotool keydown super` and clicked the rendered URL text at its exact on-screen position (verified
+twice, on a fresh `TILLER_DB` each time so the terminal layout was reproducible and the coordinates
+were confirmed correct against the actual capture). No `xdg-open` call was recorded either time.
+
+That is not a clean disproof, though, and I don't want to report it as one: COSMIC's own compositor
+very plausibly binds `Super` itself as a global shortcut (its panel includes a `CosmicAppLibrary`
+launcher button, the conventional Super target). If the window manager intercepts `Super` before the
+XWayland client ever sees a `platform`-modifier keydown, `opens_terminal_link` would correctly return
+`false` for a reason that has nothing to do with `tiller`'s own code — indistinguishable, from outside,
+from the gesture genuinely not working. `import -window "$WID"`'s per-window capture wouldn't even show
+a WM-level overlay if one opened, since it only rasterizes the named window. This is exactly the "a
+control that did nothing, about code that is fine" failure mode `linux-drive.sh`'s own comments warn
+about for the shared pointer — I just hit its keyboard-modifier analogue.
+
+Given that, and that this display had other panes' live agent sessions genuinely running on it at the
+time, I chose not to keep re-attempting blindly on shared, real infrastructure to disambiguate WM
+interception from a real code gap. I verified cleanup left no stuck modifier and no stray window
+(`xdotool getactivewindow` now errors `BadWindow` for both driven window ids, `pgrep` shows only the
+other panes' own legitimate `tiller` processes). **I believe both of the following are reachable in
+principle but not disambiguable from this pass's instrument**, and flag them rather than guess:
 
 ### F-CORE-FILE-03
 
-`link_router.rs`/`TerminalView::receive_file_drop` aside, this row is specifically about the terminal
-accepting a real file drop. The Wayland lane's own documentation (`WAYLAND-LANE.md`) states drag
-gestures are not yet exercised there — my persistent virtual pointer only speaks `move`/`click`, not
-a press-hold-move-release XDND sequence. This needs either an extended virtual-pointer driver (button
-press, motion while held, release, matching the wlr XDND source flow) or the `:1` lane, which was
-still lock-held by another pane's session at last check (`pid=1728940 label=sonnet`) past its own
-1800s staleness window. I have not yet retried acquisition. **I believe this is likely to stay
-`UNREACHABLE` from the Wayland lane specifically** (no drag primitive exists in the current
-instrument) even though it should be reachable from the `:1` lane once the lock clears — that attempt
-is still pending, tracked below, not concluded.
+Same `:1` lane, worse risk profile — a drag gesture that goes even slightly wrong could drop a file
+onto a *different* live window on the same real desktop (another pane's `cosmic-term` was visibly
+running at `pts/36` during this session). The Wayland lane's virtual pointer also has no drag primitive
+(`move`/`click` only, no press-hold-motion-release), so `WAYLAND-LANE.md`'s own "drag not yet
+exercised" limitation applies there too. I did not attempt this row this pass. **I believe this needs
+either an extended Wayland virtual-pointer driver (a real press/motion/release XDND sequence) or a
+truly isolated `:1`-equivalent display before it can be driven safely** — not the currently shared real
+desktop.
 
 ### F-TERM-UI-02
 
-Confirmed via code trace (`tiller_terminal/src/link_router.rs::opens_terminal_link` requires
-`platform_modifier`, gated on GPUI's `platform` modifier — Super, on Linux — held during the click,
-`lib.rs:988`) that this needs a modifier-chord click the Wayland lane's virtual pointer/keyboard pair
-cannot yet compose (the persistent `wtype` keyboard process and the virtual-pointer FIFO are two
-separate uncoordinated input sources; holding Super on one while clicking on the other has not been
-attempted and isn't obviously synchronizable). This needs the `:1` lane. Not yet attempted this pass —
-tracked below.
+Driven as described above: real URL rendered, real `Super`-held click landed on its exact screen
+position, no `xdg-open` call observed — but I can't rule out WM-level `Super` interception ahead of
+the app, on the specific instrument available. Capture:
+`reference/linux-progress/p120/shots/term02-url-typed.png` (URL rendered, pre-click),
+`term02-superclick-fresh.png` (post-click, layout/coordinates verified against the pre-click frame). I
+lean toward **`UNREACHABLE` from this instrument as currently built**, not toward the code being
+broken — the correct next step is a synchronized modifier+click Wayland driver (one process, atomic
+keydown→motion→click→keyup) rather than another blind attempt on the real desktop.
 
-## Instrument 3 (database) and remaining rows — not yet driven this pass
+## Instrument 3 — the database
+
+### F-CORE-SET-01
+
+Wrote six malformed values directly into `/tmp/p120a.sqlite`'s `setting` table via Python's
+`sqlite3` module, bypassing the app entirely, then killed the running app process and relaunched a
+fresh one against the same on-disk DB and the same already-running sway compositor:
+
+| key | malformed value | resolved value (post-restart, via `ctl surface.settings.read`) |
+| --- | --- | --- |
+| `appearance.uiFontSize` | `"not-a-number"` | `"13"` — fell back to default |
+| `appearance.terminalFontSize` | `"99999"` | `"24"` — clamped to range max |
+| `appearance.theme` | `"totally-bogus-theme"` | `"system"` — fell back to default enum |
+| `controlSocket.enabled` | `"maybe-ish"` | `"true"` — fell back to default bool |
+| `usage.refreshIntervalMin` | `"-500"` | `"1"` — clamped to range min |
+| `general.summarizerAgent` | `"not-a-real-agent"` | not independently re-read via `ctl` this pass — reasoning from the allow-list at `db.rs`'s `settings()`, not a live observation |
+
+No crash: `/tmp/p120a.log` after restart shows only pre-existing Mesa/EGL/Vulkan/radv warnings, no
+panic. The control socket itself stayed live and responsive through the whole sequence — the
+`controlSocket.enabled` row's own malformed value fell back to enabled, and the `ctl` call that
+produced this very evidence table is proof the socket survived. Full transcript and insert script:
+`reference/linux-progress/p120/logs/set01-malformed-values-resolved.txt`,
+`1786727180429745461-set01-settings-appearance.png`.
+
+## Remaining rows — not yet driven this pass
 
 The following rows from the assigned 21 have not been driven yet in this pass and are **not being
 reported as `UNREACHABLE`** — they simply have not been attempted:
@@ -196,13 +304,6 @@ reported as `UNREACHABLE`** — they simply have not been attempted:
 `F-CORE-ACT-24`, `F-CORE-ACT-25`, `F-CORE-ACT-26` (instrument: multi-worktree Wayland session +
 restart, watching for observable bootstrap-order/mount-eviction effects), `F-CORE-USG-05`,
 `F-CORE-USG-06`, `F-CORE-USG-07` (instrument: Codex token-refresh path — needs a safe way to force a
-refresh/failure scenario without mutating real credentials), `F-CORE-DOM-03` (instrument: "+ Add
-Project" gesture, confirm native-file-picker behavior headlessly), `F-CORE-SET-01` (instrument:
-malformed row written directly into `/tmp/p120a.sqlite`'s settings table, then restart), `F-AGENT-API-01`
-(instrument: `system.capabilities` — **partially checked as a side effect of this pass**: the live
-53-method list returned by `ctl system.capabilities` against `p120a` has no summarizer-named method;
-formal write-up pending), `F-GIT-RUN-02` (instrument: "New Worktree..." click + rapid successive
-shots, checking for/against incremental progress UI), `F-CORE-FILE-03` / `F-TERM-UI-02` (see above,
-`:1` lane retry pending).
+refresh/failure scenario without mutating real credentials).
 
 This report will be updated in place as the remaining rows are driven.
