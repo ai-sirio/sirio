@@ -12,7 +12,9 @@ pub enum TerminalContextAction {
     SetTitle,
     CopyPaneId,
     CopyTerminalId,
+    SplitLeft,
     SplitRight,
+    SplitAbove,
     SplitDown,
     ClearTerminal,
     CloseTerminal,
@@ -31,7 +33,7 @@ pub struct TerminalContextItem {
     pub route: TerminalContextRoute,
 }
 
-const ITEMS: [TerminalContextItem; 10] = [
+const ITEMS: [TerminalContextItem; 12] = [
     TerminalContextItem {
         label: "Copy",
         action: TerminalContextAction::Copy,
@@ -63,8 +65,18 @@ const ITEMS: [TerminalContextItem; 10] = [
         route: TerminalContextRoute::Terminal,
     },
     TerminalContextItem {
+        label: "Split Left",
+        action: TerminalContextAction::SplitLeft,
+        route: TerminalContextRoute::App,
+    },
+    TerminalContextItem {
         label: "Split Right",
         action: TerminalContextAction::SplitRight,
+        route: TerminalContextRoute::App,
+    },
+    TerminalContextItem {
+        label: "Split Above",
+        action: TerminalContextAction::SplitAbove,
         route: TerminalContextRoute::App,
     },
     TerminalContextItem {
@@ -123,7 +135,7 @@ mod tests {
 
     #[test]
     fn menu_contains_every_terminal_and_app_action_in_stable_order() {
-        assert_eq!(items().len(), 10);
+        assert_eq!(items().len(), 12);
         assert_eq!(
             items().iter().map(|item| item.label).collect::<Vec<_>>(),
             vec![
@@ -133,7 +145,9 @@ mod tests {
                 "Set Title",
                 "Copy Pane ID",
                 "Copy Terminal ID",
+                "Split Left",
                 "Split Right",
+                "Split Above",
                 "Split Down",
                 "Clear Terminal",
                 "Close Terminal…",
@@ -164,7 +178,9 @@ mod tests {
 
         let delegated = [
             TerminalContextAction::SetTitle,
+            TerminalContextAction::SplitLeft,
             TerminalContextAction::SplitRight,
+            TerminalContextAction::SplitAbove,
             TerminalContextAction::SplitDown,
             TerminalContextAction::CloseTerminal,
         ];

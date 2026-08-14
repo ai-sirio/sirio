@@ -5,12 +5,11 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
 
-use futures::channel::mpsc::UnboundedReceiver;
-use futures::{FutureExt as _, StreamExt as _};
+use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 
 use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
@@ -36,12 +35,16 @@ use tiller_theme::Theme;
 
 mod context_menu;
 mod domain;
+mod lifecycle;
+mod link_router;
 
 pub use context_menu::{
     TerminalContextAction, TerminalContextEvent, TerminalContextItem, TerminalContextRoute,
     TerminalIdentity, items as terminal_context_menu_items,
 };
 pub use domain::{SplitAxis, SplitDirection, SplitTree, TerminalKey};
+pub use lifecycle::{CachedTerminalPane, TerminalPaneCache, TerminalSurfaceHost};
+pub use link_router::{opens_terminal_link, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
 const LINE_HEIGHT: Pixels = px(18.0);
@@ -60,6 +63,59 @@ pub enum TerminalShell {
     WithArguments { program: String, args: Vec<String> },
 }
 
+/// Events emitted when a terminal accepts a typed pane payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalDropEvent {
+    /// Paths dropped from the file tree. The terminal inserts the model's
+    /// shell-quoted representation without a newline and emits this event so
+    /// the owning pane can classify or display the drop.
+    Files { paths: Vec<PathBuf> },
+    /// A changed-file diff was dropped into this terminal.
+    Diff { path: PathBuf, text: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalPromptAction {
+    NewTerminal,
+    NewTerminalWithCommand,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPromptEvent {
+    pub target: TerminalIdentity,
+    pub action: TerminalPromptAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLinkEvent {
+    pub target: TerminalIdentity,
+    pub url: String,
+}
+
+/// Builds the shell used by the Resolve in terminal action.
+///
+/// The command prints the combined conflict diff for the exact repo-relative
+/// path, then leaves an interactive shell in the repository so the user can
+/// resolve it with ordinary Git commands. The path is shell-quoted here,
+/// before it crosses the PTY boundary.
+pub fn conflict_resolution_shell(path: &Path) -> TerminalShell {
+    let quoted_path = shell_quote(path);
+    TerminalShell::WithArguments {
+        program: "/bin/sh".to_string(),
+        args: vec![
+            "-lc".to_string(),
+            format!(
+                "git diff --cc -- {quoted_path}; printf '\\nResolve conflict at %s\\n' {quoted_path}; exec /bin/sh -il"
+            ),
+        ],
+    }
+}
+
+fn shell_quote(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// The terminal child's final lifecycle result.
 ///
 /// Keeping this separate from the PTY implementation lets callers render a
@@ -70,6 +126,22 @@ pub enum TerminalExitStatus {
     Code(i32),
     Signal(i32),
     Unknown,
+}
+
+/// Signals from the PTY that the app may use for agent-activity detection.
+///
+/// This is deliberately separate from [`TerminalContextEvent`]: a context
+/// menu's `SetTitle` action is a user-set tab label, while `OscTitle` is the
+/// title text emitted by the shell or an interactive agent over the PTY.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalActivityEvent {
+    /// A title received from an OSC 0/2 sequence in the PTY stream.
+    OscTitle(String),
+    /// The terminal output burst has been quiet for the coalescing window;
+    /// the snapshot is plain text from the emulator's retained scrollback.
+    OutputSettled { scrollback: String },
+    /// The PTY child exited after its final output was drained.
+    ChildExited { status: TerminalExitStatus },
 }
 
 /// The renderer-owned state that persistence and headless verification can
@@ -127,6 +199,10 @@ impl TerminalExitStatus {
 /// descriptor exhaustion, a directory the user deleted or renamed since the
 /// last session, a sandbox denial).
 enum TerminalState {
+    /// The view was created before its host assigned the stable pane ID. The
+    /// PTY is intentionally delayed until the first render so that the child
+    /// inherits the host identity rather than the generated placeholder.
+    Pending,
     /// A live PTY, pumping events.
     Running(TerminalHandle),
     /// The last spawn attempt failed; the pane renders the message and a
@@ -166,10 +242,8 @@ impl Dimensions for TerminalDimensions {
 /// Bridges the alacritty event-loop thread to the view's event pump.
 ///
 /// The grid is already mutated by the event-loop thread before an event is
-/// delivered, so every event means "the screen may have changed". Forwarding
-/// the full event (rather than a bare wakeup) keeps the door open for
-/// distinguishing Bell, title changes, etc. later, mirroring how Zed forwards
-/// `TerminalBackendEvent`s through an unbounded channel.
+/// delivered. The pump below translates title, output, and child-exit events
+/// into the typed [`TerminalActivityEvent`] surface after coalescing a burst.
 #[derive(Clone)]
 struct TermEventProxy {
     wakeup: futures::channel::mpsc::UnboundedSender<Event>,
@@ -186,18 +260,13 @@ struct TerminalHandle {
     term: SharedTerm,
     sender: EventLoopSender,
     last_size: Arc<Mutex<Option<(u16, u16)>>>,
+    shell_pid: u32,
+    shutdown_started: Arc<AtomicBool>,
+    resize_generation: Arc<AtomicU64>,
 }
 
 impl TerminalHandle {
-    fn new(
-        working_directory: impl AsRef<Path>,
-        shell: &TerminalShell,
-    ) -> Result<(Self, UnboundedReceiver<Event>)> {
-        // alacritty swallows a failed chdir in the forked child (the shell
-        // would silently start in the app's cwd, i.e. the wrong project).
-        // Validate the directory here so a stale path surfaces as a
-        // retryable pane error instead.
-        let working_directory = working_directory.as_ref();
+    fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
             format!(
                 "working directory '{}' does not exist",
@@ -210,6 +279,28 @@ impl TerminalHandle {
                 working_directory.display()
             );
         }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn new(
+        working_directory: impl AsRef<Path>,
+        shell: &TerminalShell,
+    ) -> Result<(Self, UnboundedReceiver<Event>)> {
+        Self::new_with_pane_id(working_directory, shell, None)
+    }
+
+    fn new_with_pane_id(
+        working_directory: impl AsRef<Path>,
+        shell: &TerminalShell,
+        pane_id: Option<&str>,
+    ) -> Result<(Self, UnboundedReceiver<Event>)> {
+        // alacritty swallows a failed chdir in the forked child (the shell
+        // would silently start in the app's cwd, i.e. the wrong project).
+        // Validate the directory here so a stale path surfaces as a
+        // retryable pane error instead.
+        let working_directory = working_directory.as_ref();
+        Self::validate_working_directory(working_directory)?;
 
         let (wakeup_tx, wakeup_rx) = futures::channel::mpsc::unbounded();
         let proxy = TermEventProxy { wakeup: wakeup_tx };
@@ -237,16 +328,21 @@ impl TerminalHandle {
                 Shell::new(program.clone(), args.clone())
             }
         };
+        let mut env = HashMap::from([
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("COLORTERM".to_string(), "truecolor".to_string()),
+        ]);
+        if let Some(pane_id) = pane_id {
+            env.insert("TILLER_PANE_ID".to_string(), pane_id.to_string());
+        }
         let options = tty::Options {
             shell: Some(tty_shell),
             working_directory: Some(working_directory.to_path_buf()),
-            env: HashMap::from([
-                ("TERM".to_string(), "xterm-256color".to_string()),
-                ("COLORTERM".to_string(), "truecolor".to_string()),
-            ]),
+            env,
             ..Default::default()
         };
         let pty = tty::new(&options, size, 0).context("creating terminal PTY")?;
+        let shell_pid = pty.child().id();
         let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)
             .context("creating terminal event loop")?;
         let sender = event_loop.channel();
@@ -257,6 +353,9 @@ impl TerminalHandle {
                 term,
                 sender,
                 last_size: Arc::new(Mutex::new(None)),
+                shell_pid,
+                shutdown_started: Arc::new(AtomicBool::new(false)),
+                resize_generation: Arc::new(AtomicU64::new(0)),
             },
             wakeup_rx,
         ))
@@ -276,10 +375,16 @@ impl TerminalHandle {
         processor.advance(&mut *term, b"\x1b[3J\x1b[2J\x1b[H");
     }
 
-    /// Ask alacritty's event loop to drop the PTY. Its Unix PTY destructor
-    /// sends SIGHUP to the child and waits for it, so a terminal entity can
-    /// never leave its shell orphaned when the app quits.
+    /// Terminate the PTY's dedicated process group and ask alacritty to drop
+    /// the PTY. The PTY destructor only signals its direct child; signaling
+    /// the group here is what also reaches shells' descendants. A stubborn
+    /// process gets SIGKILL after a short grace period so close/quit cannot
+    /// leave a live process group behind.
     fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        terminate_process_group(self.shell_pid);
         let _ = self.sender.send(Msg::Shutdown);
     }
 
@@ -299,7 +404,15 @@ impl TerminalHandle {
             columns: columns as usize,
             screen_lines: lines as usize,
         });
-        let _ = self.sender.send(Msg::Resize(size));
+        let generation = self.resize_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let resize_generation = Arc::clone(&self.resize_generation);
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(TERMINAL_RESIZE_DEBOUNCE);
+            if resize_generation.load(Ordering::Acquire) == generation {
+                let _ = sender.send(Msg::Resize(size));
+            }
+        });
     }
 
     fn scroll_display(&self, scroll: Scroll) {
@@ -326,6 +439,27 @@ impl TerminalHandle {
             (usize::MAX, 0)
         };
         (cells, cursor)
+    }
+
+    fn link_at(&self, row: usize, column: usize) -> Option<String> {
+        let term = self.term.lock();
+        let grid = term.grid();
+        if row >= grid.screen_lines() || column >= grid.columns() {
+            return None;
+        }
+        let display_offset = grid.display_offset() as i32;
+        let cell = &grid[Line(row as i32 - display_offset)][Column(column)];
+        if let Some(hyperlink) = cell.hyperlink() {
+            return Some(hyperlink.uri().to_owned());
+        }
+        let line = (0..grid.columns())
+            .map(|column| grid[Line(row as i32 - display_offset)][Column(column)].c)
+            .collect::<String>();
+        let byte_column = line
+            .char_indices()
+            .nth(column)
+            .map_or(line.len(), |(index, _)| index);
+        url_at_column(&line, byte_column)
     }
 
     /// Captures the grid as newline-delimited plain text. This intentionally
@@ -373,24 +507,82 @@ impl TerminalHandle {
     }
 }
 
+const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
+const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
+
+fn terminate_process_group(process_group: u32) {
+    let process_group = process_group as libc::pid_t;
+    if process_group <= 0 {
+        return;
+    }
+
+    unsafe {
+        libc::killpg(process_group, libc::SIGTERM);
+    }
+
+    std::thread::spawn(move || {
+        std::thread::sleep(TERMINAL_TERMINATE_GRACE);
+        let group_is_alive = unsafe { libc::killpg(process_group, 0) == 0 };
+        if group_is_alive {
+            unsafe {
+                libc::killpg(process_group, libc::SIGKILL);
+            }
+        }
+    });
+}
+
 /// A live PTY-backed terminal view, or a failed pane showing why the PTY
 /// could not be started.
 pub struct TerminalView {
     terminal: TerminalState,
     spawn: SpawnParams,
+    empty_prompt: bool,
     focus_handle: gpui::FocusHandle,
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
     context_menu: Option<Point<Pixels>>,
+    last_dropped_diff: Option<(PathBuf, String)>,
+    last_dropped_files: Option<Vec<PathBuf>>,
 }
 
-/// How long a burst of terminal events may keep the pump draining before it
-/// settles on a redraw. Mirrors the 4 ms coalescing window Zed's terminal
-/// event loop uses; an idle terminal never reaches this timer, because the
-/// pump parks on the event channel instead.
-const EVENT_COALESCE_WINDOW: Duration = Duration::from_millis(4);
+/// Output is forwarded to the activity model only after this quiet period.
+/// This is intentionally longer than the renderer's frame cadence: an agent
+/// turn commonly arrives as several PTY writes and must be observed as one
+/// settled snapshot.
+const OUTPUT_SETTLE_DEBOUNCE: Duration = Duration::from_millis(200);
+pub const CONTENT_MATCH_BYTE_LIMIT: usize = 10 * 1024;
+pub const CONTENT_MATCH_LINE_LIMIT: usize = 40;
+/// Poll interval for the PTY event channel. The GPUI task owns this timer and
+/// polls the channel with `try_recv`; the alacritty reader thread therefore
+/// never wakes the deterministic test scheduler directly.
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(4);
 /// Cap on events drained into one redraw, bounding notify rate under a flood.
 const EVENT_COALESCE_CAP: usize = 100;
+
+/// Bounds the snapshot sent to the activity matcher. Persistence still keeps
+/// the complete scrollback, but matching an agent prompt only needs the last
+/// 10 KiB and 40 lines and must not scan an unbounded session history.
+pub fn recent_content_window(scrollback: &str) -> String {
+    let byte_start = suffix_char_boundary(scrollback, CONTENT_MATCH_BYTE_LIMIT);
+    let byte_window = &scrollback[byte_start..];
+    let mut lines = byte_window
+        .lines()
+        .rev()
+        .take(CONTENT_MATCH_LINE_LIMIT)
+        .collect::<Vec<_>>();
+    lines.reverse();
+    let joined = lines.join("\n");
+    let start = suffix_char_boundary(&joined, CONTENT_MATCH_BYTE_LIMIT);
+    joined[start..].to_owned()
+}
+
+fn suffix_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut start = value.len().saturating_sub(max_bytes);
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
 
 fn generated_identity() -> TerminalIdentity {
     let serial = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
@@ -398,7 +590,7 @@ fn generated_identity() -> TerminalIdentity {
 }
 
 impl TerminalView {
-    /// Starts the user's login shell in `working_directory`.
+    /// Starts the user's login shell in `working_directory` on first render.
     ///
     /// Returns an error when the PTY cannot be forked — the caller renders
     /// the failure inside the pane (see [`Self::failed`]) rather than
@@ -422,19 +614,52 @@ impl TerminalView {
             working_directory: working_directory.as_ref().to_path_buf(),
             shell,
         };
-        let (terminal, wakeup_rx) = Self::spawn_terminal(&spawn)?;
+        TerminalHandle::validate_working_directory(&spawn.working_directory)?;
         let focus_handle = cx.focus_handle();
-
-        Self::pump_terminal_events(wakeup_rx, cx);
+        let identity = generated_identity();
 
         Ok(Self {
-            terminal: TerminalState::Running(terminal),
+            terminal: TerminalState::Pending,
             spawn,
+            empty_prompt: false,
             focus_handle,
+            exit_status: None,
+            identity,
+            context_menu: None,
+            last_dropped_diff: None,
+            last_dropped_files: None,
+        })
+    }
+
+    /// Constructs the unmounted-pane surface. The host can subscribe to
+    /// [`TerminalPromptEvent`] and call [`Self::start_from_prompt`] after the
+    /// user chooses one of the two actions.
+    pub fn empty_prompt(cx: &mut gpui::Context<Self>) -> Self {
+        let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            terminal: TerminalState::Pending,
+            spawn: SpawnParams {
+                working_directory,
+                shell: TerminalShell::System,
+            },
+            empty_prompt: true,
+            focus_handle: cx.focus_handle(),
             exit_status: None,
             identity: generated_identity(),
             context_menu: None,
-        })
+            last_dropped_diff: None,
+            last_dropped_files: None,
+        }
+    }
+
+    /// Starts a terminal in `repo_root` prepared to inspect and resolve one
+    /// conflicted repo-relative path.
+    pub fn for_conflict(
+        repo_root: impl AsRef<Path>,
+        path: impl AsRef<Path>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<Self> {
+        Self::with_shell(repo_root, conflict_resolution_shell(path.as_ref()), cx)
     }
 
     /// A pane in the failed state: renders `message` where the terminal
@@ -456,16 +681,22 @@ impl TerminalView {
                 working_directory: working_directory.as_ref().to_path_buf(),
                 shell,
             },
+            empty_prompt: false,
             focus_handle: cx.focus_handle(),
             exit_status: None,
             identity: generated_identity(),
             context_menu: None,
+            last_dropped_diff: None,
+            last_dropped_files: None,
         }
     }
 
     /// Replaces the generated identity with the host's stable pane and
     /// terminal IDs. The terminal view uses this target for every delegated
     /// context-menu event, so a menu opened in one split cannot act on another.
+    /// The first render is deliberately where the PTY is spawned, so callers
+    /// may assign this identity immediately after creating the entity and the
+    /// child will inherit `TILLER_PANE_ID`.
     pub fn set_identity(&mut self, identity: TerminalIdentity) {
         self.identity = identity;
     }
@@ -484,7 +715,7 @@ impl TerminalView {
     pub fn failure_message(&self) -> Option<&str> {
         match &self.terminal {
             TerminalState::Failed { message } => Some(message),
-            TerminalState::Running(_) => None,
+            TerminalState::Pending | TerminalState::Running(_) => None,
         }
     }
 
@@ -498,12 +729,63 @@ impl TerminalView {
         &self.spawn.working_directory
     }
 
+    /// The shell command this pane was created with. This is useful to the
+    /// host when it needs to explain or test a specialised launch surface.
+    pub fn launch_shell(&self) -> &TerminalShell {
+        &self.spawn.shell
+    }
+
+    /// The last diff accepted through this pane's drop target, if any.
+    pub fn last_dropped_diff(&self) -> Option<&(PathBuf, String)> {
+        self.last_dropped_diff.as_ref()
+    }
+
+    pub fn last_dropped_files(&self) -> Option<&[PathBuf]> {
+        self.last_dropped_files.as_deref()
+    }
+
+    /// Lets the pane-composition owner turn the empty surface into a live
+    /// terminal without constructing a second view/entity.
+    pub fn start_from_prompt(&mut self, shell: TerminalShell, cx: &mut gpui::Context<Self>) {
+        self.spawn.shell = shell;
+        self.empty_prompt = false;
+        self.ensure_started(cx);
+        cx.notify();
+    }
+
+    fn receive_diff_drop(&mut self, payload: (PathBuf, String), cx: &mut gpui::Context<Self>) {
+        self.last_dropped_diff = Some(payload.clone());
+        cx.emit(TerminalDropEvent::Diff {
+            path: payload.0,
+            text: payload.1,
+        });
+        cx.notify();
+    }
+
+    fn receive_file_drop(&mut self, path: PathBuf, cx: &mut gpui::Context<Self>) {
+        let paths = vec![path];
+        let insertion = tiller_project::terminal_file_drop(&paths);
+        if insertion.is_empty() {
+            return;
+        }
+        self.last_dropped_files = Some(paths.clone());
+        self.input(insertion.into_bytes());
+        cx.emit(TerminalDropEvent::Files { paths });
+        cx.notify();
+    }
+
+    /// The PID of the shell (or direct command) at the root of this pane's
+    /// PTY. Layer D walks descendants of this PID on its periodic refresh.
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.running_terminal().map(|terminal| terminal.shell_pid)
+    }
+
     /// Captures the renderer's current plain-text history for persistence or
     /// headless verification. Failed panes have no emulator contents.
     pub fn capture_scrollback(&self) -> Vec<u8> {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
-            TerminalState::Failed { .. } => Vec::new(),
+            TerminalState::Pending | TerminalState::Failed { .. } => Vec::new(),
         }
     }
 
@@ -527,16 +809,36 @@ impl TerminalView {
     }
 
     /// Forks the PTY for the given parameters, without any view state.
-    fn spawn_terminal(spawn: &SpawnParams) -> Result<(TerminalHandle, UnboundedReceiver<Event>)> {
-        TerminalHandle::new(&spawn.working_directory, &spawn.shell)
+    fn spawn_terminal(
+        spawn: &SpawnParams,
+        pane_id: &str,
+    ) -> Result<(TerminalHandle, UnboundedReceiver<Event>)> {
+        TerminalHandle::new_with_pane_id(&spawn.working_directory, &spawn.shell, Some(pane_id))
+    }
+
+    fn ensure_started(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.empty_prompt || !matches!(self.terminal, TerminalState::Pending) {
+            return;
+        }
+        match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
+            Ok((terminal, wakeup_rx)) => {
+                Self::pump_terminal_events(terminal.clone(), wakeup_rx, cx);
+                self.terminal = TerminalState::Running(terminal);
+            }
+            Err(error) => {
+                self.terminal = TerminalState::Failed {
+                    message: format!("{error:#}"),
+                };
+            }
+        }
     }
 
     /// Re-attempts the spawn after a failure: on success the pane switches
     /// to the live terminal, on failure the message is updated in place.
     fn retry(&mut self, cx: &mut gpui::Context<Self>) {
-        match Self::spawn_terminal(&self.spawn) {
+        match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
             Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(wakeup_rx, cx);
+                Self::pump_terminal_events(terminal.clone(), wakeup_rx, cx);
                 self.terminal = TerminalState::Running(terminal);
                 self.exit_status = None;
             }
@@ -560,40 +862,69 @@ impl TerminalView {
     /// shape Zed's `TerminalBuilder::subscribe` uses: the task blocks on the
     /// event channel while the terminal is idle (no timer, no redraws), and
     /// on activity it coalesces the burst — draining for up to
-    /// `EVENT_COALESCE_WINDOW` or `EVENT_COALESCE_CAP` events — before
+    /// `OUTPUT_SETTLE_DEBOUNCE` or `EVENT_COALESCE_CAP` events — before
     /// requesting a single redraw, so a flood of output does not cost one
     /// notify per byte.
-    fn pump_terminal_events(mut wakeup_rx: UnboundedReceiver<Event>, cx: &mut gpui::Context<Self>) {
+    fn pump_terminal_events(
+        terminal: TerminalHandle,
+        mut wakeup_rx: UnboundedReceiver<Event>,
+        cx: &mut gpui::Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            while let Some(first_event) = wakeup_rx.next().await {
+            loop {
+                // Do not await the cross-thread channel. Its waker runs on
+                // the PTY reader thread, which violates GPUI's deterministic
+                // TestAppContext scheduler. Polling from this task keeps all
+                // scheduler interaction on its owning executor.
+                cx.background_executor().timer(EVENT_POLL_INTERVAL).await;
+                let first_event = match wakeup_rx.try_recv() {
+                    Ok(event) => event,
+                    Err(TryRecvError::Closed) => return,
+                    Err(TryRecvError::Empty) => continue,
+                };
                 let mut exit_status = Self::exit_status_from_event(&first_event);
-                // Coalesce the burst: keep draining until the channel goes
-                // quiet for the window (or the cap is hit), then redraw once.
-                let mut quiet = cx.background_executor().timer(EVENT_COALESCE_WINDOW).fuse();
+                let mut osc_title = Self::osc_title_from_event(&first_event);
+                let mut output_seen = matches!(first_event, Event::Wakeup);
                 let mut pending = 1;
-                loop {
-                    futures::select_biased! {
-                        _ = quiet => break,
-                        event = wakeup_rx.next() => match event {
-                            Some(event) => {
-                                if exit_status.is_none() {
-                                    exit_status = Self::exit_status_from_event(&event);
-                                }
-                                pending += 1;
-                                if pending >= EVENT_COALESCE_CAP {
-                                    break;
-                                }
-                            }
-                            // All senders dropped: the alacritty event loop
-                            // went away, so no more redraws can be needed.
-                            None => return,
-                        },
+                // Coalesce the burst: keep draining after scheduler-owned
+                // timer ticks until the channel is quiet or the cap is hit.
+                while pending < EVENT_COALESCE_CAP {
+                    cx.background_executor().timer(OUTPUT_SETTLE_DEBOUNCE).await;
+                    let mut received = false;
+                    while let Ok(event) = wakeup_rx.try_recv() {
+                        if exit_status.is_none() {
+                            exit_status = Self::exit_status_from_event(&event);
+                        }
+                        if let Some(title) = Self::osc_title_from_event(&event) {
+                            osc_title = Some(title);
+                        }
+                        output_seen |= matches!(event, Event::Wakeup);
+                        pending += 1;
+                        received = true;
+                        if pending >= EVENT_COALESCE_CAP {
+                            break;
+                        }
+                    }
+                    if !received {
+                        break;
                     }
                 }
                 if this
                     .update(cx, |view, cx| {
                         if let Some(exit_status) = exit_status {
                             view.exit_status = Some(exit_status);
+                            cx.emit(TerminalActivityEvent::ChildExited {
+                                status: exit_status,
+                            });
+                        }
+                        if let Some(title) = osc_title {
+                            cx.emit(TerminalActivityEvent::OscTitle(title));
+                        }
+                        if output_seen {
+                            let scrollback = recent_content_window(&String::from_utf8_lossy(
+                                &terminal.capture_scrollback(),
+                            ));
+                            cx.emit(TerminalActivityEvent::OutputSettled { scrollback });
                         }
                         cx.notify();
                     })
@@ -605,6 +936,17 @@ impl TerminalView {
             }
         })
         .detach();
+    }
+
+    fn osc_title_from_event(event: &Event) -> Option<String> {
+        match event {
+            Event::Title(title) => Some(title.clone()),
+            // An OSC reset is observable title state too. An empty title lets
+            // the activity model clear a title-owned pane through its normal
+            // unmatched-title path without confusing it with SetTitle.
+            Event::ResetTitle => Some(String::new()),
+            _ => None,
+        }
     }
 
     /// Writes bytes to the live PTY, the same path keystrokes use. Callers
@@ -636,6 +978,38 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn on_left_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.focus_handle.focus(window, cx);
+        if !opens_terminal_link(event.modifiers.platform) {
+            return;
+        }
+        let Some(terminal) = self.running_terminal() else {
+            return;
+        };
+        let column = (f32::from(event.position.x) / 8.0).floor().max(0.0) as usize;
+        let row = (f32::from(event.position.y) / f32::from(LINE_HEIGHT))
+            .floor()
+            .max(0.0) as usize;
+        if let Some(url) = terminal.link_at(row, column) {
+            cx.emit(TerminalLinkEvent {
+                target: self.identity.clone(),
+                url,
+            });
+        }
+    }
+
+    fn emit_prompt(&mut self, action: TerminalPromptAction, cx: &mut gpui::Context<Self>) {
+        cx.emit(TerminalPromptEvent {
+            target: self.identity.clone(),
+            action,
+        });
+    }
+
     fn copy_text(&self, cx: &mut gpui::Context<Self>, include_context: bool) {
         let Some(terminal) = self.running_terminal() else {
             return;
@@ -659,7 +1033,7 @@ impl TerminalView {
     fn running_terminal(&self) -> Option<&TerminalHandle> {
         match &self.terminal {
             TerminalState::Running(terminal) => Some(terminal),
-            TerminalState::Failed { .. } => None,
+            TerminalState::Pending | TerminalState::Failed { .. } => None,
         }
     }
 
@@ -691,7 +1065,9 @@ impl TerminalView {
                 }
             }
             TerminalContextAction::SetTitle
+            | TerminalContextAction::SplitLeft
             | TerminalContextAction::SplitRight
+            | TerminalContextAction::SplitAbove
             | TerminalContextAction::SplitDown
             | TerminalContextAction::CloseTerminal => {
                 cx.emit(TerminalContextEvent {
@@ -725,7 +1101,19 @@ impl gpui::Focusable for TerminalView {
     }
 }
 
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        // GPUI can drop an entity before the host's quit hook runs. The
+        // background event pump owns a handle clone, so relying on ordinary
+        // field destruction would keep the PTY alive after the view vanished.
+        self.shutdown();
+    }
+}
+
 impl EventEmitter<TerminalContextEvent> for TerminalView {}
+impl EventEmitter<TerminalActivityEvent> for TerminalView {}
+impl EventEmitter<TerminalPromptEvent> for TerminalView {}
+impl EventEmitter<TerminalLinkEvent> for TerminalView {}
 
 struct TerminalPaintState {
     backgrounds: Vec<PaintQuad>,
@@ -928,8 +1316,15 @@ impl Element for TerminalElement {
 
 impl gpui::Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        self.ensure_started(cx);
         let theme = *Theme::get(cx);
         let palette = TerminalPalette::from_theme(&theme);
+        let terminal_entity = cx.entity();
+        let file_drop_entity = terminal_entity.clone();
+        let dropped_path = self
+            .last_dropped_diff
+            .as_ref()
+            .map(|payload| payload.0.display().to_string());
         let context_menu = self.context_menu.map(|position| {
             let entity = cx.entity();
             let dismiss_entity = entity.clone();
@@ -980,25 +1375,106 @@ impl gpui::Render for TerminalView {
             })
         });
         match &self.terminal {
+            TerminalState::Pending => {
+                if !self.empty_prompt {
+                    return div()
+                        .size_full()
+                        .bg(theme.terminal_surface)
+                        .into_any_element();
+                }
+                div()
+                    .size_full()
+                    .bg(theme.terminal_surface)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .text_color(theme.title)
+                            .child("No terminal in this pane"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .id("terminal-new")
+                                    .debug_selector(|| "terminal-new".to_owned())
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme.primary_pill_bg)
+                                    .text_color(theme.title)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.emit_prompt(TerminalPromptAction::NewTerminal, cx);
+                                    }))
+                                    .child("New Terminal"),
+                            )
+                            .child(
+                                div()
+                                    .id("terminal-new-command")
+                                    .debug_selector(|| "terminal-new-command".to_owned())
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme.card_fill)
+                                    .text_color(theme.title)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.emit_prompt(
+                                            TerminalPromptAction::NewTerminalWithCommand,
+                                            cx,
+                                        );
+                                    }))
+                                    .child("New…"),
+                            ),
+                    )
+                    .when_some(context_menu, |this, menu| this.child(menu))
+                    .into_any_element()
+            }
             TerminalState::Running(terminal) => div()
                 .size_full()
                 .relative()
+                .debug_selector(|| "terminal-drop-target".to_owned())
                 .bg(theme.terminal_surface)
                 .key_context("Terminal")
                 .track_focus(&self.focus_handle)
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
-                        // Click-to-focus, like Zed's terminal view: a terminal
-                        // only takes keyboard input once focused.
-                        this.focus_handle.focus(window, cx);
-                    }),
-                )
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_left_mouse_down))
                 .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
                 .on_key_down(cx.listener(Self::on_key_down))
+                .on_drop::<(PathBuf, String)>(move |payload: &(PathBuf, String), _, cx| {
+                    terminal_entity.update(cx, |terminal, cx| {
+                        terminal.receive_diff_drop(payload.clone(), cx);
+                    });
+                })
+                .on_drop::<PathBuf>(move |path: &PathBuf, _, cx| {
+                    file_drop_entity.update(cx, |terminal, cx| {
+                        terminal.receive_file_drop(path.clone(), cx);
+                    });
+                })
                 .child(TerminalElement {
                     terminal: terminal.clone(),
                     palette,
+                })
+                .when_some(dropped_path, |this, path| {
+                    this.child(
+                        div()
+                            .id("terminal-diff-drop")
+                            .debug_selector(|| "terminal-diff-drop".to_owned())
+                            .absolute()
+                            .top(px(8.0))
+                            .right(px(8.0))
+                            .px(theme.spacing.titlebar_control_spacing)
+                            .py(theme.spacing.titlebar_control_spacing)
+                            .rounded(theme.radii.control)
+                            .bg(theme.primary_pill_bg)
+                            .text_size(theme.typography.caption2)
+                            .text_color(theme.title)
+                            .child(format!("Dropped diff: {path}")),
+                    )
                 })
                 .when_some(
                     self.exit_status.map(TerminalExitStatus::label),
@@ -1069,6 +1545,8 @@ impl gpui::Render for TerminalView {
         }
     }
 }
+
+impl EventEmitter<TerminalDropEvent> for TerminalView {}
 
 fn color_to_hsla(color: Color, palette: TerminalPalette) -> Hsla {
     let (r, g, b) = match color {
@@ -1201,6 +1679,7 @@ fn key_bytes(event: &KeyDownEvent) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use futures::StreamExt as _;
     use futures::channel::mpsc::TryRecvError;
 
     use super::*;
@@ -1213,8 +1692,74 @@ mod tests {
             .collect()
     }
 
+    static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    fn test_working_directory(name: &str) -> PathBuf {
+        let serial = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "tiller-terminal-test-{name}-{}-{serial}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn activity_content_is_limited_to_the_recent_lines_and_bytes() {
+        let input = (0..100)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let window = recent_content_window(&input);
+        assert!(window.contains("line-99"));
+        assert!(!window.contains("line-0"));
+        assert!(window.lines().count() <= CONTENT_MATCH_LINE_LIMIT);
+        assert!(window.len() <= CONTENT_MATCH_BYTE_LIMIT);
+    }
+
+    #[test]
+    fn activity_content_keeps_utf8_boundaries_when_bounded_by_bytes() {
+        let input = "é".repeat(CONTENT_MATCH_BYTE_LIMIT);
+        let window = recent_content_window(&input);
+        assert!(window.is_char_boundary(0));
+        assert!(window.len() <= CONTENT_MATCH_BYTE_LIMIT);
+        assert!(window.chars().all(|character| character == 'é'));
+    }
+
     fn palette() -> TerminalPalette {
         TerminalPalette::from_theme(&Theme::light())
+    }
+
+    #[test]
+    fn terminal_child_receives_the_pane_id_environment() {
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-test-pane-env-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'pane=%s\\n' \"$TILLER_PANE_ID\"; exec sleep 0.1".to_string(),
+            ],
+        };
+        let (handle, mut events) =
+            TerminalHandle::new_with_pane_id(&working_directory, &shell, Some("pane-real-env"))
+                .expect("spawn PTY");
+
+        futures::executor::block_on(async {
+            while let Some(event) = events.next().await {
+                if matches!(event, Event::ChildExit(_)) {
+                    break;
+                }
+            }
+        });
+
+        assert!(
+            String::from_utf8_lossy(&handle.capture_scrollback()).contains("pane=pane-real-env"),
+            "the PTY child must inherit TILLER_PANE_ID"
+        );
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     #[test]
@@ -1263,10 +1808,7 @@ mod tests {
 
     #[test]
     fn scrollback_can_be_viewed_after_output_exceeds_the_viewport() {
-        let working_directory = std::env::temp_dir().join(format!(
-            "tiller-terminal-test-scroll-{}",
-            std::process::id()
-        ));
+        let working_directory = test_working_directory("scroll");
         std::fs::create_dir_all(&working_directory).unwrap();
         let shell = TerminalShell::WithArguments {
             program: "/bin/sh".to_string(),
@@ -1276,16 +1818,21 @@ mod tests {
                     .to_string(),
             ],
         };
-        let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while std::time::Instant::now() < deadline
-            && !screen_text(&handle).contains("P4_SCROLL_099")
-        {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let (handle, mut wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
+        let output_reached_screen = futures::executor::block_on(async {
+            while let Some(event) = wakeup_rx.next().await {
+                if matches!(event, Event::Wakeup) && screen_text(&handle).contains("P4_SCROLL_099")
+                {
+                    return true;
+                }
+                if matches!(event, Event::ChildExit(_)) {
+                    return screen_text(&handle).contains("P4_SCROLL_099");
+                }
+            }
+            false
+        });
         assert!(
-            screen_text(&handle).contains("P4_SCROLL_099"),
+            output_reached_screen,
             "the command output never reached the terminal grid"
         );
         let captured = String::from_utf8_lossy(&handle.capture_scrollback()).into_owned();
@@ -1305,6 +1852,8 @@ mod tests {
             screen_text(&handle).contains("P4_SCROLL_099"),
             "scrolling back to the bottom should restore the newest output"
         );
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     #[test]
@@ -1419,6 +1968,7 @@ mod tests {
         };
         let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
         handle.resize(37, 11, 8, 18);
+        std::thread::sleep(Duration::from_millis(150));
         handle.write(b"stty size\n".to_vec());
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1515,6 +2065,84 @@ mod tests {
         panic!("PTY child {pid} was still running after terminal shutdown");
     }
 
+    #[test]
+    fn shutdown_terminates_the_entire_pty_process_group() {
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-test-process-group-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).unwrap();
+        let pid_file = working_directory.join("grandchild.pid");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "trap '' HUP; sleep 60 & printf '%s' \"$!\" > {}; wait",
+                    pid_file.display()
+                ),
+            ],
+        };
+        let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
+        let process_group = ProcessGroupGuard(handle.shell_pid);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let child_pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = pid.parse::<i32>()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY child did not publish its background process pid"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            process_is_running(child_pid),
+            "background process exited before shutdown was exercised"
+        );
+        handle.shutdown();
+        drop(handle);
+
+        while std::time::Instant::now() < deadline && process_is_running(child_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_running(child_pid),
+            "PTY descendant {child_pid} survived shutdown of process group {}",
+            process_group.0
+        );
+    }
+
+    struct ProcessGroupGuard(u32);
+
+    impl Drop for ProcessGroupGuard {
+        fn drop(&mut self) {
+            // The PTY creates a dedicated session/process group for its child.
+            // This is test cleanup only; the assertion above must prove normal
+            // shutdown made this fallback unnecessary.
+            unsafe {
+                let _ = libc::kill(-(self.0 as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+
+    fn process_is_running(pid: i32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return false;
+        };
+        fields
+            .as_bytes()
+            .first()
+            .is_some_and(|state| *state != b'Z')
+    }
+
     fn process_exists(pid: i32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -1527,9 +2155,116 @@ mod tests {
 #[cfg(test)]
 mod view_tests {
     use super::*;
-    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+    use gpui::{AppContext, Modifiers, MouseButton, VisualTestContext, point, px};
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    struct DiffDropFixture {
+        terminal: gpui::Entity<TerminalView>,
+        payload: (PathBuf, String),
+    }
+
+    struct FileDropFixture {
+        terminal: gpui::Entity<TerminalView>,
+        path: PathBuf,
+    }
+
+    impl gpui::Render for DiffDropFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("terminal-test-drag-source")
+                        .debug_selector(|| "terminal-test-drag-source".to_owned())
+                        .h(px(40.0))
+                        .on_drag(self.payload.clone(), |_, _, _, cx| cx.new(|_| gpui::Empty))
+                        .child("diff source"),
+                )
+                .child(self.terminal.clone())
+        }
+    }
+
+    impl gpui::Render for FileDropFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("terminal-file-test-drag-source")
+                        .debug_selector(|| "terminal-file-test-drag-source".to_owned())
+                        .h(px(40.0))
+                        .on_drag(self.path.clone(), |_, _, _, cx| cx.new(|_| gpui::Empty))
+                        .child("file source"),
+                )
+                .child(self.terminal.clone())
+        }
+    }
+
+    #[test]
+    fn conflict_resolution_shell_quotes_the_exact_repo_relative_path() {
+        let shell = conflict_resolution_shell(Path::new("src/conflicted file.txt"));
+        let TerminalShell::WithArguments { program, args } = shell else {
+            panic!("conflict launch must be a shell command");
+        };
+        assert_eq!(program, "/bin/sh");
+        assert_eq!(args[0], "-lc");
+        assert!(args[1].contains("git diff --cc -- 'src/conflicted file.txt'"));
+        assert!(args[1].contains("Resolve conflict at"));
+    }
+
+    /// The drawn terminal created for a conflict keeps the repository root
+    /// and exact conflicted path in its launch contract.
+    #[gpui::test]
+    async fn a_conflict_terminal_is_drawn_with_the_exact_path(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let repo = std::env::temp_dir().join(format!(
+            "tiller-terminal-conflict-launch-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&repo).expect("create conflict repo");
+        let path = PathBuf::from("src/conflicted file.txt");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::for_conflict(&repo, &path, cx).expect("create conflict terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal
+                .working_directory()
+                .to_path_buf()),
+            repo
+        );
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| match terminal.launch_shell() {
+                TerminalShell::WithArguments { args, .. } => {
+                    args.get(1)
+                        .is_some_and(|command| command.contains("'src/conflicted file.txt'"))
+                }
+                TerminalShell::System => false,
+            })
+        );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(repo);
+    }
 
     fn missing_directory(tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1618,6 +2353,136 @@ mod view_tests {
         );
     }
 
+    /// A real PTY must expose the shell's OSC title and its settled scrollback
+    /// through the terminal entity. This is intentionally a drawn test: the
+    /// event pump must be alive, and every scheduler turn is fully drained.
+    #[gpui::test]
+    async fn real_pty_emits_osc_title_and_settled_output(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-activity-events-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "sleep 0.1; printf '\\033]0;✳ idle\\007'; printf 'Do you want to proceed?\\n'; exec sleep 1"
+                    .to_string(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        let _subscription = cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalActivityEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let events = events.borrow();
+            let title_seen = events
+                .iter()
+                .any(|event| event == &TerminalActivityEvent::OscTitle("✳ idle".to_string()));
+            let content_seen = events.iter().any(|event| {
+                matches!(event, TerminalActivityEvent::OutputSettled { scrollback }
+                    if scrollback.contains("Do you want to proceed?"))
+            });
+            if title_seen && content_seen {
+                break;
+            }
+            drop(events);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let events = events.borrow();
+        let snapshot = terminal.update(&mut cx.cx, |terminal, _| terminal.snapshot());
+        assert!(
+            events
+                .iter()
+                .any(|event| event == &TerminalActivityEvent::OscTitle("✳ idle".to_string())),
+            "OSC title did not cross the PTY listener boundary: {events:?}; scrollback: {:?}",
+            String::from_utf8_lossy(&snapshot.scrollback)
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, TerminalActivityEvent::OutputSettled { scrollback }
+                    if scrollback.contains("Do you want to proceed?"))
+            }),
+            "settled PTY scrollback did not reach the activity surface: {events:?}"
+        );
+        drop(events);
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn stable_identity_is_inherited_by_the_lazily_spawned_pty(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-pane-identity-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'pane=%s\\n' \"$TILLER_PANE_ID\"; exec sleep 1".to_string(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("create lazy terminal");
+            view.set_identity(TerminalIdentity::new("pane-stable", "terminal-stable"));
+            view
+        });
+        let scrollback = Rc::new(RefCell::new(Vec::new()));
+        let observed = scrollback.clone();
+        let _subscription = cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalActivityEvent, _| {
+                if let TerminalActivityEvent::OutputSettled { scrollback } = event {
+                    observed.borrow_mut().push(scrollback.clone());
+                }
+            })
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if scrollback
+                .borrow()
+                .iter()
+                .any(|text| text.contains("pane=pane-stable"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            scrollback
+                .borrow()
+                .iter()
+                .any(|text| text.contains("pane=pane-stable")),
+            "stable pane identity must reach the PTY child: {:?}",
+            scrollback.borrow()
+        );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     async fn right_click_resolves_this_terminal_and_draws_all_context_actions(
         cx: &mut gpui::TestAppContext,
@@ -1655,7 +2520,7 @@ mod view_tests {
         let click = point(px(40.0), px(40.0));
         cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
 
-        for index in 0..10 {
+        for index in 0..12 {
             let selector: &'static str =
                 Box::leak(format!("terminal-context-item-{index}").into_boxed_str());
             assert!(
@@ -1664,15 +2529,196 @@ mod view_tests {
             );
         }
 
-        let split_right = cx
+        let split_left = cx
             .debug_bounds("terminal-context-item-6")
-            .expect("Split Right item");
-        cx.simulate_click(split_right.center(), Modifiers::none());
+            .expect("Split Left item");
+        cx.simulate_click(split_left.center(), Modifiers::none());
         let event = events.borrow().last().cloned().expect("split event");
-        assert_eq!(event.action, TerminalContextAction::SplitRight);
+        assert_eq!(event.action, TerminalContextAction::SplitLeft);
         assert!(event.target.pane_id().starts_with("pane-"));
         assert!(event.target.terminal_id().starts_with("terminal-"));
 
         assert!(cx.update(|_, cx| terminal.read(cx).is_failed()));
+    }
+
+    /// A dropped diff is delivered through the same real mouse gesture GPUI
+    /// uses for payload drags, and the terminal entity records the exact
+    /// payload for the host to consume.
+    #[gpui::test]
+    async fn a_drawn_terminal_receives_a_diff_payload_drop(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-terminal-diff-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create drop directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+        };
+        let payload = (
+            PathBuf::from("src/conflicted file.txt"),
+            "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+        );
+        let window = cx.add_window(|_, cx| {
+            let terminal = cx.new(|cx| {
+                TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
+            });
+            DiffDropFixture {
+                terminal,
+                payload: payload.clone(),
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<DiffDropFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let terminal = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal.clone());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalDropEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is a drawn drop target");
+        let source = cx
+            .debug_bounds("terminal-test-drag-source")
+            .expect("test source is drawn");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(source.center().x + px(8.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[TerminalDropEvent::Diff {
+                path: payload.0.clone(),
+                text: payload.1.clone(),
+            }],
+            "the terminal receives the complete diff payload"
+        );
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.last_dropped_diff().cloned()),
+            Some(payload),
+            "the terminal keeps the dropped diff available to its host"
+        );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_drawn_terminal_inserts_a_quoted_file_drop_without_a_newline(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-terminal-file-drop-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create drop directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+        };
+        let path = PathBuf::from("src/file with spaces.rs");
+        let window = cx.add_window(|_, cx| {
+            let terminal = cx.new(|cx| {
+                TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
+            });
+            FileDropFixture {
+                terminal,
+                path: path.clone(),
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<FileDropFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let terminal = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal.clone());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalDropEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is a drawn drop target");
+        let source = cx
+            .debug_bounds("terminal-file-test-drag-source")
+            .expect("test source is drawn");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(source.center().x + px(8.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[TerminalDropEvent::Files {
+                paths: vec![path.clone()]
+            }]
+        );
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal
+                .last_dropped_files()
+                .map(<[PathBuf]>::to_vec)),
+            Some(vec![path])
+        );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
     }
 }

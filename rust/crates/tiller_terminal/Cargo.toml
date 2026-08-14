@@ -8,10 +8,12 @@ publish.workspace = true
 gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 tiller_theme.workspace = true
+tiller_project.workspace = true
 anyhow.workspace = true
 futures = "0.3"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
 parking_lot = "0.12"
+libc = "0.2"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
