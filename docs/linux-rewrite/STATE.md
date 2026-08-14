@@ -90,18 +90,34 @@ picker draws on the same account, so switching models *within* that provider buy
 **Claude Code panes running Sonnet 5**, 1M context, thinking high, auto mode. The names are
 unchanged; the engines behind them are not. `pireview` (w1:p6) is **gone from `herdr agent list`**.
 
-| Pane | Engine | Piece | Territory |
-|---|---|---|---|
-| `sonnet` (w1:p5) | Claude | `P109` — the 34 gestures `P106` could not reach; **holds the `:1` drive lock** | critic, drives only |
-| `fable` (w1:pD) | Claude | `P111` — settings + adapter absent rows | `settings.rs`, `status_bar.rs`, `tiller_agents`, `tiller_usage` |
-| `pi` (w1:p4) | **Sonnet 5** | `P121` — independently verify the `P117` fix. Delivered `P119`; done `P112`, `P116` Slice C | drives + `reference/linux-progress/p121/` |
-| `codex12` (w1:p3) | **Sonnet 5** | `P120` — the ~21 re-slotted rows, four instruments. Delivered `P118`; done `P110` | no `rust/` |
-| ~~`codex11` (w1:p2)~~ | — | **OUT OF CREDIT.** Never started `P117` | — |
-| ~~`pireview` (w1:p6)~~ | — | **GONE.** Delivered `P113`, `P115`, `P116` Slice A | was sole owner of `INVENTORY-LEDGER.md` |
+### The roles, set by the user 18:37 — read this before dispatching anything
 
-**The ledger has no owner.** `pireview` held that exclusively and is gone, so verdicts for `P118`,
-`P119`, `P120` and `P121` are queued with nobody to set them. Reassigning it needs a pane that
-built none of the work it is judging.
+**`pi`, `sonnet` and `codex12` are implementers. `fable` is the critic/reviewer.** I had this
+backwards in the 18:40 table and dispatched against the inverted version; the two mis-slotted panes
+were already deep into their work, so they are being allowed to finish rather than thrashed. The
+roles apply **from the next dispatch onward**.
+
+| Pane | Engine | Role | Piece in flight | Territory |
+|---|---|---|---|---|
+| `pi` (w1:p4) | Sonnet 5 | **implementer** | `P121` (mis-slotted — finishing it). Delivered `P119`; done `P112`, `P116` Slice C | back to `rust/` after |
+| `sonnet` (w1:p5) | Claude | **implementer** | `P109` — 34 gestures; **holds the `:1` drive lock** | drives only today |
+| `codex12` (w1:p3) | Sonnet 5 | **implementer** | `P120` — ~21 re-slotted rows. Delivered `P118`; done `P110` | no `rust/` |
+| `fable` (w1:pD) | Fable 5 | **critic / reviewer** | `P111` (mis-slotted — finishing it) | **inherits `INVENTORY-LEDGER.md`** |
+| ~~`codex11` (w1:p2)~~ | — | — | **OUT OF CREDIT.** Never started `P117` | — |
+| ~~`pireview` (w1:p6)~~ | — | — | **GONE.** Delivered `P113`, `P115`, `P116` Slice A | was sole ledger owner |
+
+**`fable` inherits `INVENTORY-LEDGER.md` from `pireview`** once `P111` lands, and is the pane that
+sets verdicts for `P118`, `P119`, `P120` and `P121`.
+
+### The one row-set `fable` may not judge
+
+`fable` is currently **building** `P111` (`F-SET-12`, `F-SET-17`, `F-AGENT-OPENCODE-03` landed;
+`F-SET-13` in flight). Under the binding rule — **the critic is never the agent that built the
+piece** — `fable` cannot be the judge of its own `P111` rows, and it is the only critic.
+
+**Those rows go to the orchestrator, who built none of them.** Everything else is `fable`'s. Role
+labels are the user's org structure; builder ≠ critic is the project's invariant, and where the two
+collide the invariant wins.
 
 ### What was tried on the dead panes, so nobody retries it
 
