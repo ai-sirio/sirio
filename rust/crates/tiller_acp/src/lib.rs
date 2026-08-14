@@ -11,8 +11,9 @@ use agent_client_protocol::schema::v1::{
     PlanEntry as ProtocolPlanEntry, PlanEntryStatus as ProtocolPlanEntryStatus, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigOptionValue, SessionConfigSelectOptions, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus,
+    SessionConfigOptionValue, SessionConfigSelectOptions, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest, TextContent,
+    ToolCallContent, ToolCallLocation, ToolCallStatus,
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, ErrorCode, Lines,
@@ -266,6 +267,31 @@ pub struct EffortOption {
     pub choices: Vec<EffortChoice>,
 }
 
+/// A mode the agent can operate in for this session (ACP's `SessionMode`,
+/// e.g. "ask"/"plan"/"auto" — the offered granularity is entirely
+/// agent-defined; see the ACP session-modes spec) (F-CHAT-15).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentMode {
+    /// Protocol identifier sent back via `session/set_mode`.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional agent-provided description.
+    pub description: Option<String>,
+}
+
+/// The session-mode selector advertised by an ACP session (ACP's
+/// `SessionModeState`) — a distinct wire concept from [`ModelCatalog`] and
+/// [`EffortOption`], which ride the separate `SessionConfigOption`
+/// mechanism (F-CHAT-15).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModeCatalog {
+    /// The mode currently active.
+    pub current_id: String,
+    /// Every mode the agent offers.
+    pub options: Vec<AgentMode>,
+}
+
 /// A structured question folded out of an `AskUserQuestion`-shaped tool
 /// input attached to a permission request. The permission's own options
 /// remain the wire of record; this only adds the free-text prompt and text
@@ -462,6 +488,7 @@ enum Command {
     PromptContent(Vec<ContentBlock>),
     SetModel { config_id: String, value: String },
     SetConfigOption { option_id: String, value: String },
+    SetMode(String),
     Cancel,
     Shutdown(mpsc::SyncSender<()>),
 }
@@ -501,6 +528,13 @@ pub struct AcpClient {
     session_id: String,
     initialize_info: InitializeInfo,
     model_catalog: Option<ModelCatalog>,
+    // Live, not a fixed snapshot like `model_catalog`: the worker updates it
+    // in place as `session/set_mode` is confirmed or the agent pushes a
+    // `CurrentModeUpdate`, so a caller can re-read it after any signal that
+    // something changed rather than needing a dedicated typed event
+    // (F-CHAT-15; see `AcpEvent::TransportError`'s doc for why this crate's
+    // event enum cannot grow a new variant this wave).
+    mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -535,6 +569,8 @@ impl AcpClient {
         let (worker_tx, worker_rx) = mpsc::sync_channel(2);
         let pending_permissions: PermissionWaiters = Arc::new(Mutex::new(HashMap::new()));
         let worker_pending = Arc::clone(&pending_permissions);
+        let mode_catalog: Arc<Mutex<Option<ModeCatalog>>> = Arc::new(Mutex::new(None));
+        let worker_mode_catalog = Arc::clone(&mode_catalog);
 
         let worker = thread::Builder::new()
             .name("tiller-acp".into())
@@ -546,6 +582,7 @@ impl AcpClient {
                     worker_event_tx,
                     worker_tx,
                     worker_pending,
+                    worker_mode_catalog,
                 );
             })?;
 
@@ -600,6 +637,7 @@ impl AcpClient {
                 session_id: startup.session_id,
                 initialize_info: startup.initialize_info,
                 model_catalog: startup.model_catalog,
+                mode_catalog,
                 worker: Some(worker),
             },
             event_rx,
@@ -622,6 +660,30 @@ impl AcpClient {
     #[must_use]
     pub fn model_catalog(&self) -> Option<&ModelCatalog> {
         self.model_catalog.as_ref()
+    }
+
+    /// The session-mode selector advertised by the agent, if any
+    /// (F-CHAT-15). Unlike [`Self::model_catalog`], this reflects the
+    /// current state live: re-reading it after [`Self::set_mode`] resolves,
+    /// or after any event, picks up a `session/set_mode` confirmation or an
+    /// agent-pushed `CurrentModeUpdate`. `None` means the agent did not
+    /// advertise `modes` in its `session/new` response — most ACP agents
+    /// today don't.
+    #[must_use]
+    pub fn mode_catalog(&self) -> Option<ModeCatalog> {
+        self.mode_catalog
+            .lock()
+            .ok()
+            .and_then(|catalog| catalog.clone())
+    }
+
+    /// Ask the agent to switch to a different session mode (F-CHAT-15),
+    /// e.g. an "ask"/"plan"/"auto" selector some ACP agents expose. Valid
+    /// `mode_id`s come from [`Self::mode_catalog`]'s advertised options.
+    pub fn set_mode(&self, mode_id: impl Into<String>) -> Result<()> {
+        self.command_tx
+            .send_blocking(Command::SetMode(mode_id.into()))
+            .map_err(|error| anyhow!("ACP worker is not running: {error}"))
     }
 
     /// Send a user turn without blocking on its streamed response.
@@ -768,6 +830,7 @@ fn run_connection(
     event_tx: EventStreamSender,
     worker_tx: mpsc::SyncSender<WorkerSignal>,
     pending_permissions: PermissionWaiters,
+    mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
 ) {
     let started = Arc::new(AtomicBool::new(false));
     let clean_shutdown = Arc::new(AtomicBool::new(false));
@@ -874,6 +937,8 @@ fn run_connection(
         let permission_timeout_reason = Arc::clone(&timeout_reason);
         let prompt_timeout_reason = Arc::clone(&timeout_reason);
         let auth_methods_seen = Arc::clone(&auth_methods_for_connection);
+        let mode_catalog_for_notifications = Arc::clone(&mode_catalog);
+        let mode_catalog_for_session = Arc::clone(&mode_catalog);
         let shutdown_ack = Arc::clone(&shutdown_ack_for_connection);
         let child_for_prompt = Arc::clone(&child_for_connection);
         let outgoing = futures::sink::unfold(stdin, |mut writer, line: String| async move {
@@ -888,6 +953,16 @@ fn run_connection(
             .name("tiller")
             .on_receive_notification(
                 async move |notification: SessionNotification, _connection| {
+                    // Applied before `notification_to_events` folds the
+                    // update into an `AcpEvent`, so `AcpClient::mode_catalog`
+                    // is already current by the time a caller reacts to that
+                    // event (F-CHAT-15).
+                    if let SessionUpdate::CurrentModeUpdate(ref update) = notification.update {
+                        apply_current_mode(
+                            &mode_catalog_for_notifications,
+                            update.current_mode_id.to_string(),
+                        );
+                    }
                     for event in notification_to_events(notification) {
                         let _ = notification_events.send(event).await;
                     }
@@ -991,6 +1066,11 @@ fn run_connection(
                 };
                 let model_catalog = model_catalog_from_options(session.config_options.as_ref());
                 let effort = effort_from_options(session.config_options.as_ref());
+                if let Some(state) = &session.modes
+                    && let Ok(mut catalog) = mode_catalog_for_session.lock()
+                {
+                    *catalog = Some(mode_catalog_from_state(state));
+                }
                 let model_event = model_catalog.clone().map(AcpEvent::ModelCatalog);
                 startup_sender
                     .send(WorkerSignal::Startup(Ok(Startup {
@@ -1139,6 +1219,41 @@ fn run_connection(
                                             let _ = event_tx
                                                 .send(AcpEvent::TransportError(format!(
                                                     "config option selection failed: {error}"
+                                                )))
+                                                .await;
+                                        }
+                                    }
+                                    Ok(())
+                                })?;
+                        }
+                        Command::SetMode(mode_id) => {
+                            let event_tx = connection_events.clone();
+                            let mode_catalog_for_result = Arc::clone(&mode_catalog_for_session);
+                            let confirmed_mode_id = mode_id.clone();
+                            connection
+                                .send_request(SetSessionModeRequest::new(
+                                    session.session_id.clone(),
+                                    mode_id,
+                                ))
+                                .on_receiving_result(move |result| async move {
+                                    match result {
+                                        // `SetSessionModeResponse` carries no
+                                        // state back — ACP leaves
+                                        // confirmation to a later
+                                        // `CurrentModeUpdate` — so update
+                                        // optimistically, the same tradeoff
+                                        // a `CurrentModeUpdate` push resolves
+                                        // authoritatively when it arrives.
+                                        Ok(_response) => {
+                                            apply_current_mode(
+                                                &mode_catalog_for_result,
+                                                confirmed_mode_id,
+                                            );
+                                        }
+                                        Err(error) => {
+                                            let _ = event_tx
+                                                .send(AcpEvent::TransportError(format!(
+                                                    "set mode failed: {error}"
                                                 )))
                                                 .await;
                                         }
@@ -1487,6 +1602,15 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
         SessionUpdate::Plan(plan) => vec![AcpEvent::PlanUpdate {
             entries: plan.entries.iter().map(plan_entry).collect(),
         }],
+        // The cell update that actually matters already happened at the
+        // notification-handler call site, before this pure fold ever sees
+        // the update (F-CHAT-15) — this arm only keeps the signal a caller
+        // gets out of the generic "other" bucket so it knows to re-read
+        // `AcpClient::mode_catalog` rather than mistaking this for
+        // unmodeled protocol traffic.
+        SessionUpdate::CurrentModeUpdate(update) => vec![AcpEvent::OtherSessionUpdate {
+            kind: format!("CurrentModeUpdate({})", update.current_mode_id),
+        }],
         _ => vec![AcpEvent::OtherSessionUpdate {
             kind: "other".into(),
         }],
@@ -1554,6 +1678,44 @@ fn effort_from_options(options: Option<&Vec<SessionConfigOption>>) -> Option<Eff
             })
             .collect(),
     })
+}
+
+/// Converts ACP's `SessionModeState` (from `session/new`'s `modes` field)
+/// into the client's [`ModeCatalog`] (F-CHAT-15).
+fn mode_catalog_from_state(state: &SessionModeState) -> ModeCatalog {
+    ModeCatalog {
+        current_id: state.current_mode_id.to_string(),
+        options: state
+            .available_modes
+            .iter()
+            .map(|mode| AgentMode {
+                id: mode.id.to_string(),
+                name: mode.name.clone(),
+                description: mode.description.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Updates the live mode-catalog cell's current selection in place, from
+/// either a confirmed `session/set_mode` or an agent-pushed
+/// `CurrentModeUpdate` (F-CHAT-15). Synthesizes an options-less catalog if
+/// nothing was seeded yet — the agent that pushes a mode change without
+/// ever having advertised `session/new`'s `modes` field is not one this
+/// crate has observed, but `AcpClient::mode_catalog` should still report
+/// the current mode id rather than staying `None`.
+fn apply_current_mode(cell: &Arc<Mutex<Option<ModeCatalog>>>, current_id: String) {
+    if let Ok(mut catalog) = cell.lock() {
+        match catalog.as_mut() {
+            Some(existing) => existing.current_id = current_id,
+            None => {
+                *catalog = Some(ModeCatalog {
+                    current_id,
+                    options: Vec::new(),
+                });
+            }
+        }
+    }
 }
 
 /// Assembles the `session/prompt` content blocks from a draft, mirroring the
@@ -2139,6 +2301,102 @@ mod tests {
             }
             other => panic!("expected a TransportError carrying auth guidance, got {other:?}"),
         }
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_creation_carries_the_advertised_mode_catalog() {
+        // (F-CHAT-15) `session/new`'s `modes` field is ACP's session-modes
+        // primitive — a distinct wire concept from the `config_options`
+        // model/effort selectors this crate already extracts.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"plan","name":"Plan","description":"Plan before editing"}]}}}' ;;"#,
+        );
+        let (mut client, _events) =
+            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+                .expect("fixture agent should create a session");
+
+        assert_eq!(
+            client.mode_catalog(),
+            Some(ModeCatalog {
+                current_id: "ask".into(),
+                options: vec![
+                    AgentMode {
+                        id: "ask".into(),
+                        name: "Ask".into(),
+                        description: None,
+                    },
+                    AgentMode {
+                        id: "plan".into(),
+                        name: "Plan".into(),
+                        description: Some("Plan before editing".into()),
+                    },
+                ],
+            })
+        );
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_without_session_modes_reports_no_mode_catalog() {
+        // Most installed ACP agents today don't advertise `modes` at all —
+        // `mode_catalog` must stay `None` rather than synthesizing one, so
+        // a caller can tell "no selector" apart from "selector with no
+        // options" (F-CHAT-15).
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;;"#,
+        );
+        let (mut client, _events) =
+            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+                .expect("fixture agent should create a session");
+
+        assert_eq!(client.mode_catalog(), None);
+
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_mode_updates_the_live_catalog_once_the_agent_confirms() {
+        // (F-CHAT-15) `SetSessionModeResponse` carries no state back, so the
+        // live catalog only advances once the worker thread has actually
+        // processed the confirmed response — this drives that round trip
+        // through the real worker/command-channel machinery rather than
+        // calling the extractor directly.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test","modes":{"currentModeId":"ask","availableModes":[{"id":"ask","name":"Ask"},{"id":"plan","name":"Plan"}]}}}' ;; *session/set_mode*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{}}' ;;"#,
+        );
+        let (mut client, _events) =
+            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+                .expect("fixture agent should create a session");
+
+        client
+            .set_mode("plan")
+            .expect("set_mode should be accepted by the worker");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let updated = loop {
+            if let Some(catalog) = client.mode_catalog()
+                && catalog.current_id == "plan"
+            {
+                break catalog;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mode catalog never reflected the confirmed set_mode, last seen {:?}",
+                client.mode_catalog()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(
+            updated.options.len(),
+            2,
+            "the confirmed set_mode should update current_id in place, not drop the options"
+        );
 
         let _ = client.shutdown();
     }

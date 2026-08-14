@@ -375,16 +375,19 @@ impl TerminalHandle {
         processor.advance(&mut *term, b"\x1b[3J\x1b[2J\x1b[H");
     }
 
-    /// Terminate the PTY's dedicated process group and ask alacritty to drop
-    /// the PTY. The PTY destructor only signals its direct child; signaling
-    /// the group here is what also reaches shells' descendants. A stubborn
-    /// process gets SIGKILL after a short grace period so close/quit cannot
-    /// leave a live process group behind.
+    /// Terminate the PTY's process group(s) and ask alacritty to drop the
+    /// PTY. The PTY destructor only signals its direct child; signaling the
+    /// group(s) here is what also reaches the shell's descendants —
+    /// including ones that detached into their own process group after job
+    /// control forked them (F-PER-06), which a single `killpg` on the pgid
+    /// captured at spawn never reaches. A stubborn process gets SIGKILL
+    /// after a short grace period so close/quit cannot leave a live process
+    /// group behind.
     fn shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        terminate_process_group(self.shell_pid);
+        terminate_descendant_process_groups(self.shell_pid);
         let _ = self.sender.send(Msg::Shutdown);
     }
 
@@ -529,6 +532,78 @@ fn terminate_process_group(process_group: u32) {
             }
         }
     });
+}
+
+/// Every process id that is currently a descendant of `root` (not
+/// including `root` itself), discovered by walking the kernel's own live
+/// parent/child view (F-PER-06).
+///
+/// `/proc/<pid>/task/<tid>/children` is read fresh per pid rather than
+/// cached: a job-control-spawned child (a compound command, a backgrounded
+/// job) can detach into its own session/process group at any point after
+/// spawn, and a stubborn descendant can itself keep forking, so only a walk
+/// done at kill time — not the single pgid captured once at spawn — can
+/// find all of it. A process can have multiple threads (`task/<tid>`), and
+/// each thread's `children` file only lists the children *that thread*
+/// directly spawned, so every tid must be read to see the whole process's
+/// children.
+fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut discovered = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(root);
+    let mut frontier = vec![root];
+    while let Some(pid) = frontier.pop() {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let Ok(contents) = std::fs::read_to_string(task.path().join("children")) else {
+                continue;
+            };
+            for token in contents.split_whitespace() {
+                let Ok(child) = token.parse::<libc::pid_t>() else {
+                    continue;
+                };
+                if seen.insert(child) {
+                    discovered.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+    }
+    discovered
+}
+
+/// The distinct process groups spanning the shell (`shell_pid`) and every
+/// descendant it has right now, deduplicated. A single `killpg` on the pgid
+/// captured once at spawn only ever reaches the shell's *original* group —
+/// a job-control-spawned child that detached into a new group (a compound
+/// command run under job control, a backgrounded job in an interactive
+/// shell) is invisible to it and survives shutdown as an orphan (F-PER-06).
+/// Reading `getpgid` per pid at kill time, rather than assuming the shell's
+/// own pid is still its pgid, is what makes this correct even if the shell
+/// itself has re-grouped.
+fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut pids = vec![shell_pid];
+    pids.extend(descendant_pids(shell_pid));
+    let mut groups: Vec<libc::pid_t> = Vec::new();
+    for pid in pids {
+        let pgid = unsafe { libc::getpgid(pid) };
+        if pgid > 0 && !groups.contains(&pgid) {
+            groups.push(pgid);
+        }
+    }
+    groups
+}
+
+/// Terminates the shell at `shell_pid` and every process group any of its
+/// current descendants live in — not just the group captured at spawn
+/// (F-PER-06). Each distinct group gets its own SIGTERM-then-grace-then-
+/// SIGKILL handling via [`terminate_process_group`].
+fn terminate_descendant_process_groups(shell_pid: u32) {
+    for group in descendant_process_groups(shell_pid as libc::pid_t) {
+        terminate_process_group(group as u32);
+    }
 }
 
 /// A live PTY-backed terminal view, or a failed pane showing why the PTY
@@ -2117,6 +2192,78 @@ mod tests {
         );
     }
 
+    /// F-PER-06: a job-control-spawned child (a compound command, a
+    /// backgrounded job under an interactive shell) can detach into its
+    /// *own* process group, distinct from the shell's. `setsid` reproduces
+    /// that deterministically — it puts its argument into a brand-new
+    /// session and process group regardless of whether the parent shell
+    /// happens to have job control enabled, which a plain `sleep 60 &`
+    /// (the older, weaker test above) does not reliably do under a
+    /// non-interactive `-c` shell. The old fix only ever `killpg`'d the
+    /// pgid captured once at spawn — the shell's own group — so this
+    /// grandchild used to survive shutdown as an orphan.
+    #[test]
+    fn shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group() {
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-test-detached-group-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).unwrap();
+        let pid_file = working_directory.join("detached.pid");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "trap '' HUP; setsid sleep 60 & printf '%s' \"$!\" > {}; wait",
+                    pid_file.display()
+                ),
+            ],
+        };
+        let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
+        let process_group = ProcessGroupGuard(handle.shell_pid);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let detached_pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = pid.parse::<i32>()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY child did not publish the setsid child's pid"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let guard = PidGuard(detached_pid);
+
+        assert!(
+            process_is_running(detached_pid),
+            "the setsid child exited before shutdown was exercised"
+        );
+        let detached_pgid = unsafe { libc::getpgid(detached_pid) };
+        assert_ne!(
+            detached_pgid, process_group.0 as libc::pid_t,
+            "setsid must actually have put the child in a new process \
+             group for this test to prove anything"
+        );
+
+        handle.shutdown();
+        drop(handle);
+
+        while std::time::Instant::now() < deadline && process_is_running(detached_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_running(detached_pid),
+            "the detached process group {detached_pgid} survived shutdown \
+             of the shell's own group {}",
+            process_group.0
+        );
+        drop(guard);
+    }
+
     struct ProcessGroupGuard(u32);
 
     impl Drop for ProcessGroupGuard {
@@ -2126,6 +2273,20 @@ mod tests {
             // shutdown made this fallback unnecessary.
             unsafe {
                 let _ = libc::kill(-(self.0 as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+
+    /// Test cleanup for a single detached pid (its own session/group, so
+    /// [`ProcessGroupGuard`]'s `killpg` on the shell's group cannot reach
+    /// it). Same role as `ProcessGroupGuard`: a fallback that must prove
+    /// unnecessary once the assertion above has run.
+    struct PidGuard(i32);
+
+    impl Drop for PidGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = libc::kill(self.0, libc::SIGKILL);
             }
         }
     }
