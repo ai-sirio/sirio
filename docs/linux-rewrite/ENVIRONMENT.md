@@ -123,6 +123,35 @@ stale file or use the default path. The flock design it replaced had the opposit
 fd 9 inherited by a long-lived reparented process kept the lock held for a finished run and
 deadlocked every driver on the machine for an hour.
 
+### Holding the lock yourself, for a drive `linux-drive.sh` cannot do
+
+`linux-drive.sh` is launch → act → capture → kill. Some work needs the app **alive across many
+steps**: running an agent until a hook fires, waiting on a stream, proving a settings round-trip
+survives a relaunch. That work moves the same single global pointer, so it needs the same lock — and
+having no documented way to hold one is exactly why `codex12` came to drive with raw
+`xdotool windowactivate` at 03:13 on 2026-08-14 while two other agents were capturing.
+
+Take it the way the script does, so the same self-healing applies:
+
+```bash
+LOCKDIR=/tmp/tiller-drive-1.lockd            # the DISPLAY=:1 default
+until mkdir "$LOCKDIR" 2>/dev/null; do
+  hpid=$(sed -n 's/^pid=\([0-9]*\).*/\1/p' "$LOCKDIR/holder" 2>/dev/null)
+  # self-heal: the recorded holder died without cleaning up
+  if [ -n "$hpid" ] && ! kill -0 "$hpid" 2>/dev/null; then rm -rf "$LOCKDIR"; continue; fi
+  sleep 5
+done
+printf 'pid=%s label=%s since=%s\n' "$$" "${TILLER_DRIVE_LABEL:-unlabelled}" "$(date -Is)" \
+  >"$LOCKDIR/holder"
+trap 'rm -rf "$LOCKDIR"' EXIT INT TERM       # the trap is the point — a lock you forget to
+                                             # release is worse than never taking one
+```
+
+**`import -window` is not protection.** It photographs your own window correctly even while
+`windowactivate` and `xdotool key` are stealing focus from everybody else. So a raw driver's own
+frames look plausible while it corrupts other agents' input — the false negative above, arriving
+from the direction you are least likely to check.
+
 ## Driving with a fixture database
 
 `TILLER_DB=/path/to/fixture.sqlite` points the app at a scratch database — the pass-17 pattern
