@@ -134,7 +134,10 @@ enum Entry {
     /// rendering, so a redraw never reparses the entire reply.
     Assistant { text: String, document: Document },
     /// A streamed reasoning chunk, visually distinct from the reply.
-    Thought(String),
+    ///
+    /// `expanded` starts `false` (F-CHAT-21): thinking renders collapsed to
+    /// a one-line summary until the reader opts in, live or historical.
+    Thought { text: String, expanded: bool },
     /// A tool call, tracked by protocol id so later updates can patch it.
     ToolCall {
         id: String,
@@ -175,7 +178,8 @@ enum Entry {
 impl Entry {
     fn plain_text(&self) -> String {
         match self {
-            Self::User(text) | Self::Thought(text) => text.clone(),
+            Self::User(text) => text.clone(),
+            Self::Thought { text, .. } => text.clone(),
             Self::Assistant { document, .. } => document.plain_text(),
             Self::ToolCall { title, status, .. } => format!("{title}\n{status}"),
             Self::Permission {
@@ -639,6 +643,15 @@ impl Chat {
         self.list_state.remeasure_items(index..index + 1);
     }
 
+    /// F-CHAT-21: flips one thought entry's expand/collapse state.
+    fn toggle_thought_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Entry::Thought { expanded, .. }) = self.entries.get_mut(index) {
+            *expanded = !*expanded;
+            self.remeasure_entry(index);
+        }
+        cx.notify();
+    }
+
     /// Install the composer keymap in the host application.
     pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
@@ -693,11 +706,14 @@ impl Chat {
                 }
             }
             AcpEvent::ThoughtChunk(text) => {
-                if let Some(Entry::Thought(existing)) = self.entries.last_mut() {
+                if let Some(Entry::Thought { text: existing, .. }) = self.entries.last_mut() {
                     existing.push_str(&text);
                     self.remeasure_entry(self.entries.len() - 1);
                 } else {
-                    self.push_entry(Entry::Thought(text));
+                    self.push_entry(Entry::Thought {
+                        text,
+                        expanded: false,
+                    });
                 }
             }
             AcpEvent::ToolCallStarted { id, title, status } => {
@@ -2435,20 +2451,65 @@ impl Chat {
             Entry::Assistant { document, .. } => {
                 Self::render_markdown(document, theme, Some(interaction), source_start)
             }
-            Entry::Thought(text) => div()
-                .w_full()
-                .text_size(typography.callout)
-                .line_height(px(19.0))
-                .text_color(colors.subtitle)
-                .italic()
-                .child(Self::render_plain_text(
-                    text,
-                    theme,
-                    format!("thought-entry-{entry_index}"),
-                    source_start,
-                    Some(&interaction),
-                ))
-                .into_any_element(),
+            Entry::Thought { text, expanded } => {
+                let toggle_entity = entity.clone();
+                let mut column = div().w_full().flex().flex_col().gap(px(4.0)).child(
+                    div()
+                        .id(("thought-toggle", entry_index))
+                        .debug_selector(move || format!("thought-toggle-{entry_index}"))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .cursor(CursorStyle::PointingHand)
+                        .hover(|style| style.text_color(colors.title))
+                        .child(
+                            IconElement::new(
+                                if expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::ChevronRight
+                                },
+                                px(10.0),
+                            )
+                            .text_color(colors.meta),
+                        )
+                        .child(
+                            div()
+                                .text_size(typography.callout)
+                                .line_height(px(19.0))
+                                .text_color(colors.subtitle)
+                                .italic()
+                                .child(if expanded {
+                                    "Thinking".to_string()
+                                } else {
+                                    thought_summary(&text)
+                                }),
+                        )
+                        .on_click(move |_, _, cx| {
+                            toggle_entity.update(cx, |chat, cx| {
+                                chat.toggle_thought_expanded(entry_index, cx);
+                            });
+                        }),
+                );
+                if expanded {
+                    column = column.child(
+                        div()
+                            .pl(px(14.0))
+                            .text_size(typography.callout)
+                            .line_height(px(19.0))
+                            .text_color(colors.subtitle)
+                            .italic()
+                            .child(Self::render_plain_text(
+                                text,
+                                theme,
+                                format!("thought-entry-{entry_index}"),
+                                source_start,
+                                Some(&interaction),
+                            )),
+                    );
+                }
+                column.into_any_element()
+            }
             Entry::ToolCall { title, status, .. } => div()
                 .w_full()
                 .flex()
@@ -4058,6 +4119,23 @@ fn option_hash(option: &AnswerOption) -> usize {
     })
 }
 
+/// F-CHAT-21: the one-line summary shown on a collapsed thought — text
+/// flattened to a single line and capped so it never wraps the header row.
+const THOUGHT_SUMMARY_MAX_CHARS: usize = 72;
+
+fn thought_summary(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return "Thinking…".to_string();
+    }
+    if flat.chars().count() <= THOUGHT_SUMMARY_MAX_CHARS {
+        flat
+    } else {
+        let truncated: String = flat.chars().take(THOUGHT_SUMMARY_MAX_CHARS).collect();
+        format!("{truncated}…")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4317,7 +4395,7 @@ mod tests {
                 .entries
                 .iter()
                 .find_map(|entry| match entry {
-                    Entry::Thought(text) => Some(text.clone()),
+                    Entry::Thought { text, .. } => Some(text.clone()),
                     _ => None,
                 })
                 .expect("thought chunk");
@@ -5287,6 +5365,27 @@ mod tests {
     }
 
     #[test]
+    fn thought_summary_flattens_and_caps_long_text() {
+        assert_eq!(thought_summary(""), "Thinking…");
+        assert_eq!(thought_summary("short thought"), "short thought");
+        assert_eq!(
+            thought_summary("line one\nline two"),
+            "line one line two",
+            "collapsed summary flattens newlines to one line"
+        );
+        let long = "word ".repeat(30);
+        let summary = thought_summary(&long);
+        assert!(
+            summary.chars().count() <= THOUGHT_SUMMARY_MAX_CHARS + 1,
+            "summary must stay within the cap plus the ellipsis: {summary:?}"
+        );
+        assert!(
+            summary.ends_with('…'),
+            "truncated summary keeps the ellipsis marker"
+        );
+    }
+
+    #[test]
     fn acp_program_converts_to_the_adapters_own_agent_command() {
         // The picker contract: the chosen adapter's `AcpProgram` converts
         // to the `AgentCommand` that launches THAT agent — never another's.
@@ -5447,6 +5546,50 @@ mod tests {
         cx.simulate_click(point(px(10.0), px(10.0)), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("context-popover").is_none());
+    }
+
+    #[gpui::test]
+    async fn thought_starts_collapsed_and_toggles_on_click(cx: &mut TestAppContext) {
+        // F-CHAT-21: thinking renders collapsed to a summary until clicked,
+        // live or historical, and clicking again folds it back.
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Thought {
+                text: "considering the approach".into(),
+                expanded: false,
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        fn is_expanded(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+            chat.read_with(cx, |chat, _| {
+                matches!(chat.entries.last(), Some(Entry::Thought { expanded, .. }) if *expanded)
+            })
+        }
+        assert!(!is_expanded(&chat, cx), "a new thought starts collapsed");
+
+        let toggle = cx
+            .debug_bounds("thought-toggle-0")
+            .expect("thought toggle is rendered");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            is_expanded(&chat, cx),
+            "clicking the toggle expands the thought"
+        );
+
+        let toggle = cx
+            .debug_bounds("thought-toggle-0")
+            .expect("thought toggle stays rendered while expanded");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
     }
 
     #[gpui::test]
