@@ -60,3 +60,29 @@ gesture available on this lane reaches the discriminating input; this half needs
 which this slice may invoke/build.
 
 Capture: `reference/linux-progress/drive-E03-chat/02-f20-mid-stream.png`.
+
+## F-CHAT-13 (ledger line 162, NOT EXERCISED going in)
+
+Prior verdict: instrument-unreachable on the X lane (no XDND source window; the "+" attach
+control opens an invisible-to-X portal picker).
+
+Tried the "+" attach control on the Wayland lane instead, since this lane's `click` is a real
+synthetic left-click (unlike the X lane's xdotool). Set up project + chat as usual, located the
+"+" control precisely (confirmed by a capture with the cursor sitting on it,
+`02-f13-plus-click4.png`), then clicked it. No popup, file picker, or portal dialog appeared in
+the next forced-repaint capture in any of four attempts (`02-f13-plus-click.png` through
+`...click4.png`) — composer stayed "idle", unfocused, same as before the click.
+
+**Claim: could-not-reach.** Two candidate explanations, neither provable without more
+instrumentation: (a) `shot`'s forced repaint requires an output-resolution change, which may
+itself dismiss an open popup as an outside interaction before the capture lands — this lane's
+only way to force a fresh frame is also destructive to transient popups; (b) this headless sway
+session runs no `xdg-desktop-portal`, so a portal-backed file picker may legitimately produce
+nothing to capture, matching what the X-lane note already predicted. Drag-and-drop itself
+remains separately unreachable here too: `Scripts/wayland-virtual-pointer.c` implements only
+`motion_absolute`/`button`/`frame`, no `wl_data_device`/drag-offer protocol, so a synthetic XDND
+or Wayland DnD drag cannot be issued from this lane's tooling without extending it — out of
+scope for this pass (no compiling). Same bottom line as the prior pass: a human can reach this
+control, neither current harness lane can drive it to a photographable result.
+
+Captures: `reference/linux-progress/drive-E03-chat/02-f13-plus-click.png` … `04-f13-plus-click4.png`.
