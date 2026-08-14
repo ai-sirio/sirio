@@ -77,6 +77,34 @@ the screen showed (verbatim where it matters), and the capture filename. **No ve
 
 **Release the lock when you finish and say so in your pane.**
 
+## Addendum — aim the tab right-click at the tab, not the strip
+
+Added mid-task after tracing the code. **The tab context menu is not missing.**
+
+- `main.rs:5723` `tab_context_items()` builds the whole menu — Open File, Rename, Close, Move
+  Earlier, Move Later — including the disabled-with-reason variants.
+- `main.rs:5538` attaches `on_mouse_down(MouseButton::Right, …)` calling `open_tab_menu`.
+- `render_tab_context_menu` is wired at `main.rs:5880` and `:6303`, and drawn tests that simulate
+  `MouseButton::Right` pass.
+
+Yet `P104` recorded that repeated tab-strip right-clicks produced no menu while a terminal-body
+right-click worked, and **six rows carry `FAILED — defective` on that observation**
+(`F-TAB-12/13/14/15/17/21`).
+
+Two possibilities, neither asserted here:
+
+1. **The gesture missed.** The tab div is `h(px(30.0))` under `mt(px(4.0))` (`main.rs:5514-5516`),
+   so a right-click aimed at the vertical centre of the tab *strip* can land in the margin or below
+   the tab, on background carrying no handler.
+2. **A real bug.** `main.rs:5530` puts `.on_drag` on the same element as the right-click handler; a
+   drag listener claiming mouse-down would produce exactly this symptom.
+
+Each tab carries `debug_selector("workspace-tab-{id}")` (`main.rs:5512`). Resolve its bounds, click
+inside them, and **record the coordinate and the bounds** — the value is that the next person can
+replay it. If the menu opens, six rows were mis-verdicted on a missed gesture. If it does not open
+from a coordinate provably inside the tab, that is a confirmed bug with `:5530` as first suspect —
+say so and move on; do not debug it.
+
 ## The rules
 
 - **Do not edit `INVENTORY-LEDGER.md`.** Do not edit any `rust/` source: a bug you find is a
