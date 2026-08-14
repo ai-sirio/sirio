@@ -163,3 +163,26 @@ Notify traffic, as predicted by the code trace above — not by itself proof of 
 **Discriminating:** the restore-and-background state was real (confirmed via `panel.list`
 before/after quit+relaunch, not assumed), so this is a genuine negative result for the specific
 pane tested, not a null instrument; it just tested a pane the code was never going to notify for.
+
+## `F-TAB-25` — Attach an eligible pane to the current terminal
+
+**Claim: could-not-reach.**
+
+**Drove:** No new drive attempted — checked feasibility first. The manifest's own approach says
+the remaining owed work is the live right-click exercise of the terminal pane context menu's
+"Attach to Current Terminal" item (code + tests already exist per `main.rs:5823-6030+`,
+`:11973`/`:12012`), and separately flags a shared cause: "tab-bar popover paints behind
+centre-surface, not on top."
+
+**Observed:** Right-click is out of reach by construction on this lane —
+`WAYLAND-LANE.md` explicitly lists right-click among the gestures "not yet exercised" (the
+lane's virtual pointer only exposes `move` and a hard-coded left-button `click`). Even setting
+that aside, the shared popover-paints-behind-surface defect would make any resulting menu
+unverifiable by screenshot on this lane regardless of gesture support.
+
+**Captures:** none — no drive was possible.
+
+**Reason for could-not-reach:** (1) right-click is not a gesture this lane's tooling can send
+(documented lane limitation, this is an X11/DISPLAY=:1 row); (2) the shared tab-bar-popover
+defect noted in the manifest would independently block visual confirmation of the menu's
+contents even if the click landed.
