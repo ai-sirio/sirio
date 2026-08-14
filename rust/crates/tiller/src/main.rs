@@ -2,7 +2,7 @@ use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Entity, FocusHandle,
     Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton,
     PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, TitlebarOptions, Window,
-    WindowBounds, WindowOptions, actions, div, point, prelude::*, px, size,
+    WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::collections::{BTreeMap, BTreeSet};
@@ -5906,7 +5906,7 @@ impl TillerWorkspace {
         });
         let dismiss_entity = entity;
         let menu_tab_id = self.tab_menu_tab.unwrap_or_default();
-        div()
+        let menu = div()
             .id(format!("workspace-tab-menu-{menu_tab_id}"))
             .debug_selector(move || format!("workspace-tab-menu-{menu_tab_id}"))
             .absolute()
@@ -5919,7 +5919,15 @@ impl TillerWorkspace {
                 self.tab_context_items(),
                 on_action,
                 theme,
-            ))
+            ));
+        // Same shared defect as `render_overflow_menu` above: this popover is
+        // positioned `top(TAB_BAR_HEIGHT)`, which places it squarely over
+        // `#centre-surface`, a *later* sibling of the tab-bar row it is
+        // nested under. Undeferred, tree-order painting put the
+        // centre-surface on top of it every time, so the tab context menu
+        // never appeared to a live right-click no matter how correct its
+        // item logic was.
+        deferred(menu)
     }
 
     fn dismiss_tab_menu(&mut self, cx: &mut Context<Self>) {
@@ -6245,7 +6253,16 @@ impl TillerWorkspace {
                 });
             menu = menu.child(row);
         }
-        menu
+        // The tab strip lives in an earlier flex-col sibling of
+        // `#centre-surface` (see `columns()`); this popover's own bounds
+        // overflow below the strip into that sibling's area. Painted inline
+        // it is a plain descendant of the strip, so it paints (and is
+        // occluded) before `#centre-surface`'s later paint pass runs.
+        // `deferred(...)` keeps its layout in place but defers painting
+        // until after every ancestor, so it actually lands on top — the
+        // same pattern already used for the new-tab menu in
+        // `tiller_ui::tab_bar`.
+        deferred(menu)
     }
 
     fn render_open_tabs(
@@ -6267,8 +6284,21 @@ impl TillerWorkspace {
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
         let available_width = self.tab_strip_available_width(window, theme);
-        let visible_count = visible_tab_count(&tab_widths, available_width, overflow_width);
-        let has_overflow = visible_count < group_tabs.len();
+        // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
+        // overflow_width` unconditionally reserves room for the chevron even
+        // when no chevron will ever be shown, so the strip flipped into
+        // overflow mode before the tabs actually exceeded the real pixel
+        // width. Decide overflow against the *full* width first (no
+        // reservation); only once that says the strip truly doesn't fit do
+        // we recompute how many tabs fit in the width that remains once the
+        // chevron itself is carved out.
+        let all_visible_count = visible_tab_count(&tab_widths, available_width, 0.0);
+        let has_overflow = all_visible_count < group_tabs.len();
+        let visible_count = if has_overflow {
+            visible_tab_count(&tab_widths, available_width, overflow_width)
+        } else {
+            all_visible_count
+        };
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let mut tabs = div()
             .absolute()
@@ -9430,6 +9460,35 @@ mod tests {
         assert!(cx.debug_bounds("tab-overflow-item-0").is_some());
         assert!(cx.debug_bounds("tab-overflow-item-9").is_some());
         assert!(cx.debug_bounds("tab-overflow-selected-0").is_some());
+    }
+
+    #[gpui::test]
+    async fn drawn_tab_strip_does_not_reserve_overflow_room_when_all_tabs_actually_fit(
+        cx: &mut TestAppContext,
+    ) {
+        // F-TAB-02 (P104 §Group 1): `has_overflow` used to be decided against
+        // `available_width - overflow_width`, reserving room for the chevron
+        // even when it would never be drawn. At this exact window width
+        // three 132px terminal tabs fill the strip's full available width
+        // (396px) with nothing to spare, but the old check still demanded a
+        // further 26px (for a chevron it would then need to show), so it hid
+        // the third tab behind a chevron nothing actually required.
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1164.0), px(600.0)));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("tab-overflow-button").is_none(),
+            "three tabs that exactly fill the strip must not trip overflow"
+        );
+        assert!(cx.debug_bounds("workspace-tab-0").is_some());
+        assert!(cx.debug_bounds("workspace-tab-1").is_some());
+        assert!(
+            cx.debug_bounds("workspace-tab-2").is_some(),
+            "the third tab must stay visible instead of being hidden behind a phantom chevron"
+        );
     }
 
     #[gpui::test]
