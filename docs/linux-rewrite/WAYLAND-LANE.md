@@ -1,4 +1,4 @@
-# The Wayland lane — a second visual display, in parallel, with no drive lock
+# The Wayland lane — a second visual display with synthetic input, in parallel, with no drive lock
 
 **The app renders fully headless under a nested Wayland compositor**, and `grim` captures real
 pixels. This is a *second* display: it does not touch `DISPLAY=:1` and does not take the drive lock,
@@ -21,7 +21,7 @@ one cannot work — it is verified working, with screenshots in `reference/linux
 | ✅ **Layout at any size** | change the output resolution and capture the reflow |
 | ✅ **Surfaces open and navigate over the socket** | `surface.settings.open`/`.select`, `surface.changes.open`, `browser.open`, `project.add`, `panel.*`, `tab.*`, `pane.*` — see "Driving without a pointer" below |
 | ✅ **Chat turns, in the visible transcript** | since `P107` (2026-08-14) `surface.chat.compose`/`.send` drive the rendered chat, so a real ACP turn can be photographed here. Socket-sourced `F-CHAT` evidence dated **before** that commit proves the old invisible replica and must be re-driven |
-| ❌ **No synthetic input** | clicks and keystrokes **do not reach the client** — see trap 3. Anything gated on a pointer or keyboard gesture (context menus, drag-and-drop, typing) still needs `DISPLAY=:1` |
+| ✅ **Synthetic left-click, text and named-key input** | `click`, `move`, `type` and `key` in `wayland-drive.sh` use persistent virtual devices created **before** Tiller connects — see trap 3 and P112. Pointer drags, right-click, modifiers/chords and IME/non-ASCII text are not yet exercised. |
 | ❌ **No webview content** | the embedded browser needs an X11 window handle and gets a Wayland one; its chrome renders, the page does not. Every `F-BRW` row belongs on `DISPLAY=:1` |
 
 **A row whose `VERIFY` line names a click, a right-click, a drag or typed text cannot be closed
@@ -119,6 +119,14 @@ Scripts/wayland-drive.sh /tmp/my-shots '
   ctl surface.settings.select section=general
   shot settings-general
 '
+
+# A real, socket-unreachable gesture: focus the Projects filter, type, then prove the frame changed.
+Scripts/wayland-drive.sh /tmp/my-input-shots '
+  click 100 80
+  type WAYLAND_INPUT_PROOF
+  key BackSpace
+  shot filter-input
+'
 ```
 
 Inside the snippet, `ctl <method> [k=v …]` sends a `ControlRequest` and prints the reply, and
@@ -200,25 +208,26 @@ grim -o HEADLESS-1 /path/to/shot.png
    screenshot reads as "the feature did nothing" when the app simply never repainted. Verify a
    negative by forcing a repaint before you believe it.
 
-3. **Synthetic input does not work, and fails silently.** `swaymsg seat seat0 cursor set/press`
-   returns `success: true` and does nothing; `wtype` and `wlrctl` (both installed 2026-08-14) exit 0
-   and nothing lands. The cause is in `swaymsg -t get_seats`: the seat reports
-   **`capabilities: 0`, `devices: []`**. The headless backend creates no input devices, so sway never
-   advertises `wl_pointer`/`wl_keyboard` to the client, and a transient virtual device from `wtype`
-   is created and destroyed faster than the client can bind and take focus. Priming with a
-   long-lived `wtype -d 3500 -k Shift_L …` in the background does not fix it either — that was
-   tested.
+3. **One-shot virtual devices race the client; persistent ones work.** A bare headless seat starts
+   as **`capabilities: 0, devices: []`**. `wtype` then causes sway to advertise keyboard capability
+   `2`; GPUI immediately creates `wl_keyboard` and receives every traced key event. `wlrctl pointer
+   move`/`click` similarly causes capability `1`, but each one-shot process sends its event before
+   GPUI can bind the newly advertised `wl_pointer`, so the client sees no `enter`, `motion` or
+   `button`. Exit 0 meant the compositor accepted the request, not that its delivery race was won.
 
-   **Every input tool here reports success while doing nothing.** Never infer that a gesture landed;
-   confirm with a forced-repaint capture, and if the frame is unchanged, the gesture did not happen.
+   `wayland-drive.sh` now starts a tiny virtual-pointer client and a quiescent long-lived `wtype`
+   **before launching Tiller**. The pointer client remains connected and accepts `move`/`click`
+   commands over a per-instance FIFO; the keyboard keeper has pressed and released Shift before
+   Tiller starts, then stays alive without a modifier held. GPUI consequently binds both objects at
+   startup. `click`/`move` and `type`/`key` verify `WAYLAND_DISPLAY` and the nested sway config with
+   `swaymsg -t get_version` before injecting, so they cannot inherit the operator desktop.
 
-   **Re-proved 2026-08-14 against the trap-2 objection.** The original finding rested on
-   before/after captures with identical MD5s — which trap 2 says proves nothing, since an unchanged
-   frame is the app's normal state. Redone properly: `wtype "echo WAYLAND_INPUT_PROOF_42"` then
-   `wtype -k Return` (both exit 0), then a capture at a **different resolution**, so the frame is
-   provably fresh — the layout reflowed and the Files panel re-wrapped. The terminal's prompt was
-   still empty. The gesture did not land, and this time the negative is evidenced rather than
-   assumed. Keep the conclusion; do not re-derive it from identical MD5s, which do not support it.
+   **Evidence, 2026-08-14 P112:** a persistent pointer produced `wl_pointer.enter`, `motion`, and
+   left-button press/release in `WAYLAND_DEBUG=1`; `click 100 80`, `type P112_SCRIPT_E2E`, and a
+   forced-repaint `shot` visibly populated the Projects filter. `key BackSpace` visibly removed the
+   final `X` from `P112_NAMED_KEY_X`. See `P112-report.md`. Do not declare a gesture landed from an
+   exit code: force a repaint and capture its visible result. Right-click, drag, modifier/chord,
+   non-ASCII and IME paths remain unexercised.
 
 4. **Clean up by matching on the environment, never on the process name.** `pkill sway` or
    `pkill tiller` will kill other agents' instances, and on a machine where the user runs a Wayland
@@ -258,8 +267,10 @@ working lane. Check the capture before you believe the log.
 ## Combining the lanes
 
 - **`HEADLESS-LANE.md`** — the control socket, no rendering at all. Best for state and API rows.
-- **This lane** — the socket *plus* real pixels. Best for anything whose evidence is visual.
-- **`DISPLAY=:1` + the drive lock** — the only lane with working input. Reserve it for gestures.
+- **This lane** — the socket, real pixels, and verified left-click/text/named-key input. Best for
+  visual and ordinary gesture rows; it remains parallel and lock-free.
+- **`DISPLAY=:1` + the drive lock** — reserve for unexercised gestures (right-click, drag,
+  modifiers/chords, non-ASCII/IME) and X11-only browser content.
 
 The natural division: everything that can be driven by socket and judged by eye moves here and runs
 in parallel; the drive lock is spent only on clicks, keystrokes and drags.
