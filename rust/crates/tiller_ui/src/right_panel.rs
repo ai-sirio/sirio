@@ -121,6 +121,10 @@ struct FileContextMenu {
 /// The GPUI right panel: the filesystem tree and the activity section.
 pub struct RightPanel {
     repo_root: PathBuf,
+    /// A panel is constructed for a selected checkout. Closing that checkout
+    /// must explicitly revoke the binding; retaining its path would make the
+    /// Files/Changes surface look current while serving stale data.
+    worktree_selected: bool,
     file_tree: Vec<FileNode>,
     changed_paths: HashSet<PathBuf>,
     activity_expanded: bool,
@@ -148,6 +152,7 @@ impl RightPanel {
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         Self {
             repo_root: repo_root.into(),
+            worktree_selected: true,
             file_tree: Vec::new(),
             changed_paths: HashSet::new(),
             activity_expanded: false,
@@ -179,6 +184,23 @@ impl RightPanel {
             return;
         }
         self.activity = activity;
+        cx.notify();
+    }
+
+    /// Remove the panel's checkout binding after its selected worktree
+    /// closes. This clears both already drawn rows and any in-flight result's
+    /// visible destination; a later worktree selection replaces the panel
+    /// with a new bound instance.
+    pub fn clear_worktree(&mut self, cx: &mut Context<Self>) {
+        if !self.worktree_selected {
+            return;
+        }
+        self.worktree_selected = false;
+        self.file_tree.clear();
+        self.changed_paths.clear();
+        self.selected_path = None;
+        self.refresh_error = None;
+        self.file_context_menu = None;
         cx.notify();
     }
 
@@ -938,8 +960,10 @@ impl EventEmitter<RightPanelActionEvent> for RightPanel {}
 impl Render for RightPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
-        self.ensure_tree_refresh(cx);
-        if self.file_focus.is_none() {
+        if self.worktree_selected {
+            self.ensure_tree_refresh(cx);
+        }
+        if self.worktree_selected && self.file_focus.is_none() {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
         }
         let entity = cx.entity();
@@ -952,9 +976,36 @@ impl Render for RightPanel {
             .overflow_hidden()
             .bg(theme.background)
             .child(self.render_header(theme))
-            .child(self.render_files(entity.clone(), theme, cx))
-            .when_some(self.file_context_menu.clone(), |this, menu| {
+            .child(if self.worktree_selected {
+                self.render_files(entity.clone(), theme, cx).into_any_element()
+            } else {
+                div()
+                    .id("right-panel-no-worktree")
+                    .debug_selector(|| "right-panel-no-worktree".to_owned())
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(theme.spacing.card_gap)
+                    .p(theme.spacing.card_gap)
+                    .text_size(theme.typography.headline)
+                    .text_color(theme.meta)
+                    .child(IconElement::new(Icon::PanelRight, px(24.0)).text_color(theme.meta))
+                    .child("No worktree selected")
+                    .child(
+                        div()
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.meta)
+                            .child("Select a worktree to inspect its files and changes."),
+                    )
+                    .into_any_element()
+            })
+            .when(self.worktree_selected, |this| {
+                this.when_some(self.file_context_menu.clone(), |this, menu| {
                 this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
+                })
             })
             .child(self.render_activity(entity, theme))
     }
