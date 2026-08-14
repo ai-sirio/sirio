@@ -30,7 +30,7 @@ use tiller_persistence::{
 use tiller_project::{TabKind, current_branch, is_git_repository};
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
-    TerminalIdentity, TerminalShell, TerminalStateSnapshot, TerminalView,
+    TerminalIdentity, TerminalLinkEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
 };
 use tiller_theme::{Theme, ThemeMode};
 use tiller_ui::{
@@ -197,8 +197,49 @@ const BROWSER_METHODS: [&str; 10] = [
     "browser.console",
     "browser.errors",
 ];
+const BROWSER_CAPABILITIES: [&str; 3] = ["browser.open", "browser.navigate", "browser.act"];
 
 type ControlReply = Sender<Result<Vec<(String, String)>, String>>;
+
+fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Option<String> {
+    if !BROWSER_CAPABILITIES.contains(&method) {
+        return Some(format!(
+            "{method} is unsupported on Linux: browser automation is not implemented"
+        ));
+    }
+
+    match method {
+        "browser.open"
+            if params
+                .get("url")
+                .or_else(|| params.get("address"))
+                .is_none_or(|url| url.trim().is_empty()) =>
+        {
+            Some("browser.open requires a non-empty url".to_string())
+        }
+        "browser.navigate" if params.contains_key("action") => Some(format!(
+            "{method} action is unsupported on Linux: only URL navigation is implemented"
+        )),
+        "browser.navigate"
+            if params
+                .get("url")
+                .or_else(|| params.get("address"))
+                .or_else(|| params.get("href"))
+                .is_none_or(|url| url.trim().is_empty()) =>
+        {
+            Some("browser.navigate requires a non-empty url".to_string())
+        }
+        "browser.act"
+            if !params.contains_key("driving") && !params.contains_key("agentDriving") =>
+        {
+            Some(
+                "browser.act is unsupported on Linux: only the driving flag is implemented"
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
 
 enum PaneQuery {
     State,
@@ -279,6 +320,7 @@ enum ControlAction {
     Browser {
         method: String,
         params: BTreeMap<String, String>,
+        reply: ControlReply,
     },
 }
 struct OpenTab {
@@ -313,6 +355,7 @@ struct RetainedChat {
 enum WorkspaceAction {
     NewTab(NewTabAction),
     NewChatAgent(&'static str),
+    InstallSkill(tiller_project::SkillInstallCommand),
     OpenSettings,
     CloseSettings,
 }
@@ -979,7 +1022,7 @@ impl ControlHandler for AppControlHandler {
         match request.method.as_str() {
             "system.ping" => Self::success(&request.id, [("pong".to_string(), "true".to_string())]),
             "system.capabilities" => {
-                let methods = [
+                let mut methods = vec![
                     "system.ping",
                     "system.capabilities",
                     "system.identify",
@@ -1030,17 +1073,8 @@ impl ControlHandler for AppControlHandler {
                     "surface.chat.permission",
                     "surface.chat.stop",
                     "surface.chat.read",
-                    "browser.open",
-                    "browser.navigate",
-                    "browser.get",
-                    "browser.screenshot",
-                    "browser.snapshot",
-                    "browser.act",
-                    "browser.wait",
-                    "browser.eval",
-                    "browser.console",
-                    "browser.errors",
                 ];
+                methods.extend(BROWSER_CAPABILITIES);
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
                     .map(|method| BTreeMap::from([("method".to_string(), (*method).to_string())]))
@@ -1681,23 +1715,16 @@ impl ControlHandler for AppControlHandler {
                 self.queue_action(request, |reply| ControlAction::RestoreSession { reply })
             }
             method if BROWSER_METHODS.contains(&method) => {
-                let Ok(mut actions) = self.control_actions.lock() else {
-                    return ControlResponse::failure(
-                        &request.id,
-                        "control action queue unavailable",
-                    );
-                };
-                actions.push(ControlAction::Browser {
-                    method: method.to_string(),
-                    params: request.params.clone(),
-                });
-                Self::success(
-                    &request.id,
-                    [
-                        ("method".to_string(), method.to_string()),
-                        ("queued".to_string(), "true".to_string()),
-                    ],
-                )
+                if let Some(error) = browser_request_error(method, &request.params) {
+                    return ControlResponse::failure(&request.id, error);
+                }
+                let method = method.to_string();
+                let params = request.params.clone();
+                self.queue_action(request, move |reply| ControlAction::Browser {
+                    method,
+                    params,
+                    reply,
+                })
             }
             _ => ControlResponse::failure(
                 &request.id,
@@ -1726,6 +1753,17 @@ fn default_chat_command() -> AgentCommand {
         .unwrap_or_else(|| {
             AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
         })
+}
+
+fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> TerminalShell {
+    TerminalShell::WithArguments {
+        program: command.program,
+        args: command.args,
+    }
+}
+
+fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
+    (event.target.pane_id() == pane_id).then_some(event.url.as_str())
 }
 
 fn post_desktop_notification(payload: &NotificationPayload) {
@@ -2557,6 +2595,14 @@ impl TillerWorkspace {
                                 WorkspaceAction::NewChatAgent(id) => {
                                     workspace.open_chat_agent(id, window, cx);
                                 }
+                                WorkspaceAction::InstallSkill(command) => {
+                                    workspace.add_terminal_tab_with_shell(
+                                        "Install Skill",
+                                        skill_install_shell(command),
+                                        None,
+                                        cx,
+                                    );
+                                }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
                                 }
@@ -2670,8 +2716,14 @@ impl TillerWorkspace {
                                     workspace.select_tab_position(position, cx);
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
-                                ControlAction::Browser { method, params } => {
-                                    workspace.handle_browser_action(&method, &params, window, cx);
+                                ControlAction::Browser {
+                                    method,
+                                    params,
+                                    reply,
+                                } => {
+                                    let result = workspace
+                                        .handle_browser_action(&method, &params, window, cx);
+                                    let _ = reply.send(result);
                                 }
                             }
                         }
@@ -2954,6 +3006,7 @@ impl TillerWorkspace {
             ));
         });
         Self::subscribe_terminal(terminal, tab_id, pane_id, cx);
+        Self::subscribe_terminal_link(terminal, pane_id, cx);
         Self::subscribe_terminal_activity(terminal, pane_id, cx);
         Self::start_process_signal_refresh(terminal, tab_id, pane_id, cx);
     }
@@ -3001,6 +3054,23 @@ impl TillerWorkspace {
                         workspace.close_terminal_at(tab_id, pane_id, None, cx);
                     }
                     None => {}
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn subscribe_terminal_link(
+        terminal: &Entity<TerminalView>,
+        pane_id: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let expected_pane_id = format!("pane-{pane_id}");
+        cx.subscribe(
+            terminal,
+            move |_, _, event: &TerminalLinkEvent, cx| {
+                if let Some(url) = terminal_link_url_for_pane(event, &expected_pane_id) {
+                    cx.open_url(url);
                 }
             },
         )
@@ -4551,8 +4621,10 @@ impl TillerWorkspace {
         initial_url: impl Into<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> (String, Entity<BrowserSurface>) {
         let initial_url = initial_url.into();
+        let pane_id = self.next_pane_id;
+        let surface_id = format!("surface:{pane_id}");
         let browser = cx.new(|cx| BrowserSurface::new(&initial_url, window, cx));
         let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
         browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
@@ -4563,9 +4635,9 @@ impl TillerWorkspace {
             kind: TabKind::Browser,
             agent_icon: None,
             agent_id: None,
-            session_state: SessionTabState::with_root(self.next_pane_id),
-            panes: PaneNode::leaf(self.next_pane_id, TabContent::Browser(browser)),
-            focused_pane: self.next_pane_id,
+            session_state: SessionTabState::with_root(pane_id),
+            panes: PaneNode::leaf(pane_id, TabContent::Browser(browser.clone())),
+            focused_pane: pane_id,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -4574,6 +4646,7 @@ impl TillerWorkspace {
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
+        (surface_id, browser)
     }
 
     fn browser_surface(&self) -> Option<Entity<BrowserSurface>> {
@@ -4597,52 +4670,59 @@ impl TillerWorkspace {
         params: &BTreeMap<String, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<Vec<(String, String)>, String> {
         if method == "browser.open" {
-            self.add_browser_tab(
-                params
-                    .get("url")
-                    .or_else(|| params.get("address"))
-                    .map(String::as_str)
-                    .unwrap_or("https://example.com"),
-                window,
-                cx,
-            );
-            return;
+            let initial_url = params
+                .get("url")
+                .or_else(|| params.get("address"))
+                .filter(|url| !url.trim().is_empty())
+                .ok_or_else(|| "browser.open requires a non-empty url".to_string())?;
+            let (surface_id, browser) = self.add_browser_tab(initial_url, window, cx);
+            return Ok(browser.update(cx, |surface, _| {
+                let state = surface.state();
+                vec![
+                    ("surface".to_string(), surface_id),
+                    ("url".to_string(), state.address().to_string()),
+                    ("title".to_string(), state.page_title().to_string()),
+                ]
+            }));
         }
 
-        let browser = match self.browser_surface() {
-            Some(browser) => browser,
-            None => {
-                self.add_browser_tab("https://example.com", window, cx);
-                self.browser_surface().expect("browser tab was just added")
-            }
-        };
+        let browser = self
+            .browser_surface()
+            .ok_or_else(|| format!("{method} failed: no browser surface"))?;
         browser.update(cx, |surface, _| match method {
             "browser.navigate" => {
-                if let Some(address) = params
+                let address = params
                     .get("url")
                     .or_else(|| params.get("address"))
                     .or_else(|| params.get("href"))
-                    && let Err(error) = surface.submit_address(address)
-                {
-                    eprintln!("[browser] navigation failed: {error}");
-                }
+                    .ok_or_else(|| "browser.navigate requires a non-empty url".to_string())?;
+                surface
+                    .submit_address(address)
+                    .map_err(|error| format!("{method} failed: {error}"))?;
+                let state = surface.state();
+                Ok(vec![
+                    ("url".to_string(), state.address().to_string()),
+                    ("title".to_string(), state.page_title().to_string()),
+                ])
             }
             "browser.act" => {
-                if let Some(driving) = params.get("driving").or_else(|| params.get("agentDriving"))
-                {
-                    surface.set_agent_driving(matches!(driving.as_str(), "1" | "true" | "yes"));
-                }
+                let driving = params
+                    .get("driving")
+                    .or_else(|| params.get("agentDriving"))
+                    .ok_or_else(|| {
+                        "browser.act is unsupported on Linux: only the driving flag is implemented"
+                            .to_string()
+                    })?;
+                let driving = matches!(driving.as_str(), "1" | "true" | "yes");
+                surface.set_agent_driving(driving);
+                Ok(vec![("driving".to_string(), driving.to_string())])
             }
-            // These methods are intentionally routed to the live surface even
-            // when their transport payload is only an observation request.
-            "browser.get" | "browser.screenshot" | "browser.snapshot" | "browser.wait"
-            | "browser.eval" | "browser.console" | "browser.errors" => {
-                let _ = surface.state();
-            }
-            _ => {}
-        });
+            _ => Err(format!(
+                "{method} is unsupported on Linux: browser automation is not implemented"
+            )),
+        })
     }
 
     fn seed_browser_origins(&self, cx: &mut Context<Self>) {
@@ -4658,6 +4738,16 @@ impl TillerWorkspace {
     }
 
     fn drain_browser_events(&mut self, cx: &mut Context<Self>) {
+        let settings_origins = self
+            .settings
+            .read(cx)
+            .browser_origins()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        if settings_origins != self.browser_origins {
+            self.browser_origins = settings_origins;
+            self.seed_browser_origins(cx);
+        }
         let mut newly_allowed = Vec::new();
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
@@ -4680,10 +4770,16 @@ impl TillerWorkspace {
                 }
             });
         }
+        let browser_origins_changed = !newly_allowed.is_empty();
         for origin in newly_allowed {
             if self.browser_origins.insert(origin.clone()) {
                 self.session.save_browser_origin_grant(&origin);
             }
+        }
+        if browser_origins_changed {
+            let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
+            self.settings
+                .update(cx, |settings, cx| settings.set_browser_origins(origins, cx));
         }
     }
 
@@ -4700,17 +4796,27 @@ impl TillerWorkspace {
         agent_icon: Icon,
         cx: &mut Context<Self>,
     ) {
+        let tillerctl_path = match resolve_tillerctl_for_process() {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_notice(format!("[agent] {}: {error}", adapter.display_name()), cx)
+                });
+                cx.notify();
+                return;
+            }
+        };
         let worktree_path = self.working_directory.to_string_lossy().into_owned();
         let pane_id = format!("pane-{}", self.next_pane_id);
 
-        if let Err(error) = adapter.prepare(&worktree_path, &pane_id, "tillerctl") {
+        if let Err(error) = adapter.prepare(&worktree_path, &pane_id, &tillerctl_path) {
             eprintln!(
                 "failed to prepare {} in {worktree_path}: {error}",
                 adapter.display_name()
             );
         }
 
-        let command = adapter.command(&worktree_path, &pane_id, "tillerctl");
+        let command = adapter.command(&worktree_path, &pane_id, &tillerctl_path);
         let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let shell = TerminalShell::WithArguments {
             program: shell_program,
@@ -5030,9 +5136,19 @@ impl TillerWorkspace {
             .get(self.active_tab)
             .map(|tab| tab.focused_pane)
             .unwrap_or(pane_id);
+        let tillerctl_path = match resolve_tillerctl_for_process() {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_notice(format!("[agent] {}: {error}", adapter.display_name()), cx)
+                });
+                cx.notify();
+                return;
+            }
+        };
         let worktree_path = self.working_directory.to_string_lossy().into_owned();
         let pane_name = format!("pane-{pane_id}");
-        if let Err(error) = adapter.prepare(&worktree_path, &pane_name, "tillerctl") {
+        if let Err(error) = adapter.prepare(&worktree_path, &pane_name, &tillerctl_path) {
             eprintln!(
                 "failed to prepare {} in {worktree_path}: {error}",
                 adapter.display_name()
@@ -5043,7 +5159,7 @@ impl TillerWorkspace {
             program: shell_program,
             args: vec![
                 "-lc".to_string(),
-                adapter.command(&worktree_path, &pane_name, "tillerctl"),
+                adapter.command(&worktree_path, &pane_name, &tillerctl_path),
             ],
         };
         let terminal = cx.new(|cx| {
@@ -7553,29 +7669,187 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
 
+const TILLERCTL_INSTALL_SUBPATH: &str = "TillerRust/bin/tillerctl";
+
+/// Resolve the control CLI used by worktree-local agent hooks.
+///
+/// The installed path is deliberately app-owned and XDG-correct rather than
+/// relying on the login shell's PATH. A development build supplies the
+/// sibling binary from `target/debug`; an installed build may supply an
+/// already-installed copy or a PATH entry. In all cases hooks receive the
+/// absolute app-owned path, so the shell that an agent starts cannot lose the
+/// control CLI merely because it has a different PATH.
+fn resolve_tillerctl_path(
+    current_exe: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
+    let destination = xdg_data_home_for(environment).join(TILLERCTL_INSTALL_SUBPATH);
+    if is_executable_file(&destination) {
+        return Ok(destination);
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(parent) = current_exe.parent() {
+        candidates.push(parent.join("tillerctl"));
+    }
+    if let Some(path) = environment.get("PATH")
+        && let Some(path) =
+            tiller_agents::find_executable_in_path("tillerctl", std::ffi::OsStr::new(path))
+    {
+        candidates.push(path);
+    }
+
+    let source = candidates
+        .iter()
+        .find(|candidate| is_executable_file(candidate))
+        .map(|candidate| {
+            std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
+        })
+        .ok_or_else(|| {
+            format!(
+                "tillerctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
+                current_exe
+                    .parent()
+                    .map(|path| path.join("tillerctl").display().to_string())
+                    .unwrap_or_else(|| "the app executable directory".to_string())
+            )
+        })?;
+
+    install_tillerctl(&source, &destination).map(|()| destination)
+}
+
+fn resolve_tillerctl_for_process() -> Result<PathBuf, String> {
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let environment: BTreeMap<String, String> = std::env::vars().collect();
+    resolve_tillerctl_path(&current_exe, &environment)
+}
+
+fn xdg_data_home_for(environment: &BTreeMap<String, String>) -> PathBuf {
+    environment
+        .get("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            environment
+                .get("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join(".local/share"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join(".local/share"))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "tillerctl install path has no parent: {}",
+            destination.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+
+    if is_executable_file(destination) {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(destination).is_ok() {
+        return Err(format!(
+            "cannot install tillerctl at {}: a non-executable file already exists",
+            destination.display()
+        ));
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(source, destination).map_err(|error| {
+        format!(
+            "could not install tillerctl at {}: {error}",
+            destination.display()
+        )
+    })?;
+
+    #[cfg(not(unix))]
+    std::fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "could not install tillerctl at {}: {error}",
+                destination.display()
+            )
+        })?;
+
+    if is_executable_file(destination) {
+        Ok(())
+    } else {
+        Err(format!(
+            "installed tillerctl at {} is not executable",
+            destination.display()
+        ))
+    }
+}
+
 fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapshot {
+    let summarizer_agent =
+        match tiller_ui::settings::SummarizerChoice::parse(&settings.summarizer_agent) {
+            Some(choice) => choice,
+            None => {
+                eprintln!(
+                    "[settings] unknown summarizer agent '{}'; using Claude",
+                    settings.summarizer_agent
+                );
+                tiller_ui::settings::SummarizerChoice::Claude
+            }
+        };
+
     SettingsSnapshot {
         theme: match settings.appearance {
             AppearanceMode::System => ThemeMode::System,
             AppearanceMode::Light => ThemeMode::Light,
             AppearanceMode::Dark => ThemeMode::Dark,
         },
-        interface_font_size: settings.ui_font_size as i32,
-        terminal_font_size: settings.terminal_font_size as i32,
+        interface_font_size: settings.ui_font_size.clamp(10, 20) as i32,
+        terminal_font_size: settings.terminal_font_size.clamp(9, 24) as i32,
         file_icons: match settings.file_icon_theme {
             FileIconTheme::SfSymbols => tiller_ui::settings::FileIconChoice::SfSymbols,
             FileIconTheme::Material => tiller_ui::settings::FileIconChoice::Material,
         },
         control_socket_enabled: settings.control_socket_enabled,
+        // The live socket path is supplied by the host after this conversion;
+        // it is runtime state, not an AppSettings field.
         socket_path: String::new(),
-        // P58: the remaining snapshot fields (resume_agent_sessions,
-        // auto_naming, retention, mount cap, summarizer, usage-bar
-        // visibility/interval) start at their defaults until the persisted
-        // schema carries them — the `tiller_persistence` extension decided
-        // in P58 lands as codex11's piece, and this mapping then grows to
-        // cover it. Until then the defaults are exactly what the surface
-        // drew on every launch anyway.
-        ..Default::default()
+        resume_agent_sessions: settings.resume_agent_sessions,
+        auto_naming: settings.auto_naming,
+        limit_chat_history: settings.limit_chat_history,
+        chat_retention: settings.chat_retention.clamp(5, 500) as i32,
+        limit_mounted_worktrees: settings.limit_mounted_worktrees,
+        mounted_worktrees: settings.mounted_worktrees.clamp(2, 50) as i32,
+        summarizer_agent,
+        claude_show_in_bar: settings.claude_show_in_bar,
+        codex_show_in_bar: settings.codex_show_in_bar,
+        opencode_show_in_bar: settings.opencode_show_in_bar,
+        refresh_interval: settings.refresh_interval_min.clamp(1, 60) as i32,
+        // F-SET-22 has no AppSettings field yet; do not pretend this UI-only
+        // picker is persisted until its schema follow-up lands.
+        agent_colors: SettingsSnapshot::default().agent_colors,
     }
 }
 
@@ -7593,7 +7867,17 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
             tiller_ui::settings::FileIconChoice::Material => FileIconTheme::Material,
         },
         control_socket_enabled: snapshot.control_socket_enabled,
-        ..AppSettings::default()
+        resume_agent_sessions: snapshot.resume_agent_sessions,
+        auto_naming: snapshot.auto_naming,
+        limit_chat_history: snapshot.limit_chat_history,
+        chat_retention: i64::from(snapshot.chat_retention.clamp(5, 500)),
+        limit_mounted_worktrees: snapshot.limit_mounted_worktrees,
+        mounted_worktrees: i64::from(snapshot.mounted_worktrees.clamp(2, 50)),
+        summarizer_agent: snapshot.summarizer_agent.id().to_owned(),
+        claude_show_in_bar: snapshot.claude_show_in_bar,
+        codex_show_in_bar: snapshot.codex_show_in_bar,
+        opencode_show_in_bar: snapshot.opencode_show_in_bar,
+        refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
     }
 }
 
@@ -7681,7 +7965,9 @@ fn main() {
         control_socket.set_enabled(saved_settings.control_socket_enabled);
         let session_store_for_window = session_store.clone();
         let session_store_for_settings = session_store.clone();
+        let session_store_for_browser_revoke = session_store.clone();
         let control_socket_for_settings = control_socket.clone();
+        let browser_origins_for_settings = session_store.load_browser_origin_grants();
         // Route the resolved socket path into the settings snapshot so the
         // General screen can display the path the live socket listens on
         // (P23: the socket row must show the real path, not a template).
@@ -7747,11 +8033,28 @@ fn main() {
                 });
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
+                        .with_browser_origins(browser_origins_for_settings.clone())
+                        .on_install_skill({
+                            let pending_actions = pending_for_settings.clone();
+                            move |command| {
+                                if let Ok(mut actions) = pending_actions.lock() {
+                                    actions.push(WorkspaceAction::InstallSkill(command));
+                                }
+                            }
+                        })
                         .on_change(move |snapshot| {
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
                             session_store_for_settings
                                 .save_settings(&app_settings_from_snapshot(snapshot));
+                        })
+                        .on_revoke_browser_origin({
+                            let session_store = session_store_for_browser_revoke.clone();
+                            move |origin| session_store.revoke_browser_origin(&origin)
+                        })
+                        .on_revoke_all_browser_origins({
+                            let session_store = session_store_for_browser_revoke.clone();
+                            move || session_store.revoke_all_browser_origins()
                         })
                         .on_back(move || {
                             if let Ok(mut actions) = pending_for_settings.lock() {
@@ -7844,7 +8147,10 @@ mod tests {
     };
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
+
+    static TEST_WORKSPACE_ID: AtomicU64 = AtomicU64::new(0);
 
     struct TerminalReplayFixture {
         terminal: Entity<TerminalView>,
@@ -7904,6 +8210,41 @@ mod tests {
                 }))
                 .child("window command fixture")
         }
+    }
+
+    #[test]
+    fn skill_install_command_is_preserved_when_opened_in_a_terminal() {
+        let command = tiller_project::agent_skill_install_command();
+        let TerminalShell::WithArguments { program, args } = skill_install_shell(command) else {
+            panic!("skill installation must run as a terminal command");
+        };
+        assert_eq!(program, "npx");
+        assert_eq!(
+            args,
+            vec![
+                "skills",
+                "add",
+                "e-palmisano/tiller",
+                "--skill",
+                "tiller",
+                "-a",
+                "claude-code,codex,opencode,pi",
+                "-y",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_links_are_only_routed_to_their_owning_pane() {
+        let event = TerminalLinkEvent {
+            target: TerminalIdentity::new("pane-2", "terminal-2"),
+            url: "https://example.test/pane-2".to_string(),
+        };
+        assert_eq!(
+            terminal_link_url_for_pane(&event, "pane-2"),
+            Some("https://example.test/pane-2")
+        );
+        assert_eq!(terminal_link_url_for_pane(&event, "pane-1"), None);
     }
 
     fn palette_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
@@ -8009,7 +8350,12 @@ mod tests {
         cx: &mut Context<TillerWorkspace>,
         tab_count: usize,
     ) -> TillerWorkspace {
-        let working_directory = PathBuf::from("/tmp/tiller-command-palette");
+        let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let scratch_root = std::env::temp_dir().join(format!(
+            "tiller-command-palette-{}-{unique}",
+            std::process::id()
+        ));
+        let working_directory = scratch_root.join("worktree");
         std::fs::create_dir_all(&working_directory).expect("create palette test worktree");
         let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
             id: "palette-project".into(),
@@ -8070,8 +8416,10 @@ mod tests {
             &project_catalog,
             &working_directory,
         )));
-        let session_path =
-            std::env::temp_dir().join(format!("tiller-command-palette-{}.db", std::process::id()));
+        // Each GPUI test owns a database namespace. This includes SQLite's
+        // `-wal` sidecar because both files live below the same private root;
+        // no test can read or lock a sibling's session state.
+        let session_path = scratch_root.join("tiller.sqlite");
         let session = SessionStore::open(&session_path);
         let titlebar = cx.new(Titlebar::new);
         let sidebar = cx.new(|cx| Sidebar::from_projects(sidebar_projects(&project_catalog), cx));
@@ -8865,6 +9213,10 @@ mod tests {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // ACP owns an OS worker, so this test must allow its event channel to
+        // wake the deterministic executor while the fixture is being torn
+        // down. The worker is still explicitly closed below.
+        cx.cx.executor().allow_parking();
         cx.run_until_parked();
         let workspace = cx.update(|window, _| {
             window
@@ -8881,6 +9233,7 @@ mod tests {
                 )
             })
         });
+        let chat_for_tab = chat.clone();
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs.push(OpenTab {
                 id: 1,
@@ -8890,7 +9243,7 @@ mod tests {
                 agent_icon: Some(Icon::Codex),
                 agent_id: Some("codex".into()),
                 session_state: SessionTabState::with_root(1),
-                panes: PaneNode::leaf(1, TabContent::Chat(chat)),
+                panes: PaneNode::leaf(1, TabContent::Chat(chat_for_tab)),
                 focused_pane: 1,
             });
             workspace.active_tab = 1;
@@ -8902,6 +9255,10 @@ mod tests {
             workspace.tab_menu_open = true;
             cx.notify();
         });
+        // The local handle keeps the pre-close Chat entity alive after the
+        // tab has retained its transcript. Drop it before launching the
+        // resumed session so its ACP worker cannot overlap the next phase.
+        drop(chat);
         cx.run_until_parked();
 
         let resume = cx
@@ -8918,8 +9275,31 @@ mod tests {
                     && tab.agent_icon == Some(Icon::Codex)
             })
         }));
-        // The resumed Chat owns a real ACP worker; permit its channel
-        // teardown to notify the test scheduler from that worker thread.
+
+        let resumed_chat = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.tabs.iter().find_map(|tab| {
+                (tab.title == "Resumed chat").then(|| {
+                    let mut chat = None;
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Chat(candidate) = content {
+                            chat = Some(candidate.clone());
+                        }
+                    });
+                    chat.expect("resumed tab owns its Chat entity")
+                })
+            })
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            if let Some(index) = workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.title == "Resumed chat")
+            {
+                workspace.close_tab(index, cx);
+            }
+        });
+        drop(resumed_chat);
+        cx.run_until_parked();
     }
 
     #[gpui::test]
@@ -9371,14 +9751,24 @@ mod tests {
     }
 
     #[test]
-    fn persisted_settings_map_to_the_ui_snapshot_and_back() {
+    fn persisted_settings_round_trip_maps_all_sixteen_fields_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
-            ..AppSettings::default()
+            resume_agent_sessions: false,
+            auto_naming: true,
+            limit_chat_history: false,
+            chat_retention: 37,
+            limit_mounted_worktrees: true,
+            mounted_worktrees: 17,
+            summarizer_agent: "codex".into(),
+            claude_show_in_bar: false,
+            codex_show_in_bar: false,
+            opencode_show_in_bar: true,
+            refresh_interval_min: 11,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -9390,26 +9780,241 @@ mod tests {
             tiller_ui::settings::FileIconChoice::Material
         );
         assert!(!snapshot.control_socket_enabled);
-        assert_eq!(app_settings_from_snapshot(snapshot), persisted);
-
-        // P58: the surface-settings values (resume sessions, auto-naming,
-        // retention, mount cap, summarizer, usage-bar visibility/interval)
-        // are in the persistence contract but the persisted schema does not
-        // carry them yet — that extension is codex11's piece (P58 handoff).
-        // Until it lands, a loaded snapshot starts them at their defaults,
-        // which is exactly what every launch did before P58.
-        let defaults = settings_snapshot_from_app_settings(AppSettings::default());
-        assert!(defaults.resume_agent_sessions);
-        assert!(!defaults.auto_naming);
-        assert_eq!(defaults.chat_retention, 100);
-        assert_eq!(defaults.mounted_worktrees, 6);
+        assert!(!snapshot.resume_agent_sessions);
+        assert!(snapshot.auto_naming);
+        assert!(!snapshot.limit_chat_history);
+        assert_eq!(snapshot.chat_retention, 37);
+        assert!(snapshot.limit_mounted_worktrees);
+        assert_eq!(snapshot.mounted_worktrees, 17);
         assert_eq!(
-            defaults.summarizer_agent,
+            snapshot.summarizer_agent,
+            tiller_ui::settings::SummarizerChoice::Codex
+        );
+        assert!(!snapshot.claude_show_in_bar);
+        assert!(!snapshot.codex_show_in_bar);
+        assert!(snapshot.opencode_show_in_bar);
+        assert_eq!(snapshot.refresh_interval, 11);
+
+        let restored = app_settings_from_snapshot(snapshot);
+        assert_eq!(restored.appearance, persisted.appearance);
+        assert_eq!(restored.ui_font_size, persisted.ui_font_size);
+        assert_eq!(restored.terminal_font_size, persisted.terminal_font_size);
+        assert_eq!(restored.file_icon_theme, persisted.file_icon_theme);
+        assert_eq!(
+            restored.control_socket_enabled,
+            persisted.control_socket_enabled
+        );
+        assert_eq!(
+            restored.resume_agent_sessions,
+            persisted.resume_agent_sessions
+        );
+        assert_eq!(restored.auto_naming, persisted.auto_naming);
+        assert_eq!(restored.limit_chat_history, persisted.limit_chat_history);
+        assert_eq!(restored.chat_retention, persisted.chat_retention);
+        assert_eq!(
+            restored.limit_mounted_worktrees,
+            persisted.limit_mounted_worktrees
+        );
+        assert_eq!(restored.mounted_worktrees, persisted.mounted_worktrees);
+        assert_eq!(restored.summarizer_agent, persisted.summarizer_agent);
+        assert_eq!(restored.claude_show_in_bar, persisted.claude_show_in_bar);
+        assert_eq!(restored.codex_show_in_bar, persisted.codex_show_in_bar);
+        assert_eq!(
+            restored.opencode_show_in_bar,
+            persisted.opencode_show_in_bar
+        );
+        assert_eq!(
+            restored.refresh_interval_min,
+            persisted.refresh_interval_min
+        );
+
+        let mut invalid_summarizer = persisted;
+        invalid_summarizer.summarizer_agent = "not-a-supported-agent".into();
+        assert_eq!(
+            settings_snapshot_from_app_settings(invalid_summarizer).summarizer_agent,
             tiller_ui::settings::SummarizerChoice::Claude
         );
-        assert!(defaults.claude_show_in_bar);
-        assert_eq!(defaults.refresh_interval, 5);
     }
+
+    #[test]
+    fn changing_only_the_theme_does_not_erase_other_persisted_settings() {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-settings-destructive-property-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create settings fixture");
+        let store = SessionStore::open(&root.join("tiller.sqlite"));
+        let persisted = AppSettings {
+            appearance: AppearanceMode::Dark,
+            ui_font_size: 17,
+            terminal_font_size: 19,
+            file_icon_theme: FileIconTheme::Material,
+            control_socket_enabled: false,
+            resume_agent_sessions: false,
+            auto_naming: true,
+            limit_chat_history: false,
+            chat_retention: 37,
+            limit_mounted_worktrees: true,
+            mounted_worktrees: 17,
+            summarizer_agent: "codex".into(),
+            claude_show_in_bar: false,
+            codex_show_in_bar: false,
+            opencode_show_in_bar: true,
+            refresh_interval_min: 11,
+        };
+        store.save_settings(&persisted);
+
+        let mut changed_snapshot = settings_snapshot_from_app_settings(persisted.clone());
+        changed_snapshot.theme = tiller_theme::ThemeMode::Light;
+        store.save_settings(&app_settings_from_snapshot(changed_snapshot));
+
+        let restored = store.load_settings();
+        assert_eq!(restored.appearance, AppearanceMode::Light);
+        assert_eq!(restored.ui_font_size, persisted.ui_font_size);
+        assert_eq!(restored.terminal_font_size, persisted.terminal_font_size);
+        assert_eq!(restored.file_icon_theme, persisted.file_icon_theme);
+        assert_eq!(
+            restored.control_socket_enabled,
+            persisted.control_socket_enabled
+        );
+        assert_eq!(
+            restored.resume_agent_sessions,
+            persisted.resume_agent_sessions
+        );
+        assert_eq!(restored.auto_naming, persisted.auto_naming);
+        assert_eq!(restored.limit_chat_history, persisted.limit_chat_history);
+        assert_eq!(restored.chat_retention, persisted.chat_retention);
+        assert_eq!(
+            restored.limit_mounted_worktrees,
+            persisted.limit_mounted_worktrees
+        );
+        assert_eq!(restored.mounted_worktrees, persisted.mounted_worktrees);
+        assert_eq!(restored.summarizer_agent, persisted.summarizer_agent);
+        assert_eq!(restored.claude_show_in_bar, persisted.claude_show_in_bar);
+        assert_eq!(restored.codex_show_in_bar, persisted.codex_show_in_bar);
+        assert_eq!(
+            restored.opencode_show_in_bar,
+            persisted.opencode_show_in_bar
+        );
+        assert_eq!(
+            restored.refresh_interval_min,
+            persisted.refresh_interval_min
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tillerctl_resolver_installs_the_sibling_binary_in_xdg_data_bin() {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-tillerctl-resolution-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let executable_dir = root.join("target/debug");
+        let data_home = root.join("data");
+        std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
+        let current_exe = executable_dir.join("tiller");
+        let tillerctl = executable_dir.join("tillerctl");
+        std::fs::write(&current_exe, b"tiller").expect("write app fixture");
+        std::fs::write(&tillerctl, b"tillerctl").expect("write tillerctl fixture");
+        make_executable(&current_exe);
+        make_executable(&tillerctl);
+
+        let environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                data_home.to_string_lossy().into_owned(),
+            ),
+            (
+                "HOME".to_string(),
+                root.join("home").to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_string(),
+                root.join("empty-path").to_string_lossy().into_owned(),
+            ),
+        ]);
+
+        let resolved = resolve_tillerctl_path(&current_exe, &environment)
+            .expect("sibling tillerctl should be installed");
+        assert_eq!(resolved, data_home.join("TillerRust/bin/tillerctl"));
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            std::fs::canonicalize(&resolved).expect("installed tillerctl exists"),
+            std::fs::canonicalize(&tillerctl).expect("source tillerctl exists")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tillerctl_resolver_falls_back_to_path_and_reports_missing_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-tillerctl-path-resolution-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let executable_dir = root.join("app");
+        let path_dir = root.join("path");
+        let data_home = root.join("data");
+        std::fs::create_dir_all(&executable_dir).expect("create app fixture");
+        std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
+        let current_exe = executable_dir.join("tiller");
+        let path_tillerctl = path_dir.join("tillerctl");
+        std::fs::write(&current_exe, b"tiller").expect("write app fixture");
+        std::fs::write(&path_tillerctl, b"tillerctl").expect("write PATH fixture");
+        make_executable(&current_exe);
+        make_executable(&path_tillerctl);
+
+        let mut environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                data_home.to_string_lossy().into_owned(),
+            ),
+            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
+        ]);
+        let resolved = resolve_tillerctl_path(&current_exe, &environment)
+            .expect("PATH tillerctl should be installed");
+        assert_eq!(resolved, data_home.join(TILLERCTL_INSTALL_SUBPATH));
+        assert_eq!(
+            std::fs::canonicalize(&resolved).expect("PATH installation exists"),
+            std::fs::canonicalize(&path_tillerctl).expect("PATH source exists")
+        );
+
+        environment.insert(
+            "XDG_DATA_HOME".into(),
+            root.join("missing-data").display().to_string(),
+        );
+        environment.insert(
+            "PATH".into(),
+            root.join("missing-path").display().to_string(),
+        );
+        let error = resolve_tillerctl_path(&root.join("missing/tiller"), &environment)
+            .expect_err("missing tillerctl must be surfaced");
+        assert!(error.contains("tillerctl is unavailable"));
+        assert!(!error.contains("using bare tillerctl"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make fixture executable");
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     #[test]
     fn restoring_launch_snapshot_adds_missing_tabs_without_replacing_current_tabs() {
@@ -9962,37 +10567,22 @@ mod tests {
     }
 
     #[test]
-    fn browser_methods_are_accepted_and_advertised() {
+    fn browser_methods_are_explicit_and_capabilities_are_truthful() {
         let state = Arc::new(Mutex::new(ControlState {
             projects: Vec::new(),
             workspaces: Vec::new(),
             current: None,
         }));
+        let control_actions = Arc::new(Mutex::new(Vec::new()));
         let handler = AppControlHandler::new(
             state,
-            Arc::new(Mutex::new(Vec::new())),
+            control_actions.clone(),
             Arc::new(PaneRegistry::new()),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(BTreeMap::new())),
             None,
             ControlSocketInfo::new(PathBuf::from("/tmp/tiller-browser-test.sock")),
         );
-
-        for method in BROWSER_METHODS {
-            let response = handler.handle(&ControlRequest {
-                id: method.to_string(),
-                method: method.to_string(),
-                params: BTreeMap::new(),
-            });
-            assert!(response.ok, "{method} failed: {:?}", response.error);
-            assert_eq!(
-                response
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("method")),
-                Some(&method.to_string())
-            );
-        }
 
         let capabilities = handler.handle(&ControlRequest {
             id: "capabilities".into(),
@@ -10005,27 +10595,64 @@ mod tests {
             .and_then(|result| result.get("methods"))
             .and_then(|json| tiller_control::protocol::rows::decode(json))
             .expect("capability rows");
+        let advertised: Vec<_> = methods
+            .iter()
+            .filter_map(|row| row.get("method").map(String::as_str))
+            .filter(|method| method.starts_with("browser."))
+            .collect();
+        assert_eq!(
+            advertised,
+            ["browser.open", "browser.navigate", "browser.act"]
+        );
+
         for method in [
-            "pane.split",
-            "pane.focus",
-            "pane.close",
-            "tab.cycle",
-            "tab.select",
+            "browser.get",
+            "browser.screenshot",
+            "browser.snapshot",
+            "browser.wait",
+            "browser.eval",
+            "browser.console",
+            "browser.errors",
         ] {
+            let response = handler.handle(&ControlRequest {
+                id: method.to_string(),
+                method: method.to_string(),
+                params: BTreeMap::new(),
+            });
+            assert!(!response.ok, "{method} must not report fabricated success");
+            let error = response.error.as_deref().expect("unsupported error");
+            assert!(error.contains(method), "error must name {method}: {error}");
             assert!(
-                methods
-                    .iter()
-                    .any(|row| row.get("method").map(String::as_str) == Some(method)),
-                "missing capability {method}"
+                error.contains("unsupported"),
+                "error must explain {method}: {error}"
             );
+            assert!(control_actions.lock().expect("action queue").is_empty());
         }
-        for method in BROWSER_METHODS {
+
+        for (method, params) in [
+            ("browser.open", BTreeMap::new()),
+            (
+                "browser.navigate",
+                BTreeMap::from([(String::from("action"), String::from("reload"))]),
+            ),
+            (
+                "browser.act",
+                BTreeMap::from([(String::from("verb"), String::from("click"))]),
+            ),
+        ] {
+            let response = handler.handle(&ControlRequest {
+                id: method.to_string(),
+                method: method.to_string(),
+                params,
+            });
+            assert!(!response.ok, "{method} must reject unsupported input");
+            let error = response.error.as_deref().expect("request error");
+            assert!(error.contains(method), "error must name {method}: {error}");
             assert!(
-                methods
-                    .iter()
-                    .any(|row| row.get("method").map(String::as_str) == Some(method)),
-                "missing browser capability {method}"
+                error.contains("requires") || error.contains("unsupported"),
+                "error must explain {method}: {error}"
             );
+            assert!(control_actions.lock().expect("action queue").is_empty());
         }
     }
 
@@ -10631,11 +11258,16 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
-        let working_directory =
-            std::env::temp_dir().join(format!("tiller-p73-codex-restore-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&working_directory);
+        let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let scratch_root = std::env::temp_dir().join(format!(
+            "tiller-p73-codex-restore-{}-{unique}",
+            std::process::id()
+        ));
+        let working_directory = scratch_root.join("worktree");
         std::fs::create_dir_all(&working_directory).expect("create restore worktree");
-        let database_path = working_directory.join("session.sqlite");
+        // Keep the database and its SQLite `-wal` sidecar in this test's
+        // private namespace; a neighbouring restore cannot observe either.
+        let database_path = scratch_root.join("tiller.sqlite");
         let store = SessionStore::open(&database_path);
         store.schedule(SessionLayout {
             working_directory: working_directory.clone(),
@@ -10649,10 +11281,14 @@ mod tests {
             tab_states: vec![SessionTabState::default()],
         });
         store.flush_now();
+        drop(store);
         let restored = session::restore(&database_path, &working_directory);
 
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Chat restoration starts an ACP worker. Permit its late wakeup while
+        // the entity is being released at the end of this test.
+        cx.cx.executor().allow_parking();
         let workspace = cx.update(|window, _| {
             window
                 .root::<TillerWorkspace>()
@@ -10677,7 +11313,13 @@ mod tests {
                     && tab.agent_icon == Some(Icon::Codex)
             })
         }));
-        let _ = std::fs::remove_dir_all(&working_directory);
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        drop(workspace);
+        let _ = std::fs::remove_dir_all(&scratch_root);
     }
 
     #[gpui::test]
