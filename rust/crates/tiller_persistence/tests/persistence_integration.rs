@@ -271,8 +271,10 @@ fn v9_tab_rows_upgrade_to_current_with_no_recorded_agent_identity() {
     }
 
     let db = AppDatabase::open(&path).expect("upgrade v9 database");
-    assert_eq!(CURRENT_SCHEMA_VERSION, 12);
-    assert_eq!(db.schema_version().expect("schema version"), 12);
+    assert_eq!(
+        db.schema_version().expect("schema version"),
+        CURRENT_SCHEMA_VERSION
+    );
     let tabs = db.tabs_of_worktree("wt-1").expect("legacy tabs");
     assert_eq!(tabs.len(), 1);
     assert_eq!(tabs[0].agent_id, None);
