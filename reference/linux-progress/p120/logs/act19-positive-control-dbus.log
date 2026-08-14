@@ -1,0 +1,25 @@
+signal time=1786726424.923555 sender=org.freedesktop.DBus -> destination=:1.2882 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
+   string ":1.2882"
+signal time=1786726424.923583 sender=org.freedesktop.DBus -> destination=:1.2882 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost
+   string ":1.2882"
+method call time=1786726425.926505 sender=:1.2883 -> destination=:1.60 serial=7 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=GetServerInformation
+method call time=1786726425.926718 sender=:1.2883 -> destination=:1.60 serial=8 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=GetServerInformation
+method call time=1786726425.926901 sender=:1.2883 -> destination=:1.60 serial=9 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=Notify
+   string "ManualTest"
+   uint32 0
+   string ""
+   string "control-title"
+   string "control-body"
+   array [
+   ]
+   array [
+      dict entry(
+         string "urgency"
+         variant             byte 1
+      )
+      dict entry(
+         string "sender-pid"
+         variant             int64 3777261
+      )
+   ]
+   int32 -1
