@@ -1,0 +1,8 @@
+signal time=1786741896.496257 sender=org.freedesktop.DBus -> destination=:1.5486 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
+   string ":1.5486"
+signal time=1786741896.496290 sender=org.freedesktop.DBus -> destination=:1.5486 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost
+   string ":1.5486"
+signal time=1786741896.496559 sender=org.freedesktop.DBus -> destination=:1.5485 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
+   string ":1.5485"
+signal time=1786741896.496578 sender=org.freedesktop.DBus -> destination=:1.5485 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost
+   string ":1.5485"
