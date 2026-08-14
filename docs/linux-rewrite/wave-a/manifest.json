@@ -1,0 +1,135 @@
+{
+ "W01-core": {
+  "count": 6,
+  "ids": [
+   "F-CORE-ACT-02",
+   "F-CORE-ACT-06",
+   "F-CORE-ACT-07",
+   "F-CORE-ACT-10",
+   "F-CORE-ACT-11",
+   "F-CORE-ACT-25"
+  ]
+ },
+ "W02-core": {
+  "count": 6,
+  "ids": [
+   "F-CORE-AUTH-01",
+   "F-CORE-DOM-03",
+   "F-CORE-FILE-03",
+   "F-CORE-FILE-06",
+   "F-CORE-TERM-02",
+   "F-CORE-USG-07"
+  ]
+ },
+ "W03-chat": {
+  "count": 6,
+  "ids": [
+   "F-CHAT-13",
+   "F-CHAT-18",
+   "F-CHAT-20",
+   "F-CHAT-25",
+   "F-CHAT-26",
+   "F-CHAT-27"
+  ]
+ },
+ "W04-chat": {
+  "count": 4,
+  "ids": [
+   "F-CHAT-28",
+   "F-CHAT-29",
+   "F-CHAT-30",
+   "F-CHAT-32"
+  ]
+ },
+ "W05-set": {
+  "count": 6,
+  "ids": [
+   "F-SET-11",
+   "F-SET-12",
+   "F-SET-13",
+   "F-SET-14",
+   "F-SET-15",
+   "F-SET-17"
+  ]
+ },
+ "W06-set": {
+  "count": 2,
+  "ids": [
+   "F-SET-19",
+   "F-SET-24"
+  ]
+ },
+ "W07-prj": {
+  "count": 5,
+  "ids": [
+   "F-PRJ-06",
+   "F-PRJ-07",
+   "F-PRJ-09",
+   "F-PRJ-14",
+   "F-PRJ-15"
+  ]
+ },
+ "W08-agent": {
+  "count": 5,
+  "ids": [
+   "F-AGENT-API-01",
+   "F-AGENT-OMP-01",
+   "F-AGENT-OMP-02",
+   "F-AGENT-OMP-03",
+   "F-AGENT-OPENCODE-03"
+  ]
+ },
+ "W09-term": {
+  "count": 5,
+  "ids": [
+   "F-TERM-04",
+   "F-TERM-06",
+   "F-TERM-08",
+   "F-TERM-UI-01",
+   "F-TERM-UI-02"
+  ]
+ },
+ "W10-chg": {
+  "count": 5,
+  "ids": [
+   "F-CHG-01",
+   "F-CHG-03",
+   "F-CHG-05",
+   "F-CHG-18",
+   "F-CHG-22"
+  ]
+ },
+ "W11-ctrl+brw+sid": {
+  "count": 7,
+  "ids": [
+   "F-CTRL-BROWSER-02",
+   "F-CTRL-CLI-02",
+   "F-CTRL-NOTIFY-03",
+   "F-BRW-07",
+   "F-BRW-08",
+   "F-SID-12",
+   "F-SID-18"
+  ]
+ },
+ "W12-auto+edit+use+tab": {
+  "count": 7,
+  "ids": [
+   "F-AUTO-06",
+   "F-AUTO-09",
+   "F-EDIT-08",
+   "F-EDIT-12",
+   "F-USE-03",
+   "F-USE-06",
+   "F-TAB-25"
+  ]
+ },
+ "W13-git+per+persist+win": {
+  "count": 4,
+  "ids": [
+   "F-GIT-RUN-02",
+   "F-PER-08",
+   "F-PERSIST-DB-11",
+   "F-WIN-06"
+  ]
+ }
+}
