@@ -89,3 +89,29 @@ The real-agent-hook half is could-not-reach on this lane: it requires a `ctrl-sh
 open an agent tab through the code path that wires hooks; route to the `DISPLAY=:1` lane.
 
 No new captures for this row (filesystem inspection only).
+
+## F-BRW-07 — ledger line 256, currently half-proven
+
+**Drove:** `grep -rn "request_permission" rust/crates/tiller_ui/src/browser.rs` to re-confirm
+the blocker triage names before spending a live drive on it.
+
+**Observed:**
+```
+588:    pub fn request_permission(&mut self, origin: &str) {
+880:    pub fn request_permission(&mut self, origin: &str) {
+881:        self.state.request_permission(origin);
+1666:        browser.request_permission("https://agent.example");   <- #[test]
+1677:        browser.request_permission("https://denied.example");  <- #[test]
+```
+Both call sites at 1666/1677 are inside `#[test]` functions in the same file — zero production
+callers anywhere in the crate, matching the F-BRW-06 UNREACHABLE finding this row's approach
+cites. There is genuinely no user gesture, socket call, or code path in the shipped app that
+would trigger a permission prompt to confirm-absent; "trigger access, confirm no new prompt"
+has no seam to drive.
+
+**Claim:** could-not-reach for the owed half — not a lane limitation but an absent production
+caller (`request_permission` is dead code outside tests). The persisted-reload half remains
+correctly proven per the existing record (main.rs:8161/8234, re-confirmed by grep of the same
+call sites this pass, unchanged). Do not close this row until F-BRW-06 gets a real caller.
+
+No new captures (grep-only re-confirmation).
