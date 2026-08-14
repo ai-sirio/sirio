@@ -126,3 +126,135 @@ the relabeled button; confirm the status transitions `Failed → Running → Com
 - **size**: S
 
 ---
+
+## `F-PRJ-11` — FAILED — absent
+
+**Needs: build, but small.** Confirmed live and by reading: `render_project_settings`
+(`sidebar.rs:1865-2022`) draws heading, path, repo-type text, display-name field, a conditional
+`Initialize Git` button, `card.icon_picker`, `Close`, and the project id — no trash/removal
+control anywhere in the sheet, matching the evidence exactly. The removal machinery itself is
+not missing, only its door from this surface: `request_remove_project` (`sidebar.rs:1055-1075`)
+already does everything the VERIFY clause asks — a native `window.prompt` with "Remove project
+from Tiller?" / "This only removes the project from Tiller's sidebar. Files on disk will not be
+deleted." and `["Remove from Tiller", "Cancel"]` — and on accept emits `SidebarEvent::
+RemoveProject`, which `main.rs`'s `remove_project` (`:2999`) turns into `project_catalog.remove`
+(files untouched, matching the clause). Today it is only reachable from the context menu one
+level up (`dispatch_context_action`, `:959-964`).
+
+**Approach**: add a trash/remove control to `render_project_settings` (near `Close`) whose
+`on_click` calls `sidebar.request_remove_project(card.id.clone(), window, cx)` — the exact same
+method the context-menu path already calls. No new confirmation logic needed; it already exists
+and is already proven.
+
+- **files**: `rust/crates/tiller_ui/src/sidebar.rs` (`render_project_settings`, `:1865-2022`)
+- **size**: S
+
+---
+
+## `F-PRJ-12` — half-proven
+
+**Needs: both.** Two distinct things are bundled in one row:
+
+**(a) The staleness bug is real and traced.** `open_project_settings` (`sidebar.rs:889-940`)
+snapshots `is_git: row.is_git` once into `ProjectSettingsCard` when the sheet opens. When
+`Initialize Git` runs while a *different* code path drives it (`main.rs:3162-3198`), it calls
+`project_catalog.refresh_project` then `workspace.refresh_sidebar(cx)` (`main.rs:2696-2705`),
+which calls `sidebar.set_projects(...)` (`sidebar.rs:499-509`) — that rebuilds `self.rows` from
+scratch (fresh `is_git` per row) but never looks at `self.project_settings` at all. An
+already-open sheet's `card.is_git` — and therefore its "Repository: Git/Folder" text and whether
+the `Initialize Git` button still renders — is frozen at open-time and never refreshed, exactly
+matching "the OPEN sheet itself doesn't live-refresh."
+
+**Approach for (a)**: in `set_projects` (or a small helper called from it), after rebuilding
+`self.rows`, if `self.project_settings` is `Some` and its `id` matches a row in the new set,
+patch `card.is_git` (and `card.path`, for parity) from that row before returning.
+
+**(b) Display-name propagation is already exercise-only.** `on_display_name_key`
+(`sidebar.rs:852-886`) calls `self.set_project_identity(...)` on every keystroke, which directly
+rewrites the matching row's `row.title` in `self.rows` (`:800-816`) — so the sidebar row already
+updates in-session before `Close` is even clicked, not just on persistence. The evidence's gap
+("not directly screenshotted post-close") is a missing photo of already-correct behavior, not a
+missing feature.
+
+**Approach for (b)**: edit the display name, click `Close`, screenshot the sidebar row showing
+the new name — no code change needed for this half.
+
+- **files**: `rust/crates/tiller_ui/src/sidebar.rs` (`set_projects` `:499`, `open_project_settings` `:889`)
+- **size**: S
+
+---
+
+## `F-PRJ-13` / `F-PRJ-15` — FAILED — defective (both) — likely stale verdict, see reclassify note
+
+**Needs: reclassify** (with a residual **build** item for F-PRJ-13's second, unrelated defect —
+see below). Both rows' "defective" reasoning is the same claim: the picker updates its own
+in-panel selection but the choice "never leaves the panel" / "is discarded" after `Close`. That
+claim was true when the evidence's screenshots (`orch18-*.png`) were taken, but it was fixed by
+commit `28a41fa` ("feat(P97): the project settings card writes through and reads back," **Aug 14
+12:59:05**, same day, landing after `SEAMS.md`'s "Last verified: 2026-08-14, 02:00" note that
+still describes the seam as open). Read against the current tree:
+
+- `ProjectIconPicker` is constructed with `.on_change_with_context(...)` at `sidebar.rs:913-919`,
+  whose callback is `sidebar.apply_icon_change(project_id, value, cx)`.
+- `apply_icon_change` (`sidebar.rs:838-850`) does **both** halves in one call: it updates
+  `self.project_identities.insert(project_id, icon)` — the exact map `render_row`'s `glyph`/
+  `glyph_color` computation reads from (`sidebar.rs:2066-2081`) — immediately, in-session, on
+  every pick (not gated on `Close`); and it emits `SidebarEvent::ProjectSettingsChanged`, which
+  `main.rs`'s `update_project_settings` (`:2977-2997`) turns into a `CatalogProjectSettings`
+  write persisted via `schedule_catalog`.
+- The commit's own message is explicit that this is unverified, not that it's broken: "Code plus
+  a green test is NOT EXERCISED, not PASSED — the judgeable proof is still a restart, and a
+  critic sets the verdicts." The green test is
+  `sidebar::tests::project_settings_changes_update_the_row_and_emit_a_durable_edit`.
+
+So as read, both rows' propagation half now looks correctly wired; what's actually missing is a
+fresh live re-drive (pick → `Close` → sidebar row shows the new icon, immediately) plus the
+restart check the commit message itself calls out (durable across relaunch). That is the
+`needs: exercise` shape, but because the *verdict text* ("never leaves the panel," "is
+discarded") is what's stale, this is filed as `reclassify` per the brief's own instruction — flag,
+don't silently downgrade to a different bucket.
+
+**F-PRJ-13 has a second, separate, still-live defect** the reclassify does not touch: "the
+Colour row is clipped mid-swatch at the panel edge." `controls::color_picker` (`controls.rs:
+495-529`) lays out `AgentAccentColor::ALL` (8 fixed 20px swatches, `settings.rs:267-276`) in a
+plain `.flex().items_center().gap(...)` row with **no `.flex_wrap()` and no horizontal scroll**,
+inside `controls::row_view` (`controls.rs:100-119`) which gives the label `flex_1` but leaves the
+control at its natural (unshrinkable) width — all hosted inside the 325px-wide sidebar-docked
+settings sheet (`SIDEBAR_WIDTH`, `sidebar.rs:66`) with 16px+8px of padding stacked on each side
+before the swatch row even starts. This is a genuine, independent layout bug — not fixed by P97 —
+and on its own is enough to keep F-PRJ-13 legitimately `defective` even once the propagation half
+re-verifies clean.
+
+**Approach**: (reclassify) re-drive both rows live post-`28a41fa` — pick, `Close`, confirm the
+sidebar row's icon updates immediately; relaunch, confirm it persisted. (build, F-PRJ-13 only)
+give the color-swatch row in `controls::color_picker` either `.flex_wrap()` or a horizontal
+scroll container so all 8 swatches are reachable in the sheet's actual width.
+
+- **files**: `rust/crates/tiller_ui/src/controls.rs` (`color_picker`, `:495-529`; `row_view`, `:100-119`) for the residual clipping defect only — the propagation wiring itself needs no file change
+- **size**: S (clipping fix); reclassify/exercise portion is S
+
+---
+
+## `F-PRJ-14` — half-proven
+
+**Needs: exercise.** The GitHub-avatar arm is proven live. The other two arms and the
+sidebar-propagation question are all reachable through the same machinery just confirmed for
+F-PRJ-13/15, not a separate mechanism: `project_identity.rs`'s `commit_favicon` (`:460-469`) and
+the local-PNG commit path both end in the same shared `commit(...)` used by the GitHub-avatar
+arm, which calls both `on_change`/`on_change_with_context` (`:330-365`) — i.e. the exact
+`apply_icon_change` → `project_identities` → `SidebarEvent::ProjectSettingsChanged` chain P97
+wired. `render_row`'s glyph match renders any `ProjectIconValue::Avatar(_)` (GitHub, favicon, or
+local PNG alike) as `Icon::Globe` (`sidebar.rs:2066-2072`) — not the actual image — so "reaches
+the sidebar row" should already mean a Globe glyph appears, once P97's propagation is live-
+reconfirmed (see F-PRJ-13/15 above).
+
+**Approach**: drive the two untried arms — upload a local PNG under `MAX_AVATAR_PNG_BYTES`
+(`project_identity.rs:230`) via the real file picker, and enter a favicon domain — then `Close`
+and confirm the sidebar row shows the Globe glyph for each, and that a bad PNG / malformed domain
+still shows `png_error`/`favicon_error` correctly. This is exercise-only, riding on the same
+propagation path already re-checked for F-PRJ-13/15 — no new production code expected.
+
+- **files**: none (exercise only)
+- **size**: S
+
+---
