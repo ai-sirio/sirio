@@ -3,8 +3,8 @@
 use crate::controls;
 use crate::sidebar::icons::{Icon, IconElement};
 use gpui::{
-    App, Context, Entity, FocusHandle, FontWeight, KeyBinding, KeyDownEvent, MouseButton, Render,
-    Rgba, Window, actions, div, prelude::*, px, text,
+    AnyElement, App, Context, Entity, FocusHandle, FontWeight, KeyBinding, KeyDownEvent,
+    MouseButton, Render, Rgba, Window, actions, div, prelude::*, px, text,
 };
 use std::rc::Rc;
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
@@ -664,6 +664,16 @@ pub struct Settings {
     on_back: Option<Rc<dyn Fn()>>,
     on_change: Option<Rc<dyn Fn(SettingsSnapshot)>>,
     theme_mode: ThemeMode,
+    /// The Appearance screen's Translucency toggle. **Known incomplete
+    /// (F-SET-20):** [`Self::set_translucency`] now calls
+    /// [`Self::changed`] like every sibling setter, but the value still
+    /// cannot leave this surface — [`SettingsSnapshot`] has no
+    /// `translucency` field to carry it in the emitted payload. Adding one
+    /// is scoped to this file, but every call site that builds a
+    /// `SettingsSnapshot` struct literal (`rust/crates/tiller/src/main.rs`,
+    /// owned elsewhere this wave) would need a matching field to keep
+    /// compiling, so it is not added here — see the wave report for the
+    /// exact patch.
     translucency: bool,
     interface_font_size: i32,
     terminal_font_size: i32,
@@ -712,6 +722,11 @@ pub struct Settings {
     /// message above the last successful rows — never five false "Not found
     /// on PATH" claims — and the screen's "↻ Refresh" button is the retry.
     agent_registry_error: Option<String>,
+    /// When the Agents screen's rows were last populated by a discovery
+    /// sweep (F-SET-16) — construction counts as one, and every "↻ Refresh"
+    /// click stamps a fresh one, so the render has a real, changing value
+    /// to show rather than nothing at all.
+    agent_last_refreshed: Option<String>,
     /// Account state for the three AI Provider cards, derived from local
     /// credential files at construction — never a mock default.
     provider_accounts: ProviderAccountStates,
@@ -738,6 +753,21 @@ pub struct Settings {
     /// Last failure while handing account management to an external terminal.
     /// A failed spawn must be visible rather than implying that login started.
     account_action_error: Option<(ProviderKind, String)>,
+    /// The provider whose [`Self::launch_account_login`] is currently
+    /// spawned and being waited on (F-SET-14). While set, the card renders
+    /// "Signing in…" and a Cancel button in place of Add Account, so a
+    /// click that already reached a real subprocess is not left with no
+    /// visible sign anything is happening.
+    account_login_pending: Option<ProviderKind>,
+    /// The spawned login terminal's pid, once known — set slightly after
+    /// [`Self::account_login_pending`] (the process must exist before it
+    /// has one) and what [`Self::cancel_account_login`] signals.
+    account_login_pid: Option<u32>,
+    /// Set by [`Self::cancel_account_login`] so the login task's own
+    /// completion handler — which still runs after the killed process's
+    /// `wait()` resolves — does not overwrite the "Sign-in canceled"
+    /// message with an exit-status one.
+    account_login_canceled: bool,
     /// The OpenCode Go session cookie being typed (F-SET-12). Transient UI
     /// state: Save moves it into [`CredentialStore`], and the field only
     /// ever renders mask dots — the value is never drawn back or persisted
@@ -837,6 +867,10 @@ impl Settings {
             Ok(rows) => (rows, None),
             Err(error) => (Vec::new(), Some(Self::registry_error_message(&error))),
         };
+        // F-SET-16: construction just ran the sweep above, successful or
+        // not — it stamped the rows (or the error) the Agents screen opens
+        // showing, so it is as much a "last refreshed" as a button click.
+        let agent_last_refreshed = Some(Self::format_refreshed_stamp());
         Self {
             category: SettingsCategory::Appearance,
             on_back: None,
@@ -855,6 +889,7 @@ impl Settings {
             // machine — never a fixed list of "Available" claims.
             provider_availability,
             agent_registry_error,
+            agent_last_refreshed,
             // The provider cards report what local credential state exists
             // on this machine — never a fixed list of "Active" claims.
             provider_accounts: ProviderAccountStates::discovered(),
@@ -878,6 +913,9 @@ impl Settings {
             on_install_skill: None,
             on_manage_account: None,
             account_action_error: None,
+            account_login_pending: None,
+            account_login_pid: None,
+            account_login_canceled: false,
             opencode_cookie_input: String::new(),
             opencode_cookie_focus: cx.focus_handle(),
             opencode_cookie_error: None,
@@ -1096,6 +1134,10 @@ impl Settings {
 
     fn set_translucency(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.translucency = enabled;
+        // F-SET-20: matches every sibling setter now — see the field doc on
+        // `translucency` for why the emitted snapshot still can't carry
+        // this value.
+        self.changed();
         cx.notify();
     }
 
@@ -1241,6 +1283,11 @@ impl Settings {
     /// terminal. Tiller waits off the render thread and re-reads the local
     /// account stores when that terminal session ends, so cancel/retry and a
     /// successful login all leave the card truthful.
+    ///
+    /// F-SET-14: while the terminal is up, [`Self::account_login_pending`]
+    /// is set so the card can render "Signing in…" and a Cancel button
+    /// instead of leaving a click that reached a real subprocess with no
+    /// visible sign anything happened.
     fn launch_account_login(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
         self.account_action_error = None;
         // Unreachable from the UI for a provider without a login command
@@ -1251,19 +1298,61 @@ impl Settings {
         let program = login.program;
         let args = login.args;
         let entity = cx.entity();
+        self.account_login_pending = Some(provider);
+        self.account_login_pid = None;
+        self.account_login_canceled = false;
+        cx.notify();
         cx.spawn(async move |_, cx| {
-            let result = cx
+            let spawned = cx
                 .background_spawn(async move {
-                    let mut child = Command::new("x-terminal-emulator")
+                    Command::new("x-terminal-emulator")
                         .arg("-e")
                         .arg(program)
                         .args(&args)
-                        .spawn()?;
-                    child.wait()
+                        .spawn()
                 })
                 .await;
 
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = entity.update(cx, |settings, cx| {
+                        settings.account_login_pending = None;
+                        settings.account_login_pid = None;
+                        settings.account_action_error = Some((
+                            provider,
+                            format!("could not start {program} login: {error}"),
+                        ));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            // Publish the pid as soon as the process exists, so a Cancel
+            // click that lands before this point still has something to
+            // kill once it does; [`Self::cancel_account_login`] guards on
+            // `account_login_pending` still naming this provider, so a
+            // Cancel that already fired is not clobbered by this update.
+            let pid = child.id();
             let _ = entity.update(cx, |settings, cx| {
+                if settings.account_login_pending == Some(provider) {
+                    settings.account_login_pid = Some(pid);
+                    cx.notify();
+                }
+            });
+
+            let result = cx.background_spawn(async move { child.wait() }).await;
+
+            let _ = entity.update(cx, |settings, cx| {
+                settings.account_login_pending = None;
+                settings.account_login_pid = None;
+                if settings.account_login_canceled {
+                    // Cancel already set the "Sign-in canceled" message and
+                    // fired its own notify; the process's own exit status
+                    // (a signal, once `kill` lands) is not a real outcome.
+                    settings.account_login_canceled = false;
+                    return;
+                }
                 settings.provider_accounts = ProviderAccountStates::discovered();
                 settings.account_action_error = match result {
                     Ok(status) if status.success() => None,
@@ -1288,14 +1377,53 @@ impl Settings {
         .detach();
     }
 
+    /// Cancels a login [`Self::launch_account_login`] spawned (F-SET-14).
+    /// Killing the terminal emulator process closes its pty, which takes
+    /// the foreground login command down with it on every terminal this app
+    /// targets; the outstanding `child.wait()` in the login task then
+    /// resolves on its own and clears the pending state from there — this
+    /// only needs to handle the pid and the message. If this runs before
+    /// the spawn task has published a pid yet (a race no human click can
+    /// realistically win, since the surface must render the Cancel button
+    /// first), there is nothing to kill and the terminal is left running;
+    /// the button simply reappears as "Add Account" once that login exits
+    /// on its own.
+    fn cancel_account_login(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = self.account_login_pending.take() else {
+            return;
+        };
+        if let Some(pid) = self.account_login_pid.take() {
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+        }
+        self.account_login_canceled = true;
+        self.account_action_error = Some((provider, "Sign-in canceled".to_string()));
+        cx.notify();
+    }
+
     /// Re-runs agent discovery for the Agents screen's "↻ Refresh" button
     /// (F-SET-16), the same re-read-from-disk meaning "Refresh now" already
     /// has on the AI Providers screen: an agent installed or removed since
     /// launch shows up without a relaunch. This button doubles as the
     /// registry error state's retry (F-SET-17).
+    ///
+    /// Also stamps [`Self::agent_last_refreshed`] — Search and Refresh were
+    /// both genuinely wired before this row; what was missing was a
+    /// rendered sign the click did anything, which a byte-identical capture
+    /// (a Refresh with nothing new to discover) then read as "absent".
     fn refresh_agent_availability(&mut self, cx: &mut Context<Self>) {
         self.apply_agent_discovery(try_discover_availability());
+        self.agent_last_refreshed = Some(Self::format_refreshed_stamp());
         cx.notify();
+    }
+
+    /// The Agents screen's "Refreshed …" stamp (F-SET-16), local time to
+    /// the second — the same clock and precision `chat.rs`'s message
+    /// timestamps already use.
+    fn format_refreshed_stamp() -> String {
+        chrono::Local::now().format("%H:%M:%S").to_string()
     }
 
     /// The registry failure message, shaped like the Swift original's
@@ -2028,22 +2156,61 @@ impl Settings {
                     .child(text!(error.clone())),
             );
         }
+        // F-SET-14: while this card's login is spawned and being waited on,
+        // "Add Account" is replaced by a "Signing in…" indicator and a
+        // Cancel button — a click that already reached a real subprocess
+        // must not look like nothing happened, and a login that will not
+        // finish (a wrong password, a login the user no longer wants) must
+        // be escapable without alt-tabbing to the spawned terminal.
+        let account_action: AnyElement = if self.account_login_pending == Some(provider) {
+            let cancel_entity = entity.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(theme.cosmic.spacing.xs as f32))
+                .child(
+                    div()
+                        .id(format!("account-login-pending-{title}"))
+                        .debug_selector(move || format!("account-login-pending-{title}"))
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.subtitle)
+                        .child(text!("Signing in…")),
+                )
+                .child(controls::button(
+                    match provider {
+                        ProviderKind::Claude => "cancel-claude-account",
+                        ProviderKind::Codex => "cancel-codex-account",
+                        ProviderKind::OpenCodeGo => "cancel-opencode-account",
+                        // Unreachable: the Ollama card returned above.
+                        ProviderKind::OllamaCloud => "cancel-ollama-account",
+                    },
+                    "Cancel",
+                    theme,
+                    move |_, _, cx| {
+                        cancel_entity.update(cx, |settings, cx| settings.cancel_account_login(cx));
+                    },
+                ))
+                .into_any_element()
+        } else {
+            controls::button_maybe(
+                match provider {
+                    ProviderKind::Claude => "add-claude-account",
+                    ProviderKind::Codex => "add-codex-account",
+                    ProviderKind::OpenCodeGo => "add-opencode-account",
+                    // Unreachable: the Ollama card returned above.
+                    ProviderKind::OllamaCloud => "add-ollama-account",
+                },
+                "Add Account",
+                theme,
+                manage_account_handler,
+            )
+            .into_any_element()
+        };
         card = card
             .child(controls::subsection_header(
                 "Accounts",
                 "Showing accounts for this device. New accounts are added there.",
-                controls::button_maybe(
-                    match provider {
-                        ProviderKind::Claude => "add-claude-account",
-                        ProviderKind::Codex => "add-codex-account",
-                        ProviderKind::OpenCodeGo => "add-opencode-account",
-                        // Unreachable: the Ollama card returned above.
-                        ProviderKind::OllamaCloud => "add-ollama-account",
-                    },
-                    "Add Account",
-                    theme,
-                    manage_account_handler,
-                ),
+                account_action,
                 theme,
             ))
             // The "Active" badge on the System default row is a *selection*
@@ -2606,15 +2773,33 @@ impl Settings {
                                 search_text
                             })),
                     )
-                    .child(controls::button(
-                        "refresh-agents",
-                        "↻ Refresh",
-                        theme,
-                        move |_, _, cx| {
-                            refresh_entity
-                                .update(cx, |this, cx| this.refresh_agent_availability(cx));
-                        },
-                    )),
+                    .child({
+                        // F-SET-16: a "Refreshed …" stamp next to the
+                        // button — the conjunct a byte-identical
+                        // before/after capture read as absent, since
+                        // Search and Refresh were themselves already wired
+                        // and tested.
+                        let mut refresh_area = div().flex().items_center().gap(px(8.0));
+                        if let Some(stamp) = self.agent_last_refreshed.as_ref() {
+                            refresh_area = refresh_area.child(
+                                div()
+                                    .id("agents-last-refreshed")
+                                    .debug_selector(|| "agents-last-refreshed".to_string())
+                                    .text_size(theme.typography.footnote)
+                                    .text_color(theme.subtitle)
+                                    .child(text!(format!("Refreshed {stamp}"))),
+                            );
+                        }
+                        refresh_area.child(controls::button(
+                            "refresh-agents",
+                            "↻ Refresh",
+                            theme,
+                            move |_, _, cx| {
+                                refresh_entity
+                                    .update(cx, |this, cx| this.refresh_agent_availability(cx));
+                            },
+                        ))
+                    }),
             );
         // F-SET-17: the registry error state, rendered over the rows from
         // the last successful sweep, with the "↻ Refresh" button above as
@@ -3686,6 +3871,63 @@ mod tests {
             rendered,
             try_discover_availability().expect("this machine's PATH discovers cleanly"),
             "Refresh replaces the pinned fixture with a fresh discovery read"
+        );
+    }
+
+    /// F-SET-16: Refresh was already genuinely wired (the row above pins
+    /// that); what a byte-identical before/after capture read as "absent"
+    /// was the other conjunct — a rendered last-refreshed stamp. Clears the
+    /// stamp construction itself set, so the assertion below proves the
+    /// button populates it rather than merely inheriting it from startup.
+    #[gpui::test]
+    async fn refresh_agents_renders_a_last_refreshed_timestamp(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |this, cx| {
+                this.agent_last_refreshed = None;
+                cx.notify();
+            });
+        });
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("agents-last-refreshed").is_none(),
+            "no timestamp renders before the first refresh"
+        );
+
+        let refresh = cx
+            .debug_bounds("refresh-agents")
+            .expect("Refresh renders on the Agents screen");
+        cx.simulate_click(refresh.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("agents-last-refreshed").is_some(),
+            "Refresh renders the last-refreshed stamp the byte-identical capture never found"
+        );
+        let stamp = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .agent_last_refreshed
+                .clone()
+        });
+        assert!(
+            stamp.is_some(),
+            "the field backing the render is populated by the click"
         );
     }
 
@@ -4989,6 +5231,76 @@ mod tests {
             .debug_bounds("add-claude-account")
             .expect("Claude card's Add Account renders with the production fallback");
         assert!(add_claude.size.width > px(0.0));
+    }
+
+    /// F-SET-14: while a card's login is spawned and being waited on,
+    /// "Add Account" is replaced by a "Signing in…" indicator and a Cancel
+    /// button, and Cancel both clears that state and leaves an explanatory
+    /// message — the residual gap on top of the already-real
+    /// `x-terminal-emulator` fallback `add_account_renders_wired_by_default`
+    /// covers. Drives `account_login_pending` directly rather than through
+    /// a real spawn, since this sandbox may not have `x-terminal-emulator`
+    /// installed; [`Settings::cancel_account_login`] itself is exercised
+    /// through a real click.
+    #[gpui::test]
+    async fn add_account_in_flight_renders_signing_in_and_cancel(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("cancel-claude-account").is_none(),
+            "no Cancel renders before any login starts"
+        );
+
+        let settings_entity =
+            cx.update(|window, _cx| window.root::<Settings>().flatten().expect("settings root"));
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |this, cx| {
+                this.account_login_pending = Some(ProviderKind::Claude);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("add-claude-account").is_none(),
+            "Add Account is replaced while a login is pending"
+        );
+        assert!(
+            cx.debug_bounds("account-login-pending-Claude Code").is_some(),
+            "the Signing in… indicator renders"
+        );
+        let cancel = cx
+            .debug_bounds("cancel-claude-account")
+            .expect("Cancel renders while a login is pending");
+
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("cancel-claude-account").is_none(),
+            "Cancel clears the pending state"
+        );
+        assert!(
+            cx.debug_bounds("add-claude-account").is_some(),
+            "Add Account re-renders once the login is canceled"
+        );
+        let message = cx.update(|_window, cx| settings_entity.read(cx).account_action_error.clone());
+        assert_eq!(
+            message,
+            Some((ProviderKind::Claude, "Sign-in canceled".to_string())),
+            "the card explains why sign-in stopped"
+        );
     }
 
     /// P58, F-SET-04/05/06/07: every General-screen control must flow into
