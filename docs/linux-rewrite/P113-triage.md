@@ -4,13 +4,17 @@
 `INVENTORY-LEDGER.md`; no UI, socket, build, or test was driven. Locations below
 are the locations named by that evidence, not independently verified diagnoses.
 
-## Census warning
+## Inventory census
 
-The task and totals block say **47** defective rows, but the ledger body at this
-reading contains **49** rows whose verdict is exactly `FAILED — defective`.
-The two-subtotal discrepancy is not changed here: no row's own evidence retracts
-its verdict, so P113 has no authority to alter a verdict or totals. The ranked
-coverage below accounts for all **49 current body rows**.
+The frozen inventory denominator is **389 `F-` rows**. The project's ledger gate,
+`python3 Scripts/ledger-totals.py`, counts **47** of those rows as
+`FAILED — defective` and reports `Totals block matches the body`.
+
+Two supplementary ACP records also use that verdict text: `ACP-08` and
+`ACP-12`. They are not `F-` inventory entries and do not enter the frozen
+389-row denominator or the 47-row defective count. `ACP-12` explicitly belongs
+to `F-CHAT-15`; both ACP records remain analysed below as supplementary
+sub-rows, not as extra inventory defects.
 
 ## Separate queues before builder dispatch
 
@@ -26,8 +30,9 @@ would discard its own contrary evidence.
 
 ### Reproducibly failing named tests — urgent, cheapest queue
 
-These are the three defective *rows* whose own evidence says a named test is
-reproducibly red; do not merge them into UI work or run them in this shared tree.
+These are the three defective *inventory rows* whose own evidence says a named
+test is reproducibly red; do not merge them into UI work or run them in this
+shared tree.
 
 | Root cause / rows unblocked | Rows and evidence | Where / builder action |
 |---|---|---|
@@ -113,9 +118,9 @@ reference and only restores an in-memory `retained_chats` list.
 load them into a restored UI session; a later live restart re-drive decides both
 rows. The green store test is not sufficient evidence for either.
 
-### 3. Agent mode pill is display-only — 2 rows, high confidence
+### 3. Agent mode pill is display-only — 1 inventory row (+ `ACP-12` sub-row), high confidence
 
-**Rows:** `F-CHAT-15`, `ACP-12`.
+**Inventory row:** `F-CHAT-15`. **Supplementary sub-row:** `ACP-12`.
 
 **Evidence:** `F-CHAT-15` records correct pills in each state but no chooser
 after idle/offline clicks and 2s/4s waits; `ACP-12` explicitly points back to
@@ -124,7 +129,7 @@ that owning row.
 **Likely location:** `rust/crates/tiller_ui/src/chat.rs`. **Builder action:**
 attach/open the mode menu and implement its selections; re-drive choices for
 each available mode. This is one defect reported at a feature and ACP-contract
-level, not two UI defects.
+level, not two inventory defects.
 
 ### 3. `notification.create` stores a record but never posts — 2 rows, high confidence
 
@@ -171,13 +176,23 @@ row. They are deliberately not grouped merely by screen or subsystem.
 | Status indicators have no live signal lifecycle | `F-TERM-09`: badges appear/stick but do not track work or clear on death/relaunch; evidence ties this to dead hooks and absent title/content/process badge wiring. | activity merger and terminal/app lifecycle (not one widget); establish Linux signal sources and clearing. |
 | File links have no UI click path | `F-CORE-FILE-04`: `resolve_file_link` and tests exist but have zero callers/click machinery. | `rust/crates/tiller_project/src/file_link.rs` plus editor/markdown UI; wire Cmd/Ctrl-click/open-link behavior. |
 | Worktree annotation intentionally bypasses existing storage | `F-CTRL-WORK-01`: schema/model/upsert already preserve comment; `main.rs:328` deliberately labels `worktree.set` runtime-only. | `rust/crates/tiller/src/main.rs` control path; decide contract, then route to existing column if persistence is required. |
-| Retry silently drops a failed ACP turn | `ACP-08`: retry respawns and returns idle without resending the prompt. | ACP retry/session bridge under `rust/crates/tiller_acp`; retain and replay the failed turn or report its loss. |
 | Terminal split cache lifecycle unintegrated | `F-TERM-SPLIT-01`: left-placement defect overlaps `F-TAB-23`, but this row also requires `TerminalPaneCache` integration/recursive lifecycle. | `rust/crates/tiller_terminal` and split integration; fix cache lifecycle before claiming this full row. |
+
+## ACP supplementary sub-rows — outside the inventory count
+
+- `ACP-12` is the supplementary ACP detail for the `F-CHAT-15` mode-pill cause
+  above; it adds no second inventory row.
+- `ACP-08` records a separate ACP retry defect: retry respawns and returns idle
+  without resending the prompt. Its likely location is the retry/session bridge
+  under `rust/crates/tiller_acp`; retain and replay the failed turn or report its
+  loss. It is analysed for builder planning, but is not one of the 47 `F-` rows.
 
 ## Accounting
 
-The ranked multi-row causes cover 22 rows (6 + 6 + 2 + 2 + 2 + 2 + 2). The
-one-row causes cover the remaining 27. Total: **49 current defective body
-rows**. No ledger row was edited: the three superseded-pass entries still state
-an observed present defect, and the browser-excuse entries state concrete
-failures rather than a re-drive-only state.
+The multi-row inventory causes and the dedicated test clusters cover 22 `F-`
+rows (6 + 6 + 2 + 2 + 1 + 2 + 3). The one-row causes cover the remaining 25.
+Total: **47 defective inventory rows**. The two ACP sub-rows above are
+supplementary and are excluded from that total. No ledger row was edited: the
+three superseded-pass entries still state an observed present defect, and the
+browser-excuse entries state concrete failures rather than a re-drive-only
+state.
