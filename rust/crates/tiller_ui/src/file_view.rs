@@ -14,18 +14,16 @@
 //!   `conflict`, `check_external`, `save`, `reload` and `keep` for the shell
 //!   to drive: save on ⌘S, conflict check on tab activation, close
 //!   confirmation when dirty;
-//! - the conflict banner and the Markdown toolbar are rendered here. The
-//!   Code/Preview switch (F-EDIT-01) and the conflict banner's Reload/Keep
-//!   are behaviour — the switch is exercised against the drawn frame, and
-//!   the banner's state machine is provable through the editor model —
-//!   while the pixels inside them remain `NOT EXERCISED — blocked on
-//!   display`.
+//! - the conflict banner, Markdown toolbar, and Code/Preview switch are
+//!   rendered here as interactive controls over the model operations.
 
 use gpui::{
-    AnyElement, Context, HighlightStyle, Render, StyledText, Task, Window, div, prelude::*, px,
+    AnyElement, Context, FocusHandle, HighlightStyle, KeyDownEvent, MouseButton, Render,
+    StyledText, Subscription, Task, Window, div, prelude::*, px,
 };
 use std::path::{Path, PathBuf};
-use tiller_markdown::{Document, parse};
+use std::time::Duration;
+use tiller_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use tiller_theme::Theme;
 
 use crate::chat::Chat;
@@ -47,7 +45,7 @@ enum ViewState {
 /// F-EDIT-01: the two Markdown modes. Code shows the editable source;
 /// Preview shows the rendered document. Switching between them is
 /// behaviour (tested against the drawn frame); the typography inside each
-/// mode is appearance and stays `NOT EXERCISED — blocked on display`.
+/// mode is appearance and stays outside the behavior contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownMode {
     Code,
@@ -62,6 +60,8 @@ pub struct FileView {
     path: PathBuf,
     state: ViewState,
     load_task: Option<Task<()>>,
+    file_monitor: Option<FileSystemEventMonitor>,
+    _file_monitor_task: Option<Task<()>>,
     /// A user-visible message raised by the shell, such as a failed save.
     notice: Option<String>,
     /// F-EDIT-01: which Markdown mode is active. Only meaningful for
@@ -73,6 +73,17 @@ pub struct FileView {
     /// small, honest selection seam the formatting toolbar needs until the
     /// code surface grows a native text editor.
     source_selection: Option<Selection>,
+    /// The insertion point used by the lightweight code surface. The model
+    /// owns text mutation; the view owns only this display/input state.
+    caret: usize,
+    /// The anchor for a shift-extended selection, if one is being built.
+    selection_anchor: Option<usize>,
+    /// Focus target for the source surface. GPUI sends raw key events to the
+    /// focused element, so this is the missing input tier over `Editor`.
+    editor_focus: FocusHandle,
+    /// Re-check the disk snapshot whenever this tab's editor focus is
+    /// regained after another surface owned it.
+    focus_subscription: Option<Subscription>,
 }
 
 impl FileView {
@@ -90,13 +101,35 @@ impl FileView {
                 cx.notify();
             });
         });
+        let file_monitor = FileSystemEventMonitor::new(&path).ok();
+        let file_monitor_task = file_monitor.as_ref().map(|_| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    if this
+                        .update(cx, |view, cx| view.poll_file_system_events(cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        });
         Self {
             path,
             state: ViewState::Loading,
             load_task: Some(load_task),
+            file_monitor,
+            _file_monitor_task: file_monitor_task,
             notice: None,
             markdown_mode: MarkdownMode::Preview,
             source_selection: None,
+            caret: 0,
+            selection_anchor: None,
+            editor_focus: cx.focus_handle().tab_stop(true),
+            focus_subscription: None,
         }
     }
 
@@ -154,6 +187,34 @@ impl FileView {
         }
     }
 
+    /// Applies one inotify event from this file's monitor. The monitor is
+    /// filtered to the path, but the path check keeps this public seam safe
+    /// for host-driven tests and future directory-level monitors.
+    pub fn handle_file_system_event(&mut self, event: FileSystemEvent, cx: &mut Context<Self>) {
+        if event.path == self.path {
+            self.check_external(cx);
+        }
+    }
+
+    fn poll_file_system_events(&mut self, cx: &mut Context<Self>) {
+        let Some(monitor) = &self.file_monitor else {
+            return;
+        };
+        let events = match monitor.poll() {
+            Ok(events) => events,
+            Err(error) => {
+                eprintln!(
+                    "[files] watcher failed for {}: {error}",
+                    self.path.display()
+                );
+                return;
+            }
+        };
+        for event in events {
+            self.handle_file_system_event(event, cx);
+        }
+    }
+
     /// Saves the buffer (F-EDIT-04/06), recreating a deleted file. Errors
     /// are returned and kept visible on the editor.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -203,6 +264,10 @@ impl FileView {
         let result = self.editor_mut().map(|editor| op.apply(editor, selection));
         if result.is_some() {
             self.source_selection = result;
+            if let Some(selection) = result {
+                self.caret = selection.end;
+                self.selection_anchor = (!selection.is_collapsed()).then_some(selection.start);
+            }
         }
         cx.notify();
         result
@@ -210,7 +275,190 @@ impl FileView {
 
     fn select_source_line(&mut self, selection: Selection, cx: &mut Context<Self>) {
         self.source_selection = Some(selection);
+        self.caret = selection.end;
+        self.selection_anchor = None;
         cx.notify();
+    }
+
+    fn on_editor_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.keystroke.modifiers.control && event.keystroke.key == "a" {
+            self.select_all();
+            cx.notify();
+            return;
+        }
+        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+            // Command chords, including the shell-owned Ctrl-S save path,
+            // must continue to resolve outside this raw text-input tier.
+            return;
+        }
+
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        if editor.status() != &LoadStatus::Loaded || self.effective_mode() != MarkdownMode::Code {
+            return;
+        }
+
+        let key = event.keystroke.key.as_str();
+        let extend = event.keystroke.modifiers.shift;
+        match key {
+            "home" => self.move_to_line_edge(true, extend),
+            "end" => self.move_to_line_edge(false, extend),
+            "left" => self.move_horizontal(false, extend),
+            "right" => self.move_horizontal(true, extend),
+            "backspace" => self.delete_backward(),
+            "delete" => self.delete_forward(),
+            "enter" | "return" => self.replace_selection("\n"),
+            "tab" => self.replace_selection("    "),
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && character != "\n"
+                {
+                    self.replace_selection(character);
+                } else {
+                    return;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn current_selection(&self, editor: &Editor) -> Selection {
+        self.source_selection
+            .filter(|selection| {
+                selection.end <= editor.buffer().len()
+                    && editor.buffer().is_char_boundary(selection.start)
+                    && editor.buffer().is_char_boundary(selection.end)
+            })
+            .unwrap_or_else(|| {
+                let caret = self.caret.min(editor.buffer().len());
+                Selection::point(caret)
+            })
+    }
+
+    fn move_to_line_edge(&mut self, start: bool, extend: bool) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let selection = self.current_selection(editor);
+        let buffer = editor.buffer().to_owned();
+        let caret = selection.end.min(buffer.len());
+        let position = if start {
+            buffer[..caret].rfind('\n').map_or(0, |newline| newline + 1)
+        } else {
+            buffer[caret..]
+                .find('\n')
+                .map_or(buffer.len(), |newline| caret + newline)
+        };
+        self.move_caret(position, extend, &buffer);
+    }
+
+    fn move_horizontal(&mut self, right: bool, extend: bool) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let selection = self.current_selection(editor);
+        let buffer = editor.buffer().to_owned();
+        let position = if !extend && !selection.is_collapsed() {
+            if right {
+                selection.end
+            } else {
+                selection.start
+            }
+        } else if right {
+            next_char_boundary(&buffer, self.caret.max(selection.end))
+        } else {
+            previous_char_boundary(&buffer, self.caret.min(selection.start))
+        };
+        self.move_caret(position, extend, &buffer);
+    }
+
+    fn move_caret(&mut self, position: usize, extend: bool, buffer: &str) {
+        let position = position.min(buffer.len());
+        if extend {
+            let anchor = self.selection_anchor.unwrap_or(self.caret);
+            self.selection_anchor = Some(anchor);
+            self.caret = position;
+            self.source_selection =
+                Selection::new(buffer, anchor.min(position), anchor.max(position))
+                    .filter(|selection| !selection.is_collapsed());
+        } else {
+            self.caret = position;
+            self.source_selection = None;
+            self.selection_anchor = None;
+        }
+    }
+
+    fn replace_selection(&mut self, text: &str) {
+        let Some(selection) = self.editor().map(|editor| self.current_selection(editor)) else {
+            return;
+        };
+        let Some(editor) = self.editor_mut() else {
+            return;
+        };
+        if editor.replace(selection, text).is_ok() {
+            self.caret = selection.start + text.len();
+            self.source_selection = None;
+            self.selection_anchor = None;
+        }
+    }
+
+    fn delete_backward(&mut self) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let selection = self.current_selection(editor);
+        let range = if selection.is_collapsed() {
+            let start = previous_char_boundary(editor.buffer(), selection.start);
+            Selection::new(editor.buffer(), start, selection.start)
+        } else {
+            Some(selection)
+        };
+        if let Some(range) = range {
+            self.replace_selection_range(range, "");
+        }
+    }
+
+    fn delete_forward(&mut self) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let selection = self.current_selection(editor);
+        let range = if selection.is_collapsed() {
+            let end = next_char_boundary(editor.buffer(), selection.end);
+            Selection::new(editor.buffer(), selection.start, end)
+        } else {
+            Some(selection)
+        };
+        if let Some(range) = range {
+            self.replace_selection_range(range, "");
+        }
+    }
+
+    fn replace_selection_range(&mut self, selection: Selection, text: &str) {
+        let Some(editor) = self.editor_mut() else {
+            return;
+        };
+        if editor.replace(selection, text).is_ok() {
+            self.caret = selection.start + text.len();
+            self.source_selection = None;
+            self.selection_anchor = None;
+        }
+    }
+
+    fn select_all(&mut self) {
+        if let Some(editor) = self.editor() {
+            let buffer = editor.buffer().to_owned();
+            self.caret = buffer.len();
+            self.source_selection = Selection::new(&buffer, 0, buffer.len())
+                .filter(|selection| !selection.is_collapsed());
+            self.selection_anchor = Some(0);
+        }
     }
 
     fn formatting_selection(&self, editor: &Editor) -> Selection {
@@ -331,8 +579,26 @@ impl FileView {
                     let conflict = editor.conflict();
                     let mode = self.effective_mode();
                     let selection = self.formatting_selection(editor);
+                    let editor_entity = entity.clone();
+                    let editor_focus = self.editor_focus.clone();
                     div()
                         .id("file-editor")
+                        .key_context("FileEditor")
+                        .track_focus(&editor_focus)
+                        .focusable()
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            editor_entity.update(cx, |view, cx| {
+                                view.editor_focus.focus(window, cx);
+                            });
+                        })
+                        .on_key_down({
+                            let key_entity = entity.clone();
+                            move |event, window, cx| {
+                                key_entity.update(cx, |view, cx| {
+                                    view.on_editor_key(event, window, cx);
+                                });
+                            }
+                        })
                         .size_full()
                         .flex()
                         .flex_col()
@@ -370,7 +636,14 @@ impl FileView {
 }
 
 impl Render for FileView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_subscription.is_none() {
+            let editor_focus = self.editor_focus.clone();
+            self.focus_subscription =
+                Some(cx.on_focus(&editor_focus, window, |view, _window, cx| {
+                    view.check_external(cx)
+                }));
+        }
         let theme = *Theme::get(cx);
         let entity = cx.entity();
         div()
@@ -459,9 +732,8 @@ fn render_mode_option(
 /// resolutions, rendered above the content. Reload and Keep are wired to
 /// the view's entity, which resolves them through the editor model; a
 /// deleted file offers no Reload (there is nothing to reload) — the message
-/// says saving recreates it. The banner itself needs pixels, so it is
-/// `NOT EXERCISED — blocked on display`; the state machine behind it is the
-/// tested part.
+/// says saving recreates it. Both controls are exercised against the drawn
+/// frame and resolve through the existing editor model.
 fn render_conflict_banner(
     conflict: Conflict,
     theme: Theme,
@@ -673,6 +945,7 @@ fn render_content(
                 .when(is_markdown && editor.preview_locked(), |this| {
                     // F-EDIT-03: a large Markdown file opens as source with
                     // a manual-preview state until `request_preview`.
+                    let preview_entity = entity.clone();
                     this.child(
                         div()
                             .id("file-manual-preview")
@@ -685,7 +958,25 @@ fn render_content(
                             .bg(theme.raised)
                             .text_size(theme.typography.footnote)
                             .text_color(theme.subtitle)
-                            .child("Large file — manual preview"),
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(div().flex_1().child("Large file — manual preview"))
+                            .child(
+                                div()
+                                    .id("file-manual-preview-render")
+                                    .debug_selector(|| "file-manual-preview-render".into())
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .rounded(theme.radii.control)
+                                    .hover(|style| style.bg(theme.row_hover))
+                                    .on_click(move |_, _, cx| {
+                                        preview_entity.update(cx, |view, cx| {
+                                            view.set_markdown_mode(MarkdownMode::Preview, cx);
+                                        });
+                                    })
+                                    .child("Render preview"),
+                            ),
                     )
                 })
                 .font_family(theme.typography.code_family)
@@ -922,6 +1213,21 @@ fn markdown_document(path: &Path, text: &str) -> Option<Document> {
     }
 }
 
+fn previous_char_boundary(buffer: &str, position: usize) -> usize {
+    buffer[..position.min(buffer.len())]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_char_boundary(buffer: &str, position: usize) -> usize {
+    let position = position.min(buffer.len());
+    buffer[position..]
+        .chars()
+        .next()
+        .map_or(position, |character| position + character.len_utf8())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1378,49 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn keyboard_input_edits_the_buffer_through_the_focused_file_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::new("keyboard-input", "hello\n");
+        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let line = cx
+            .debug_bounds("file-source-line-0")
+            .expect("the source line is drawn");
+        cx.simulate_click(line.center(), Modifiers::none());
+        cx.simulate_keystrokes("home");
+        cx.simulate_input("typed ");
+        cx.simulate_keystrokes("end");
+        cx.simulate_input(" end");
+        cx.simulate_keystrokes("home shift-end");
+        cx.simulate_input("replacement");
+        cx.simulate_keystrokes("end enter");
+        cx.simulate_input("next");
+        cx.simulate_keystrokes("home delete end backspace");
+
+        let buffer = cx.update(|window, cx| {
+            window
+                .root::<FileView>()
+                .flatten()
+                .expect("file view root")
+                .read(cx)
+                .editor()
+                .expect("editor loaded")
+                .buffer()
+                .to_owned()
+        });
+        assert_eq!(buffer, "replacement\nex\n");
+        assert!(cx.update(|window, cx| {
+            window
+                .root::<FileView>()
+                .flatten()
+                .expect("file view root")
+                .read(cx)
+                .is_dirty()
+        }));
+    }
+
+    #[gpui::test]
     async fn conflict_detection_and_resolutions_work_through_the_view(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1163,6 +1512,66 @@ mod tests {
             );
             assert!(view.is_dirty(), "Keep leaves the tab dirty until saved");
         });
+    }
+
+    #[gpui::test]
+    async fn filesystem_events_reload_clean_content_and_surface_rename_conflicts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::new("watcher", "original\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        std::fs::write(file.path(), "external\n").expect("external write");
+        for _ in 0..40 {
+            cx.cx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            cx.cx.run_until_parked();
+            let updated = view.read_with(&cx.cx, |view, _| {
+                view.editor()
+                    .is_some_and(|editor| editor.buffer() == "external\n")
+            });
+            if updated {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| {
+                view.editor().expect("editor loaded").buffer().to_owned()
+            }),
+            "external\n",
+            "a clean editor adopts a watcher-delivered external write"
+        );
+
+        view.update(&mut cx.cx, |view, cx| {
+            let editor = view.editor_mut().expect("editor loaded");
+            editor
+                .insert(editor.buffer().len(), "local\n")
+                .expect("local edit");
+            cx.notify();
+        });
+        std::fs::remove_file(file.path()).expect("external rename/delete");
+        view.update(&mut cx.cx, |view, cx| {
+            view.handle_file_system_event(
+                tiller_markdown::FileSystemEvent {
+                    path: file.path().to_path_buf(),
+                    kind: tiller_markdown::FileEventKind::Renamed,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.conflict()),
+            Conflict::DeletedOnDisk,
+            "a watcher rename event surfaces the missing file conflict"
+        );
+        cx.update(|window, app| {
+            window.refresh();
+            window.simulate_next_frame(app);
+            window.simulate_next_frame(app);
+        });
+        assert!(cx.debug_bounds("file-conflict-banner").is_some());
     }
 
     #[gpui::test]
@@ -1391,12 +1800,12 @@ mod tests {
             "the preview is not auto-rendered for a large file"
         );
 
-        // Clicking Preview unlocks it: the manual state is "not automatic",
-        // not "forbidden".
-        let preview = cx
-            .debug_bounds("file-mode-preview")
-            .expect("the Preview option is drawn");
-        cx.simulate_click(preview.center(), Modifiers::none());
+        // Clicking the notice unlocks it: the manual state is "not
+        // automatic", not "forbidden".
+        let render_preview = cx
+            .debug_bounds("file-manual-preview-render")
+            .expect("the manual preview control is drawn");
+        cx.simulate_click(render_preview.center(), Modifiers::none());
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.simulate_next_frame(cx);

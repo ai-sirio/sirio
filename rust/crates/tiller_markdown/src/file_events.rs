@@ -26,16 +26,19 @@ pub struct FileSystemEventMonitor {
 impl FileSystemEventMonitor {
     pub fn new(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref();
-        let metadata = std::fs::metadata(path)?;
-        let (directory, file_filter) = if metadata.is_dir() {
-            (path.to_path_buf(), None)
-        } else {
-            (
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let (directory, file_filter) = match metadata {
+            Some(metadata) if metadata.is_dir() => (path.to_path_buf(), None),
+            Some(_) | None => (
                 path.parent()
                     .unwrap_or_else(|| Path::new("."))
                     .to_path_buf(),
                 Some(path.to_path_buf()),
-            )
+            ),
         };
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
