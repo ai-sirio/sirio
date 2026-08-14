@@ -58,3 +58,34 @@ context at all. Reclassify the *named* defects, but the row is not clean.
 
 Captures: `reference/linux-progress/wavea-W11-ctrl+brw+sid/brw02/{01-baseline,02-after-open}.png`,
 `reference/linux-progress/wavea-W11-ctrl+brw+sid/brw02b/{01-baseline,02-noworkspace}.png`.
+
+## F-CTRL-CLI-02 — ledger line 451, currently NOT EXERCISED
+
+**Drove:** Inspected the on-disk installed tillerctl location directly (not the socket):
+`ls -la ~/.local/share/TillerRust/bin/tillerctl` (the exact `TILLERCTL_INSTALL_SUBPATH =
+"TillerRust/bin/tillerctl"` constant from `main.rs:7858`, joined to the real `XDG_DATA_HOME`
+default resolution in `xdg_data_home_for`).
+
+**Observed:**
+```
+lrwxrwxrwx ... tillerctl -> /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl
+```
+A real symlink exists at the exact path `resolve_tillerctl_path` computes, pointing at the
+real `tillerctl` binary built in this worktree — confirms `install_tillerctl` genuinely ran
+against the shared `$HOME` this project uses (not a synthetic env) and produced a working,
+resolvable symlink, satisfying the "inspect the installed XDG symlink on disk" half of VERIFY.
+
+**Not reached:** driving a real agent CLI's own native hook (Layer A) to a status transition.
+The agent-tab launch path (`NewTabAction::ClaudeCode`/`Codex`) is only reachable from the
+command palette, which opens on `ctrl-shift-p` — a modifier chord. `WAYLAND-LANE.md` states
+chords are not yet exercised on this lane and routes them to `DISPLAY=:1`; `panel.create`
+(the one socket action that spawns an arbitrary command in a pane) does not go through
+`AgentAdapter::prepare`, so a command spawned that way would not get worktree-local hook
+config and would not be a genuine test of the hook path.
+
+**Claim:** partially-exercised. The installed-symlink half is confirmed live and genuine.
+The real-agent-hook half is could-not-reach on this lane: it requires a `ctrl-shift-p` chord
+(or another UI path not available without a chord or right-click, both out of scope here) to
+open an agent tab through the code path that wires hooks; route to the `DISPLAY=:1` lane.
+
+No new captures for this row (filesystem inspection only).
