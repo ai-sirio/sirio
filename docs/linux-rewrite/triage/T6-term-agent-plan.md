@@ -145,3 +145,134 @@ cause #1) is the separate, larger piece if the row is read end-to-end.
   `summarizer_command` → spawn → parse stdout → rename tab)
 
 ---
+
+## `F-AGENT-SAFE-01` — half-proven
+
+**Needs: build.** Confirmed by grep (`management.marker`, `managed_by_tiller`,
+`overwrite.*refus`, `skill.*provision` — zero hits in `tiller_agents/src` and
+`tiller_project/src`) and by reading every adapter's `prepare`: none of the five write a
+management marker into the files they generate, and none check for or refuse to overwrite an
+existing *unmanaged* file at the same path. `ClaudeCodeAdapter::prepare`
+(`crates/tiller_agents/src/claude.rs:36-100`) does the closest thing — it merges into an
+existing `settings.local.json` rather than clobbering it wholesale — but that is a JSON-merge
+convenience, not the marker-based managed/unmanaged distinction the row describes (which
+implies a plain-text marker comment for the TS/JS hook and plugin files, since
+`omp-hook.ts`/`tiller-session.js` aren't structured merge targets the way JSON is). This needs
+a marker constant, a written-marker check before overwrite, and a refusal error variant, added
+per-adapter.
+
+- **files**: `rust/crates/tiller_agents/src/error.rs` (new `PrepareError` variant for "existing
+  unmanaged file, refusing to overwrite"), `rust/crates/tiller_agents/src/omp.rs`,
+  `rust/crates/tiller_agents/src/opencode.rs` (both write a single generated file today with no
+  marker or overwrite check — these are the two adapters most exposed to clobbering a user's
+  own file), `rust/crates/tiller_agents/src/claude.rs` (extend the existing merge with an
+  explicit marker check rather than relying on JSON-merge as an implicit safety net)
+- **size**: M — five adapters' `prepare` functions plus a shared marker/refusal helper and its
+  tests (temp-dir fixtures already exist in `crates/tiller_agents/tests/adapters_tests.rs` to
+  extend)
+
+---
+
+## `F-AGENT-SAFE-02` — NOT EXERCISED
+
+**Needs: build**, not exercise — the callee that would need exercising does not exist yet.
+`ClaudeHookMigrator::rewritten_settings` (`crates/tiller_agents/src/hook_migrator.rs:16-40`) is
+fully implemented and unit-tested against matching/stale/malformed/unrelated fixtures (per
+`ADJUDICATION-BACKLOG.md`'s own census: prod=0, test=7). Reading `ClaudeCodeAdapter::prepare`
+shows why nobody reached for it: `prepare` already unconditionally overwrites its five owned
+hook keys with the *current* `tillerctl_path` on every call
+(`crates/tiller_agents/src/claude.rs:59-95`), so a worktree that gets `prepare`d again after a
+tillerctl relocation self-heals without the migrator. The migrator only matters for a worktree
+whose `.claude/settings.local.json` was written *before* a tillerctl path change (e.g. the P87
+XDG-install move) and is never `prepare`d again — e.g. at app startup, before any pane in that
+worktree is relaunched. No such startup sweep exists: `main.rs` has no call site that iterates
+known worktrees and calls `ClaudeHookMigrator::rewritten_settings` on each one's settings file.
+
+- **files**: `rust/crates/tiller/src/main.rs` (add the startup/upgrade sweep — iterate
+  persisted worktrees, read each `.claude/settings.local.json`, call
+  `ClaudeHookMigrator::rewritten_settings` with the current tillerctl path, write back only on
+  `Some`), `rust/crates/tiller_agents/src/hook_migrator.rs` (already correct, reference only)
+- **size**: S — the migrator and its tests are done; this is one iteration loop plus a call
+
+---
+
+## `F-AGENT-SESSION-01` — NOT EXERCISED
+
+**Needs: build.** `AgentSessionValidator::is_likely_valid`
+(`crates/tiller_agents/src/session_validator.rs:8-26`) is implemented and matches the row's
+spec exactly (Claude: `<config>/projects/<slug>/<ref>.jsonl` with non-alphanumeric→hyphen
+slugging; Codex: recursive filename search under `<codexHome>/sessions`; other agents trusted).
+It has zero callers outside its own tests. The resume path that should consult it is
+`handle_resume_chat` (`rust/crates/tiller/src/main.rs:6793`), reached from the tab
+context-menu's `TabContextAction::ResumeChat` (`main.rs:5872-5943`) — it reads `session_refs`
+directly and calls `resume_command` with no pre-flight check, so resuming against a deleted or
+never-existed session file is only ever discovered by the CLI's own failure inside the pane,
+not by Tiller. Wiring this also needs the app to know `claude_config_dir`/`codex_home`, which
+is not currently threaded anywhere in `main.rs` — that path resolution is the other real piece
+of this row, not just the validator call.
+
+- **files**: `rust/crates/tiller/src/main.rs` (call `is_likely_valid` in `handle_resume_chat`
+  before invoking `resume_command`; resolve/thread `claude_config_dir`/`codex_home`, which
+  today has no home in this file), `rust/crates/tiller_agents/src/session_validator.rs`
+  (already correct, reference only)
+- **size**: M — the validator call is small, but resolving the two config directories and
+  deciding the UX for an invalid ref (disable Resume vs. warn vs. fail after attempting) is a
+  real design surface, not a one-line change
+
+---
+
+## `F-AGENT-SESSION-02` — NOT EXERCISED
+
+**Needs: build.** `ClaudeTranscriptSource`/`CodexTranscriptSource`
+(`crates/tiller_agents/src/transcript.rs:8-96`) implement the row's spec — JSONL text/block
+join under `~/.claude/projects/<slug>/<session>.jsonl` for Claude, recursive
+`-<session>.jsonl` search under `~/.codex/sessions` for Codex — and are unit-tested, with zero
+production callers (same dead pair as `F-AGENT-SESSION-01`, per `ADJUDICATION-BACKLOG.md`).
+Unlike `F-AGENT-SESSION-01`, there is no existing UI affordance this obviously slots into
+today — no tooltip, preview, or resume-menu text currently shows "recent text" for a session.
+The most plausible consumer is the auto-naming pipeline (shared cause #1): a
+CLI-hosted agent's summarizer prompt has to come from *somewhere*, and for Claude/Codex panes
+(which have no ACP chat transcript in the DB, only a native JSONL file) these two readers are
+the only code in the tree that can produce that prompt text. Building the auto-naming caller
+and this row's wiring together avoids inventing two different "read recent conversation text"
+paths.
+
+- **files**: `rust/crates/tiller/src/main.rs` (the same auto-naming caller from shared cause
+  #1 — feed `ClaudeTranscriptSource`/`CodexTranscriptSource` output in as the summarizer
+  prompt for terminal-hosted Claude/Codex panes), `rust/crates/tiller_agents/src/transcript.rs`
+  (already correct, reference only)
+- **size**: M, folded into the same `main.rs` pass as `F-AGENT-OPENCODE-03`'s wiring rather
+  than sized separately
+
+---
+
+## `F-TERM-04` — half-proven
+
+**Needs: exercise.** See shared cause #2. The menu is proven open with `Copy`/`Paste` visible
+as the first two items (`p17-rclick-term.png`, `p17-f1-menu.png`). The owed half: select
+terminal text, `rclick` at the pane, click `Copy` (menu item 1, offset from the click point
+per `p17-f1-menu.png`'s layout), then `rclick` again and click `Paste`, and confirm the
+terminal's own content changed — proving the actual clipboard round trip, not just that the
+menu dismissed. `p17-f2-copied.png` shows the menu closing after a click but does not itself
+prove clipboard content changed; that check (`xclip -o` or a Paste-and-diff) is still owed.
+
+- **files**: none (exercise only; the underlying actions are `TerminalContextAction::Copy`/
+  `::Paste` in `rust/crates/tiller_terminal/src/context_menu.rs`, already wired)
+- **size**: S
+
+---
+
+## `F-TERM-06` — half-proven
+
+**Needs: exercise.** See shared cause #2. `Copy Pane ID` and `Copy Terminal ID` are both
+visible in the proven-open menu (`p17-f1-menu.png`, items 5–6). The owed half: click each,
+then paste into a visible text field (the terminal itself, or the `Set Title` field opened
+from the same menu) and confirm a nonempty identifier landed — `p17-term06-pasted.png` and
+`p17-term06-d1/d2.png` exist in `reference/linux-progress/` from the same pass-17 session and
+are worth reading first (per `QUEUE.md`'s "a frame is evidence about everything in it" rule)
+before re-driving from scratch, though their own logs don't record which item was clicked.
+
+- **files**: none (exercise only)
+- **size**: S
+
+---
