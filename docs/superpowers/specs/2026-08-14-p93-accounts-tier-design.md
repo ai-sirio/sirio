@@ -32,9 +32,12 @@ shared worktree.
 
 3. The account list remains a single `System default` row. Investigation found
    no installed CLI/account store that supplies a selectable Tiller-owned set
-   of accounts, and the persistence model has no account-selection field.
-   F-SET-15 is therefore reported as an evidence-backed Linux limitation,
-   rather than represented by a fake list or badge.
+   of accounts: Claude exposes one local credentials store plus
+   `auth login/logout/status`, Codex exposes one `auth.json` token set plus
+   `login/logout`, and OpenCode's `auth list` enumerates provider credentials,
+   not user accounts. The persistence model also has no account-selection
+   field. F-SET-15 is therefore reported as an evidence-backed Linux
+   limitation, rather than represented by a fake list or badge.
 
 4. Usage state keeps the existing distinction between `Loading`, `Loaded`, and
    `Stale`. Add `TimedOut` as an unavailable reason for a timeout with no prior
