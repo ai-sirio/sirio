@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, PathPromptOptions,
+    ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, PathPromptOptions,
     Render, Window, div, prelude::*, px, text,
 };
 use tiller_theme::Theme;
@@ -231,6 +231,56 @@ const MAX_AVATAR_PNG_BYTES: u64 = 1_048_576;
 
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
+/// F-PRJ-16's "Open Emoji Picker" grid: a curated, searchable set of
+/// project-relevant emoji (each entry's keywords), not the full Unicode
+/// emoji table — the same "curated subset" call `ProjectGlyph::ALL` makes
+/// above, for the same reason (no plausible in-app way to browse the full
+/// set, and this crate has no OS character palette to shell out to on
+/// Linux).
+const EMOJI_CHOICES: &[(&str, &[&str])] = &[
+    ("🚀", &["rocket", "launch", "fast", "ship"]),
+    ("🔥", &["fire", "hot", "flame"]),
+    ("⭐", &["star", "favorite"]),
+    ("✨", &["sparkles", "magic", "new"]),
+    ("🐛", &["bug", "insect", "debug"]),
+    ("🧪", &["test", "flask", "science", "experiment"]),
+    ("📦", &["package", "box", "ship"]),
+    ("🔧", &["wrench", "tool", "fix"]),
+    ("⚙", &["gear", "settings", "cog"]),
+    ("🔒", &["lock", "secure", "security"]),
+    ("🔑", &["key", "unlock", "access"]),
+    ("📚", &["book", "books", "docs", "documentation"]),
+    ("📝", &["memo", "note", "write"]),
+    ("💡", &["bulb", "idea", "light"]),
+    ("🎯", &["target", "goal", "aim"]),
+    ("🏆", &["trophy", "win", "award"]),
+    ("🌐", &["globe", "world", "web", "network"]),
+    ("💻", &["laptop", "computer", "code"]),
+    ("🖥", &["desktop", "computer", "monitor"]),
+    ("📊", &["chart", "graph", "data", "analytics"]),
+    ("🗂", &["folder", "files", "organize"]),
+    ("🧩", &["puzzle", "piece", "plugin"]),
+    ("🛠", &["tools", "build", "hammer"]),
+    ("🚧", &["construction", "wip", "progress"]),
+    ("✅", &["check", "done", "complete"]),
+    ("❌", &["cross", "fail", "error", "no"]),
+    ("⚠", &["warning", "caution", "alert"]),
+    ("💾", &["save", "disk", "floppy"]),
+    ("🔗", &["link", "chain", "connect"]),
+    ("🧠", &["brain", "ai", "smart"]),
+    ("🤖", &["robot", "bot", "ai", "agent"]),
+    ("🐙", &["octopus", "git", "github"]),
+    ("🐳", &["whale", "docker", "container"]),
+    ("🦀", &["crab", "rust"]),
+    ("🐍", &["snake", "python"]),
+    ("☕", &["coffee", "java", "cup"]),
+    ("🍃", &["leaf", "green", "eco"]),
+    ("🌙", &["moon", "night", "dark"]),
+    ("☀", &["sun", "light", "day"]),
+    ("🎨", &["art", "design", "palette"]),
+    ("🧭", &["compass", "navigate", "direction"]),
+];
+
 /// The standalone project-identity picker (F-PRJ-13/14/15/16). Mirrors
 /// `Settings`/`StatusBar`'s own shape: a self-contained entity with
 /// `on_change`-style host callbacks, so whoever mounts it (the seam named in
@@ -249,14 +299,16 @@ pub struct ProjectIconPicker {
     favicon_focus: FocusHandle,
     favicon_error: Option<String>,
     png_error: Option<String>,
+    /// F-PRJ-16: there is no Linux desktop-portal equivalent of macOS's
+    /// system character palette this crate could shell out to, so "Open
+    /// Emoji Picker" opens a searchable grid this crate renders itself
+    /// (`EMOJI_CHOICES`, below) instead of delegating to a host callback —
+    /// self-contained, so nothing outside this file needs to wire it up.
+    emoji_grid_open: bool,
+    emoji_grid_query: String,
+    emoji_grid_focus: FocusHandle,
     on_change: Option<Rc<dyn Fn(ProjectIcon)>>,
     on_change_with_context: Option<Rc<dyn Fn(ProjectIcon, &mut Context<Self>)>>,
-    /// F-PRJ-16's "Open Emoji Picker" opens a system service (the desktop's
-    /// own emoji input, e.g. a compositor shortcut or `gnome-characters`) —
-    /// not something a `tiller_ui` render function can reach. Unset, the
-    /// button renders muted and inert, the same seam shape
-    /// `Settings::on_install_skill` uses.
-    on_open_emoji_picker: Option<Rc<dyn Fn()>>,
     /// Test-only substitute for the OS file picker `choose_local_png`
     /// normally opens — mirrors `chat.rs`'s `attach_test_paths` seam, since
     /// nothing can drive a real native file dialog from a `gpui::test`.
@@ -284,9 +336,11 @@ impl ProjectIconPicker {
             favicon_focus: cx.focus_handle(),
             favicon_error: None,
             png_error: None,
+            emoji_grid_open: false,
+            emoji_grid_query: String::new(),
+            emoji_grid_focus: cx.focus_handle(),
             on_change: None,
             on_change_with_context: None,
-            on_open_emoji_picker: None,
             #[cfg(test)]
             png_test_paths: Vec::new(),
         }
@@ -304,11 +358,6 @@ impl ProjectIconPicker {
         callback: impl Fn(ProjectIcon, &mut Context<Self>) + 'static,
     ) -> Self {
         self.on_change_with_context = Some(Rc::new(callback));
-        self
-    }
-
-    pub fn on_open_emoji_picker(mut self, callback: impl Fn() + 'static) -> Self {
-        self.on_open_emoji_picker = Some(Rc::new(callback));
         self
     }
 
@@ -396,6 +445,53 @@ impl ProjectIconPicker {
         let emoji = trimmed.to_string();
         self.emoji_error = None;
         self.commit(ProjectIconValue::Emoji(emoji), cx);
+    }
+
+    /// F-PRJ-16: opens the searchable emoji grid. Self-contained -- see
+    /// `emoji_grid_open`'s doc comment for why this doesn't delegate to a
+    /// host callback the way `choose_local_png`'s file picker does.
+    fn open_emoji_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.emoji_grid_open = true;
+        self.emoji_grid_query.clear();
+        self.emoji_grid_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_emoji_grid(&mut self, cx: &mut Context<Self>) {
+        self.emoji_grid_open = false;
+        cx.notify();
+    }
+
+    fn on_emoji_grid_query_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.close_emoji_grid(cx);
+            return;
+        }
+        if key == "backspace" || key == "delete" {
+            self.emoji_grid_query.pop();
+        } else if let Some(character) = event.keystroke.key_char.as_deref()
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            self.emoji_grid_query.push_str(character);
+        }
+        cx.notify();
+    }
+
+    /// Picking a swatch commits it immediately (mirrors `select_glyph` in
+    /// Icon mode) rather than routing back through the typed field + "Set
+    /// Emoji" — a click is already exactly-one-grapheme by construction.
+    fn pick_emoji_from_grid(&mut self, emoji: &'static str, cx: &mut Context<Self>) {
+        self.emoji_draft = emoji.to_string();
+        self.emoji_error = None;
+        self.emoji_grid_open = false;
+        self.commit(ProjectIconValue::Emoji(emoji.to_string()), cx);
     }
 
     fn on_github_key(
@@ -639,11 +735,6 @@ impl ProjectIconPicker {
 
         let commit_entity = entity.clone();
         let open_picker_entity = entity.clone();
-        let open_picker_handler = self
-            .on_open_emoji_picker
-            .clone()
-            .map(|handler| move |_: &ClickEvent, _: &mut Window, _: &mut App| handler());
-        let _ = open_picker_entity;
 
         let mut column = div()
             .flex()
@@ -663,11 +754,14 @@ impl ProjectIconPicker {
                             commit_entity.update(cx, |picker, cx| picker.commit_emoji(cx));
                         },
                     ))
-                    .child(controls::button_maybe(
+                    .child(controls::button(
                         "project-icon-emoji-open-picker",
                         "Open Emoji Picker",
                         theme,
-                        open_picker_handler,
+                        move |_, window, cx| {
+                            open_picker_entity
+                                .update(cx, |picker, cx| picker.open_emoji_grid(window, cx));
+                        },
                     )),
             );
 
@@ -681,7 +775,135 @@ impl ProjectIconPicker {
                     .child(text!(id = "project-icon-emoji-error-text", error.clone())),
             );
         }
+        if self.emoji_grid_open {
+            column = column.child(self.render_emoji_grid(theme, entity));
+        }
         column
+    }
+
+    /// F-PRJ-16's searchable grid, rendered as a normal (non-absolute)
+    /// child appended after the field/button row -- deliberately not
+    /// `.absolute()`, so it can't repeat F-PRJ-01's paint-order bug
+    /// (an overlay painted before later siblings, so they draw over it).
+    fn render_emoji_grid(&self, theme: Theme, entity: Entity<Self>) -> impl IntoElement {
+        let query_focus_entity = entity.clone();
+        let query_key_entity = entity.clone();
+        let close_entity = entity.clone();
+        let query = self.emoji_grid_query.to_lowercase();
+        let matches: Vec<&'static str> = EMOJI_CHOICES
+            .iter()
+            .filter(|(emoji, keywords)| {
+                query.is_empty()
+                    || *emoji == query
+                    || keywords.iter().any(|keyword| keyword.contains(&query))
+            })
+            .map(|(emoji, _)| *emoji)
+            .collect();
+
+        let mut grid = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(theme.cosmic.spacing.xxs as f32));
+        for emoji in &matches {
+            let emoji = *emoji;
+            let pick_entity = entity.clone();
+            let selector = format!("project-icon-emoji-grid-choice-{emoji}");
+            grid = grid.child(
+                div()
+                    .id(selector.clone())
+                    .debug_selector(move || selector.clone())
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.headline)
+                    .hover(|style| style.bg(theme.row_hover))
+                    .on_click(move |_: &ClickEvent, _, cx| {
+                        pick_entity.update(cx, |picker, cx| picker.pick_emoji_from_grid(emoji, cx));
+                    })
+                    .child(emoji),
+            );
+        }
+        if matches.is_empty() {
+            grid = grid.child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.meta)
+                    .child("No matching emoji."),
+            );
+        }
+
+        div()
+            .id("project-icon-emoji-grid")
+            .debug_selector(|| "project-icon-emoji-grid".into())
+            .w_full()
+            .p(px(theme.cosmic.spacing.xs as f32))
+            .flex()
+            .flex_col()
+            .gap(px(theme.cosmic.spacing.xs as f32))
+            .rounded(theme.radii.control)
+            .border_1()
+            .border_color(theme.hairline)
+            .bg(theme.card_fill)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(theme.cosmic.spacing.xs as f32))
+                    .child(
+                        div()
+                            .id("project-icon-emoji-grid-query")
+                            .debug_selector(|| "project-icon-emoji-grid-query".into())
+                            .track_focus(&self.emoji_grid_focus)
+                            .flex_1()
+                            .min_h(px(28.0))
+                            .px(px(theme.cosmic.spacing.xs as f32))
+                            .flex()
+                            .items_center()
+                            .rounded(theme.radii.control)
+                            .bg(theme.filter_field_bg)
+                            .border_1()
+                            .border_color(theme.hairline)
+                            .text_size(theme.typography.footnote)
+                            .text_color(if self.emoji_grid_query.is_empty() {
+                                theme.meta
+                            } else {
+                                theme.title
+                            })
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                query_focus_entity.update(cx, |picker, cx| {
+                                    picker.emoji_grid_focus.focus(window, cx);
+                                });
+                            })
+                            .on_key_down(move |event, window, cx| {
+                                query_key_entity.update(cx, |picker, cx| {
+                                    picker.on_emoji_grid_query_key(event, window, cx);
+                                });
+                            })
+                            .child(if self.emoji_grid_query.is_empty() {
+                                "Search emoji…".to_owned()
+                            } else {
+                                self.emoji_grid_query.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("project-icon-emoji-grid-close")
+                            .debug_selector(|| "project-icon-emoji-grid-close".into())
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.meta)
+                            .hover(|style| style.bg(theme.row_hover))
+                            .on_click(move |_, _, cx| {
+                                close_entity.update(cx, |picker, cx| picker.close_emoji_grid(cx));
+                            })
+                            .child("Close"),
+                    ),
+            )
+            .child(grid)
     }
 
     fn render_avatar_mode(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
@@ -1275,51 +1497,78 @@ mod tests {
         );
     }
 
-    /// F-PRJ-16: "Open Emoji Picker" reaches a desktop service this crate
-    /// cannot call directly (see the module doc) — unset, it must render as
-    /// an honest dead control rather than a live-looking one, and set, the
-    /// host's callback must actually fire on click.
+    /// F-PRJ-16: clicking "Open Emoji Picker" with the field empty used to
+    /// have no observable effect at all (the button's only wiring was a
+    /// host callback nothing in `rust/` ever chained). It must now open a
+    /// real, searchable grid; typing narrows it; and clicking a swatch
+    /// commits that emoji and closes the grid.
     #[gpui::test]
-    async fn open_emoji_picker_button_is_inert_without_a_handler_and_fires_when_set(
+    async fn open_emoji_picker_opens_a_searchable_grid_that_commits_on_click(
         cx: &mut TestAppContext,
     ) {
-        cx.update(Theme::init);
+        let (_picker, captured, cx) = picker_view_with_capture(cx);
+        cx.update(|window, _| window.refresh());
 
-        {
-            let (_picker, vcx) = cx.add_window_view(|_, cx| ProjectIconPicker::new(cx));
-            vcx.update(|window, _| window.refresh());
-            let emoji_tab = vcx
-                .debug_bounds("project-icon-mode-1")
-                .expect("the Emoji tab is drawn");
-            vcx.simulate_click(emoji_tab.center(), Modifiers::none());
-            vcx.run_until_parked();
-            refresh_frame(vcx);
-            assert!(
-                vcx.debug_bounds("project-icon-emoji-open-picker").is_some(),
-                "the button renders even with no handler wired"
-            );
-        }
-
-        let fired = Rc::new(RefCell::new(false));
-        let for_closure = fired.clone();
-        let (_picker, vcx) = cx.add_window_view(move |_, cx| {
-            ProjectIconPicker::new(cx).on_open_emoji_picker(move || {
-                *for_closure.borrow_mut() = true;
-            })
-        });
-        vcx.update(|window, _| window.refresh());
-        let emoji_tab = vcx
+        let emoji_tab = cx
             .debug_bounds("project-icon-mode-1")
             .expect("the Emoji tab is drawn");
-        vcx.simulate_click(emoji_tab.center(), Modifiers::none());
-        vcx.run_until_parked();
-        refresh_frame(vcx);
-        let open_picker = vcx
+        cx.simulate_click(emoji_tab.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("project-icon-emoji-grid").is_none(),
+            "the grid is closed until Open Emoji Picker is clicked"
+        );
+
+        let open_picker = cx
             .debug_bounds("project-icon-emoji-open-picker")
             .expect("the open-picker control is drawn");
-        vcx.simulate_click(open_picker.center(), Modifiers::none());
-        vcx.run_until_parked();
-        assert!(*fired.borrow(), "the host callback fires when wired");
+        cx.simulate_click(open_picker.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("project-icon-emoji-grid").is_some(),
+            "clicking Open Emoji Picker with an empty field opens the grid overlay"
+        );
+        assert!(
+            cx.debug_bounds("project-icon-emoji-grid-choice-🚀").is_some(),
+            "the unfiltered grid offers its curated choices"
+        );
+
+        let query = cx
+            .debug_bounds("project-icon-emoji-grid-query")
+            .expect("the grid's search field is drawn");
+        cx.simulate_click(query.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("rocket");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("project-icon-emoji-grid-choice-🚀").is_some(),
+            "searching \"rocket\" keeps the matching swatch"
+        );
+        assert!(
+            cx.debug_bounds("project-icon-emoji-grid-choice-🐍").is_none(),
+            "searching \"rocket\" filters out unrelated swatches"
+        );
+
+        let rocket = cx
+            .debug_bounds("project-icon-emoji-grid-choice-🚀")
+            .expect("the rocket swatch is drawn");
+        cx.simulate_click(rocket.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            captured.borrow().last().map(|icon| icon.value.clone()),
+            Some(ProjectIconValue::Emoji("🚀".to_string())),
+            "clicking a swatch commits that emoji"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("project-icon-emoji-grid").is_none(),
+            "picking a swatch closes the grid"
+        );
     }
 
     fn refresh_frame(cx: &mut VisualTestContext) {
