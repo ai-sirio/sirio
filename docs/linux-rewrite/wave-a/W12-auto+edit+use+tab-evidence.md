@@ -76,3 +76,24 @@ cannot deliver a Ctrl-chord at all" without a modifier-chord positive control, w
 DISPLAY=:1/X11 lane's real keyboard (as WAYLAND-LANE.md recommends for chords generally) or a
 longer within-lane setup than this pass budgeted. The dedup *logic* itself
 (`add_file_tab`, cited by triage as already correct) was not separately re-verified this pass.
+
+## `F-EDIT-12` — Drag a file from the file explorer or changes list into a pane
+
+**Claim: could-not-reach.**
+
+**Drove:** Re-confirmed the tooling limitation cited by triage rather than re-driving:
+inspected `Scripts/wayland-virtual-pointer.c` (already source-verified per the manifest) and
+`Scripts/wayland-drive.sh`'s `pointer_command`/`click`/`move` helpers, which only expose an
+absolute `move` and a hard-coded `move+press+release` `click` — no button-down-only or
+motion-while-held primitive exists anywhere in this lane's input surface, so a drag (press,
+move while held, release) cannot be composed here.
+
+**Observed:** No new drive attempted; this row is out of reach by construction on this lane,
+matching `WAYLAND-LANE.md`'s explicit "Pointer drags ... are not yet exercised" statement and
+the manifest's own note that this needs `DISPLAY=:1`/X11.
+
+**Captures:** none — no drive was possible.
+
+**Reason for could-not-reach:** Wayland lane's virtual-pointer tooling has no button-down-only
+or motion-while-held primitive; this is an X11-lane row per this assignment's explicit
+Wayland-only scope.
