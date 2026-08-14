@@ -63,11 +63,31 @@ Two observations handed off rather than concluded, because one launch is not a v
 
 ## Setup
 
+**`Scripts/wayland-drive.sh` does all of this for you** — boot, drive, capture, tear down — and is
+the way to use this lane:
+
+```bash
+Scripts/wayland-drive.sh /tmp/my-shots '
+  ctl surface.settings.open
+  shot settings-appearance
+  ctl surface.settings.select section=general
+  shot settings-general
+'
+```
+
+Inside the snippet, `ctl <method> [k=v …]` sends a `ControlRequest` and prints the reply, and
+`shot <name>` forces a repaint before capturing (trap 2, below) and refuses a blank frame. Set
+`TILLER_WL_LABEL` to name your instance — every path derives from it, so two agents never collide —
+and `TILLER_WL_KEEP=1` to leave the instance up for follow-up calls.
+
+The rest of this section is what the script does, for when you need to do it by hand.
+
 Use your own paths everywhere so instances do not collide. Keep sockets under `/tmp/` — the
 `sockaddr_un` limit is **108 bytes** and the scratchpad path overflows it.
 
 ```bash
 cat > /tmp/<you>-sway.conf <<'EOF'
+xwayland disable
 default_border none
 default_floating_border none
 gaps inner 0
@@ -79,15 +99,26 @@ env -u WAYLAND_DISPLAY -u DISPLAY \
     XDG_RUNTIME_DIR=/run/user/1000 \
     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
     SWAYSOCK=/tmp/<you>-sway.sock \
-    nohup sway -c /tmp/<you>-sway.conf > /tmp/<you>-sway.log 2>&1 &
+    nohup sway -d -c /tmp/<you>-sway.conf > /tmp/<you>-sway.log 2>&1 &
 ```
+
+`xwayland disable` matters for parallelism: Xwayland claims a global `/tmp/.X11-unix/XN`, and a
+second instance loses that race and **refuses to start at all** (`Failed to bind socket
+@/tmp/.X11-unix/X2: Address already in use`). The app is a native Wayland client here and needs
+none of it.
 
 **Read back which display it chose — never assume `wayland-1`:**
 
 ```bash
 grep "Running compositor on wayland display" /tmp/<you>-sway.log
-# -> Running compositor on wayland display 'wayland-2'
+# -> Running compositor on wayland display 'wayland-3'
 ```
+
+**`-d` is load-bearing, not diagnostic noise.** That is an `INFO` line, and at sway's default level
+the log carries errors only — without `-d` the grep silently matches nothing and you have no way to
+learn your display. (An earlier version of this document omitted the flag, which made the whole
+setup unreproducible.) sway skips any `wayland-N` whose lockfile is held, so parallel instances
+land on different numbers by themselves.
 
 Then the app, with `DISPLAY` **unset** so GPUI selects its Wayland backend:
 
@@ -108,7 +139,7 @@ swaymsg output HEADLESS-1 resolution 1400x900   # forces a repaint — see trap 
 grim -o HEADLESS-1 /path/to/shot.png
 ```
 
-## Four traps
+## Five traps
 
 1. **`DISPLAY` must be unset for the app.** With `DISPLAY` set, GPUI takes the X11 path and you are
    back in the lane that paints nothing. `env -u DISPLAY`, not `DISPLAY=`.
@@ -155,6 +186,13 @@ grim -o HEADLESS-1 /path/to/shot.png
      tr '\0' '\n' < /proc/$p/environ | grep -q '^SWAYSOCK=/tmp/<you>-sway.sock' && kill $p
    done
    ```
+
+5. **`grim` follows `WAYLAND_DISPLAY`, and yours is already set to the operator's desktop.** On this
+   machine the login session exports `WAYLAND_DISPLAY=wayland-1`. Run `grim -o HEADLESS-1 shot.png`
+   without overriding it and grim looks for `HEADLESS-1` on the **user's real compositor**, finds no
+   such output, and writes **no file at all** — which then reads as "the app rendered nothing".
+   Export `WAYLAND_DISPLAY=<your display>` in every shell that captures. On a compositor that did
+   happen to have a matching output name, the same mistake photographs the operator's screen.
 
 ## Noise you should ignore
 
