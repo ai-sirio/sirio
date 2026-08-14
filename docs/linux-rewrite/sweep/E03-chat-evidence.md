@@ -118,3 +118,29 @@ next step run.
 
 Captures: `reference/linux-progress/drive-E03-chat/02-f24-a-plan.png`,
 `03-f24-b-resolved.png`.
+
+## F-CHAT-25 (ledger line 174, NOT EXERCISED going in — code+tests existed, never driven live)
+
+Code renders `AnswerTextInput` (placeholder/prefill) whenever an ACP tool call's input parses
+as an `AskUserQuestion`-shaped payload carrying a `_tillerTextInput` metadata object
+(`rust/crates/tiller_acp/src/lib.rs:parse_permission_question`, `:1211`).
+
+Prompted the live Claude Code ACP agent (the one that has been used for every other row this
+pass) to call its `AskUserQuestion` tool with free-text input. `02-f25-a-question.png` /
+`chat.read` show three `ToolSearch` calls followed by the agent's own words: **"There's no
+`AskUserQuestion` tool available in this environment — it's a Claude Code CLI feature that isn't
+wired up here. I can't invoke it, structured or otherwise."** It then asked the question as
+plain chat text instead, which renders as an ordinary assistant message, not a question card —
+no `Entry::Permission` with a `PermissionQuestion` was created (nothing to click, no
+`answer_question_text`/`cancel_question` control appeared).
+
+**Claim: could-not-reach.** The Claude Code CLI available on this machine, wired up over ACP by
+this build, does not expose the `AskUserQuestion` tool that is the only observed way to
+construct the `_tillerTextInput`-bearing payload this card renders from — confirmed by the
+agent's own report, not inferred. Did not attempt the other 3 installed CLIs (Codex, opencode,
+Pi) in this pass; the WAYLAND-LANE.md source comment on `parse_permission_question` notes Pi's
+`ui/select` reaches the same card via a different question shape, which is the most promising
+lead for a follow-up pass, but switching agents mid-slice was judged too much for the time
+remaining and the row is left honestly unreached rather than half-forced.
+
+Capture: `reference/linux-progress/drive-E03-chat/02-f25-a-question.png`.
