@@ -141,11 +141,12 @@ enum Entry {
     Thought { text: String, expanded: bool },
     /// A tool call, tracked by protocol id so later updates can patch it.
     ///
-    /// `kind`, `content`, `locations` and `raw_input` are the protocol's
-    /// widened tool-call surface (F-CHAT-23/-31/-32) — a diff or text
-    /// result, the files touched, and the raw input sent, when the agent
-    /// reported them. `expanded` starts `false`, same as `Thought`
-    /// (F-CHAT-21): the card renders as one line until the reader opts in.
+    /// `kind`, `content`, `locations`, `raw_input` and `raw_output` are the
+    /// protocol's widened tool-call surface (F-CHAT-23/-31/-32) — a diff or
+    /// text result, the files touched, and the raw input/output the agent
+    /// reported, when it reported them. `expanded` starts `false`, same as
+    /// `Thought` (F-CHAT-21): the card renders as one line until the reader
+    /// opts in.
     ///
     /// `group_expanded` (F-CHAT-22) is read only on the *last* entry of a
     /// consecutive run of tool calls — that is the entry the transcript
@@ -160,6 +161,7 @@ enum Entry {
         content: Vec<ToolCallContentInfo>,
         locations: Vec<ToolCallLocationInfo>,
         raw_input: Option<String>,
+        raw_output: Option<String>,
         expanded: bool,
         group_expanded: bool,
     },
@@ -784,6 +786,7 @@ impl Chat {
                 content,
                 locations,
                 raw_input,
+                raw_output,
             } => {
                 self.push_entry(Entry::ToolCall {
                     id,
@@ -793,6 +796,7 @@ impl Chat {
                     content,
                     locations,
                     raw_input,
+                    raw_output,
                     expanded: false,
                     group_expanded: false,
                 });
@@ -805,6 +809,7 @@ impl Chat {
                 content,
                 locations,
                 raw_input,
+                raw_output,
             } => {
                 if let Some((index, Entry::ToolCall {
                     title: existing_title,
@@ -813,6 +818,7 @@ impl Chat {
                     content: existing_content,
                     locations: existing_locations,
                     raw_input: existing_raw_input,
+                    raw_output: existing_raw_output,
                     ..
                 })) = self
                     .entries
@@ -839,6 +845,9 @@ impl Chat {
                     if let Some(raw_input) = raw_input {
                         *existing_raw_input = Some(raw_input);
                     }
+                    if let Some(raw_output) = raw_output {
+                        *existing_raw_output = Some(raw_output);
+                    }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
@@ -849,6 +858,7 @@ impl Chat {
                 content,
                 locations,
                 raw_input,
+                raw_output,
             } => {
                 if let Some((index, Entry::ToolCall {
                     status: existing_status,
@@ -856,6 +866,7 @@ impl Chat {
                     content: existing_content,
                     locations: existing_locations,
                     raw_input: existing_raw_input,
+                    raw_output: existing_raw_output,
                     ..
                 })) = self
                     .entries
@@ -876,6 +887,9 @@ impl Chat {
                     }
                     if let Some(raw_input) = raw_input {
                         *existing_raw_input = Some(raw_input);
+                    }
+                    if let Some(raw_output) = raw_output {
+                        *existing_raw_output = Some(raw_output);
                     }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
@@ -5991,6 +6005,7 @@ mod tests {
             content: vec![],
             locations: vec![],
             raw_input: None,
+            raw_output: None,
             expanded: false,
             group_expanded: false,
         }
@@ -6284,6 +6299,7 @@ mod tests {
                         line: Some(3),
                     }],
                     raw_input: Some("{\"path\":\"src/lib.rs\"}".into()),
+                    raw_output: Some("{\"bytesWritten\":12}".into()),
                 },
                 cx,
             );
@@ -6297,6 +6313,7 @@ mod tests {
                 content,
                 locations,
                 raw_input,
+                raw_output,
                 expanded,
                 group_expanded,
             }) => {
@@ -6307,6 +6324,7 @@ mod tests {
                 assert_eq!(content.len(), 1);
                 assert_eq!(locations.len(), 1);
                 assert!(raw_input.is_some());
+                assert!(raw_output.is_some());
                 assert!(!expanded, "a new tool call starts collapsed");
                 assert!(!group_expanded, "a new tool call starts group-collapsed");
             }
@@ -6336,6 +6354,7 @@ mod tests {
                 content: vec![ToolCallContentInfo::Text("partial output".into())],
                 locations: vec![],
                 raw_input: None,
+                raw_output: None,
                 expanded: false,
                 group_expanded: false,
             });
@@ -6351,6 +6370,7 @@ mod tests {
                     content: None,
                     locations: None,
                     raw_input: None,
+                    raw_output: None,
                 },
                 cx,
             );
@@ -6398,6 +6418,7 @@ mod tests {
                 content: vec![ToolCallContentInfo::Text("the tool's output".into())],
                 locations: vec![],
                 raw_input: None,
+                raw_output: None,
                 expanded: false,
                 group_expanded: false,
             });
@@ -6453,6 +6474,7 @@ mod tests {
                     content: vec![],
                     locations: vec![],
                     raw_input: None,
+                    raw_output: None,
                     expanded: false,
                     group_expanded: false,
                 });

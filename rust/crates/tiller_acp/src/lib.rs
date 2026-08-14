@@ -314,6 +314,8 @@ pub enum AcpEvent {
         locations: Vec<ToolCallLocationInfo>,
         /// Raw input sent to the tool, pretty-printed JSON, when present.
         raw_input: Option<String>,
+        /// Raw output the tool returned, pretty-printed JSON, when present.
+        raw_output: Option<String>,
     },
     /// A non-terminal tool call update.
     ToolCallUpdated {
@@ -332,6 +334,8 @@ pub enum AcpEvent {
         locations: Option<Vec<ToolCallLocationInfo>>,
         /// Updated raw input, pretty-printed JSON, when present.
         raw_input: Option<String>,
+        /// Updated raw output, pretty-printed JSON, when present.
+        raw_output: Option<String>,
     },
     /// A tool call reached a terminal status.
     ToolCallCompleted {
@@ -349,6 +353,8 @@ pub enum AcpEvent {
         locations: Option<Vec<ToolCallLocationInfo>>,
         /// Updated raw input, pretty-printed JSON, when present.
         raw_input: Option<String>,
+        /// Updated raw output, pretty-printed JSON, when present.
+        raw_output: Option<String>,
     },
     /// The model selector changed or became available.
     ModelCatalog(ModelCatalog),
@@ -1308,6 +1314,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
             content: tool_call_content_info(tool.content),
             locations: tool_call_location_info(tool.locations),
             raw_input: tool_call_raw_json(tool.raw_input),
+            raw_output: tool_call_raw_json(tool.raw_output),
         }],
         SessionUpdate::ToolCallUpdate(update) => {
             let status = update.fields.status.map(|status| format!("{:?}", status));
@@ -1315,6 +1322,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
             let content = update.fields.content.map(tool_call_content_info);
             let locations = update.fields.locations.map(tool_call_location_info);
             let raw_input = tool_call_raw_json(update.fields.raw_input);
+            let raw_output = tool_call_raw_json(update.fields.raw_output);
             vec![if matches!(
                 update.fields.status,
                 Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
@@ -1326,6 +1334,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                     content,
                     locations,
                     raw_input,
+                    raw_output,
                 }
             } else {
                 AcpEvent::ToolCallUpdated {
@@ -1336,6 +1345,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                     content,
                     locations,
                     raw_input,
+                    raw_output,
                 }
             }]
         }
@@ -1527,6 +1537,7 @@ mod tests {
                 content: None,
                 locations: None,
                 raw_input: None,
+                raw_output: None,
             }]
         );
     }
@@ -1544,11 +1555,11 @@ mod tests {
     }
 
     /// P91 part 2: the widened seam. A tool call whose content is a diff
-    /// and whose input is raw JSON must carry `kind`, the diff, the
-    /// location, and the input all the way to the typed event — not just
-    /// `{id, title, status}`.
+    /// and whose input/output are raw JSON must carry `kind`, the diff, the
+    /// location, and both raw values all the way to the typed event — not
+    /// just `{id, title, status}`.
     #[test]
-    fn started_tool_call_carries_kind_content_locations_and_raw_input() {
+    fn started_tool_call_carries_kind_content_locations_and_raw_input_and_output() {
         let tool = ToolCall::new("tool-1", "Edit file")
             .kind(ToolKind::Edit)
             .content(vec![ToolCallContent::Diff(Diff::new(
@@ -1556,7 +1567,8 @@ mod tests {
                 "new contents\n",
             ))])
             .locations(vec![ToolCallLocation::new("/tmp/example.rs").line(3)])
-            .raw_input(serde_json::json!({"path": "/tmp/example.rs"}));
+            .raw_input(serde_json::json!({"path": "/tmp/example.rs"}))
+            .raw_output(serde_json::json!({"bytesWritten": 12}));
         let update = SessionNotification::new("session", SessionUpdate::ToolCall(tool));
 
         let events = notification_to_events(update);
@@ -1569,6 +1581,7 @@ mod tests {
                 content,
                 locations,
                 raw_input,
+                raw_output,
                 ..
             } => {
                 assert_eq!(id, "tool-1");
@@ -1591,6 +1604,8 @@ mod tests {
                 );
                 let raw_input = raw_input.as_ref().expect("raw input was set");
                 assert!(raw_input.contains("/tmp/example.rs"));
+                let raw_output = raw_output.as_ref().expect("raw output was set");
+                assert!(raw_output.contains("bytesWritten"));
             }
             other => panic!("expected ToolCallStarted, got {other:?}"),
         }
@@ -1618,6 +1633,7 @@ mod tests {
                 content: None,
                 locations: None,
                 raw_input: None,
+                raw_output: None,
             }]
         );
     }
