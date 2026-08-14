@@ -52,3 +52,20 @@ ambiguity is out of reach from here, not a defect finding.
 `03-07-after-open-click.png`, `02-08-tree-check.png`.
 
 **Verdict left as:** NOT EXERCISED, unchanged — instrument ambiguity persists on current HEAD.
+
+## `F-CORE-FILE-03`
+
+**Claim:** could-not-reach.
+
+**Drove:** Confirmed `terminal_file_drop`/`classify_file_drop` (`tiller_project/src/file.rs`)
+is a real consumed data layer per DEAD-MODULES.md's correction. Checked
+`Scripts/wayland-drive.sh`'s action vocabulary (`ctl`, `click`, `move`, `type`, `key`,
+`title`, `shot`) for a drag primitive: there is none — no press-hold/motion/release
+sequence, only an instantaneous `click`. XDND drag-and-drop cannot be synthesized with what
+this lane exposes, matching `ENVIRONMENT.md:76-78`'s documented limitation.
+
+**Observed:** No capture attempted; this is a tooling gap, not a code question — the drive
+lock (`DISPLAY=:1`) is also off-limits to this slice, and even that lane's own docs note it
+lacks a press/motion/release primitive for the virtual pointer.
+
+**Verdict left as:** NOT EXERCISED, unchanged — needs a human hand or a different drive tool.
