@@ -8,6 +8,39 @@ codex12 in P65 and still marked absent within the hour).
 **Evidence, not verdicts.** No ledger row changes here. Every claim below is an input to
 `pireview`, which adjudicates.
 
+> ### Correction — orchestrator, 2026-08-14 12:10. Read this before using the table.
+>
+> **The two halves of this table are not equally fresh, and nothing in the layout says so.**
+> The script re-verifies **only the `already built` needles** — its own step 4 says exactly that
+> ("every `built` needle must be found in its cited file under `--tree`"). The `still absent`
+> cells are **frozen prose from 2026-08-13** that no run re-checks, so they can rot silently
+> while the table around them re-verifies and prints as if current.
+>
+> Proven, not suspected: `F-TERM-SCR-02` still reads *"searched: debounce / settle in
+> tiller_terminal — zero"*. In today's tree `OUTPUT_SETTLE_DEBOUNCE = 200ms` (`lib.rs:552`) and
+> `TERMINAL_RESIZE_DEBOUNCE = 120ms` (`lib.rs:511`) are both present and used in production
+> (`:411`, `:892`), and the ledger has closed the row `PASSED` via P82.
+>
+> Cross-checked every row here against the live ledger on 2026-08-14:
+> - **23 `still absent` rows have been overtaken** — the ledger now carries `PASSED`,
+>   `half-proven`, `NOT EXERCISED` or `UNREACHABLE` for them. Do not read a `still absent` cell
+>   as current.
+> - **13 `already built` rows were still sitting at `FAILED` in the ledger.** Those needles
+>   re-verify against today's tree, and four were independently spot-checked by hand
+>   (`F-SID-07`, `F-TAB-14`, `F-CHG-18`, `F-CHG-22` — all hold, all in production regions).
+>   All twelve of the `FAILED — absent` ones are now annotated **do not rebuild** in the ledger
+>   and queued as `P94` for exercising.
+> - `F-CHG-18` is a **direct contradiction between two frozen references**, and this document
+>   wins it: `FABLE-07`'s backlog says *"changes.rs has zero drag handlers"*, but
+>   `changes.rs:993` carries a production `on_drag` with a `DiffDragPreview` payload and the
+>   file's `#[cfg(test)]` does not start until `:1557`. The backlog checked `right_panel.rs`
+>   and generalised.
+>
+> **The ledger is authoritative; this document is dated evidence.** Where they disagree, check
+> the tree — and note that this asymmetry is the census's own stated harm turned inward: a
+> stale `still absent` cell is exactly the false FAILED that "sends a builder to construct
+> something that already exists".
+
 ## What this census is pinned to
 
 - Ledger: `docs/linux-rewrite/pins/INVENTORY-LEDGER.FABLE-08.md` — a verbatim copy of the

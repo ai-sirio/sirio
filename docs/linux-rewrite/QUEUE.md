@@ -2449,3 +2449,52 @@ reference files for the claim it rested on).
 
 `-06` now points at `P93`, which owns the account wiring — when that lands the row is re-judgeable
 with no further store work. A row that names its own fix is worth more than one that merely fails.
+
+## An instrument that re-verifies half of itself — orchestrator, 2026-08-14 12:25
+
+`Scripts/stale-failed-census.py` re-verifies **only its `already built` needles**; its own step 4
+says so. The `still absent` cells are frozen prose from 2026-08-13 that no run re-checks. Both
+halves print in one table, in the same style, on every run — so the document *looks* freshly
+verified end to end and half of it is a year-old photograph. `F-TERM-SCR-02` proves it: the cell
+still reads *"debounce / settle in tiller_terminal — zero"* while `OUTPUT_SETTLE_DEBOUNCE = 200ms`
+sits at `lib.rs:552`, used in production, with the ledger `PASSED` since P82.
+
+**This is the census's own stated harm, turned inward.** Its opening line is that a false FAILED
+"sends a builder to construct something that already exists". A stale `still absent` cell *is* a
+false FAILED.
+
+Cross-checking all 141 rows against the live ledger cost one script and produced two piles:
+
+- **23 `still absent` rows the ledger has overtaken** — low harm, the ledger is authoritative.
+- **13 `already built` rows still sitting at `FAILED` in the ledger** — the expensive pile. Their
+  needles re-verify against today's tree; I hand-checked four (`F-SID-07`, `F-TAB-14`, `F-CHG-18`,
+  `F-CHG-22`) and all four hold in production regions. Twelve are now annotated **do not rebuild**
+  in the ledger and briefed as `P94`; the thirteenth (`F-SET-09`) is already `FAILED — defective`.
+
+`F-CHG-18` was a **direct contradiction between two frozen references** — `FABLE-07` says
+*"changes.rs has zero drag handlers"*, `FABLE-08` cites `changes.rs:994`. The census wins:
+`changes.rs:993` is a production `on_drag` and the file's `#[cfg(test)]` starts at `:1557`. The
+backlog checked `right_panel.rs` and generalised to a file it had not opened. **When two references
+disagree, neither is evidence — the tree is.**
+
+### The reusable move
+
+A frozen document with a machine-checkable half is worth **cross-checking against the live ledger**,
+not just re-running. Re-running asks "do my citations still match?"; cross-checking asks "has anyone
+acted on them?" — and unapplied findings are this project's most reliable defect source. That is now
+four for four: `p17-rclick-term.png`, `DEAD-MODELS.md`, `ADJUDICATION-BACKLOG.md`, and now
+`STALE-FAILED-CENSUS.md`. Every one of them declares "this document changes no verdict", which is a
+correct division of labour with **no completion step attached**.
+
+### And a self-inflicted one, same family as the `owed`-inside-`showed` bug
+
+Writing `P94` I grepped `OpenDiff` with `| head -5`, saw the enum variant, the emit and three test
+hits, and concluded *no handler exists*. The handler is `main.rs:4068` — **hit number six**. I was
+one line from briefing a critic that a wired feature was unwired.
+
+The real finding is better than the wrong one: `OpenDiff(_path) => workspace.add_changes_tab(cx)`
+**discards the path** and opens the generic changes tab, while the variant's doc promises a
+dedicated diff tab for that file. A truncating pipe manufactures false negatives that look exactly
+like confirmed disproofs — same shape as the substring bug (`owed` matching inside "showed") and the
+misspelled-symbol trap (`directory_status` for `directory_statuses`). **Never let `head` decide
+whether something exists; count first, then read.**
