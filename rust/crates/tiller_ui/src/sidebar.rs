@@ -2442,9 +2442,6 @@ impl Render for Sidebar {
                             .child("+"),
                     ),
             )
-            .when(add_project_menu, |this| {
-                this.child(Self::render_add_project_menu(entity.clone(), theme))
-            })
             .child(
                 div()
                     .id("filter-field")
@@ -2645,6 +2642,9 @@ impl Render for Sidebar {
             })
             .when_some(project_form, |this, form| {
                 this.child(Self::render_project_form(form, entity.clone(), theme))
+            })
+            .when(add_project_menu, |this| {
+                this.child(Self::render_add_project_menu(entity.clone(), theme))
             })
     }
 }
