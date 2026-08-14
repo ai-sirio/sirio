@@ -19,7 +19,7 @@ use raw_window_handle::{
 use tiller_theme::Theme;
 use wry::{
     NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder,
-    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalPosition, LogicalSize},
 };
 
 /// GPUI's Linux backend exposes its X11 surface as XCB, while wry's
@@ -759,6 +759,11 @@ pub struct BrowserSurface {
     address_editor: AddressEditor,
     address_focus: FocusHandle,
     address_dragging: bool,
+    /// F-BRW-03: mirrors `address_focus.is_focused(window)`, refreshed each
+    /// render (the only place a `Window` is available). Guards the
+    /// PageLoad(Finished) address resync below from clobbering a caret or
+    /// selection the user is actively editing.
+    address_focused: bool,
     webview: SharedWebView,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
@@ -835,6 +840,7 @@ impl BrowserSurface {
             address_editor,
             address_focus: cx.focus_handle(),
             address_dragging: false,
+            address_focused: false,
             webview,
             web_events,
             events: Vec::new(),
@@ -927,14 +933,20 @@ impl BrowserSurface {
         }
     }
 
-    fn on_back(&mut self) {
+    fn on_back(&mut self, cx: &mut Context<Self>) {
         let address = self.state.go_back();
         self.navigate_history(address);
+        // F-BRW-02: go_back()/navigate_history() mutate self.state and
+        // self.address_editor correctly, but nothing repaints without an
+        // explicit notify — unlike on_address_key's "enter" path, which
+        // does call it after submit_address().
+        cx.notify();
     }
 
-    fn on_forward(&mut self) {
+    fn on_forward(&mut self, cx: &mut Context<Self>) {
         let address = self.state.go_forward();
         self.navigate_history(address);
+        cx.notify();
     }
 
     fn on_reload(&mut self) {
@@ -1038,7 +1050,18 @@ impl BrowserSurface {
                 WebEvent::PageLoad(PageLoadEventKind::Finished, url) => {
                     let title = self.state.page_title().to_owned();
                     self.state.did_finish_navigation(&url, &title);
-                    self.address_editor.set_text(self.state.address());
+                    // F-BRW-03: WebKit fires PageLoad(Finished) once per
+                    // sub-resource/iframe, not just once per navigation.
+                    // Resyncing the address field on every one of those
+                    // events reset the caret to end-of-text mid-edit,
+                    // turning a click-to-position or ctrl+a select-all into
+                    // a no-op the instant a stray Finished event landed —
+                    // the field could then only ever append. Skip the
+                    // resync while the user is at the field; `submit_address`
+                    // already sets the authoritative text on Enter.
+                    if !self.address_focused {
+                        self.address_editor.set_text(self.state.address());
+                    }
                     self.events.push(BrowserEvent::PageFinished(url));
                 }
                 WebEvent::TitleChanged(title) => {
@@ -1086,14 +1109,14 @@ impl BrowserSurface {
                 "‹",
                 theme,
                 self.state.can_go_back(),
-                move |cx| back.update(cx, |surface, _| surface.on_back()),
+                move |cx| back.update(cx, |surface, cx| surface.on_back(cx)),
             ))
             .child(browser_button(
                 "browser-forward",
                 "›",
                 theme,
                 self.state.can_go_forward(),
-                move |cx| forward.update(cx, |surface, _| surface.on_forward()),
+                move |cx| forward.update(cx, |surface, cx| surface.on_forward(cx)),
             ))
             .child(browser_button(
                 "browser-reload",
@@ -1196,8 +1219,12 @@ fn browser_button(
 }
 
 impl Render for BrowserSurface {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *Theme::get(cx);
+        // F-BRW-03: this is the only place a `Window` is available to ask
+        // the focus system directly; pump_web_events (a background timer
+        // task) reads this snapshot instead of calling is_focused itself.
+        self.address_focused = self.address_focus.is_focused(window);
         let entity = cx.entity();
         let permission = self.state.permission_prompt().cloned();
         let webview = NativeWebViewElement::new(self.webview.clone());
@@ -1507,17 +1534,35 @@ impl Element for AddressTextElement {
     }
 }
 
-fn native_webview_rect(bounds: Bounds<Pixels>, scale_factor: f32) -> Rect {
-    let device_bounds = bounds.to_device_pixels(scale_factor);
+/// Converts a GPUI layout rect straight into wry's logical-pixel `Rect`.
+///
+/// F-BRW-01: wry's WebKitGTK backend re-derives logical pixels from
+/// whatever `Rect` it is handed by calling its own
+/// `bounds.to_logical(self.webview.scale_factor())` before ever touching a
+/// GTK/X11 geometry call (`WebView::set_bounds` in wry 0.56's
+/// `webkitgtk/mod.rs`). That conversion runs unconditionally — it is not
+/// skipped for a `Rect` that is already logical. Pre-converting GPUI's
+/// bounds to device pixels with `to_device_pixels(window.scale_factor())`
+/// and tagging them `Physical` therefore fed wry a value it divided by
+/// *its own* GTK-reported scale factor a second time; whenever that GTK
+/// scale factor disagreed with GPUI's (as it does on this desktop), the
+/// child window landed at a uniform fraction of the intended rect around
+/// the window origin — exactly the shrink this row's evidence recorded.
+///
+/// `Bounds<Pixels>` is already the same logical-pixel space the webview's
+/// *initial* bounds use in `build_webview`/`build_production_webview`
+/// above (both call sites build a `Rect` from `LogicalPosition`/
+/// `LogicalSize`). Passing the live layout bounds straight through the
+/// same way keeps every `Rect` this file builds in one unit, and needs no
+/// scale factor at all — wry's own `to_logical` is a no-op on an
+/// already-`Logical` value.
+fn native_webview_rect(bounds: Bounds<Pixels>) -> Rect {
     Rect {
-        position: PhysicalPosition::new(
-            i32::from(device_bounds.origin.x),
-            i32::from(device_bounds.origin.y),
-        )
-        .into(),
-        size: PhysicalSize::new(
-            i32::from(device_bounds.size.width).max(1),
-            i32::from(device_bounds.size.height).max(1),
+        position: LogicalPosition::new(f64::from(bounds.origin.x), f64::from(bounds.origin.y))
+            .into(),
+        size: LogicalSize::new(
+            f64::from(bounds.size.width).max(1.0),
+            f64::from(bounds.size.height).max(1.0),
         )
         .into(),
     }
@@ -1572,11 +1617,11 @@ impl Element for NativeWebViewElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        window: &mut Window,
+        _window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
         if let Some(webview) = self.webview.borrow().as_ref() {
-            let _ = webview.set_bounds(native_webview_rect(bounds, window.scale_factor()));
+            let _ = webview.set_bounds(native_webview_rect(bounds));
         }
         ()
     }
@@ -1697,19 +1742,36 @@ mod tests {
     }
 
     #[test]
-    fn webview_bounds_convert_gpui_logical_pixels_to_device_pixels() {
+    fn webview_bounds_pass_gpui_logical_pixels_straight_to_wry() {
+        // F-BRW-01: wry's own `set_bounds` re-derives logical pixels via
+        // *its* GTK-reported scale factor before it ever reaches GTK/X11
+        // geometry calls, so this function must hand it the same logical
+        // rect GPUI laid the pane out at, unscaled — any pre-conversion
+        // here gets applied a second time inside wry.
         let bounds = Bounds::new(
             gpui::point(gpui::px(386.0), gpui::px(133.0)),
             gpui::size(gpui::px(850.0), gpui::px(792.0)),
         );
 
-        let rect = native_webview_rect(bounds, 7.0 / 6.0);
+        let rect = native_webview_rect(bounds);
 
         assert_eq!(
             rect.position,
-            wry::dpi::PhysicalPosition::new(450, 155).into()
+            wry::dpi::LogicalPosition::new(386.0, 133.0).into()
         );
-        assert_eq!(rect.size, wry::dpi::PhysicalSize::new(992, 924).into());
+        assert_eq!(rect.size, wry::dpi::LogicalSize::new(850.0, 792.0).into());
+    }
+
+    #[test]
+    fn webview_bounds_clamp_to_a_minimum_visible_size() {
+        let bounds = Bounds::new(
+            gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            gpui::size(gpui::px(0.0), gpui::px(0.0)),
+        );
+
+        let rect = native_webview_rect(bounds);
+
+        assert_eq!(rect.size, wry::dpi::LogicalSize::new(1.0, 1.0).into());
     }
 
     #[test]
