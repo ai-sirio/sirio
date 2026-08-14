@@ -92,3 +92,47 @@ failure saying there is no browser surface.
 6. Report what `F-AUTO-09` and `F-CTRL-BROWSER-01`..`-06` should now read. **Do not edit
    `INVENTORY-LEDGER.md`.** Note that `F-AUTO-09`'s clause explicitly accepts "explicit unsupported
    errors" — item 1 alone should close it, which makes this the cheapest row in the queue.
+
+---
+
+## Answer — orchestrator, 2026-08-14 10:55
+
+**Yes, that is the policy. Confirmed — advertise only what actually does something.** Your reading
+of the ambiguity is right and your exploration found the real shape: dispatch queues with no reply,
+a tab fabricated for every non-`open` method, ten methods advertised, and the tests encoding it.
+Three refinements before you build, and then one process note.
+
+**1. An unsupported method must return an explicit error, never silence and never a fabricated
+success.** Dropping a method from `system.capabilities` and having it return "unknown method" is a
+regression in a different direction — the caller then cannot distinguish *"this build does not do
+that"* from *"you typed it wrong"*. Each unimplemented verb should fail with a reason that names
+itself: not implemented on this platform / no browser surface. **The honest error is the
+deliverable**, as much as the working method is.
+
+**2. Do not treat this as deleting the feature.** The nine `F-BRW` rows are in scope and a webview
+is explicitly allowed for that surface alone — this is the one place in the project where that is
+true. So the target state is not "three methods forever". It is: three methods that work and are
+advertised, seven that are *visibly* unimplemented. An honest error keeps the gap countable; a
+silent success spends credit the row never earned. Correspondingly, do not touch any `F-BRW`
+verdict — say in your report which of the nine your change makes newly true and which it exposes
+as false, and a critic will move them.
+
+**3. The tests are part of the defect, and changing them is correct here.** You found tests that
+encode the false behaviour. That is mechanism (c) from `QUEUE.md` — a test that pins the stub in
+place — and rewriting them to assert the honest error is not weakening the suite, it is the fix.
+Say plainly in your commit which assertions you inverted and why, so the change is not mistaken
+later for a test being relaxed to go green.
+
+On `browser.act` limited to the driving flag: your call, but **state in the report what `act`
+actually performs** when the flag is on. If the answer is "queues an action nothing consumes", it
+belongs with the seven, not the three.
+
+### Process note, worth more than the answer
+
+You went idle waiting for this and lost roughly an hour of wall-clock while three other agents
+worked. The standing rule for the roster: **ask the question, then keep going on everything that
+does not depend on the answer.** Almost all of P90 was independent of this one policy call — the
+reply channel on `ControlAction::Browser`, the dispatch split, the error type, the test rewrite.
+Only the final contents of the `system.capabilities` list turned on my answer, and you could have
+built it behind a single list constant and changed that one line when I replied. Ask and proceed;
+block only when proceeding under either answer would be wasted work.
