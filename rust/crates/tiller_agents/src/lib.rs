@@ -163,6 +163,18 @@ pub trait AgentAdapter {
     /// spawn. Consumers must mark the adapter as chat-unavailable rather
     /// than fall back to another agent's server.
     fn acp_program(&self) -> Option<AcpProgram>;
+
+    /// Full shell command that runs the CLI noninteractively over `prompt`
+    /// and prints the answer to stdout — the auto-naming summarizer's
+    /// invocation, ported from `AgentAdapter.summarizerCommand`.
+    ///
+    /// The default is `None`: an adapter whose noninteractive mode has not
+    /// been ported answers honestly rather than guessing an argv. Consumers
+    /// must skip summarization for such an adapter, never substitute
+    /// another agent's command.
+    fn summarizer_command(&self, _prompt: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Resolve a program using the process's current `PATH`.
@@ -295,6 +307,33 @@ mod tests {
             "No ACP server",
             "the surface says there is no ACP server rather than falling back"
         );
+    }
+
+    /// F-AGENT-OPENCODE-03: the noninteractive summarizer command is
+    /// `opencode run --pure '<prompt>'`, with the prompt shell-quoted the
+    /// same way the Swift original quotes it.
+    #[test]
+    fn opencode_summarizer_command_is_run_pure_with_a_quoted_prompt() {
+        assert_eq!(
+            OpenCodeAdapter.summarizer_command("summarize this"),
+            Some("opencode run --pure 'summarize this'".to_string())
+        );
+        // The Swift test's own edge case: an embedded single quote must
+        // survive the shell round trip.
+        assert_eq!(
+            OpenCodeAdapter.summarizer_command("it's a test"),
+            Some("opencode run --pure 'it'\\''s a test'".to_string())
+        );
+    }
+
+    /// The other three adapters' summarizers are their own inventory rows
+    /// and are not yet ported; until they are, the honest answer is `None`
+    /// — never a guessed argv for a CLI whose contract nobody checked.
+    #[test]
+    fn unported_summarizers_answer_none_rather_than_guessing() {
+        assert_eq!(ClaudeCodeAdapter.summarizer_command("p"), None);
+        assert_eq!(CodexAdapter.summarizer_command("p"), None);
+        assert_eq!(PiAdapter.summarizer_command("p"), None);
     }
 
     #[test]
