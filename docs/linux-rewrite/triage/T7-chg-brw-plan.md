@@ -269,3 +269,294 @@ in the same frame.
 - **size**: S
 
 ---
+
+## `F-BRW-01` — FAILED — defective
+
+**Needs: build.** The GPUI layout hierarchy around the native child is correct in principle —
+`BrowserSurface::render` (`browser.rs:1198`) puts the embedded `NativeWebViewElement` inside a
+`div().relative().flex_1()` (`browser.rs:1288-1295`, comment: "the native child is the final
+layout region, not a sibling overlapped by GPUI"), sized by the pane after a fixed 48px toolbar —
+so the *region* the webview should fill is computed by ordinary GPUI layout. The mis-sizing is in
+how that region's bounds get converted for the native embed:
+`NativeWebViewElement::prepaint` (`browser.rs:1567-1579`) calls
+`native_webview_rect(bounds, window.scale_factor())`, which converts the GPUI layout `bounds`
+(logical pixels) to device pixels via `Bounds::to_device_pixels(scale_factor)` before handing them
+to `webview.set_bounds(...)`.
+
+The evidence's own numbers point straight at this conversion: native child **729×679** against a
+content area of **850×792** — `729/850 = 679/792 ≈ 0.857143`, i.e. **exactly 6/7**, the *inverse*
+of the `7.0/6.0` scale factor this same file's own test hardcodes at `browser.rs:1706`
+(`let rect = native_webview_rect(bounds, 7.0 / 6.0);`). That is the signature of a logical/device
+pixel inversion: multiplying by the reciprocal of the intended scale instead of the scale itself
+(or, as plausibly, GTK/X11 widget geometry expecting *logical* pixels here rather than the raw
+device pixels `to_device_pixels` produces — unlike Win32, GTK widgets on X11 are typically sized
+in already-scaled "application pixels," so feeding an *additionally* device-scaled rect through
+`wry`'s `set_bounds` would double-apply the scale and shrink the embed exactly this way).
+
+**Approach**: instrument or log the actual `window.scale_factor()` value in the live session that
+produced `orch21-base.png`/`orch21-link.png` and compare it against what `native_webview_rect`
+computes; check whether `wry`'s `WebView::set_bounds` on the GTK/X11 backend expects logical or
+device pixels (its own docs/source, since this is the *only* native-child-embed code path in the
+app — terminal rendering does not embed a native window, so this conversion is uniquely
+under-exercised). Fix the conversion direction (or drop `to_device_pixels` entirely if GTK wants
+logical pixels) and re-check the reported position offset `(331,114)` against the pane's expected
+origin once the size matches — the offset error may resolve as a side effect of the same fix, or
+need separate origin-math correction if it doesn't.
+
+- **files**: `rust/crates/tiller_ui/src/browser.rs` (`native_webview_rect`, `:1510`; `NativeWebViewElement::prepaint`, `:1567-1579`)
+- **size**: M
+
+---
+
+## `F-BRW-02` — FAILED — defective
+
+**Needs: build.** The manifest's own framing ("the code says it should have") holds up under
+reading: `BrowserState`'s history model is correct in isolation — `go_back()`/`go_forward()`
+(`browser.rs:523-544`) only mutate `history_index` and return `Some(address)` when `can_go_back()`/
+`can_go_forward()` (`history_index > 0` / `history_index + 1 < history.len()`) are true, and
+`record_navigation` (`browser.rs:641`) is called from `did_start_navigation` on every real
+navigation, including in-page link clicks (`pump_web_events`'s `WebEvent::NavigationRequested`/
+`PageLoad(Started, _)` arms both route through it, `browser.rs:1025-1033`). The Back button itself
+is only rendered clickable when `can_go_back()` is true — `browser_button`'s `.when(enabled, |this|
+this.hover(...).on_click(...))` (`browser.rs:1190-1192`) gates **both** the hover style and the
+click handler on the same `enabled` flag, so the manifest's positive control (hover background
+rendered) is proof `can_go_back()` was genuinely true and `on_click` was genuinely attached — the
+click landing was not the failure.
+
+What stands out reading the call chain is an asymmetry: `on_address_key`'s `"enter"` arm — the one
+gesture already proven to work live (F-BRW-03's Return-navigates evidence) — explicitly calls
+`cx.notify()` after acting (`browser.rs:997`). `on_back`/`on_forward`/`navigate_history`
+(`browser.rs:918-939`) take no `Context<Self>` at all and have **no path to call `cx.notify()`
+anywhere** in the chain from click to `load_url`. If GPUI does not implicitly schedule a repaint
+on every `Entity::update()` call (it does not, in general — views must call `cx.notify()` to mark
+themselves dirty), the underlying state (history index, `webview.load_url()`) could mutate
+correctly while the GPUI-painted parts of the surface (the address field) never redraw to reflect
+it. That alone would explain the address field staying frozen; whether the *native* WebKit child
+also failing to visibly move needs checking too — either `self.webview` was unexpectedly `None` at
+that moment (`load_url`, `browser.rs:909`, silently returns `Ok(())` in that case, doing nothing),
+or wry's `load_url` on the real webview didn't take effect for another reason.
+
+**Approach**: add `cx: &mut Context<Self>` to `on_back`/`on_forward`/`navigate_history` and an
+explicit `cx.notify()` after they run (matching `on_address_key`'s pattern), and confirm live that
+the address field updates. If the *native page* still doesn't visibly change after that fix, dig
+into whether `self.webview` was populated at click time and whether `wry`'s `load_url` call is
+actually taking effect on the GTK/X11 backend at all — that would be a second, independent defect.
+
+- **files**: `rust/crates/tiller_ui/src/browser.rs` (`on_back`/`on_forward`/`navigate_history`, `:918-939`)
+- **size**: S–M
+
+---
+
+## `F-BRW-03` — FAILED — defective
+
+**Needs: build.** The `AddressEditor` model (`browser.rs:264-378`) and its click-to-position
+wiring are both genuinely well-implemented, not stubs: `select_all()` sets `anchor=0,
+caret=text.len()`; `replace_selection` correctly deletes the current selection range before
+inserting; `on_address_key` (`browser.rs:963`) has a real `ctrl+a`/`cmd+a` handler calling
+`select_all()`. Click-to-position is not a naive parent `on_click` — `AddressTextElement` is a
+custom `Element` that shapes the text itself and hit-tests the exact click x-coordinate against
+glyph positions (`line.closest_index_for_x(...)`, `browser.rs:1472`, `:1488`) via its own
+`window.on_mouse_event` handlers for `MouseDownEvent`/`MouseMoveEvent`/`MouseUpEvent`
+(`browser.rs:1465-1503`), calling `begin_address_drag`/`update_address_drag`/`end_address_drag` —
+real selection-by-drag support, not a stub.
+
+Given the model is correct in isolation but the live behavior contradicts it exactly ("ctrl+a does
+not select", "caret always end-of-text"), the defect is most likely in event delivery or a
+state-reset racing the user's input, not in this logic. Two concrete leads worth checking first:
+(1) `pump_web_events` (`browser.rs:1021`) calls `self.address_editor.set_text(...)` on every
+`WebEvent::PageLoad(Finished, _)` (`browser.rs:1035-1039`), which resets the caret to end-of-text
+(`AddressEditor::set_text` → `move_to(text.len(), false)`, `browser.rs:289-292`) — if the
+underlying page keeps re-delivering "finished" events (sub-resource/iframe loads are common on
+real pages) while the user is mid-edit, every such event would silently snap the caret back to the
+end, which would look exactly like "select-all does nothing, typed text always appends." (2)
+Whether `ctrl+a` genuinely reaches `on_address_key` at all in the live app — no global keybinding
+in `main.rs`/`tiller_ui` currently shadows it for this context (`chat.rs:1102`'s `"ctrl-a"` binding
+is scoped to the `"ChatComposer"` key context and shouldn't apply here), but that should be
+confirmed live rather than assumed from a static context-scoping read.
+
+**Approach**: reproduce live and narrow which of the two leads is real — log/print each
+`WebEvent::PageLoad(Finished, _)` delivery during a manual edit session to see if it's firing
+repeatedly and stomping the caret; separately confirm `address_focus` genuinely has window focus
+and `on_address_key` is being invoked at all when `ctrl+a` is pressed (e.g. a debug print inside
+the handler). Fix is likely either debouncing/guarding the `set_text` reset in `pump_web_events`
+(only reset if the address actually changed and the field isn't focused/being edited), or a focus/
+dispatch fix if `on_address_key` isn't firing.
+
+- **files**: `rust/crates/tiller_ui/src/browser.rs` (`pump_web_events`, `:1021-1051`; `on_address_key`, `:963-999`)
+- **size**: M
+
+---
+
+## `F-BRW-04` — FAILED — defective
+
+**Needs: build.** Both halves of the manifest evidence are confirmed and independently rooted.
+
+**`browser.open` with `url=https://` silently falls back**: `normalize_address("https://")`
+(`browser.rs:667`) correctly computes an empty `host` and returns `Err(InvalidAddress(...))` — the
+*validation* is right. But `BrowserSurface::new` (`browser.rs:775`) catches that error and
+silently substitutes a hardcoded fallback instead of propagating it: `let (state, startup_error) =
+match BrowserState::new(initial_url) { Ok(state) => (state, None), Err(error) =>
+(BrowserState::new("https://example.com").expect(...), Some(error.to_string())) }`
+(`browser.rs:776-782`). The resulting `startup_error` is stored purely for the in-UI error banner
+(`self.startup_error`, rendered at `browser.rs:1214` as `"browser-error"`) — it has **no public
+accessor**, so `handle_browser_action`'s `"browser.open"` arm (`main.rs:4476-4490`) has no way to
+see it and unconditionally returns `Ok(...)` with `url: state.address()` (the silently-substituted
+`https://example.com`) and no `error` key.
+
+**`browser.navigate` to an unreachable/invalid host returns `ok:true` with no error**: the control
+handler's `"browser.navigate"` arm (`main.rs:4497-4512`) calls `surface.submit_address(address)`
+and replies with success as soon as that call returns `Ok`. But `submit_address` (`browser.rs:858`)
+only validates and *starts* the navigation (`self.state.submit_address` normalizes the URL string;
+`self.load_url` just calls `webview.load_url(address)`, which kicks off an async load) — it cannot
+know yet whether the host resolves or the connection succeeds. That outcome arrives later, if at
+all, via `WebEvent::PageLoad(Finished)` or a `did_fail_navigation` call reachable only through the
+async `pump_web_events` loop. The synchronous control-socket response is sent before that outcome
+exists, so `ok:true` is structurally the best the current design can say about reachability.
+
+**Approach**: for `browser.open`, add a `pub fn startup_error(&self) -> Option<&str>` accessor on
+`BrowserSurface` and have `handle_browser_action`'s `"browser.open"` arm check it and either fail
+the request or include an `"error"` key in the reply instead of reporting the silent fallback as
+success. For `browser.navigate`, this needs real async handling: block (with a bounded timeout) on
+a channel/oneshot signaled by the next `did_finish_navigation`/`did_fail_navigation` for that
+surface before replying, or explicitly document/return a "pending" status and require callers to
+follow up with `browser.wait`/`browser.get` (currently both blanket-unsupported on Linux per the
+`BROWSER_METHODS` catch-all, `main.rs:4519-4521`) — the latter is a larger, separate feature.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`handle_browser_action`, `:4469-4524`), `rust/crates/tiller_ui/src/browser.rs` (`startup_error` field needs an accessor, `:766`; navigation-outcome signaling for the async half)
+- **size**: M (the `browser.open` fallback fix) / L (the `browser.navigate` async-outcome half, if built)
+
+---
+
+## `F-BRW-05` — half-proven
+
+**Needs: build.** Confirmed exactly as the manifest states, and the code says so itself:
+`BrowserSurface::set_agent_driving`/`BrowserState::set_agent_driving` (`browser.rs:905`, `:581`)
+are both doc-commented `"Updates the F-BRW-05 activity marker"` / `"F-BRW-05 agent-driving
+indicator"` — i.e. this setter was built *specifically and only* for this row. The **only**
+caller anywhere in `rust/` is `handle_browser_action`'s `"browser.act"` arm (`main.rs:4514-4522`),
+which is explicitly a manual stub: its own error message reads *"browser.act is unsupported on
+Linux: only the driving flag is implemented"* when the `driving` param is absent. There is no ACP
+protocol type or dispatch for a real browser action anywhere — `rust/crates/tiller_acp/src/*.rs`
+has zero references to "browser" at all. So the render wiring (pill on/off) is fully proven, but
+the thing that's supposed to *trigger* it — an agent actually driving the browser via ACP — has no
+implementation to trigger from, matching the row's own "half-proven" verdict precisely.
+
+**Approach**: this needs a real ACP-side browser action: a tool-call/action type in `tiller_acp`
+that an agent session can invoke, dispatch from the ACP event loop into the relevant
+`BrowserSurface` (calling `set_agent_driving(true)` for the duration of the action and `false`
+after), separate from the manual `browser.act` control-socket stub which can stay for direct
+testing. This is a new protocol capability spanning the ACP crate, the dispatch in `main.rs`, and
+using the browser setter that already exists — genuinely more than a wiring fix.
+
+- **files**: `rust/crates/tiller_acp/src/*.rs` (new browser-action type/dispatch — none exists today), `rust/crates/tiller/src/main.rs` (route the real ACP action to `set_agent_driving`, near `handle_browser_action`, `:4469`), `rust/crates/tiller_ui/src/browser.rs` (setter already exists, `:905`)
+- **size**: L
+
+---
+
+## `F-BRW-07` — half-proven
+
+**Needs: exercise.** The persisted-reload half the manifest cites is real and independently
+re-confirmed (seeded origin, fresh process, Permissions section shows it on first render via
+`load_browser_origin_grants()`/`with_browser_origins`, `main.rs:8161`/`:8234`). The owed half
+("trigger access, confirm no new prompt") cannot currently be exercised for a reason outside this
+row: it depends on `F-BRW-06` (not in this triage group), which the ledger already grades
+**UNREACHABLE** — `BrowserSurface::request_permission` (`browser.rs:588`, `:880`) and the
+doorhanger render (`browser.rs:1242`-ish) are complete, but the only caller anywhere in `rust/` is
+a unit test; nothing in `main.rs` calls `request_permission` from a real navigation or ACP action.
+Without a production trigger for the prompt in the first place, there is no live "no new prompt"
+gesture to drive.
+
+**Approach**: no code to write for this row itself. It is blocked on `F-BRW-06`'s seam closing
+first (giving `request_permission` a real production caller — presumably on navigating to a new
+origin not yet granted, or on an ACP browser action targeting a new origin, which would also feed
+`F-BRW-05`'s agent-driving trigger above). Once that lands, re-drive: navigate to the
+already-granted seeded origin and confirm no doorhanger appears, matching the row's remaining
+clause.
+
+- **files**: none (exercise only, blocked)
+- **blockedBy**: `F-BRW-06` (`request_permission` has zero production callers — ledger: UNREACHABLE)
+- **size**: S once unblocked
+
+---
+
+## `F-BRW-08` — half-proven
+
+**Needs: exercise.** "Revoke all" is real, wired production code, not a stub — confirmed reading
+`settings.rs`: the button (`settings.rs:3038-3056`) is gated `when(!origins.is_empty())`, calls
+`revoke_all_browser_origins(cx)` (`settings.rs:1016`), which clears the local `BTreeSet` and
+invokes the `on_revoke_all_browser_origins` callback; that callback is wired in `main.rs:8253-8255`
+to `session_store.revoke_all_browser_origins()`, the same persistence layer the single-origin
+Revoke path (already proven per the manifest) uses. Only the single-origin path has been clicked
+live so far.
+
+**Approach**: seed two or more distinct origins into the DB (not one, so the "all" behavior is
+distinguishable from the single-origin path already proven), open Settings → Permissions, click
+"Revoke all," and confirm both the card flips to "No browser origins have been granted" and a
+direct DB re-query shows zero rows.
+
+- **files**: none (exercise only)
+- **size**: S
+
+---
+
+## `F-BRW-09` — FAILED — defective
+
+**Needs: build.** Confirmed exactly as the manifest states, with the precise mechanism. Chat
+transcript rendering branches by author: `Entry::User(text)` (`chat.rs:3606-3628`) renders via
+`Self::render_plain_text` (`:3620`) — no link parsing at all; only `Entry::Assistant { text,
+document }` (`chat.rs:3629-3677`) renders via `Self::render_markdown` (`:3677`), which is the only
+path that ever populates a `links` list. Both places that *do* handle a parsed link click —
+`TranscriptSelectableText`'s mouse-up handler (`chat.rs:777`) and the plain `InteractiveText::
+on_click` path used when there's no selection interaction (`chat.rs:3324-3329`) — call
+`cx.open_url(target)` **unconditionally**, with no modifier check and no internal-tab routing
+anywhere in the file. This is the reverse of the row's spec (`01-inventory-app.md:127`): "click an
+HTTP link in chat, confirm an internal browser tab opens, then use the documented modifier gesture
+to open the system browser" — today every link, in every message type that has links at all, opens
+externally and unconditionally; user messages don't even get link parsing to click on in the first
+place.
+
+`docs/linux-rewrite/SEAMS.md`'s "P82 platform ruling" already establishes this project's
+convention for a modifier-bypass gesture on Linux: the terminal link router uses GPUI's `platform`
+modifier (Super key) as the Linux equivalent of the Swift original's Cmd, with no separate Control
+fallback. The same convention should apply here for consistency.
+
+**Approach**: (1) make `Entry::User` render through `render_markdown` (or otherwise run the same
+link-extraction pass `render_markdown` uses) so user messages get clickable links too. (2) Change
+both click sites so a plain click emits a new event (mirroring the existing `ChatEvent::OpenFile`
+pattern, `chat.rs:536`/`:3500`/`:6515`) asking the host to open/focus an internal browser tab at
+that URL, and only fall through to `cx.open_url(target)` (system browser) when the platform
+modifier is held at click time — the reverse of today's unconditional default.
+
+- **files**: `rust/crates/tiller_ui/src/chat.rs` (`render_entry`/`Entry::User` branch, `:3606-3628`; both click handlers, `:755-785`, `:3300-3330`; new `ChatEvent` variant near `:536`), `rust/crates/tiller/src/main.rs` (handle the new event and route to `add_browser_tab`/existing browser surface, alongside the existing `ChatEvent::OpenFile` handler near `:6515`)
+- **size**: M
+
+---
+
+## Cross-row notes
+
+- **F-CHG-01/02 share a root cause worth naming even though only one is a build**: the project's
+  pivot from "Changes as a right-panel toggle" to "Changes as a first-class tab" (P21, documented
+  and deliberate) left `right_panel.rs` and `changes.rs` as two independently-worktree-bound
+  surfaces with no shared "is a worktree currently selected" signal. F-CHG-02's fix (propagate a
+  no-worktree state into both) is the concrete piece of that; F-CHG-01 is the row whose own spec
+  assumes the pre-pivot single-panel model and should be re-worded rather than built.
+- **F-CHG-03/05 share a root cause**: both rows' live-drive evidence was gathered against the
+  Files tab's happy/simple path only (an already-cached local refresh; arrow keys and Space on a
+  file, never Enter) while the actual code — including named tests written specifically for
+  each row — implements the fuller spec correctly. Both are flagged `reclassify` for the same
+  reason: incomplete gesture coverage, not absent code. If a build fleet re-drives both and finds
+  a genuine defect, it would likely show up in the same file (`right_panel.rs`) and be worth
+  fixing together.
+- **F-BRW-01 is the single highest-value browser row to fix first**: every other browser
+  interaction row (`F-BRW-02` through `F-BRW-09`) is only exercisable once the native child is
+  correctly positioned inside its pane — a mis-sized/mis-positioned webview makes click-position
+  math for **F-BRW-03** (which already does its own independent hit-testing in GPUI coordinates,
+  so it's not directly affected) less trustworthy to verify visually, and makes every other
+  browser screenshot-based proof (F-BRW-02, 04, 05, 07, 08) harder to read cleanly. Fix `F-BRW-01`
+  before re-driving the others that depend on visual confirmation.
+- **`rust/crates/tiller/src/main.rs` is touched by five of these eight `F-BRW`/`F-CHG` build
+  rows** (`F-CHG-02`, `F-CHG-13`, `F-BRW-04`, `F-BRW-05`, `F-BRW-09`) — consistent with the
+  manifest's own note that this file is the fleet's bottleneck. None of the five edits overlap in
+  the same function, but all land in the same file and should be sequenced, not parallelized
+  blindly, if dispatched to different builders.
+
