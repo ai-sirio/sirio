@@ -84,7 +84,7 @@ than the row it would close.
 | Pane | Piece | Territory |
 |---|---|---|
 | `sonnet` (w1:p5) | `P109` — the 34 gestures `P106` could not reach; **holds the `:1` drive lock** | critic, drives only |
-| `codex11` (w1:p2) | `P117` — **a completed chat turn draws nothing**; done `P114` | `chat.rs`, `composer.rs` |
+| ~~`codex11` (w1:p2)~~ | **OUT OF CREDIT until 2026-08-20 08:19.** `P117` is unowned and unstarted | — |
 | `codex12` (w1:p3) | `P118` — project-icon + `notification.create` clusters; done `P110` | `sidebar.rs`, notification handler in `main.rs` |
 | `fable` (w1:pD) | `P111` — settings + adapter absent rows, two of which may be `N/A — platform` | `settings.rs`, `status_bar.rs`, `tiller_agents`, `tiller_usage` |
 | `pi` (w1:p4) | `P119` — what survives a restart; done `P112`, `P116` Slice C | diagnosis only, no `rust/` |
@@ -397,6 +397,27 @@ about 150 px**, cutting its `Untracked` header mid-row. Whether that is one root
 first question `P117` must answer. Full evidence, with capture paths, is in
 `CRITIC-visual-baseline.md` under the 17:40 heading.
 
+
+### 18:10 — the roster lost a pane, and one assumption needs retesting
+
+**`codex11` hit its account usage limit and is gone until 2026-08-20 08:19.** It committed nothing
+broken — `HEAD` was clean and it never modified `chat.rs` — but it also never got past planning.
+`P117`, the empty-transcript fix and the highest-value item on the board, is **unowned and
+effectively unstarted**. Its plan survives at `docs/superpowers/plans/2026-08-14-p117-transcript.md`
+with every box unchecked; the proposed test name
+`drawn_chat_transcript_gets_the_full_center_surface_height` was a hypothesis, not a diagnosis.
+Reassign `P117` to the next pane that frees, and treat that plan as a starting point, not a finding.
+
+`codex12` shares that account and is still running, so it may stop the same way without warning.
+**A codex pane can die mid-edit**; when one goes quiet, check `git status` before assuming its work
+landed.
+
+**Assumption to retest: agents may not all be text-only.** `codex12`'s transcript contains
+`• Viewed Image └ reference/linux-progress/p118-reset2-retry2/04-reset-settled.png`. If codex panes
+really can see captures, they can close visual rows themselves and the orchestrator stops being the
+only visual gate — which would change how every visual row is assigned. `CRITIC-visual-baseline.md`
+currently asserts the opposite. **Do not act on this until it is tested against a capture whose
+content is already known** — ask for text that is provably in the frame and check the answer.
 
 ## HISTORICAL — 2026-08-13's display crisis (superseded 2026-08-14)
 
