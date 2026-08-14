@@ -329,9 +329,13 @@ make our code wrong in order to make a bad build run.
 published `bin` is actually JavaScript. It was deliberately left alone rather than downgrading a
 global npm package unattended.
 
-## The critic pane is out until ~2026-08-24 — the rule is *not the builder*, not *pireview*
+## The critic pane came back on a different model — the rule is *not the builder*, not *pireview*
 
-`pireview` (`w1:p6`, deepseek-v4-pro on Opencode Go) refuses every dispatch as of 2026-08-14:
+**Resolved 2026-08-14 (afternoon):** `pireview` (`w1:p6`) now runs `glm-5.3` on Zai and accepts
+dispatches normally. The block below is kept because the *failure shape* recurs, not because the
+pane is still down.
+
+Earlier that day, on deepseek-v4-pro/Opencode Go, it refused every dispatch:
 
 ```
 Error: 429: {"type":"GoUsageLimitError","message":"Monthly usage limit reached. Resets in 10 days…"}
@@ -340,9 +344,6 @@ Error: 429: {"type":"GoUsageLimitError","message":"Monthly usage limit reached. 
 It accepted the text and failed at the model call, so **a dispatch to it looks delivered and simply
 never runs.** Read the pane back after dispatching, or you will believe a critic is working when
 none is.
-
-**Only the user can lift this** — it needs balance-based usage enabled on the Opencode workspace.
-Do not try to work around it by switching that pane's model.
 
 **What this changes.** "The critic runs on `pireview`" was never the real constraint; it was where
 the role happened to live. The real invariant is:
@@ -356,3 +357,56 @@ fresh, still exercises live, and still may not accept a green test as `PASSED`.
 
 `P101` is the first brief affected — it critiques `codex11`'s `P95`, so it may go to anyone
 **except `codex11`**.
+
+## Two herdr gestures that report success and do nothing
+
+Both were found on 2026-08-14 by reading the pane back. Neither errors; the only tell is that
+`herdr agent list` still says `agent_status: idle` after you were sure you had sent something.
+
+- **Submitting a dispatch to a codex pane.** After `herdr pane send-text`, `herdr pane send-keys
+  <pane> enter` inserts a **newline into the composer** instead of submitting, and the pane stays
+  `idle` however many times you press it. Use **`herdr pane run <pane> "<text>"`** — it sends text
+  and Enter in one call, and it is the gesture that actually submits. Make it the default dispatch
+  verb for every pane, not just codex.
+- **Cycling a Claude Code pane out of `⏸ manual mode`.** `herdr pane send-keys <pane> shift+tab`
+  is accepted — no `invalid_key` error — and is inert. `S-tab`, `btab` and `shift-tab` are
+  rejected outright. What works is sending the raw backtab escape as text:
+
+  ```bash
+  herdr pane send-text <pane> "$(printf '\033[Z')"     # → ⏵⏵ accept edits on
+  ```
+
+  Generalise it: for any TUI chord herdr does not model, send the raw terminal escape as text.
+
+**Counting keypresses is not evidence.** Confirm every dispatch with `herdr agent list` and require
+`working` before you believe the pane received it.
+
+### `/clear` queues behind an in-flight turn
+
+A Claude Code pane that is mid-turn takes `/clear` as a **queued message** — the footer says
+"Press up to edit queued messages" and the context gauge does not move. Send `esc` to interrupt
+first, then clear, then confirm the gauge reads `0/1.0M`. A pane you believe is fresh and is
+actually carrying 227k of a previous task is a critic that is no longer independent.
+
+## Approval gates: the shape they take, and what may be cleared without the user
+
+Both agent CLIs gate constantly, and each gate stops the pane dead. The prompts differ:
+
+- **codex** — `› 1. Yes, proceed (y) / 2. Yes, and don't ask again for these files (a) / 3. No`.
+  Option 2 is usually the right one: it clears the whole piece rather than the next line of it.
+- **Claude Code** — `❯ 1. Yes / 2. Yes, allow reading from <dir> from this project / 3. No`.
+  Option 2 is durable across the session; option 1 gates again immediately. A pane whose cwd is
+  outside the worktree gates on **every** `cd … && git …`, so take the broadening option the first
+  time it is offered.
+
+`scratchpad/gatekeeper.py` polls `herdr agent list`, and for a blocked pane parses the options and
+clears it **only** when every segment of the proposed command matches an allowlist (`git
+status/log/diff/add/commit`, `cargo check/test/build/fmt/clippy`, read-only shell, `grim`,
+`swaymsg`, `dbus-monitor`) and nothing matches the denylist (`rm -rf`, `sudo`, `git push`,
+`git reset --hard`, `git clean`, `--force`, `curl`, `wget`, `ssh`, package installs, `gh pr/issue`).
+Anything else it logs as `REFUSED` and leaves blocked for a human. **Default is refuse** — the
+allowlist is the exception, not the filter.
+
+The standing instruction is that recommended actions are taken while the user is asleep. That
+covers reversible work inside a version-controlled worktree. It does not cover anything that
+leaves the machine or destroys history, and those stay blocked no matter how long a pane waits.
