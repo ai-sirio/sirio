@@ -643,6 +643,7 @@ struct AppControlHandler {
     control_actions: Arc<Mutex<Vec<ControlAction>>>,
     panes: Arc<PaneRegistry>,
     notifications: Arc<Mutex<Vec<ControlNotification>>>,
+    notification_poster: Arc<dyn Fn(&NotificationPayload) + Send + Sync>,
     session_refs: Arc<Mutex<BTreeMap<String, String>>>,
     session_store: Option<SessionStore>,
     socket_info: ControlSocketInfo,
@@ -691,6 +692,7 @@ impl AppControlHandler {
             control_actions,
             panes,
             notifications,
+            notification_poster: Arc::new(post_desktop_notification),
             session_refs,
             session_store,
             socket_info,
@@ -702,6 +704,15 @@ impl AppControlHandler {
 
     fn success(id: &str, pairs: impl IntoIterator<Item = (String, String)>) -> ControlResponse {
         ControlResponse::success(id, pairs.into_iter().collect())
+    }
+
+    #[cfg(test)]
+    fn with_notification_poster(
+        mut self,
+        poster: impl Fn(&NotificationPayload) + Send + Sync + 'static,
+    ) -> Self {
+        self.notification_poster = Arc::new(poster);
+        self
     }
 
     fn pane_error(request: &ControlRequest, error: PaneError) -> ControlResponse {
@@ -725,6 +736,13 @@ impl AppControlHandler {
             date,
             title: title.to_string(),
             subtitle: request.params.get("subtitle").cloned().unwrap_or_default(),
+            body: body.to_string(),
+        });
+        drop(notifications);
+        (self.notification_poster)(&NotificationPayload {
+            pane_id: String::new(),
+            worktree_id: String::new(),
+            title: title.to_string(),
             body: body.to_string(),
         });
         Self::success(&request.id, [])
@@ -2556,6 +2574,7 @@ impl TillerWorkspace {
         worktree_label: String,
         terminal_breadcrumb: String,
         launch_snapshot: RestoredSession,
+        activity: AgentActivityModel,
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
@@ -2846,7 +2865,7 @@ impl TillerWorkspace {
             palette_selected: 0,
             palette_focus: cx.focus_handle(),
             palette_previous_focus: None,
-            activity: AgentActivityModel::new(),
+            activity,
             restored_scrollback_scheduled: false,
             browser_origins,
             show_settings: false,
@@ -3924,6 +3943,7 @@ impl TillerWorkspace {
                 &self.working_directory,
                 self.next_tab_id,
                 self.next_pane_id,
+                &mut self.activity,
                 window,
                 cx,
             );
@@ -7462,6 +7482,16 @@ fn replay_pane_events<T>(
     tree
 }
 
+fn register_restored_agent(
+    activity: &mut AgentActivityModel,
+    root_pane_id: usize,
+    agent_id: Option<&str>,
+) {
+    if let Some(agent_id) = agent_id {
+        activity.register_agent_id(&format!("pane-{root_pane_id}"), agent_id);
+    }
+}
+
 /// Rebuilds the shell's tabs from a restored session: chat tabs get a fresh
 /// `Chat` entity (identity, not transcript), terminal tabs get a fresh
 /// terminal in the restored worktree directory, and persisted pane events
@@ -7470,6 +7500,7 @@ fn restore_tabs(
     restored: &RestoredSession,
     working_directory: &std::path::Path,
     mut window: Option<&mut Window>,
+    activity: &mut AgentActivityModel,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
     let mut tabs = Vec::new();
@@ -7492,6 +7523,7 @@ fn restore_tabs(
                 tab.agent_id.clone(),
             )
         };
+        register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
                 Chat::launch_with_command(
@@ -7591,6 +7623,7 @@ fn restore_tabs_in_workspace(
     working_directory: &std::path::Path,
     tab_id_start: usize,
     pane_id_start: usize,
+    activity: &mut AgentActivityModel,
     window: &mut Window,
     cx: &mut Context<TillerWorkspace>,
 ) -> (Vec<OpenTab>, usize) {
@@ -7616,6 +7649,7 @@ fn restore_tabs_in_workspace(
                 tab.agent_id.clone(),
             )
         };
+        register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
                 Chat::launch_with_command(
@@ -8062,8 +8096,14 @@ fn main() {
                 ..Default::default()
             },
             move |window, cx| {
-                let (tabs, active_tab) =
-                    restore_tabs(&restored, &working_directory, Some(window), cx);
+                let mut activity_model = AgentActivityModel::new();
+                let (tabs, active_tab) = restore_tabs(
+                    &restored,
+                    &working_directory,
+                    Some(window),
+                    &mut activity_model,
+                    cx,
+                );
                 let activity = tabs
                     .iter()
                     .map(|tab| {
@@ -8167,6 +8207,7 @@ fn main() {
                         activity_label.clone(),
                         terminal_breadcrumb.clone(),
                         restored.clone(),
+                        activity_model,
                         cx,
                     )
                 });
@@ -8537,6 +8578,7 @@ mod tests {
                 tab_states: Vec::new(),
                 diagnostics: Vec::new(),
             },
+            AgentActivityModel::new(),
             cx,
         )
     }
@@ -8624,6 +8666,7 @@ mod tests {
                 tab_states: Vec::new(),
                 diagnostics: Vec::new(),
             },
+            AgentActivityModel::new(),
             cx,
         )
     }
@@ -10630,6 +10673,42 @@ mod tests {
     }
 
     #[test]
+    fn control_notification_create_posts_exact_title_and_body() {
+        let captured = Arc::new(Mutex::new(Vec::<NotificationPayload>::new()));
+        let capture = captured.clone();
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-test-control.sock")),
+        )
+        .with_notification_poster(move |payload| {
+            capture.lock().expect("capture lock").push(payload.clone());
+        });
+        let response = handler.handle(&ControlRequest {
+            id: "notification-create".into(),
+            method: "notification.create".into(),
+            params: BTreeMap::from([
+                ("title".into(), "Build finished".into()),
+                ("body".into(), "The Linux build is ready.".into()),
+            ]),
+        });
+
+        assert!(response.ok, "notification.create failed: {:?}", response.error);
+        let posted = captured.lock().expect("capture lock");
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].title, "Build finished");
+        assert_eq!(posted[0].body, "The Linux build is ready.");
+    }
+
+    #[test]
     fn session_ref_handler_write_is_visible_after_store_reopen() {
         let database = std::env::temp_dir().join(format!(
             "tiller-control-session-ref-{}.sqlite",
@@ -11324,7 +11403,16 @@ mod tests {
             diagnostics: vec![],
         };
 
-        let (tabs, active) = cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
+        let mut activity = AgentActivityModel::new();
+        let (tabs, active) = cx.update(|cx| {
+            restore_tabs(
+                &restored,
+                &working_directory,
+                None,
+                &mut activity,
+                cx,
+            )
+        });
 
         assert_eq!(
             tabs.len(),
@@ -11358,6 +11446,42 @@ mod tests {
         assert_eq!(live, 0);
         // (Rendering the failed pane headlessly is covered by the terminal
         // crate's own gpui test: `failed_pane_renders_and_retry_recovers`.)
+    }
+
+    #[gpui::test]
+    async fn restore_tabs_registers_restored_agent_identity(cx: &mut TestAppContext) {
+        let working_directory = std::env::temp_dir();
+        let restored = session::RestoredSession {
+            working_directory: working_directory.clone(),
+            tabs: vec![session::SessionTab {
+                id: "restored-codex".into(),
+                title: "Codex".into(),
+                kind: "terminal".into(),
+                agent_id: Some("codex".into()),
+                active: true,
+            }],
+            tab_states: vec![session::SessionTabState::with_root(7)],
+            diagnostics: Vec::new(),
+        };
+        let mut activity = AgentActivityModel::new();
+
+        let (tabs, _) = cx.update(|cx| {
+            restore_tabs(
+                &restored,
+                &working_directory,
+                None,
+                &mut activity,
+                cx,
+            )
+        });
+
+        assert_eq!(tabs[0].agent_id.as_deref(), Some("codex"));
+        assert_eq!(activity.agent_id("pane-7"), Some("codex"));
+        assert_eq!(
+            activity.status("pane-7"),
+            None,
+            "restore registers identity without claiming running"
+        );
     }
 
     #[gpui::test]
@@ -11403,8 +11527,16 @@ mod tests {
                 .flatten()
                 .expect("workspace root")
         });
-        let (tabs, active) =
-            cx.update(|_, cx| restore_tabs(&restored, &working_directory, None, cx));
+        let mut activity = AgentActivityModel::new();
+        let (tabs, active) = cx.update(|_, cx| {
+            restore_tabs(
+                &restored,
+                &working_directory,
+                None,
+                &mut activity,
+                cx,
+            )
+        });
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs = tabs;
             workspace.active_tab = active;
@@ -11566,7 +11698,16 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let (mut tabs, _) = cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
+        let mut activity = AgentActivityModel::new();
+        let (mut tabs, _) = cx.update(|cx| {
+            restore_tabs(
+                &restored,
+                &working_directory,
+                None,
+                &mut activity,
+                cx,
+            )
+        });
         let terminal = cx.update(|cx| {
             cx.new(|cx| {
                 TerminalView::with_shell(
@@ -11621,7 +11762,16 @@ mod tests {
             diagnostics: vec![],
         };
 
-        let (tabs, active) = cx.update(|cx| restore_tabs(&restored, &working_directory, None, cx));
+        let mut activity = AgentActivityModel::new();
+        let (tabs, active) = cx.update(|cx| {
+            restore_tabs(
+                &restored,
+                &working_directory,
+                None,
+                &mut activity,
+                cx,
+            )
+        });
 
         assert_eq!(active, 0, "the restored Changes tab is active");
         assert_eq!(tabs.len(), 1, "the shell retains the Changes tab");
