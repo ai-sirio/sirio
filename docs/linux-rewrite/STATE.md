@@ -79,33 +79,36 @@ each cost someone a false result.
 behind one agent. That is why `P112` — can the Wayland lane be given synthetic input — is worth more
 than the row it would close.
 
-## Who owns what right now (18:20)
+## Who owns what right now (18:40)
 
-**The OpenAI account is exhausted, and it backed four of the seven panes.** Not a rate limit that
-clears in minutes — `codex11` was told **2026-08-20 08:19**. Every `openai-codex` model in the
-picker draws on it, so switching models within that provider buys nothing.
+**The OpenAI account went out at ~18:15 and took four panes with it** — `codex11`, `codex12`, `pi`
+and `pireview` all returned `Codex error: The usage limit has been reached`. Not a rate limit that
+clears in minutes; `codex11` was told **2026-08-20 08:19**, and every `openai-codex` model in the
+picker draws on the same account, so switching models *within* that provider buys nothing.
 
-| Pane | Piece | Territory |
-|---|---|---|
-| `sonnet` (w1:p5) | `P109` — the 34 gestures `P106` could not reach; **holds the `:1` drive lock** | critic, drives only |
-| `fable` (w1:pD) | `P111` — settings + adapter absent rows, two of which may be `N/A — platform` | `settings.rs`, `status_bar.rs`, `tiller_agents`, `tiller_usage` |
-| ~~`codex11` (w1:p2)~~ | **OUT OF CREDIT.** Never started `P117` | — |
-| ~~`codex12` (w1:p3)~~ | **OUT OF CREDIT.** Delivered `P118`; done `P110` | `sidebar.rs`, notification handler in `main.rs` |
-| ~~`pi` (w1:p4)~~ | **OUT OF CREDIT** — died on the `P117` dispatch, 18:18. Delivered `P119`; done `P112`, `P116` Slice C | — |
-| `pireview` (w1:p6) | `P116` Slice A non-chat 10 rows; done `P113`, `P115`. **Same account — expect it to stop mid-turn** | critic; **sole owner of `INVENTORY-LEDGER.md`** |
+**The user then rebuilt the roster on Anthropic.** `pi` (w1:p4) and `codex12` (w1:p3) are now
+**Claude Code panes running Sonnet 5**, 1M context, thinking high, auto mode. The names are
+unchanged; the engines behind them are not. `pireview` (w1:p6) is **gone from `herdr agent list`**.
 
-Only `sonnet` and `fable` are durable, and both are mid-task. **`P117` and `P120` are unowned with
-nobody to give them to**, so the orchestrator is diagnosing `P117` directly; whoever fixes it,
-someone else judges it.
+| Pane | Engine | Piece | Territory |
+|---|---|---|---|
+| `sonnet` (w1:p5) | Claude | `P109` — the 34 gestures `P106` could not reach; **holds the `:1` drive lock** | critic, drives only |
+| `fable` (w1:pD) | Claude | `P111` — settings + adapter absent rows | `settings.rs`, `status_bar.rs`, `tiller_agents`, `tiller_usage` |
+| `pi` (w1:p4) | **Sonnet 5** | `P121` — independently verify the `P117` fix. Delivered `P119`; done `P112`, `P116` Slice C | drives + `reference/linux-progress/p121/` |
+| `codex12` (w1:p3) | **Sonnet 5** | `P120` — the ~21 re-slotted rows, four instruments. Delivered `P118`; done `P110` | no `rust/` |
+| ~~`codex11` (w1:p2)~~ | — | **OUT OF CREDIT.** Never started `P117` | — |
+| ~~`pireview` (w1:p6)~~ | — | **GONE.** Delivered `P113`, `P115`, `P116` Slice A | was sole owner of `INVENTORY-LEDGER.md` |
 
-### What was tried, so nobody retries it
+**The ledger has no owner.** `pireview` held that exclusively and is gone, so verdicts for `P118`,
+`P119`, `P120` and `P121` are queued with nobody to set them. Reassigning it needs a pane that
+built none of the work it is judging.
 
-`pi` (w1:p4) still holds `gpt-5.6-terra high` and a fresh `/new` context — the reset did **not**
-downgrade it this time, and the picker was closed with `escape` without selecting. Filtering that
-picker for `claude` returns **no matches**: no Anthropic provider is configured there. The only
-non-exhausted models it offers are `opencode-go` (`minimax-m3`, `qwen3.7-max`, `qwen3.7-plus`),
-which is a poor match for a subtle GPUI layout defect. Left as-is so it resumes when the limit
-clears.
+### What was tried on the dead panes, so nobody retries it
+
+Filtering `pi`'s old `/model` picker for `claude` returned **no matches** — no Anthropic provider
+was configured there, and its only non-exhausted options were `opencode-go` (`minimax-m3`,
+`qwen3.7-max`, `qwen3.7-plus`), a poor match for a subtle GPUI layout defect. That is moot now that
+the pane is a Claude Code pane, but it is why the swap was needed rather than a model change.
 
 Answer any rate-limit or `/model` menu with `send-keys down`/`enter` and read the cursor back — a
 typed digit confirms the highlighted default instead, which is how `codex11` got silently moved to
