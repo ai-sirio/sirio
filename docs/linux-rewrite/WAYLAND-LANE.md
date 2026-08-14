@@ -286,3 +286,36 @@ Launched under `sway` 1.10-headless with `WLR_RENDERER=pixman`; the app created 
 `project.add` over the control socket then appeared in the sidebar after a forced repaint —
 `tiller`, `rust/gpui-rewrite` badged `Primary`, `linux/gpui-waku` with its `Chat` and `Terminal`
 tabs, and `New Worktree…`.
+
+## A text-only agent can assert on a frame it cannot see — added 2026-08-14 18:10
+
+You cannot look at a capture. You **can** measure one, and for the commonest rendering defect in
+this project — a region that draws nothing — the measurement is decisive.
+
+```bash
+convert <png> -crop <W>x<H>+<X>+<Y> +repage -colorspace Gray \
+        -format "%[fx:standard_deviation*255] %[fx:mean*255]" info:-
+```
+
+**Standard deviation is zero if and only if every pixel in that rectangle is identical.** A drawn
+row, any glyph, any divider makes it non-zero. This is how the clipped Changes list was confirmed:
+the region below the list measured `0.00` at two resolutions after a 12-second settle, while the
+Files panel over the identical rows measured `22.0`.
+
+Three rules make it evidence rather than a number:
+
+1. **Always measure a positive control** — the same size region, same rows, somewhere content is
+   known to be drawn. Without it, `stddev 0` could equally mean your crop coordinates were wrong or
+   you photographed the wrong window. A live control proves the detector is awake.
+2. **It proves absence far better than presence.** `stddev 0` is near-conclusive that *nothing* is
+   drawn. A non-zero result proves only that *something* is drawn — never that the **right** thing
+   is drawn. Never close a row on "the region is non-empty"; that is the same inference that
+   produced this project's false `PASSED`s.
+3. **Settle first, and check two resolutions.** `shot` alternates the output size to force a
+   repaint, so a single capture can catch a mid-relayout frame. A defect that reproduces at both
+   sizes after a settle is not an artifact.
+
+`convert` and `identify` are installed; Python has **no** `PIL` and no `numpy` on this machine.
+
+Use this to check your own work before asking for a visual acceptance pass — it turns a
+frame you cannot read into a claim you can defend.
