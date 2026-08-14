@@ -127,3 +127,25 @@ is reserved and out of scope per the brief).
   02-typed-check2.png, crop-field.png, crop-field2.png, crop-field3.png, 02-sanity2.png
   (positive control — Filter field accepts the same click+type), 02-clone-form.png,
   02-url-typed.png, 02-url-typed2.png, crop-url2.png, 02-cancel-check.png, 02-cancel-retry.png
+
+## `F-PRJ-07` — ledger line 100, currently half-proven
+
+- **Triage says:** exercise (edit the URL to a local git repo path after the proven
+  invalid-URL failure, click the relabeled Retry button, confirm Failed→Running→Complete)
+
+Same Clone-repository popover as the F-PRJ-06/09 investigation above, hit immediately: opened
+the form fresh, clicked the Repository URL field, typed an invalid URL, clicked "Clone
+repository" — the field is still showing the placeholder and the status still reads "Ready to
+clone" (`02-f07-invalid-submit.png`), i.e. this drive could not even reach the invalid-URL
+failure state the ledger already has proof of, let alone the untried correct-URL retry, because
+text does not land in this field on this lane (same defect as documented for F-PRJ-06/09 —
+same anchored-popover class of surface, same control (a Cancel-button click test) already ruled
+out timing as the cause).
+
+- **Claim:** could-not-reach
+- **Drove:** open Clone repository → click URL field → type an invalid URL → click "Clone
+  repository"
+- **Observed:** no state change at all — field still shows the placeholder, status line still
+  "Ready to clone". Not a defect in the retry path itself; it is the same input-delivery gap on
+  this lane's floating popovers already isolated above.
+- **Captures:** 02-f07-invalid-submit.png
