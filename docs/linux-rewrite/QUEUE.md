@@ -2010,3 +2010,46 @@ queue. Briefed as `P88`.
 defect is real but has never yet destroyed anyone's data. That empty table is also independent
 corroboration that those five rows' "DB half unproven" verdicts were right all along. The ledger was
 not wrong here; it simply did not know *why*.
+
+## The seventh mechanism: a channel that reports success for work it never does — 2026-08-14, 07:10
+
+The eight browser-excused `N/A — platform` rows are judged, and taking them turned up a failure mode
+the catalogue did not have.
+
+All ten `browser.*` control methods are advertised in `system.capabilities`. Eight of them, called
+live over the socket, answered `{"ok":true,"result":{"method":...,"queued":"true"}}`.
+`browser.screenshot` with an explicit `path` returned that success and wrote no file; `browser.eval`
+with a script returned success and no value. Seven are literally `let _ = surface.state();`
+(`main.rs:4638-4643`), and the reply is sent **before the action runs** (`:1683-1700`).
+
+**Why this deserves its own entry.** The six mechanisms so far are all about a feature being *dead*
+— unwired, half-dispatched, stubbed, refused, discarded, or resting on an expired premise. A caller
+who exercises a dead feature finds out. This one is different: the feature is dead **and the channel
+reports success**, so exercising it teaches you nothing. Every other mechanism is caught by trying
+the feature; this one survives being tried.
+
+**It is a regression in honesty that looks like progress.** Pass 6 recorded these as "documented
+unsupported responses, all 10 methods exercised" — accurate when written. The code then gained a
+partial implementation that answers success, so the surface became *less* truthful while looking
+more finished. Anyone reading the diff saw handlers appear.
+
+**What it implies for this ledger.** A `PASSED` earned by "I called it and got a success" is worth
+much less than one earned by observing the *effect*. Wherever a verdict rests on a control-socket
+response rather than on the change that response claims, it needs re-checking:
+
+```bash
+grep -n "socket\|tillerctl\|control" docs/linux-rewrite/INVENTORY-LEDGER.md | grep "| PASSED |"
+```
+
+**The cheap consequence.** `F-AUTO-09`'s clause accepts either browser results **or explicit
+unsupported errors**. Linux returns neither. Simply making the unimplemented methods fail honestly
+closes that row — the only row in the queue that is closed by removing a claim rather than adding an
+implementation. Briefed as `P90`.
+
+**And a note against myself.** I hit the side effect at `main.rs:4614-4619` — any non-`open` browser
+method *creates* a browser tab when none exists — by probing a socket while a critic was mid-run,
+and opened a browser tab in that agent's app. I checked `panel.list` for an existing browser surface
+first, but on a *different* instance than the one my poller later caught. **Checking the state of a
+shared resource is not the same as checking it atomically with the action**, and read-only intent
+does not survive contact with a handler that mutates on a missing precondition. Told the affected
+agent immediately rather than hoping the frame was unaffected.
