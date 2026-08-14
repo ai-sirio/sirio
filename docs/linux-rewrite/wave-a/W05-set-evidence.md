@@ -36,3 +36,30 @@ live.
 `05-tall-typed3.png`, `06-after-save.png`.
 
 ---
+
+## `F-SET-13` — ledger line 301, currently **FAILED — absent**
+
+**Approach taken:** same commit (7ae343d) built the Ollama Cloud provider card, cookie UI, bar
+segment and fetcher per triage; re-drove live with the same corrected click→type→click gesture
+used for F-SET-12 (coordinates recomputed from a fresh crop of the Ollama Cloud card since its
+"Session cookie" field sits ~250px further down the page than OpenCode Go's).
+
+**Observed:**
+- `08-ollama-before.png` — Ollama Cloud card renders in full: Status "Not signed in", Show in
+  usage bar OFF, Refresh interval, Session cookie field with placeholder, Save/Clear, caption
+  text naming ollama.com's DevTools → Network → Cookie header — same pattern as OpenCode Go, a
+  real card not a stub.
+- `11-ollama-typed2.png` — click on the field at its real coordinates (650,1510) focused it
+  (orange ring) and typing `OLLAMATESTCOOKIE` produced masked dots.
+- `12-ollama-after-save2.png` — clicked Save (1220,1510): field cleared back to placeholder, and
+  Status flipped from "Not signed in" to green "Signed in" (`12-status-crop.png`) — a real write
+  through the same `CredentialStore`/`OllamaCloudUsageFetcher::COOKIE_KEY` path, driven by the
+  same real click+type+click gesture a user would use.
+
+**Claim:** exercised-working. Same shape and same real end-to-end result as F-SET-12.
+
+**Captures:** `reference/linux-progress/wavea-W05-set/08-ollama-before.png`,
+`09-ollama-typed.png` (first, mis-targeted attempt — kept as a negative control showing the field
+still empty when the click misses),`11-ollama-typed2.png`, `12-ollama-after-save2.png`.
+
+---
