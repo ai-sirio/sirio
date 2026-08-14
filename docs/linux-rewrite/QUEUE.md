@@ -1870,3 +1870,46 @@ which is exactly how twelve rows were once queued behind a false platform claim.
 denominator stays 389 and no row was invented for it. But `F-EDIT-02`, `F-EDIT-04` and `F-EDIT-06`
 all now read PASSED on the strength of gestures that route *around* the missing path, and a reader
 could reasonably conclude the editor is finished. It is not.
+
+---
+
+## `FAILED — absent` is the least trustworthy verdict in the ledger — 2026-08-14, 05:20
+
+Three independent audits have now hit the same thing, and it is time to state it as a rule rather
+than rediscover it a fourth time.
+
+- `codex11`'s P81 audit: **nine** `F-EDIT` rows stale.
+- The orchestrator's live editor drive, tonight: `F-EDIT-06` ("no save path") and `F-EDIT-11` ("no
+  copy-path code") were **flatly wrong** — both features work, exercised live. `F-EDIT-05`'s model
+  exists too; only its banner is missing.
+- A five-minute `grep` of `chat.rs` this hour: `F-CHAT-24/25/26/27`, all "absent" since pass 8, are
+  **all present**, several with tests named after the row —
+  `a_plan_renders_approval_attaches_and_the_plan_advances`,
+  `a_question_whose_turn_ends_unanswered_expires_instead_of_waiting`. `PlanApproval` even carries the
+  comment `(F-CHAT-24)`.
+
+**Why it happens.** `FAILED — absent` is written once, early, by whoever could not find the feature —
+and then nothing ever re-examines it. A builder later implements it under a different pass number,
+the ledger is never revisited, and the row stays "absent" forever. Every other verdict gets
+challenged; this one is self-sealing.
+
+**Why it is the expensive one.** A stale `PASSED` costs a false sense of progress. A stale
+`FAILED — absent` **sends a builder to rebuild a feature that already works** — burning a pass,
+and risking a second, worse implementation landing beside the first. It is the only verdict whose
+staleness actively destroys value.
+
+**The method, and it takes minutes per cluster.** Before believing any `FAILED — absent`:
+
+```bash
+grep -n '<the row's own vocabulary>' crates/<owning-crate>/src/<owning-file>.rs
+```
+
+Search the row's *own words* — "question", "expired", "plan", "copy path" — in the file whose owner
+the row belongs to. Then check for a test named after the behaviour. Both take one command.
+
+**What it does and does not license.** Finding the code moves a row off `FAILED — absent` — it does
+**not** move it to `PASSED`. Code plus a green test is `NOT EXERCISED`; only a critic who has driven
+the feature live may write `PASSED`. Tonight's correction moved four rows out of "absent" and
+`PASSED` stayed at 203, which is the point: this is a correction of fact, not a promotion.
+
+**118 rows still carry this verdict.** On tonight's hit rate a meaningful fraction are wrong.

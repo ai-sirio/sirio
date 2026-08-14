@@ -170,10 +170,10 @@ touched the entry — those rows do **not** count toward done.
 | `F-CHAT-21` | FAILED — absent | no Thinking expand/collapse | pass 8 |
 | `F-CHAT-22` | FAILED — absent | no grouped-steps expansion | pass 8 |
 | `F-CHAT-23` | FAILED — absent | pass 12: `Entry::ToolCall` carries {id,title,status} only (chat.rs:72-76); render is a static title+status row (chat.rs:1861-1875) with no click handler, no expand, no output/diff/location links, no Dismiss; the pass-1 Pending→Completed evidence is true and proves a different claim | pass 12 |
-| `F-CHAT-24` | FAILED — absent | generic Permission card only; named Plan card absent | pass 8 |
-| `F-CHAT-25` | FAILED — absent | no text-answer/cancel on questions | pass 8 |
-| `F-CHAT-26` | FAILED — absent | no pending-question bar | pass 8 |
-| `F-CHAT-27` | FAILED — absent | no expired-question state | pass 8 |
+| `F-CHAT-24` | NOT EXERCISED | **the pass-8 "absent" was wrong.** `PlanApproval` in `chat.rs` is commented `(F-CHAT-24)` and carries `request_id`/`options`/`resolved`/`expired`; `PlanEntryRow` holds each plan row; test `a_plan_renders_approval_attaches_and_the_plan_advances` (`chat.rs:4719`) is named for it. Code exists and is tested — **no critic has exercised it live**, so it is not PASSED | orchestrator audit, 2026-08-14 |
+| `F-CHAT-25` | NOT EXERCISED | **the pass-8 "absent" was wrong.** `AnswerTextInput` (placeholder + prefill), `actions!(chat_question_answer, [SendAnswer, CancelAnswer])`, `answer_question_text` (`chat.rs:1381`), `cancel_question` (`:1412`), `render_question_answer_row` (`:1853`), test `cancel_on_a_question_closes_it_without_an_answer` (`:4551`). Both the text answer and the cancel exist — **unexercised live** | orchestrator audit, 2026-08-14 |
+| `F-CHAT-26` | NOT EXERCISED | **the pass-8 "absent" was wrong.** `pending_question()` at `chat.rs:1490` returns the pending entry and its prompt. Exists — **unexercised live** | orchestrator audit, 2026-08-14 |
+| `F-CHAT-27` | NOT EXERCISED | **the pass-8 "absent" was wrong.** `PlanApproval.expired` plus test `a_question_whose_turn_ends_unanswered_expires_instead_of_waiting` (`chat.rs:4625`) — the state exists and the turn-end transition is tested. **Unexercised live** | orchestrator audit, 2026-08-14 |
 | `F-CHAT-28` | FAILED — absent | no subagent task cards | pass 8 |
 | `F-CHAT-29` | NOT EXERCISED | copy code exists (chat.rs), unexercised | pass 8 |
 | `F-CHAT-30` | NOT EXERCISED | code-block copy never exercised | never claimed |
