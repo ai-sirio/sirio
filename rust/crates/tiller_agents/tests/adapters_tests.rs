@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use tiller_agents::{
-    ALL, AgentAdapter, ClaudeCodeAdapter, CodexAdapter, OhMyPiAdapter, OpenCodeAdapter, PiAdapter,
-    discover_availability, find_executable_in_path, json_string_literal, shell_quote,
+    ALL, AgentAdapter, AgentAvailability, ClaudeCodeAdapter, CodexAdapter, DiscoveryError,
+    OhMyPiAdapter, OpenCodeAdapter, PiAdapter, discover_availability, find_executable_in_path,
+    find_executable_in_path_checked, json_string_literal, shell_quote,
+    try_discover_availability_in,
 };
 
 const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
@@ -170,6 +172,115 @@ fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
         Some(executable)
     );
     assert_eq!(find_executable_in_path("missing-agent", &path), None);
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+/// F-SET-17: discovery must be able to say "I could not check" instead of
+/// collapsing a probe failure into "Not found on PATH". The checked lookup
+/// still lets a hit later in PATH win over an earlier unreadable directory
+/// — the error is only surfaced when it makes the absence claim unsafe.
+#[cfg(unix)]
+#[test]
+fn checked_lookup_prefers_a_found_binary_over_an_earlier_probe_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "tiller-agent-checked-path-{}",
+        std::process::id()
+    ));
+    let locked = root.join("locked");
+    let good = root.join("good");
+    std::fs::create_dir_all(&locked).expect("create locked dir");
+    std::fs::create_dir_all(&good).expect("create good dir");
+    let executable = good.join("demo-agent");
+    std::fs::write(&executable, b"not launched").expect("write fixture");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        .expect("make fixture executable");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("lock the directory");
+
+    let search = std::env::join_paths([&locked, &good]).expect("join paths");
+
+    // Found later in PATH → the earlier unreadable directory is irrelevant.
+    let found = find_executable_in_path_checked("demo-agent", &search)
+        .expect("a real hit later in PATH must win over an earlier probe error");
+    assert_eq!(found, Some(executable));
+
+    // Absent everywhere, with a probe error on the way → claiming absence
+    // would be a guess, so the lookup says what it could not check.
+    let error = find_executable_in_path_checked("missing-agent", &search)
+        .expect_err("an unreadable PATH directory makes absence unknowable");
+    match &error {
+        DiscoveryError::Probe {
+            program, source, ..
+        } => {
+            assert_eq!(program, "missing-agent");
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+        other => panic!("unexpected discovery error variant: {other:?}"),
+    }
+    let message = error.to_string();
+    assert!(
+        message.contains("missing-agent") && message.contains("locked"),
+        "the error names the program and the unprobeable path: {message}"
+    );
+
+    // The legacy infallible lookup keeps its collapsed behavior for callers
+    // that have not opted into the distinction.
+    assert_eq!(find_executable_in_path("missing-agent", &search), None);
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("unlock for cleanup");
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+/// F-SET-17: the sweep-level entry points. A PATH made entirely of an
+/// unreadable directory fails the sweep; a PATH holding all five
+/// distribution binaries resolves every adapter (including omp's
+/// `oh-my-pi` executable name); recovery after the permission is fixed is
+/// the "observe the next result" half of the clause.
+#[cfg(unix)]
+#[test]
+fn try_discover_fails_on_unsafe_absence_and_recovers_when_the_cause_is_fixed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!(
+        "tiller-agent-try-discover-{}",
+        std::process::id()
+    ));
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("create bin dir");
+    for name in ["claude", "codex", "opencode", "pi", "oh-my-pi"] {
+        let file = bin.join(name);
+        std::fs::write(&file, b"not launched").expect("write fixture");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+    }
+    let search = std::ffi::OsString::from(bin.as_os_str());
+
+    let discovered =
+        try_discover_availability_in(&search).expect("a readable PATH discovers cleanly");
+    assert_eq!(discovered.len(), 5);
+    assert!(
+        discovered.iter().all(AgentAvailability::is_available),
+        "all five distribution binaries resolve"
+    );
+
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000))
+        .expect("lock the directory");
+    let error = try_discover_availability_in(&search)
+        .expect_err("an unprobeable PATH fails the sweep instead of claiming absence");
+    assert!(
+        error.to_string().contains("could not probe"),
+        "the sweep error is renderable: {error}"
+    );
+
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+        .expect("unlock the directory");
+    let recovered = try_discover_availability_in(&search)
+        .expect("fixing the cause makes the next refresh succeed");
+    assert!(recovered.iter().all(AgentAvailability::is_available));
+
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 

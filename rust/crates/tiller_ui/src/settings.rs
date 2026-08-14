@@ -8,7 +8,7 @@ use gpui::{
 };
 use std::rc::Rc;
 use std::{collections::BTreeSet, path::PathBuf, process::Command};
-use tiller_agents::{AgentAvailability, discover_availability};
+use tiller_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
 use tiller_project::SkillInstallCommand;
 use tiller_theme::{Theme, ThemeMode};
 use tiller_usage::{
@@ -684,6 +684,11 @@ pub struct Settings {
     /// Discovery results for every supported agent CLI, from the crate that
     /// owns the catalog. The Agents screen renders only this data.
     provider_availability: Vec<AgentAvailability>,
+    /// Renderable failure of the last availability sweep (F-SET-17). `None`
+    /// after a successful sweep. While set, the Agents screen shows the
+    /// message above the last successful rows — never five false "Not found
+    /// on PATH" claims — and the screen's "↻ Refresh" button is the retry.
+    agent_registry_error: Option<String>,
     /// Account state for the three AI Provider cards, derived from local
     /// credential files at construction — never a mock default.
     provider_accounts: ProviderAccountStates,
@@ -771,6 +776,13 @@ impl Settings {
     /// Creates the settings model from the host's durable snapshot.
     pub fn with_snapshot(cx: &mut Context<Self>, initial: SettingsSnapshot) -> Self {
         Self::bind_keys(cx);
+        // A sweep that cannot answer (F-SET-17) starts the surface with the
+        // error banner and no rows, rather than claiming every agent is
+        // absent.
+        let (provider_availability, agent_registry_error) = match try_discover_availability() {
+            Ok(rows) => (rows, None),
+            Err(error) => (Vec::new(), Some(Self::registry_error_message(&error))),
+        };
         Self {
             category: SettingsCategory::Appearance,
             on_back: None,
@@ -787,7 +799,8 @@ impl Settings {
             control_socket_enabled: initial.control_socket_enabled,
             // The Agents screen reports what discovery finds on this
             // machine — never a fixed list of "Available" claims.
-            provider_availability: discover_availability(),
+            provider_availability,
+            agent_registry_error,
             // The provider cards report what local credential state exists
             // on this machine — never a fixed list of "Active" claims.
             provider_accounts: ProviderAccountStates::discovered(),
@@ -1195,10 +1208,34 @@ impl Settings {
     /// Re-runs agent discovery for the Agents screen's "↻ Refresh" button
     /// (F-SET-16), the same re-read-from-disk meaning "Refresh now" already
     /// has on the AI Providers screen: an agent installed or removed since
-    /// launch shows up without a relaunch.
+    /// launch shows up without a relaunch. This button doubles as the
+    /// registry error state's retry (F-SET-17).
     fn refresh_agent_availability(&mut self, cx: &mut Context<Self>) {
-        self.provider_availability = discover_availability();
+        self.apply_agent_discovery(try_discover_availability());
         cx.notify();
+    }
+
+    /// The registry failure message, shaped like the Swift original's
+    /// `AcpAgentCenter.registryError`.
+    fn registry_error_message(error: &DiscoveryError) -> String {
+        format!("Could not load the agent registry: {error}")
+    }
+
+    /// Applies one discovery sweep's outcome (F-SET-17): success replaces
+    /// the rows and clears the banner; failure keeps the previous rows on
+    /// screen — the last good list stays visible under the error, exactly
+    /// as the Swift registry keeps its rows from the last successful fetch
+    /// — and records the renderable message.
+    fn apply_agent_discovery(&mut self, outcome: Result<Vec<AgentAvailability>, DiscoveryError>) {
+        match outcome {
+            Ok(rows) => {
+                self.provider_availability = rows;
+                self.agent_registry_error = None;
+            }
+            Err(error) => {
+                self.agent_registry_error = Some(Self::registry_error_message(&error));
+            }
+        }
     }
 
     /// Raw-keystroke handling for the Agents screen's search field
@@ -1903,7 +1940,7 @@ impl Settings {
         let search_key_entity = entity.clone();
         let refresh_entity = entity;
 
-        div()
+        let mut surface = div()
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
             .pb(px(DETAIL_BOTTOM_PADDING))
@@ -1965,8 +2002,28 @@ impl Settings {
                                 .update(cx, |this, cx| this.refresh_agent_availability(cx));
                         },
                     )),
-            )
-            .child(agent_rows)
+            );
+        // F-SET-17: the registry error state, rendered over the rows from
+        // the last successful sweep, with the "↻ Refresh" button above as
+        // the retry — the Swift original's warning label in
+        // `AgentsSettingsView`.
+        if let Some(error) = self.agent_registry_error.clone() {
+            surface = surface.child(
+                div()
+                    .id("settings-agents-registry-error")
+                    .debug_selector(|| "settings-agents-registry-error".to_string())
+                    .w_full()
+                    .mb(px(14.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.tab_needs_input)
+                    .child(text!("⚠"))
+                    .child(text!(error)),
+            );
+        }
+        surface.child(agent_rows)
     }
 
     /// The summarizer agent trigger (F-SET-05): a button showing the
@@ -3014,9 +3071,118 @@ mod tests {
         });
         assert_eq!(
             rendered,
-            discover_availability(),
+            try_discover_availability().expect("this machine's PATH discovers cleanly"),
             "Refresh replaces the pinned fixture with a fresh discovery read"
         );
+    }
+
+    /// F-SET-17: a failed discovery sweep renders the registry error banner
+    /// over the rows from the last successful sweep — never five false
+    /// "Not found on PATH" claims and never a blanked list — and the next
+    /// successful sweep clears the banner and replaces the rows. The retry
+    /// gesture itself is the Agents screen's existing "↻ Refresh" button,
+    /// whose wiring `refresh_agents_re_runs_agent_discovery` already pins.
+    #[gpui::test]
+    async fn registry_error_renders_over_stale_rows_and_clears_on_recovery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let fixture = vec![AgentAvailability {
+            id: "claude",
+            display_name: "Claude Code",
+            executable: Some(PathBuf::from("/opt/homebrew/bin/claude")),
+        }];
+        let stale = fixture.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-registry-error").is_none(),
+            "no banner renders while the sweep has not failed"
+        );
+
+        // A sweep that cannot answer.
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |this, cx| {
+                this.apply_agent_discovery(Err(DiscoveryError::Probe {
+                    program: "claude".to_string(),
+                    path: PathBuf::from("/locked/claude"),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "permission denied",
+                    ),
+                }));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-registry-error").is_some(),
+            "the failed sweep renders the registry error banner"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-row-0").is_some(),
+            "the rows from the last successful sweep stay on screen"
+        );
+        let (rendered, message) = cx.update(|window, cx| {
+            let settings = window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx);
+            (
+                settings.provider_availability.clone(),
+                settings.agent_registry_error.clone(),
+            )
+        });
+        assert_eq!(rendered, stale, "a failed sweep never rewrites the rows");
+        let message = message.expect("the failure is recorded renderably");
+        assert!(
+            message.starts_with("Could not load the agent registry:"),
+            "the message keeps the Swift registry's shape: {message}"
+        );
+
+        // The next successful sweep replaces the rows and clears the banner.
+        let recovered = vec![AgentAvailability {
+            id: "codex",
+            display_name: "Codex",
+            executable: None,
+        }];
+        let applied = recovered.clone();
+        cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            settings.update(cx, |this, cx| {
+                this.apply_agent_discovery(Ok(applied));
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agents-registry-error").is_none(),
+            "a successful sweep clears the banner"
+        );
+        let rendered = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .provider_availability
+                .clone()
+        });
+        assert_eq!(rendered, recovered, "recovery replaces the stale rows");
     }
 
     #[gpui::test]
