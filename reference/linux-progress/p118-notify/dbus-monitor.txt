@@ -1,0 +1,23 @@
+signal time=1786722731.628649 sender=org.freedesktop.DBus -> destination=:1.2015 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
+   string ":1.2015"
+signal time=1786722731.628675 sender=org.freedesktop.DBus -> destination=:1.2015 serial=4294967295 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameLost
+   string ":1.2015"
+method call time=1786722732.336375 sender=:1.2016 -> destination=:1.60 serial=9 path=/org/freedesktop/Notifications; interface=org.freedesktop.Notifications; member=Notify
+   string "Tiller"
+   uint32 0
+   string ""
+   string "P118 DBus proof"
+   string "notification.create delivery"
+   array [
+   ]
+   array [
+      dict entry(
+         string "urgency"
+         variant             byte 1
+      )
+      dict entry(
+         string "sender-pid"
+         variant             int64 2421532
+      )
+   ]
+   int32 -1
