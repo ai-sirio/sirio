@@ -296,14 +296,60 @@ produced this very evidence table is proof the socket survived. Full transcript 
 `reference/linux-progress/p120/logs/set01-malformed-values-resolved.txt`,
 `1786727180429745461-set01-settings-appearance.png`.
 
+## Instrument 4b — a real multi-worktree session, killed and relaunched twice
+
+Grep confirms `AgentSessionRestorePlan`, `BootstrapRestoreOrder`, and `WorktreeMountPolicy` — the
+three pure policy structs behind ACT-24/25/26 — have zero references anywhere outside
+`tiller_activity` itself; nothing in `tiller`/`tiller_ui` calls any of them. So I drove the only
+thing that can exercise their absence: a real multi-worktree launch, killed and relaunched from
+cold, twice, watching what the app does instead. Added two real scratch git worktrees via
+`ctl workspace.create` (not the "New Worktree..." button — see F-GIT-RUN-02 above), for 4 total
+mounted worktrees including the one with the live `pane-3` Claude Code agent from the ACT-19/20
+drive. Killed the real `tiller` process and relaunched it against the same on-disk DB/socket and the
+same already-running compositor, twice in a row. Full transcript and reasoning:
+`reference/linux-progress/p120/logs/act24-25-26-multi-worktree-restart.txt`.
+
+### F-CORE-ACT-24
+
+Directly observed, twice, reproducibly: the "Claude Code" pane/tab shell for `pane-3` reappears
+after every cold restart, and a real new agent process is spawned to back it each time — but with a
+**different random `--session-id`** on each restart (`e8e3cb45-...` after restart #1,
+`d5cdcc17-...` after restart #2), no `--resume`/`--continue` flag present either time. This is live
+confirmation of the ledger's claim: the app recreates the pane shell from persisted, raw pane-keyed
+state without ever going through `AgentSessionRestorePlan`'s resumable/prunable distinction — there
+is no case where an old session is either cleanly resumed (same session-id survives) or
+explicitly recognized-and-pruned; it just always spawns a fresh session unconditionally.
+
+### F-CORE-ACT-25
+
+Partially reachable from this instrument. I confirmed a real, reproducible restore-selection
+finding: a runtime `ctl workspace.select` change does not survive a restart — the persisted DB
+selection (`linux/gpui-waku`) won both times, not the worktree I had just selected
+(`p120-act-scratch-2`) moments before killing the process. All 4 worktrees also appeared fully
+mounted within ~3-4s of each relaunch, with no observable staged/deferred loading in a
+`workspace.list` snapshot. I could not, from a single post-restart snapshot, distinguish "no
+priority/deferred split exists in practice" from "the split exists but resolves faster than I
+sampled" — that would need a sub-second `workspace.list` poll loop starting at process spawn, which
+I did not build this pass. I lean toward this row being effectively confirmed in practice, but flag
+the instrument's resolution limit honestly rather than claim a clean disproof.
+
+### F-CORE-ACT-26
+
+Directly observed, twice: 4 mounted worktrees survive two consecutive full process restarts with
+zero evictions, regardless of which one was selected or had a live agent. Confirms no
+cap-enforcement mechanism is currently live in the running app to observe protecting anything
+against — matching the ledger's "no mount eviction consumes it" verbatim.
+
+Cleanup: both scratch worktrees closed via `ctl workspace.close`, then fully removed from the real
+shared repo (`git worktree remove --force` × 2, `git branch -D` × 2, verified via `git worktree
+list` showing only the two pre-existing worktrees afterward) — no debris left in shared git state.
+
 ## Remaining rows — not yet driven this pass
 
 The following rows from the assigned 21 have not been driven yet in this pass and are **not being
 reported as `UNREACHABLE`** — they simply have not been attempted:
 
-`F-CORE-ACT-24`, `F-CORE-ACT-25`, `F-CORE-ACT-26` (instrument: multi-worktree Wayland session +
-restart, watching for observable bootstrap-order/mount-eviction effects), `F-CORE-USG-05`,
-`F-CORE-USG-06`, `F-CORE-USG-07` (instrument: Codex token-refresh path — needs a safe way to force a
-refresh/failure scenario without mutating real credentials).
+`F-CORE-USG-05`, `F-CORE-USG-06`, `F-CORE-USG-07` (instrument: Codex token-refresh path — needs a
+safe way to force a refresh/failure scenario without mutating real credentials).
 
 This report will be updated in place as the remaining rows are driven.
