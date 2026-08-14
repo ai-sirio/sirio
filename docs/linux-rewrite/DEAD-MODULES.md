@@ -45,11 +45,11 @@ Runtime ~24 s; the fn tier is byte-identical in behaviour.
 | 1 | tiller_activity/mount.rs (`ids_to_evict`) | F-SET-07 / ACT-26, recorded ↑ |
 | 1 | tiller_agents/hook_migrator.rs | F-AGENT-SAFE-02 (disclosed) |
 | 1 | tiller_markdown/editing.rs (`wrap_selection`, `prefix_selected_lines`) | **dead twin #2**: the live ops are tiller_ui editor's `MarkdownFormatOp`; delete-or-unify, do not cite against F-EDIT |
-| 1 | tiller_markdown/file_events.rs (`FileSystemEventMonitor::poll`) | follow-external-edits watcher, zero consumers; adjacent to F-CHAT-14 "Follow Edited Files" claim — **no row owns the seam** |
+| 1 | tiller_markdown/file_events.rs (`FileSystemEventMonitor::poll`) | follow-external-edits watcher, zero consumers; adjacent to F-CHAT-14 "Follow Edited Files" claim — ~~**no row owns the seam**~~ **CORRECTED 2026-08-14 (see the block at the end of this file): `F-CORE-FILE-06` owns it by name** — its clause requires "auto-reloads external changes… external deletion/rename is surfaced" and its PLATFORM note says *"Linux needs inotify/fanotify or equivalent"*. The row is `FAILED — absent` and its evidence already reads "FileSystemEventMonitor (inotify) has zero callers outside its crate". The *chat* consumer you meant was genuinely unowned, and is now `F-CHAT-14 | FAILED — defective` |
 | 1 | tiller_project/file_link.rs (`resolve_file_link`) | the original hand-found cluster, now derived mechanically — the tier's known-answer test |
 | 1 | tiller_project/settings.rs (`with_environment_override`) | `TILLER_SOCKET_ENABLE` inert — **queued for codex12, not duplicated here** |
 | 1 | tiller_project/skill.rs (`agent_skill_install_command`) | **contradicts the ledger**: F-SET-09 and F-AGENT-SAFE-01 say "no skill code in the port" — the provisioner command exists here (npx skills add …), tested, zero callers. Graders looked in tiller_agents; it lives in tiller_project. Absent → built-and-unwired. **No row owns this correction.** |
-| 1 | tiller_usage/ollama.rs (`parse_ollama_cloud_usage`) | 5th-provider usage indicator, dead; **no row** (joins status_bar's dead per-provider accessor family) |
+| 1 | tiller_usage/ollama.rs (`parse_ollama_cloud_usage`) | 5th-provider usage indicator, dead; ~~**no row**~~ **CORRECTED 2026-08-14: `F-CORE-USG-03` owns the parser** — its clause is *"Ollama Cloud parsing is explicitly best-effort…"* and its VERIFY is *"Feed representative Ollama Cloud payloads"*. That is a parser-level clause, so its `PASSED` on a unit test is **correct and stands**: being unwired to the status bar does not falsify a claim about what the parser returns. The dead *indicator* is a display concern, not this row's (joins status_bar's dead per-provider accessor family) |
 
 Collapse: 5 of 52 fn-DEAD and 13 of 211 fn-local rows sit inside these 11 files.
 
@@ -129,3 +129,50 @@ regex misses `, Error>`-shaped generic positions, so the weakly-live queue over-
 — by design; it is a reading queue, not a verdict. These rows share the census'
 half-life: four builders are editing; **re-run `--modules` and diff before adjudicating
 any line above.**
+
+---
+
+## Correction — orchestrator, 2026-08-14 12:50: two of the three "no row" labels were wrong
+
+Checked all three against the frozen clause files (`01-inventory-app.md`, `02-inventory-packages.md`),
+not against the ledger's row *titles* — which is where the original check went wrong, since a clause
+can own a module without naming it in the title.
+
+| module | "no row" | outcome |
+|---|---|---|
+| `tiller_markdown/file_events.rs` | ✗ wrong | `F-CORE-FILE-06` owns it, PLATFORM note names inotify |
+| `tiller_usage/ollama.rs` | ✗ wrong | `F-CORE-USG-03` owns the parser — and its `PASSED` is correct |
+| `tiller_agents/transcript.rs` | ✓ **right** | SESSION-02 names `session_sources`, not this pair |
+
+**The one that held is the one that was argued.** The `transcript.rs` entry did not assert "no row";
+it named SESSION-02's actual wording and showed the symbol it points at is a different one. The two
+that failed were labels. That is a usable rule for this document: *a "no row" claim is only as good
+as the clause text quoted next to it.*
+
+### Why this is worth correcting rather than shrugging at
+
+**In this document, "no row" is a deletion licence.** The whole point of `DEAD-MODULES.md` is to
+identify code nothing needs, and the natural next step for an unowned dead module is to delete it.
+`FileSystemEventMonitor` is not unowned — it is the **built half of `F-CORE-FILE-06`**, a row still
+marked `FAILED — absent` precisely because that half was never connected to the editor. Deleting it
+would destroy the only implementation of a feature the inventory still owes, and the ledger would
+not notice: the row is already `FAILED`, so nothing would change colour.
+
+That is the sharpest version of a pattern this project keeps hitting — **a verdict that is already
+negative hides any further damage to the same row.** A `FAILED — absent` row cannot get worse, so
+regressions inside it are invisible.
+
+### The reframing, which is the useful part
+
+None of these modules is an orphan. Each is the unwired half of a row that is already failing:
+
+- `file_events.rs` → `F-CORE-FILE-06` (`FAILED — absent`): watcher built, editor never subscribes.
+- `link_router.rs` → `F-TERM-UI-02` (`FAILED — absent`): router built, `TerminalLinkEvent` has zero
+  subscribers.
+- the accounts parsers → `F-CORE-AUTH-01` (`UNREACHABLE`) and half of `F-PERSIST-DB-06`: parsers
+  built, no caller. `P93` is closing this one.
+
+So the dead-module list and the `FAILED — absent` list are **two views of the same defects** — one
+indexed by code, one by clause. Read together they are a work queue of unusually cheap items: the
+expensive half already exists and what is missing is a subscription, a call site, or a handler.
+Read apart, one looks like garbage to delete and the other like features to build from scratch.

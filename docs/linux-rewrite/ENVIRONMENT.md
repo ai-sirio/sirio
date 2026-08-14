@@ -244,3 +244,23 @@ browser surface is mounted.
 All panes share one cargo target directory, so a `cargo test --workspace` taken while others build
 holds the lock and stalls them. Prefer `-p <crate>` while the roster is busy, and expect an
 occasional wait rather than a hang.
+
+## Working with the orchestrator: never idle on an approval gate
+
+The `superpowers` workflow asks for design approval before implementation, and **the orchestrator
+is the approver on this project** — the user is asleep and has instructed that recommended actions
+be taken without waiting. Post your design, then **keep working on everything that does not depend
+on the answer.**
+
+Two agents lost roughly an hour each this way on 2026-08-14: one stopped on a single
+`system.capabilities` policy question while the whole of its dispatch split, reply channel, error
+type and test rewrite were independent of it; another finished a spec and idled. In both cases the
+pending decision was worth **one constant**.
+
+The habit that fixes it: **structure the work so the undecided part is one line.** Put the disputed
+list in a named constant, the disputed threshold in a `const`, the disputed copy in one string —
+build everything around it, and change that one line when the answer arrives. Then ask, and carry
+on.
+
+Block only when proceeding under either answer would waste the work. That is rare; it is not the
+common case, and it has never yet been the case on this project.
