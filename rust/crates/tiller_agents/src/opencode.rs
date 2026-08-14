@@ -81,4 +81,9 @@ impl super::AgentAdapter for OpenCodeAdapter {
         // the honest answer: a chat tab must not be offered for it.
         None
     }
+
+    fn summarizer_command(&self, prompt: &str) -> Option<String> {
+        // `--pure` suppresses the TUI chrome so stdout is only the answer.
+        Some(format!("opencode run --pure {}", shell_quote(prompt)))
+    }
 }
