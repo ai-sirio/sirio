@@ -1,0 +1,27 @@
+$ git init /tmp/p116-git; git commit seed
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl project add /tmp/p116-git --json
+env: ‘rust/target/debug/tillerctl’: No such file or directory
+[exit=127]
+project=p-bdcd4c1e4b1614f9
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl new-workspace --project p-bdcd4c1e4b1614f9
+env: ‘rust/target/debug/tillerctl’: No such file or directory
+[exit=127]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl list-workspaces --json
+env: ‘rust/target/debug/tillerctl’: No such file or directory
+[exit=127]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl project list --json
+env: ‘rust/target/debug/tillerctl’: No such file or directory
+[exit=127]
+
+$ git -C /tmp/p116-git branch --all
+* master
+
+$ git -C /tmp/p116-git worktree list --porcelain
+worktree /tmp/p116-git
+HEAD 0c82593429b5367255e92cccf0dd9225cd67018b
+branch refs/heads/master
+

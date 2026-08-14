@@ -1,0 +1,27 @@
+worktree=p-c1fd7a5bbfd541af-wt-1
+panel=pane-2204179-1
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2204179-1 --status running
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2204179-1 --status idle
+tillerctl: notify has an unknown status
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2204179-1 --status needs-input
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2204179-1 --status needs_input
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2204179-1 --status working
+tillerctl: notify has an unknown status
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2204179-1 --status stopped
+tillerctl: notify has an unknown status
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel state pane-2204179-1 --json
+[{"exitStatus":"running","scrollback":"","scrollbackBytes":"0","workingDirectory":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux"}]
+[exit=0]

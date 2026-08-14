@@ -1,0 +1,60 @@
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2157148-2 --status working --agent-session p116-agent-ref
+tillerctl: notify has an unknown status
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2157148-2 --status idle --agent-session p116-agent-ref
+tillerctl: notify has an unknown status
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --title 'P116 user notification' --body 'headless control test'
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl list-notifications --json
+[{"body":"headless control test","date":"1786722080","subtitle":"","title":"P116 user notification"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings select appearance
+settings	Appearance
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings read
+settings	Appearance
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl restore-session
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+pane-0	Chat	Chat		false
+pane-1	Terminal	Terminal		false
+pane-2	Changes	Changes		true
+pane-2157148-1	control	sh	sh	false
+pane-2157148-2	control	sh	sh	false
+pane-2157148-3	control	sh (right)	sh	true
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl quit
+[exit=0]
+
+after_quit socket=absent
+restart_pid=2204179
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl ping
+pong
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl current-workspace --json
+[{"branch":"linux/gpui-waku","id":"p-c1fd7a5bbfd541af-wt-1","path":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux","project":"tiller"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings read
+tillerctl: Settings surface is not open
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl list-notifications --json
+[]
+[exit=0]
