@@ -82,8 +82,8 @@ touched the entry — those rows do **not** count toward done.
 | `F-SID-13` | PASSED | drawn test against real git: worktree created | pass 8 |
 | `F-SID-14` | PASSED | pass 12: drawn `right_click_context_menu_dispatches_a_typed_worktree_action` green (sidebar.rs:2125) — right-click draws the menu, New Terminal click emits typed `ContextAction{Worktree, NewTab}`; shell subscribes → `handle_sidebar_context_action` → select worktree if needed → `open_action` (main.rs:2101-2103, 2514-2584); palette route emits the same typed event (main.rs:5086-5094); open_action tab creation proven by F-TAB-03/04/05. Stale FAILED flipped — same defect as a false PASSED with the sign reversed | pass 12 |
 | `F-SID-15` | FAILED — absent | pass 12: the worktree context menu (sidebar.rs:493-553) ends at New Chat — no Remove Worktree item; removal is the hover × → `remove_worktree` with NO confirmation (sidebar.rs:1055-1082, wired :1648); drawn `remove_button_removes_the_worktree` (sidebar.rs:2245) green — proves the × route, not the clause's menu+confirm route | pass 12 |
-| `F-SID-16` | FAILED — absent | drag reorder removed by design; order untouched | pass 8 |
-| `F-SID-17` | FAILED — absent | drag reorder removed by design | pass 8 |
+| `F-SID-16` | FAILED — absent | never built in the Linux rewrite — no row-drag code exists (nothing was removed: the Swift reference ships it at RowReorder.swift:26; "removed by design" was a false evidence string, corrected pass 17 per the handover ruling) | pass 8 |
+| `F-SID-17` | FAILED — absent | never built in the Linux rewrite — no worktree-row drag code exists (the reference ships it at RowReorder.swift:44; evidence string corrected pass 17, verdict unchanged) | pass 8 |
 | `F-SID-18` | FAILED — absent | no "No Terminals" empty state | pass 8 |
 | `F-SID-19` | FAILED — absent | no ⌘T binding | pass 8 |
 
@@ -119,7 +119,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-TAB-03` | PASSED | drawn +-menu dispatches New Terminal; shell creates real tab | pass 8 |
 | `F-TAB-04` | PASSED | drawn +-menu New Terminal action; shell open_action creates tab | pass 8 |
 | `F-TAB-05` | PASSED | menu lists all 5 adapters -> add_agent_tab (pass 8); pass 11 live: a pane launched for a missing CLI reports the launch error in its terminal (opencode: command not found in pane scrollback) | pass 11 |
-| `F-TAB-06` | N/A — platform | no browser; NewBrowser typed no-op | pass 8 |
+| `F-TAB-06` | PASSED | **pass 8 superseded** — the browser exists now. Live: tab-bar `+` -> **New Browser** created a Browser tab with a globe icon in both the tab bar and the sidebar tree, loading `https://example.com/` (`orch21-base.png`, `orch24-restore.png`). The `NewBrowser typed no-op` finding is stale | orchestrator drive, 2026-08-14 |
 | `F-TAB-07` | PASSED | live, pass 14+15: New Chat → picker lists exactly the installed ACP agents (Claude Code, Codex — pi/opencode/omp correctly excluded by `is_available() && acp_program().is_some()`, tab_bar.rs:467; frame pass14/m2-01-picker-open.png); choosing either opens a chat tab, and both tabs completed real agent turns over ACP (codex/claude session JSONL nonces) | pass 15 |
 | `F-TAB-08` | half-proven | live, pass 15: bare PATH launch → the New Chat submenu renders the no-agent fallback (two text lines at the picker position — "Other agents…" + "No supported agent found on PATH" per render_chat_empty, frame pass15/l1-01-picker-bare-path.png); the clause's second half is absent — the fallback carries no click handler, selecting it does NOT open Agents settings | pass 15 |
 | `F-TAB-09` | PASSED | P65: pane context menu has Open File → picker → `add_file_tab` editor; replayed `drawn_tab_context_open_file_uses_the_picker_and_adds_an_editor_tab` (main.rs:7787) | pass 14 |
@@ -131,7 +131,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-TAB-15` | FAILED — absent | ✕-close real (pass 2 display; close_tab_by_id); pass 12: no tab context menu exists — the clause's context-menu Close Tab route is absent; "Close Tab" exists only as a palette entry (drawn palette dispatch closes tabs, main.rs:6313 — a different surface from the clause's) | pass 12 |
 | `F-TAB-16` | FAILED — absent | close_tab has no confirmation and no dirty check | pass 8 |
 | `F-TAB-17` | FAILED — absent | no close-others/right | pass 8 |
-| `F-TAB-18` | FAILED — absent | no tab drag; only pane divider drags | pass 8 |
+| `F-TAB-18` | FAILED — absent | never built in the Linux rewrite — no tab-drag code, only pane divider drags (the reference ships tab reorder at PaneTabStripBar.swift:220; nothing was removed — evidence wording corrected pass 17, verdict unchanged) | pass 8 |
 | `F-TAB-19` | PASSED | ctrl-tab/ctrl-shift-tab bound; handler = live tab.cycle; chord fixture green | pass 8 |
 | `F-TAB-20` | PASSED | ctrl-1..9 bound; handler = live tab.select; chord fixture green | pass 8 |
 | `F-TAB-21` | FAILED — absent | no Tab menu | pass 8 |
@@ -149,9 +149,9 @@ touched the entry — those rows do **not** count toward done.
 |---|---|---|---|
 | `F-CHAT-01` | PASSED | P53 socket door replayed: `chat_door_streams_stops_and_restores_transcript_over_a_real_socket` green (control_integration, 45 green) — ChatSession start/send/readback with incremental ACP output over a real socket; UI wiring exercised live pass 14 (picker → chat → agent reply) | pass 14 |
 | `F-CHAT-02` | FAILED — absent | pass 12: no auth state exists — case-insensitive `auth` over chat.rs matches once, inside a test's fake-agent script (chat.rs:3974); tiller_acp/src has zero matches. What exists is a generic connection-error banner with Retry (`Entry::Error{retryable,kind}`, chat.rs:87-91, `ErrorKind::Connection`); drawn `a_stream_that_dies_mid_reply_states_the_error_and_retry_recovers` (chat.rs:3587) + `failed_launch_can_retry_and_complete` (chat.rs:3941) green — error+Retry, not auth | pass 12 |
-| `F-CHAT-03` | NOT EXERCISED | disconnected-agent state never exercised | never claimed |
+| `F-CHAT-03` | PASSED | exercised live (pass 17, fixture DB): kill -9 of the ACP bridge subtree mid-turn → red error entry with the transport reason JSON (`Incoming transport closed … session/prompt`), composer pill flips to `● offline`, tab ✓→○ (frames p17-aj6, p17-ak1); death→UI transition measured in (2s, 13s] (aj3 fresh at +2s via advancing stream, offline observed at +13s). Clicking **Retry** attempts the restart as the clause asks: banner clears, a NEW `npm exec @agentclientprotocol/claude-agent-acp` subtree appears under the app pid, pill returns to idle (p17-al2, scratch `p17-artifacts/aj-kill.txt`). Caveat beyond the clause: Retry recovers the session but silently DROPS the failed turn — no re-send, idle at +20s (findings log pass 17) | pass 17 |
 | `F-CHAT-04` | PASSED | drawn enter_sends_and_shift_return_inserts_a_newline green: Return sends, Shift+Return inserts a newline and does not send (snapshot 2026-08-13T13:26Z; composer is pi's live file) | pass 11 |
-| `F-CHAT-05` | NOT EXERCISED | composer-disable state never exercised | never claimed |
+| `F-CHAT-05` | half-proven | offline half exercised (pass 17): from `● offline` the exact click+type+Return sequence that sent three earlier messages produces nothing — the composer is effectively inert — but NO placeholder or visual communicates the disabled state (frame p17-ak4); the clause's "corresponding placeholder" does not appear. Permission-wait half unexercised — manual mode never raised a permission prompt in the drives. During a normal turn the composer is NOT disabled: it queues ("Type to queue for the next turn…", F-CHAT-06's behavior, frame p17-aj1) | pass 17 |
 | `F-CHAT-06` | PASSED | drawn tests `enter_during_a_stream_queues_and_the_turn_end_sends_it_exactly_once`, `removing_the_queued_item_means_nothing_sends_when_the_turn_ends`, `stopping_via_click_with_a_queued_item_still_sends_it` all green (tiller_ui suite, 180 green, pass 14) | pass 14 |
 | `F-CHAT-07` | PASSED | drawn tests `stop_click_cancels_the_stream_and_the_transcript_states_it` + `escape_cancels_the_stream_and_the_transcript_states_it` green (tiller_ui suite, pass 14) | pass 14 |
 | `F-CHAT-08` | PASSED | live, pass 15: streaming observed (20 transcript bands 7s after send), the round control at the composer's right accepted a click (9.2k px state change) and the transcript settled (19 bands, stable); the agent was too fast to catch an active-stream cancel live (session JSONL shows the full 200-line reply) — the cancel path rests on drawn `stop_click_cancels_the_stream_and_the_transcript_states_it` + the P53 socket-door stop test (both green) | pass 15 |
@@ -159,14 +159,14 @@ touched the entry — those rows do **not** count toward done.
 | `F-CHAT-10` | PASSED | drawn `at_mention_popup_lists_files_and_inserts_a_file_chip` green (tiller_ui suite, pass 14) | pass 14 |
 | `F-CHAT-11` | PASSED | drawn `attach_control_accepts_one_image_and_rejects_the_rest` green (tiller_ui suite, pass 14) | pass 14 |
 | `F-CHAT-12` | PASSED | chip × removal exercised by the drawn attach test's removal half, green (tiller_ui suite, pass 14) | pass 14 |
-| `F-CHAT-13` | NOT EXERCISED | file drop into chat never exercised | never claimed |
+| `F-CHAT-13` | NOT EXERCISED | instrument-unreachable for this critic (pass 17): xdotool cannot synthesize an XDND drag (no source window to negotiate the protocol), and the alternative "+" attach control opens the Wayland portal picker, which is invisible to X captures (ENVIRONMENT.md) — a human CAN drop a file, so this is not UNREACHABLE, it is unexercisable by the current harness. Needs either a real hand or an XDND-capable driver | pass 17 |
 | `F-CHAT-14` | PASSED | drawn `overflow_menu_toggles_follow_and_resets_to_a_new_conversation` green (tiller_ui suite, pass 14) | pass 14 |
-| `F-CHAT-15` | NOT EXERCISED | permission-mode pill never exercised | never claimed |
+| `F-CHAT-15` | FAILED — defective | the pill DISPLAYS truthfully through every state — `Opus Plan Mode` pre-session, `● Ask ⌄` post-completion, mode/model/effort all correct (pass 17 frames p17-ah3/aj7) — but the chooser NEVER opens: clicks on the pill at idle and at offline, waits of 2s and 4s (menus elsewhere in this app paint ≤2.5s), zero dropdown (p17-am2/an4-modemenu-long/aj7). The clause's action — "choose each available mode" — is impossible; the pill is display-only in practice | pass 17 |
 | `F-CHAT-16` | FAILED — absent | pass 12: no search input, no no-match state, no "Recommended" string in chat.rs/composer.rs (grep, zero hits); drawn `model_picker_selects_an_agent_advertised_model_and_escape_dismisses` (chat.rs:3743) green — proves select+escape only | pass 12 |
 | `F-CHAT-17` | PASSED | drawn `model_picker_offers_effort_levels_and_updates_the_selection` green (tiller_ui suite, pass 14) | pass 14 |
 | `F-CHAT-18` | FAILED — absent | pass 12: popover renders percent-used, used/size tokens, optional Cost line (chat.rs:2388-2438); the clause's input/output/cache breakdown rows have no code; drawn `context_ring_shows_reported_usage_and_escape_dismisses_popover` (chat.rs:3791) green — usage+escape, never the breakdown | pass 12 |
 | `F-CHAT-19` | PASSED | drawn `context_ring_warns_above_eighty_percent` green (tiller_ui suite, pass 14) | pass 14 |
-| `F-CHAT-20` | NOT EXERCISED | tail-follow code exists (chat.rs), unexercised | pass 8 |
+| `F-CHAT-20` | half-proven | follow half proven live (pass 17): during two real streamed replies the viewport stayed pinned to the tail as content grew — frames p17-ai2 (rows 36–60 visible mid-stream) and p17-aj3 (stream advanced to 90, tail still in view). The manual-scroll-ownership half (scroll away mid-stream → follow stops until re-pinned) was not exercised | pass 17 |
 | `F-CHAT-21` | FAILED — absent | no Thinking expand/collapse | pass 8 |
 | `F-CHAT-22` | FAILED — absent | no grouped-steps expansion | pass 8 |
 | `F-CHAT-23` | FAILED — absent | pass 12: `Entry::ToolCall` carries {id,title,status} only (chat.rs:72-76); render is a static title+status row (chat.rs:1861-1875) with no click handler, no expand, no output/diff/location links, no Dismiss; the pass-1 Pending→Completed evidence is true and proves a different claim | pass 12 |
@@ -175,11 +175,11 @@ touched the entry — those rows do **not** count toward done.
 | `F-CHAT-26` | NOT EXERCISED | **the pass-8 "absent" was wrong.** `pending_question()` at `chat.rs:1490` returns the pending entry and its prompt. Exists — **unexercised live** | orchestrator audit, 2026-08-14 |
 | `F-CHAT-27` | NOT EXERCISED | **the pass-8 "absent" was wrong.** `PlanApproval.expired` plus test `a_question_whose_turn_ends_unanswered_expires_instead_of_waiting` (`chat.rs:4625`) — the state exists and the turn-end transition is tested. **Unexercised live** | orchestrator audit, 2026-08-14 |
 | `F-CHAT-28` | FAILED — absent | no subagent task cards | pass 8 |
-| `F-CHAT-29` | NOT EXERCISED | copy code exists (chat.rs), unexercised | pass 8 |
-| `F-CHAT-30` | NOT EXERCISED | code-block copy never exercised | never claimed |
+| `F-CHAT-29` | FAILED — absent | the clause's hover-Copy control on a response does not exist: live hover over an assistant message produced no affordance (p17-an1), and `grep -in copy chat.rs` shows the ONLY copy path is the transcript-wide `CopyTranscript` action — no per-message control anywhere. That chord path is itself live-defective: `ctrl-a` produced no visible selection and `ctrl-c` + paste-check came back empty twice with the composer focused, which binds `ctrl-c`→CopyTranscript (chat.rs:661) — so the transcript is entirely uncopyable on Linux (chords dead in practice, no selection, no controls; findings log pass 17). The pass-8 "copy code exists" referred to CopyTranscript, not this clause's control | pass 17 |
+| `F-CHAT-30` | FAILED — absent | the code block itself renders correctly — `bash` language label, monospace body (p17-am1-codeblock) — but no Copy control exists on it: hover produced nothing (p17-an1-hover), a blind click at the conventional top-right corner + paste-check into the terminal came back empty (p17-an3-pastecheck), and neither chat.rs nor tiller_markdown contains a block-copy control (`grep -i copy` — only the transcript-wide CopyTranscript action and a copied-text model fn, tiller_markdown model.rs:11). Paste-check validity: X clipboard ownership dies with the owning process, so an empty paste inside the same live app instance is conclusive for that run | pass 17 |
 | `F-CHAT-31` | FAILED — absent | no chat diff preview | pass 8 |
 | `F-CHAT-32` | FAILED — absent | no edit summary | pass 8 |
-| `F-CHAT-33` | NOT EXERCISED | turn errors/MCP warnings never exercised | never claimed |
+| `F-CHAT-33` | half-proven | turn-error half proven live (pass 17): killing the ACP subtree mid-stream produced a red error entry carrying the machine reason (`prompt failed: Incoming transport closed: {"reason": "incoming_transport_closed", "method": "session/prompt"}`) with a Retry button; partial streamed output is retained above it; banner position depends on how much streamed before death (top when ≤1.5s, pushed down otherwise — p17-aj6 vs p17-al1). Retry clears the entry (p17-al2). The MCP-configuration-warning half was never triggered; note there is no OK control — dismissal happens only via Retry | pass 17 |
 | `F-CHAT-34` | FAILED — absent | no chat history menu | pass 8 |
 | `F-CHAT-35` | FAILED — absent | no no-past-chats empty state | pass 8 |
 | `F-CHAT-36` | PASSED | drawn `no_models_fallback_shows_a_plain_agent_badge` green (tiller_ui suite, pass 14) | pass 14 |
@@ -234,28 +234,28 @@ touched the entry — those rows do **not** count toward done.
 
 | id | verdict | evidence | judged |
 |---|---|---|---|
-| `F-PER-01` | PASSED | replayed `chat_transcript_survives_process_relaunch_with_tool_and_permission_outcome` (persistence_integration, 34 green) and `chat_door_streams_stops_and_restores_transcript_over_a_real_socket` (control_integration, 45 green) — SQLite transcript migration/save/load + socket readback after relaunch (pass 14) | pass 14 |
+| `F-PER-01` | FAILED — defective | pass 17 overturns the pass-14 PASSED for the clause's **chats** object: after TWO completed real ACP exchanges in the UI chat tab (>20s settle before the kill), `chat_turn` held **0 rows** and `session_ref` **0 rows** (WAL-aware read-only read), and the relaunched app showed an EMPTY transcript (p17-ai0-restored). Debounce loss is ruled out: settings and tab_state written by the same app life survived the same SIGTERM. The pass-14 tests are real but prove the STORE and the SOCKET door — the UI chat path never writes turns or session refs. The other four clause objects stand: projects/worktrees (pass 2), tabs/splits (pass 3/4), terminal scrollback (pass 11 live). Four of five persist; chats do not through the user's path. **Browser tabs join the tabs clause, 2026-08-14:** a Browser tab created in one session was written to `tab` as kind `browser` and came back **live** after quit/relaunch — active tab, `https://example.com/` reloaded, page rendered (`orch24-restore.png`). One earlier unexplained loss (orch21 -> orch22) is logged in `QUEUE.md` | pass 17 + orchestrator drive, 2026-08-14 |
 | `F-PER-02` | PASSED | select-workspace → DB write → relaunch → selection restored | pass 3 |
 | `F-PER-03` | PASSED | 2 splits persist across quit/relaunch (pane-1/2/3 present) | pass 4 |
 | `F-PER-04` | PASSED | pass 11 live end-to-end: terminal output captured into the session DB on quit and replayed on relaunch — the restored pane scrollback showed the previous session's 15:54 prompt inside a 15:56 session; replay test green | pass 11 |
 | `F-PER-05` | PASSED | session.restore restoredCount 2 + worktree re-selected | pass 3 |
 | `F-PER-06` | FAILED — defective | compound-command panes orphan process groups on quit (pass 6); simple panes flush (pass 4) | pass 6 |
 | `F-PER-07` | FAILED — absent | pass 13: project icon/name editing does not exist (F-PRJ-12..16 all absent), so there is nothing to persist; no settings write door exists to exercise a persistence roundtrip. The snapshot-mapping test `persisted_settings_map_to_the_ui_snapshot_and_back` covers mapping, not a quit/relaunch roundtrip | pass 13 |
-| `F-PER-08` | N/A — platform | no browser on Linux | pass 2 |
+| `F-PER-08` | NOT EXERCISED | **pass 2 superseded** — `no browser on Linux` is stale. The v11 `browser_origin_grant` table exists in the live store but holds **0 rows**, and `setting` holds **0 rows**, so neither clause of this row has been exercised. No longer `N/A — platform` | orchestrator drive, 2026-08-14 |
 
 ### Browser (9)
 
 | id | verdict | evidence | judged |
 |---|---|---|---|
-| `F-BRW-01` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-02` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-03` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-04` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-05` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-06` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-07` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-08` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
-| `F-BRW-09` | FAILED — absent | no browser surface; browser.* answers specific unsupported errors (pass 8) | pass 8 |
+| `F-BRW-01` | FAILED — defective | opens and renders live: tab-bar `+` -> **New Browser** creates a Browser tab with a globe icon, GPUI chrome (`<` `>` `reload`, address field, page title, Stop) and a real WebKitGTK child showing `https://example.com/`; an in-page link navigated to iana.org with both the address field and the page title updating (`orch21-base.png`, `orch21-link.png`). **But the page is painted outside its pane**: pixel-scan puts the native child at **729x679 at (331,114)** while the content area is **850x792 at (386,133)** — a uniform **0.8576x** of the correct rect about the window origin (331/386 = 0.8575, 729/850 = 0.8576, 114/133 = 0.8571). It covers 55 px of the sidebar (the `Primary` badge is clipped to `Pri`) and leaves the pane's right and bottom edges unpainted. Identical rect in five shots across three sessions, so it is static, not paint lag. `browser.rs:1176` `prepaint` hands GPUI `Pixels` straight to wry `LogicalPosition`/`LogicalSize` | orchestrator drive, 2026-08-14 |
+| `F-BRW-02` | FAILED — defective | Back did not navigate, and **the code says it should have** — record the contradiction, do not "fix" it blind. Live: after an in-page link navigation to `iana.org/help/example-domains`, clicking `<` left the page *and the address field* unchanged after 4 s (`orch21-back.png`). Two positive controls say the click landed: the button renders its hover background in that same shot (magnified crop; hit rect approx x 400-435, y 87-112, so (417,104) is inside it), and a click on the same chrome row (address field, y=104) took focus. The address field is the tell — `navigate_history` sets `address_draft` on success (`browser.rs:791`), so a working Back would have flipped the field to `example.com` before any repaint; it did not, so `go_back()` returned `None`, i.e. `can_go_back()` was false. Yet static reading makes that impossible: **both** `did_start_navigation` (:374) and `did_finish_navigation` (:382) route through `record_navigation`, and the address bar demonstrably updated, which only those paths do. Suspect the drain, the `enabled` flag plumbed into `browser_button`, or input landing: the misplaced child window (see `F-BRW-01`) covers chrome rows y 114-132, and a native X11 child cannot be z-ordered below the GL surface. Forward, Reload and Stop **not yet exercised** — the second drive died on its 560 s ceiling under build contention | orchestrator drive, 2026-08-14 |
+| `F-BRW-03` | FAILED — defective | Return **does** navigate — the child loaded the submitted URL and the title became `Page not found` (`orch21-address.png`) — but the field can only ever *append*: `ctrl+a` does not select its contents and the caret ignores click position (always end-of-text), so a typed URL is concatenated onto the existing one, producing `https://www.iana.org/help/example-domainshttps://www.iana.org`. Submitting a *replacement* URL is impossible through the UI | orchestrator drive, 2026-08-14 |
+| `F-BRW-04` | NOT EXERCISED | no invalid address and no unreachable host were tried. The one accidental malformed URL (see `F-BRW-03`) surfaced only the **site's own** 404 page plus `Page not found` in the chrome title; no app-level error affordance was observed, but that is not this row's test | orchestrator drive, 2026-08-14 |
+| `F-BRW-05` | NOT EXERCISED | needs an agent driving the browser; no ACP browser action was run against the surface | orchestrator drive, 2026-08-14 |
+| `F-BRW-06` | NOT EXERCISED | **not absent** — `browser.rs` carries `request_permission`, `permission_prompt`, `allow_permission`, `deny_permission` and the doorhanger render at :1083, with a green unit test `permission_doorhanger_resolves_and_persists_by_origin`. Never triggered live, and code plus a green test is `NOT EXERCISED`, never `PASSED` | orchestrator drive, 2026-08-14 |
+| `F-BRW-07` | NOT EXERCISED | the v11 `browser_origin_grant` table exists in the live store (`~/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite`) and holds **0 rows** — nothing has ever granted an origin, so the across-relaunch half has had nothing to persist. Blocked behind `F-BRW-06` | orchestrator drive, 2026-08-14 |
+| `F-BRW-08` | FAILED — absent | `browser.rs` exposes `revoke_origin`, `revoke_all_origins` and `allowed_origins`, but no Permissions section in `settings.rs` lists or revokes grants — the *settings surface* is what is absent, not the API. Both halves now sit with `codex11` (`SEAMS.md`, closed by reassignment); the work remains | orchestrator drive, 2026-08-14 |
+| `F-BRW-09` | NOT EXERCISED | the row is **chat**-link routing plus the modifier bypass to the system browser, not in-page navigation. An in-page link click was exercised (example.com -> iana.org) but does not satisfy it; no HTTP link was clicked in a chat transcript and no modifier bypass was attempted | orchestrator drive, 2026-08-14 |
 
 ### Status bar / usage (6)
 
@@ -304,8 +304,8 @@ touched the entry — those rows do **not** count toward done.
 | `F-SET-16` | FAILED — absent | pass 12: "Search agents" is a static text child in a pill-shaped div, not an input (settings.rs:1183); Refresh's handler is the literal no-op `|_, _, _| {}` (settings.rs:1187-1189); no timestamp exists; drawn `agent_rows_render_what_discovery_found` (settings.rs:1839) green proves rows only — every interactive conjunct is dead chrome (contradicts F-SET-17 FAILED, same absent registry) | pass 12 |
 | `F-SET-17` | FAILED — absent | no agent registry | pass 10 |
 | `F-SET-18` | FAILED — absent | availability badges only; no install/update/retry actions | pass 10 |
-| `F-SET-19` | half-proven | pass 13: mechanism proven by the live-repo drawn test `appearance_controls_drive_theme_translucency_and_font_size` (settings.rs, green) — clicking the Light segment flips snapshot.theme to Light. Pixel half: the Appearance page is photographed (SET-01, theme segment card visible) but no light-theme frame was captured — the display click on the segment would not land (XTEST flake) and the socket has no settings write door | pass 13 |
-| `F-SET-20` | half-proven | pass 13: the same named drawn test proves the translucency toggle and the interface font stepper (+13→14) mutate the surface state. Pixel halves (window material change, text size change) not captured; also a finding: translucency is NOT in the SettingsSnapshot persistence contract (P58 rule) — the toggle's value is dropped on save | pass 13 |
+| `F-SET-19` | half-proven | pass 17 closes the pixel half for Light end-to-end through the user's own path: clicking the Light segment relit the entire surface live (p17-ae1), the DB then held `theme=light`, and a relaunch painted LIGHT at the FIRST frame with the settings page showing Light selected (p17-ag0-startup/ag1). Dark was the ambient state of every earlier frame (default). Still unexercised: choosing System and watching it follow the desktop scheme — flipping the desktop scheme mid-drive is outside the harness. The drawn mechanism test from pass 13 stands underneath | pass 17 |
+| `F-SET-20` | FAILED — defective | pass 17: the translucency conjunct is a dead control, proven three ways — `set_translucency` (settings.rs:871-874) sets the field and `cx.notify()`s but never calls `self.changed()`, unlike EVERY sibling setter; `SettingsSnapshot` (settings.rs:338) has no translucency field, so the value cannot leave the surface; and zero code anywhere consumes the flag (no `background_appearance`/`WindowBackgroundAppearance`/`Blurred` in tiller, tiller_ui or tiller_terminal). Live: toggling repaints only the knob (p17-ae3) and no DB key is ever written. The font halves work: interface stepper 13→14 changed the rendered subtitle live (p17-ae4), both font sizes persisted and survived relaunch (p17-ag1); the terminal-glyph resize itself was not photographed. A clause conjunct that can never be satisfied makes the row defective, not half-proven | pass 17 |
 | `F-SET-21` | FAILED — absent | pass 12: exactly one Files icon choice on Linux — `SEGMENTED_FILE_ICONS=["Material"]` (settings.rs:30), `file_icon_choices()` (settings.rs:161-168); drawn `selecting_the_listed_file_icon_set_changes_the_snapshot` (settings.rs:2109) clicks segment 0 and asserts the only possible value — nothing can change; plus F-CORE-FILE-08: the tree renders only generic File/FolderFill icons | pass 12 |
 | `F-SET-22` | FAILED — absent | pass 13: the Agent Colors section renders five rows with coloured glyphs and display-only `color_swatch` pills (no on_click — no colour choice exists to exercise). Agents page photographed (SET-02) | pass 13 |
 | `F-SET-23` | N/A — platform | TCC permissions | pass 8 |
@@ -324,7 +324,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-TERM-06` | NOT EXERCISED | pass 12: the terminal context menu now exists (drawn test green); CopyPaneId/CopyTerminalId write the real identity strings to the clipboard (lib.rs:737-742) — clipboard content not drawn-tested | pass 12 |
 | `F-TERM-07` | PASSED | agent launch/identity real for installed CLIs (pass 4/6); pass 11 live: choosing a missing CLI still creates the terminal and the pane reports the launch error | pass 11 |
 | `F-TERM-08` | FAILED — defective | process-group leak on close/quit; no confirmation prompt | pass 6 |
-| `F-TERM-09` | half-proven | pass 13: state core re-proven by transcript — `panel state` reports running for a live `sleep 15` pane. Pixel half NOT observed: frames TERM-11/TERM-12 are pixel-identical (AE=0 across the running→finished transition) — no visible indicator change in the tab strip or sidebar across the transition | pass 13 |
+| `F-TERM-09` | FAILED — defective | pass 17, exercised across four live agent launches: indicators EXIST but do not TRACK activity. Observed state catalog — a fresh terminal-agent tab shows a `?` badge while the TUI sits at its prompt (p17-ao1/aq1) and an amber ● appears on the worktree's sidebar row at first agent launch; but during a real working turn (`✳ Orchestrating…` live in the TUI) the tab shows NO working indication (badge simply gone, p17-as2-working), after the turn no idle/done state returns (p17-ar3/as4 — though a 1s turn left `?` frozen in p17-aq2/aq3), and the sidebar ● NEVER clears — it survived the agent's death and even an app relaunch that restored the tab as plain bash (p17-ap0..ap3): stale state with no Linux analogue of the Swift model's processGone clearing. The clause's "confirm the visible status indicator changes" fails in both directions. Plain-shell half: `sleep` panes move nothing (F-TERM-PTY-05, pass 15) — indicators are agent-scoped. Root cause consistent with the hook layer being dead in-product (F-CTRL-CLI-02: every hook fails `tillerctl: not found`) and no title/content/process layer wired to the badges | pass 17 |
 | `F-TERM-10` | PASSED | LIVE pass10: sleep 300 survived select-workspace away+back via socket; scrollback intact | pass 10 |
 | `F-TERM-11` | FAILED — absent | no no-worktree empty state | pass 7 |
 
@@ -335,7 +335,7 @@ touched the entry — those rows do **not** count toward done.
 | id | verdict | evidence | judged |
 |---|---|---|---|
 | `F-CORE-ACT-01` | PASSED | 70 tests green; status.rs 4 states+labels+priority; status_for_panes priority test | pass 10 |
-| `F-CORE-ACT-02` | half-proven | sidebar half live (tab_status reads activity.status; FABLE-04 exoneration stands) and socket notify wired; the model-level transition-driven notification half (build_payload/should_notify) has zero callers — falls with ACT-19/20 | pass 14 |
+| `F-CORE-ACT-02` | half-proven | sidebar half live (tab_status reads activity.status; FABLE-04 exoneration stands) and socket notify wired; the notification half is NO LONGER caller-less — as of 2026-08-14 main.rs:3892/3917 route transitions through should_notify→build_payload→notify-send (ACT-19/20 updated pass 17) — but that delivery has not been observed live, so the half stays unproven rather than absent | pass 17 |
 | `F-CORE-ACT-03` | PASSED | agent_spawned sets running+identity, returns () by construction; test asserts no transition | pass 10 |
 | `F-CORE-ACT-04` | PASSED | from_exit_code 0->done else error; apply_exit_result tests incl untracked/closed->None | pass 10 |
 | `F-CORE-ACT-05` | PASSED | replayed `panes::tests::real_pty_activity_status_follows_osc_title_then_settled_content` — ok (pass 16, full panes:: run: 16 passed 2 failed; this test among the 16) | pass 16 |
@@ -352,8 +352,8 @@ touched the entry — those rows do **not** count toward done.
 | `F-CORE-ACT-16` | PASSED | strip_ansi CSI+OSC(BEL+ST) test; content detector uses stripped text | pass 10 |
 | `F-CORE-ACT-17` | PASSED | status priority tested; identity picks status-priority pane == Swift agentIdForWorktree (clause wording imprecise); zero app callers — package capability proven, wiring owed (`agent_id_for_panes` dead, model.rs:377; DEAD-MODELS FABLE-05, re-swept pass 14) | pass 14 |
 | `F-CORE-ACT-18` | PASSED | running_agent_ids dedup + catalog-order test; zero app callers — package capability proven, wiring owed (model.rs:399; DEAD-MODELS FABLE-05, re-swept pass 14) | pass 14 |
-| `F-CORE-ACT-19` | FAILED — defective | `build_payload` (model.rs:420) has zero out-of-crate callers — nothing is ever emitted; the payload tests are real but built ≠ emitted (FABLE-04 overturn, re-swept pass 14: still dead) | pass 14 |
-| `F-CORE-ACT-20` | FAILED — defective | `should_notify` (notification.rs:19) has zero callers — there is no delivery to compare; the suppression-rule tests prove policy, not delivery (FABLE-04 overturn, re-swept pass 14) | pass 14 |
+| `F-CORE-ACT-19` | NOT EXERCISED | **the pass-14 "zero callers" is stale as of 2026-08-14**: `main.rs:3917` now calls `self.activity.build_payload(…)` inside a real transition-driven chain ending in `Command::new("notify-send")` at main.rs:1732. Wired ≠ delivered: no critic has observed a system notification live (the drives kept the window visible, which the suppression rule gates), so this is a correction of fact, not a promotion — the failed-absent-staleness rule (QUEUE.md 2026-08-14) applied to a defective row | pass 17 |
+| `F-CORE-ACT-20` | NOT EXERCISED | **the pass-14 "zero callers" is stale as of 2026-08-14**: `main.rs:3892` now gates that same chain with `NotificationPolicy::should_notify(transition.old, transition.new, true, visible)`. Delivery through the gate has not been observed live (visible-window suppression during all drives). Moved off FAILED — defective on the code fact; PASSED requires a live notification | pass 17 |
 | `F-CORE-ACT-21` | PASSED | rows test: terminal+chat kept, doc/diff/browser omitted; None->Idle code-verified (test gap: no unrecognized-pane row) | pass 10 |
 | `F-CORE-ACT-22` | PASSED | sorted+urgent_first tests; sort_by_key stable for ties; the `urgent_first` half has zero app callers — package capability proven, wiring owed (sort.rs:20; DEAD-MODELS FABLE-05 partial, re-swept pass 14); the sorted half stays live | pass 14 |
 | `F-CORE-ACT-23` | PASSED | requires_close_confirmation tested for all five states; zero app callers — package capability proven, wiring owed (activity.rs:30; DEAD-MODELS FABLE-05, re-swept pass 14; F-TERM-08 is the consumer-side row) | pass 14 |
@@ -439,7 +439,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-CTRL-WORK-03` | PASSED | non-git project rejected with distinct error | pass 6 |
 | `F-CTRL-WORK-04` | PASSED | select by id and exact path, current, no-selection error | pass 6 |
 | `F-CTRL-WORK-05` | PASSED | replayed `workspace_close_terminates_process_group_when_worktree_is_missing` green (control_integration, pass 14) | pass 14 |
-| `F-CTRL-NOTIFY-03` | half-proven | create/list/clear half live (pass 6); system-posting half absent — zero notify-send/zbus/org.freedesktop.Notifications paths outside tiller_theme's unrelated portal code (pass 14 re-check); the pass-6 'platform N/A' was absorption, Linux has org.freedesktop.Notifications (FABLE-04) | pass 14 |
+| `F-CTRL-NOTIFY-03` | half-proven | create/list/clear half live (pass 6); the system-posting half is no longer absent — as of 2026-08-14 `main.rs:1732` shells out to `notify-send` behind the should_notify gate (pass 17 re-check; the pass-14 "zero notify-send paths" is stale) — but no system notification has been observed live, so the posting half remains unproven | pass 17 |
 | `F-CTRL-SESSION-02` | PASSED | restore-session returns success, no row duplication | pass 6 |
 | `F-CTRL-BROWSER-01` | N/A — platform | documented unsupported responses, all 10 methods exercised | pass 6 |
 | `F-CTRL-BROWSER-02` | N/A — platform | documented unsupported responses, all 10 methods exercised | pass 6 |
@@ -448,7 +448,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-CTRL-BROWSER-05` | N/A — platform | documented unsupported responses, all 10 methods exercised | pass 6 |
 | `F-CTRL-BROWSER-06` | N/A — platform | documented unsupported responses, all 10 methods exercised | pass 6 |
 | `F-CTRL-CLI-01` | PASSED | replayed `tillerctl_accepts_socket_before_command_as_documented` green (pass 14); executed transcript `tillerctl --socket /tmp/p55-cli.sock ping` returned `pong` | pass 14 |
-| `F-CTRL-CLI-02` | FAILED — absent | no shim/install mechanism, bare tillerctl relies on PATH | pass 6 |
+| `F-CTRL-CLI-02` | FAILED — absent | no shim/install mechanism, bare tillerctl relies on PATH — and pass 17 measured the in-product consequence live: every hook of a Tiller-launched Claude Code fails `/bin/sh: 1: tillerctl: not found` (SessionStart, UserPromptSubmit, and all 3 Stop hooks; reproduced across 3 independent launches — frames p17-aq1/aq2/as2/as4). The adapter's worktree-local hook config IS written and the hooks DO fire; the binary they call is simply not on the spawned shell's PATH, so the Layer-A status channel can never work in-product until tillerctl ships on PATH (feeds F-TERM-09's dead indicators) | pass 17 |
 | `F-CTRL-PLAT-01` | PASSED | platform-neutral serde/libc manifest; same NDJSON on Linux | pass 6 |
 
 ### F-AGENT — agent adapters (20)
@@ -537,20 +537,54 @@ touched the entry — those rows do **not** count toward done.
 | `F-TERM-USG-01` | PASSED | hidden claude PTY fetch ran live (pass 1); pass 11: new test green — PATH-stubbed claude fetch returns TimedOut and the hidden PTY child is killed on drop (termination verified via stub pid) | pass 11 |
 | `F-TERM-PLAT-01` | PASSED | gpui + alacritty_terminal only; no webview/HTML renderer | pass 10 |
 
+## Appendix — ACP chat behaviors found by exercising, NOT in the 389 denominator
+
+Pass 17 drove the real ACP chat surface (fixture DB, real `claude` behind
+`npm exec @agentclientprotocol/claude-agent-acp`) and catalogued behaviors that no
+inventory row owns. **These 14 rows are an appendix by the user's explicit ruling: the
+denominator stays 389.** Where a behavior partly overlaps an inventory row, the verdict
+lives on that row and this appendix carries the ACP-specific remainder. Progress reports
+must count these as "plus 14 newly-found ACP rows not yet in the denominator".
+
+| id | verdict | evidence |
+|---|---|---|
+| `ACP-01` | PASSED | composer status pill state machine: `● idle` (green, pre-session) → `● working` (amber, during turn — precedes the first streamed chunk) → `● Ask ⌄` (green, post-completion; session mode shown) → `● offline` (gray, transport dead). All four photographed: p17-ah0..ah3, aj1, aj6 |
+| `ACP-02` | PASSED | model pill lifecycle: `Opus Plan Mode` pre-session → `Model Opus Plan Mode XHIGH ⌄` once the session starts (p17-ah3) |
+| `ACP-03` | PASSED | chat tab indicator lifecycle: ○ idle → ● red filled while working → ✓ done → back to ○ when the transport dies (p17-ah/aj series) |
+| `ACP-04` | PASSED | during a turn the composer queues instead of disabling: placeholder "Type to queue for the next turn…" + stop ■ control (p17-aj1); live pixel proof over F-CHAT-06's drawn tests |
+| `ACP-05` | PASSED | Files-panel footer shows "Activity 1 running" during a chat turn (p17-aj1) |
+| `ACP-06` | PASSED | context ring chip tracks real usage across turns (0% → 5% → 27% in the chat drives; 6% after one counting turn in the terminal drives) |
+| `ACP-07` | PASSED | transport-death error entry carries the machine reason JSON and a Retry button; partial streamed output is retained above it (p17-aj6; owning generic row F-CHAT-33) |
+| `ACP-08` | FAILED — defective | Retry recovers the session but silently DROPS the failed turn: bridge respawns (new `npm exec` subtree), pill returns to idle, and the prompt is never re-sent — idle at +20s with no response (p17-al2/al3). A user's message vanishes without an error |
+| `ACP-09` | half-proven | from `● offline` the composer is inert: the same click+type+Return that worked three times from idle produces nothing, with no feedback (p17-ak4); half-proven because only one input route was tried |
+| `ACP-10` | PASSED (measured) | transport-death → UI transition latency in (2s, 13s]: at +2s the stream was still visibly advancing (fresh frame, advancing numbers), at +13s the offline pill and ✓→○ had landed (p17-aj3..aj6) |
+| `ACP-11` | PASSED (measured) | bridge architecture: sending in the Chat tab spawns `npm exec @agentclientprotocol/claude-agent-acp@latest` → `sh -c claude-agent-acp` → node, as descendants of the app pid; first-spawn latency ~5-10s (npm resolve) — the paint-lag trap behind two stale frames (p17-artifacts/ah-proctree.txt) |
+| `ACP-12` | FAILED — defective | the mode pill's dropdown never opens — display-only pill (owning row F-CHAT-15, moved to FAILED — defective this pass) |
+| `ACP-13` | FAILED — absent | the UI chat path never writes `chat_turn` or `session_ref` rows (0 rows after two completed exchanges; WAL-aware read) — the store works, the surface does not call it (owning row F-PER-01, overturned this pass) |
+| `ACP-14` | PASSED | kill mid-stream retains the partial streamed content in the transcript above the error entry — nothing already displayed is lost (p17-aj6) |
+
 ## Totals
 
 | verdict | count |
 |---|---|
-| PASSED | **196** |
-| half-proven | **15** |
-| FAILED — absent | **127** |
-| FAILED — defective | **13** |
+| PASSED | **205** |
+| half-proven | **18** |
+| FAILED — absent | **102** |
+| FAILED — defective | **21** |
 | UNREACHABLE | **3** |
-| N/A — platform | **22** |
-| NOT EXERCISED | **12** |
+| N/A — platform | **20** |
+| NOT EXERCISED | **19** |
 | NOT EXERCISED — blocked on display | **0** |
 | builder-claimed, unverified | **1** |
 | **total** | **389** |
+
+Recomputed from the body by counting rows, not by hand, 2026-08-14 — the previous block
+summed to 388 and disagreed with the body on five of nine verdicts. Anyone editing totals
+should recount rather than adjust:
+
+```bash
+python3 -c "import re,io;from collections import Counter;s=io.open('docs/linux-rewrite/INVENTORY-LEDGER.md',encoding='utf-8').read();r=re.findall(r'^\| \`(F-[A-Z0-9-]+)\` \| ([^|]+?) \|',s,re.M);c=Counter(v.strip() for _,v in r);print(len(r));[print(f'{n:>4}  {k}') for k,n in c.most_common()]"
+```
 
 Entries never independently judged by the critic: **68**
 (**25** never claimed by anyone; **22** builder-claimed, unverified; **8** P56;
