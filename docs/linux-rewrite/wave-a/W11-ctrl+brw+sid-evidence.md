@@ -165,3 +165,47 @@ main.rs:3209-3248) remains correctly proven by source inspection; the gesture ha
 (right-click a worktree row) is could-not-reach on Wayland — needs `DISPLAY=:1`.
 
 No new captures (grep-only re-confirmation, matches prior evidence).
+
+## F-SID-18 — ledger line 87, currently FAILED — absent
+
+**Drove:** confirmed a fresh worktree does NOT start on the empty state (discriminating fact
+for this row: `ctl project.add` then `ctl panel.list` returned two panes — `pane-0`/Chat and
+`pane-1`/Terminal — so the "No Terminals" empty state (`main.rs:5416-5461`,
+`empty-worktree`/`empty-worktree-new-terminal`) can only be reached by first closing both
+default tabs). The per-tab close control (`workspace-tab-close-{id}`, main.rs:5634-5654) only
+renders `.when(active, ...)`, is a plain left-click (no chord), and `request_close_tab_by_id`
+closes a non-dirty tab immediately with no confirmation — so this should be reachable on this
+lane in principle.
+
+Attempted to locate the close-button pixel position by column/row-scanning the tab-bar region
+with `convert ... -crop ... standard_deviation` (a content band was found consistently at
+roughly x=440-580, y=25-40 across two resolutions, matching where the "Terminal" tab's label
+and close icon should sit) and tried three blind clicks at candidates derived from that scan —
+`(572,48)`, `(570,33)` twice, at both 1400x900 and 1715x972 — each followed by a forced-repaint
+shot and a `panel.list` re-check. **None reduced the pane count**; `panel.list` returned the
+same two panes after every attempt.
+
+**Not reached:** could not empirically locate the close-button hitbox from image analysis
+alone (no OCR available, and `panel.list`/pixel-region scanning cannot distinguish "missed the
+button" from "hit it and it silently no-op'd" without a visual read I cannot perform). This
+would need either a sighted pass to read the exact button coordinates from a capture, or a
+socket method to close a tab by id (none exists — `tab.select`/`tab.cycle` are the only
+`tab.*` socket methods).
+
+**Corroboration only, not closing evidence:** the drawn GPUI test
+`tests::drawn_selected_worktree_without_tabs_offers_a_new_terminal` (main.rs:11849) passed:
+```
+test tests::drawn_selected_worktree_without_tabs_offers_a_new_terminal ... ok
+```
+It simulates a real click (`cx.simulate_click`) on the empty state's "New Terminal" button in
+GPUI's own test harness and asserts a terminal tab replaces the empty state. This is a test,
+not a live-pixel PASSED — reported as a test per the evidence rules.
+
+**Claim:** could-not-reach. The default-tabs half is now confirmed live (worktrees open with
+Chat+Terminal, not empty — a genuine, newly-observed fact). Reaching the empty state itself,
+and clicking its "New Terminal" button, needs either a sighted capture-reading pass or a
+close-by-id socket method neither of which this pass had.
+
+Captures: `reference/linux-progress/wavea-W11-ctrl+brw+sid/sid18{,b,c,d}/` and
+`sid18-probe/` (blind-click attempts and panel.list probes, all non-discriminating — recorded
+for the record, not as proof).
