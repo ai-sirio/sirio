@@ -508,6 +508,7 @@ struct TranscriptSelection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CopyTarget {
     Assistant(usize),
+    CodeBlock { entry: usize, block: String },
 }
 
 impl TranscriptSelection {
@@ -524,6 +525,10 @@ impl TranscriptSelection {
 struct TranscriptInteraction {
     chat: Entity<Chat>,
     focus: FocusHandle,
+    /// The owning assistant entry, if this markdown is part of the chat
+    /// transcript rather than the read-only file preview renderer.
+    entry_index: Option<usize>,
+    copied_target: Option<CopyTarget>,
 }
 
 /// A styled text run whose selection range is anchored in the complete
@@ -2880,6 +2885,46 @@ impl Chat {
                 } else {
                     language_label
                 };
+                let code_copy = interaction.and_then(|interaction| {
+                    let entry = interaction.entry_index?;
+                    let target = CopyTarget::CodeBlock {
+                        entry,
+                        block: id.clone(),
+                    };
+                    let copied = interaction.copied_target.as_ref() == Some(&target);
+                    let selector = format!("code-block-copy-{entry}-{id}");
+                    let confirmation_selector = format!("code-block-copy-confirmed-{entry}-{id}");
+                    let copy_entity = interaction.chat.clone();
+                    let copy_target = target.clone();
+                    let copy_text = text.clone();
+                    let mut button = div()
+                        .id(selector.clone())
+                        .debug_selector(move || selector.clone())
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(theme.radii.control)
+                        .text_size(typography.footnote)
+                        .text_color(colors.meta)
+                        .cursor(CursorStyle::PointingHand)
+                        .hover(|style| style.bg(colors.chat_row_hover))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            copy_entity.update(cx, |chat, cx| {
+                                chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
+                            });
+                        });
+                    if copied {
+                        button = button.child(
+                            div()
+                                .id(confirmation_selector.clone())
+                                .debug_selector(move || confirmation_selector.clone())
+                                .child("Copied ✓"),
+                        );
+                    } else {
+                        button = button.child("Copy");
+                    }
+                    Some(button.into_any_element())
+                });
                 div()
                     .w_full()
                     .rounded(theme.radii.code_block)
@@ -2891,16 +2936,21 @@ impl Chat {
                     .gap(px(7.0))
                     .child(
                         div()
+                            .flex()
+                            .items_center()
                             .text_size(typography.footnote)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.meta)
-                            .child(Self::render_plain_text(
-                                language_label.clone(),
-                                theme,
-                                format!("{id}-language"),
-                                source_start,
-                                interaction,
-                            )),
+                            .child(
+                                div().flex_1().child(Self::render_plain_text(
+                                    language_label.clone(),
+                                    theme,
+                                    format!("{id}-language"),
+                                    source_start,
+                                    interaction,
+                                )),
+                            )
+                            .children(code_copy),
                     )
                     .child(
                         div()
@@ -3323,6 +3373,8 @@ impl Chat {
         let interaction = TranscriptInteraction {
             chat: entity.clone(),
             focus: transcript_focus,
+            entry_index: Some(entry_index),
+            copied_target: copied_target.clone(),
         };
         match entry {
             Entry::User(text) => div()
@@ -6108,6 +6160,44 @@ mod tests {
         assert!(
             cx.debug_bounds("assistant-copy-confirmed-0").is_some(),
             "the clicked Copy control visibly acknowledges success"
+        );
+        let _ = chat;
+    }
+
+    /// F-CHAT-30: a fenced code block exposes a local Copy control whose
+    /// acknowledgement belongs to that block, not the surrounding response.
+    #[gpui::test]
+    async fn code_block_copy_writes_code_and_confirms(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Assistant {
+                text: "```rust\nlet answer = 42;\n```".into(),
+                document: parse("```rust\nlet answer = 42;\n```"),
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let copy = cx
+            .debug_bounds("code-block-copy-0-assistant-block-0")
+            .expect("a code block exposes its own Copy control");
+        cx.simulate_click(copy.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("let answer = 42;\n".into()),
+            "code-block Copy writes raw code, without the fence or language label"
+        );
+        assert!(
+            cx.debug_bounds("code-block-copy-confirmed-0-assistant-block-0")
+                .is_some(),
+            "the clicked code-block control visibly acknowledges success"
         );
         let _ = chat;
     }
