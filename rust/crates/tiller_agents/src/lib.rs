@@ -326,6 +326,26 @@ mod tests {
         );
     }
 
+    /// F-AGENT-OMP-03: the noninteractive summarizer flags are
+    /// `--print --no-tools`. The Swift original spells the program `omp`,
+    /// but this port launches adapters by `executable_name()` — the binary
+    /// the distribution actually ships is `oh-my-pi`, with no `omp` alias
+    /// (settled for the launch/resume commands; the summarizer follows the
+    /// same discipline rather than generating a command no PATH can
+    /// resolve).
+    #[test]
+    fn omp_summarizer_command_uses_the_distribution_binary_name() {
+        assert_eq!(
+            OhMyPiAdapter.summarizer_command("summarize this"),
+            Some("oh-my-pi --print --no-tools 'summarize this'".to_string())
+        );
+        let command = OhMyPiAdapter.summarizer_command("x").expect("has a summarizer");
+        assert!(
+            command.starts_with(OhMyPiAdapter.executable_name()),
+            "the summarizer must spawn the executable name, not the adapter id: {command}"
+        );
+    }
+
     /// The other three adapters' summarizers are their own inventory rows
     /// and are not yet ported; until they are, the honest answer is `None`
     /// — never a guessed argv for a CLI whose contract nobody checked.

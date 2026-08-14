@@ -90,4 +90,11 @@ impl super::AgentAdapter for OhMyPiAdapter {
         // for it.
         None
     }
+
+    fn summarizer_command(&self, prompt: &str) -> Option<String> {
+        // The Swift original spells the program `omp`; the distribution
+        // ships only `oh-my-pi` (no alias), so this follows the same
+        // executable-name discipline as `command`/`resume_command` above.
+        Some(format!("oh-my-pi --print --no-tools {}", shell_quote(prompt)))
+    }
 }
