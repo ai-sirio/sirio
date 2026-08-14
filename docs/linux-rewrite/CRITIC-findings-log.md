@@ -2061,3 +2061,103 @@ green windows between them.
   and F-SET-19/20 remain for the next pass. F-CHG-06 partial: status symbols
   measured per row (staged green #B3D9B7 vs amber variants); the post-`git add`
   Refresh click was inconclusive under load.
+
+## PASS 17 (fable, ~00:19–02:30)
+
+Critic role held by fable this pass — both pi panes died on 429 GoUsageLimitError at
+00:19 and the orchestrator will not spend money while the user sleeps; fable was the
+only panel that never wrote a line of Rust here. Deviation from "the critic runs on
+pireview" recorded openly in `tasks/CRITIC-pass17-handover.md`. All drives on the
+`TILLER_DB` fixture (`p17-small-session.sqlite`), real state DB untouched; all frames
+`reference/linux-progress/p17-*`; decisive process/kill transcripts copied into
+`reference/linux-progress/p17-artifacts/`.
+
+- **Group 2 closed — all eight rows exercised live with a real claude over ACP.**
+  F-CHAT-03 PASSED (offline banner + Retry respawns the bridge), F-CHAT-33 half-proven
+  (turn-error half incl. machine-reason JSON), F-CHAT-20 half-proven (tail-follow),
+  F-CHAT-05 half-proven (offline-inert without placeholder), F-CHAT-15 FAILED — defective
+  (pill displays, chooser never opens), F-CHAT-29/30 FAILED — absent (no copy controls),
+  F-CHAT-13 NOT EXERCISED (instrument wall: xdotool cannot synthesize XDND; the "+"
+  route opens the portal picker, invisible to X). SET-19 Light proven end-to-end
+  (click → repaint → DB → relaunch first-frame), SET-20 FAILED — defective.
+- **False PASSED overturned: F-PER-01.** Two completed UI chat exchanges → `chat_turn`
+  0 rows, `session_ref` 0 rows (WAL-aware read), empty transcript after relaunch
+  (p17-ai0). Settings/tab_state survived the same SIGTERM — not debounce loss. The
+  pass-14 tests prove the store and the socket door; the UI chat path never calls
+  either. The DB read caught what the frame alone would have passed.
+- **Translucency is a dead control, three independent anchors** (SET-20):
+  `set_translucency` never calls `changed()` (settings.rs:871-874, unlike every
+  sibling); `SettingsSnapshot` has no translucency field (:338); zero consumers of the
+  flag anywhere (no WindowBackgroundAppearance/Blurred). Live: only the knob repaints
+  (p17-ae3); no DB key ever written. Would have been marked PASSED from the frame alone.
+- **F-TERM-09 → FAILED — defective, full state catalog measured** across four live
+  agent launches: `?` tab badge at boot, amber ● on the worktree row at first launch —
+  then NO working indication during a real turn (`✳ Orchestrating…` live, badge simply
+  gone, p17-as2), no idle/done return after it, and the ● NEVER clears: it survived
+  the agent's death and an app relaunch that restored the tab as plain bash
+  (p17-ap0..3). No Linux analogue of the Swift processGone clearing is wired.
+- **Layer-A can never work in-product as shipped**: every hook of a Tiller-launched
+  Claude Code fails `/bin/sh: 1: tillerctl: not found` — SessionStart,
+  UserPromptSubmit, and all 3 Stop hooks, reproduced across 3 independent launches
+  (p17-aq1/aq2/as2/as4). The adapter's worktree-local hook config IS written and the
+  hooks DO fire; the binary is not on the spawned shell's PATH (F-CTRL-CLI-02's live
+  consequence; feeds TERM-09's dead indicators).
+- **Rowless defect — the worktree context menu's agent items ignore their anchor row.**
+  Prospective proof: menu opened on the NON-primary linux/gpui-waku row (Set Primary
+  present in the menu), its "Claude Code" item clicked → the tab and TUI spawned under
+  the PRIMARY rust/gpui-rewrite worktree, cwd `~/Scrivania/Progetti/tiller`
+  (p17-aq0/aq1). Same misdirection had produced the AO launch. Primary-vs-selected
+  disambiguation is one grep in the dispatch code away — behavior proven, wiring not
+  chased. The menu itself renders at a FIXED top-left position (22,110)-(300,385)
+  regardless of which row was right-clicked (aq0 vs an5 identical geometry).
+- **Rowless finding — persisted terminal-agent tabs restore as plain bash.** A "Claude
+  Code" tab that had a live TUI restores after relaunch as a bare shell in the correct
+  worktree cwd (powerline `tiller → rust/gpui-rewrite`, p17-ap0) — no resume attempt.
+  Coherent with `session_ref` never being written (nothing to resume from). Chat tabs
+  DO respawn their adapter (F-TAB-27, pass 16) — the gap is terminal agent tabs only.
+- **Three stale "zero callers" corrected on tonight's builder work**: main.rs now
+  routes activity transitions through `should_notify` (:3892) → `build_payload`
+  (:3917) → `notify-send` (:1732). ACT-19/20 moved FAILED-defective → NOT EXERCISED;
+  ACT-02/NOTIFY-03 blocked-half wording updated. Wired ≠ delivered: no notification
+  observed live (visible-window suppression during all drives) — correction of fact,
+  not promotion. The QUEUE.md staleness method applied the hour it was written.
+- **Copy chords are defective, not absent — the grep flipped my own verdict in-flight.**
+  chat.rs binds `ctrl-a`→SelectAll and `ctrl-c`→CopyTranscript with the correct
+  modifier and the comment "cmd- forms would bind Super and be unreachable" (:659-661),
+  `copy_transcript` is `.on_action`-wired (:3722/:3738) — yet live: no visible
+  selection, paste-check empty twice with the composer focused (which binds the chord).
+  The transcript is entirely uncopyable on Linux: chords dead in practice + no
+  per-message control + no block control (grep over chat.rs and tiller_markdown).
+- **Retry drops the turn** (ACP-08): the error entry's Retry respawns the bridge and
+  resets the pill but never re-sends the failed prompt — idle at +20s, the user's
+  message silently vanishes. Distinct from the restart-works half (CHAT-03 PASSED).
+- **Instrument facts measured this pass** (added to ENVIRONMENT.md): input events
+  QUEUE during post-restore main-loop congestion and deliver late IN ORDER (ar1≈ar2
+  4s apart, menu still open ≥24s after rclick, then ar3 shows the whole queued
+  sequence executed — allow 15-20s settle after a many-pane relaunch); first-frame
+  paint lag reproduced twice more (ap2/ah1 — a no-change frame is never evidence by
+  itself); `xdotool type` renders an em-dash as the literal text "nosymbol" — ASCII
+  only in typed prompts; error-banner Y position depends on how much streamed before
+  death, so Retry coordinates must come from the same-run frame, never a
+  differently-populated layout (the AK misclick).
+- **Fixture-DB methodology validated**: `TILLER_DB` pointed every drive at a scratch
+  SQLite; the persisted state accumulated across drives (each run's tabs visible to
+  the next) which twice shifted sidebar row geometry under reused coordinates — read
+  the current frame before anchoring clicks. Real DB untouched all night.
+- **Money/scope note**: all agent turns were trivial-deterministic (count sequences,
+  "ok"); the wrong-worktree defect landed three claude TUIs in the Swift reference
+  repo — zero writes there (prompts were no-tools; transcript saving off via inherited
+  CLAUDE_CODE_CHILD_SESSION marker), and the repo's git state was never touched.
+- **ACP appendix added to the ledger**: 14 behavior rows found by exercising the chat
+  surface, kept OUT of the pinned 389 denominator per the user's ruling. Report format:
+  "N/389, plus 14 newly-found ACP rows not yet in the denominator".
+- **Transplant gate run at ledger time**: `Scripts/transplant-check.py` exits 1 with 46
+  candidate runs. Character on read: 35+ are GPUI `Element`-trait boilerplate
+  (icons.rs/chat.rs/lib.rs implementing trait-dictated signatures — `request_layout`/
+  `source_location`/style defaults) plus standard idioms (percent-decode loop, hex-digit
+  match, HSL formula, `.file_name().map().filter()` chains). No product-logic block among
+  them, but per the script's own rule each still owes a human read — none has been
+  cleared here, only characterized.
+- **Ledger totals regenerated** (`ledger-totals.py --write`): 389 rows exactly — PASSED
+  204 · half-proven 18 · FAILED-absent 110 · FAILED-defective 18 · UNREACHABLE 3 ·
+  N/A-platform 22 · NOT EXERCISED 13 · builder-claimed 1. Never-critic-judged: 24.

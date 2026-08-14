@@ -75,7 +75,23 @@ The desktop session is **Wayland**. `DISPLAY=:1` is XWayland, and the app runs a
   shows *no change*. A frame that shows the change you expected needs no second look; a frame that
   shows nothing does.
 - **The portal file picker is Wayland-side and invisible to X captures.** It will not appear in a
-  screenshot even when it is open.
+  screenshot even when it is open. XDND drags are equally out of reach: `xdotool` has no source
+  window to negotiate the protocol, so file-drop rows are unexercisable by this harness (a human
+  hand can still do them — record NOT EXERCISED with the instrument reason, never FAILED).
+- **Input events QUEUE while the app's main loop is busy, and deliver late IN ORDER.** Measured
+  pass 17 (p17-ar1..ar3): after a relaunch that restored five PTY panes, a context menu stayed
+  open ≥24s after the right-click, two follow-up clicks and a typed sentence appeared to do
+  nothing — two frames 4s apart identical — then the ENTIRE queued sequence executed correctly
+  at once (menu item fired, agent booted, buffered keystrokes reached its PTY). Allow 15–20s of
+  settle after launching an app that restores many panes, or every coordinate you clicked was
+  right and every frame you shot says nothing happened.
+- **`xdotool type` is ASCII-only in practice**: an em-dash (—) in the typed string comes out as
+  the literal text `nosymbol` (p17-ap3). Keep typed prompts to plain ASCII.
+- **Coordinates belong to a layout, not to the app.** Two pass-17 misclicks came from reusing
+  coordinates across differently-populated layouts: the error banner's Retry button sits at the
+  TOP of the transcript when the stream died early but is pushed down by whatever streamed first,
+  and sidebar rows shift as persisted tabs accumulate across fixture-DB runs. Anchor clicks in a
+  frame from the SAME run/layout, never a remembered one.
 - **Only one agent may drive the display at a time.** Measured 2026-08-14, 01:22, the hard way.
 
   `linux-drive.sh` solves **which window to photograph** — it matches `_NET_WM_PID` against the
@@ -93,6 +109,27 @@ The desktop session is **Wayland**. `DISPLAY=:1` is XWayland, and the app runs a
   **Claim the display before a drive batch and say so in your pane.** If your captures overlap
   somebody else's window in time, re-take any frame that shows *no change* before writing it to the
   ledger — same rule as paint lag, different cause.
+
+## The drive lock, and its one trap
+
+`Scripts/linux-drive.sh` serializes display access with an atomic `mkdir` lock
+(default `/tmp/tiller-drive-1.lockd` for DISPLAY=:1), self-healing when the holder pid is dead
+or the hold exceeds 30 minutes. Export `TILLER_DRIVE_LABEL=<you>` so the holder file names you.
+
+**The trap:** pointing `TILLER_DRIVE_LOCK` at a path where a REGULAR FILE already exists (e.g.
+left over from the earlier flock design) makes `mkdir` fail EEXIST forever — exit 6 with
+`Holder: unknown`, and the self-heal cannot help because there is no pid to read. `rm -f` the
+stale file or use the default path. The flock design it replaced had the opposite failure:
+fd 9 inherited by a long-lived reparented process kept the lock held for a finished run and
+deadlocked every driver on the machine for an hour.
+
+## Driving with a fixture database
+
+`TILLER_DB=/path/to/fixture.sqlite` points the app at a scratch database — the pass-17 pattern
+for exercising persistence rows without touching `~/.local/state/TillerRust`. Two facts to hold:
+state ACCUMULATES across drives (each run's tabs/worktree selection persist into the next run's
+restore, shifting sidebar geometry under previously-valid coordinates), and reading the fixture
+mid-run needs the same WAL-aware read-only open as the real DB (section below).
 
 ## There is no headless critic
 

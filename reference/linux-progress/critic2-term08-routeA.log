@@ -1,0 +1,6 @@
+[session] development build: session state is checkout-local at /home/enzopalmisano/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+[session] development build: session state is checkout-local at /home/enzopalmisano/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+[control] listening on /run/user/1000/TillerRust/control.sock
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+
+(tiller:3856061): Gdk-CRITICAL **: 02:19:04.300: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed

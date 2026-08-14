@@ -1,0 +1,6 @@
+== albero processi APP_PID=3487010 ==
+3487107 3487010 /bin/bash -il
+3487331 3487010 npm exec @agentclientprotocol/claude-agent-acp@latest
+-- figli di 3487107:
+-- figli di 3487331:
+3487880 3487331 sh -c 'claude-agent-acp'
