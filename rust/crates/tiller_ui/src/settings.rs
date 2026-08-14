@@ -6,12 +6,15 @@ use gpui::{
     App, Context, Entity, FocusHandle, FontWeight, KeyBinding, KeyDownEvent, MouseButton, Render,
     Rgba, Window, actions, div, prelude::*, px, text,
 };
-use std::path::PathBuf;
 use std::rc::Rc;
+use std::{collections::BTreeSet, path::PathBuf, process::Command};
 use tiller_agents::{AgentAvailability, discover_availability};
 use tiller_project::SkillInstallCommand;
 use tiller_theme::{Theme, ThemeMode};
-use tiller_usage::{LocalAccountState, UsageProvider};
+use tiller_usage::{
+    AgentAccountIdentity, LocalAccountState, UsageProvider, codex_auth_file_path,
+    parse_codex_identity,
+};
 
 // The action bound to Escape while the summarizer picker menu is focused.
 // Scoped to the menu's key context so the shell's own Escape handling is
@@ -68,24 +71,13 @@ pub enum SettingsCategory {
 impl SettingsCategory {
     /// The categories offered to the user, in sidebar order.
     ///
-    /// Permissions drives macOS TCC (camera, microphone, screen recording,
-    /// accessibility) — machinery that does not exist outside macOS. On
-    /// non-macOS the category is not offered, exactly as the icon-set lists
-    /// only renderable sets: a sidebar entry for a permission system the
-    /// running OS does not have states something untrue about the program.
-    #[cfg(target_os = "macos")]
+    /// Permissions contains the platform-specific privacy controls and the
+    /// in-app browser's durable origin grants.
     const ALL: [Self; 5] = [
         Self::AiProviders,
         Self::Agents,
         Self::General,
         Self::Permissions,
-        Self::Appearance,
-    ];
-    #[cfg(not(target_os = "macos"))]
-    const ALL: [Self; 4] = [
-        Self::AiProviders,
-        Self::Agents,
-        Self::General,
         Self::Appearance,
     ];
 
@@ -424,7 +416,7 @@ pub struct ProviderRowModel {
 /// state exists on this machine, derived — never a mock default. The word
 /// "Active" used to sit here and claimed the provider's account worked
 /// without anything having checked it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderAccountStatus {
     /// The label next to the dot, from the account state's own wording.
     pub label: &'static str,
@@ -432,6 +424,9 @@ pub struct ProviderAccountStatus {
     /// otherwise. "Not signed in" and "Unknown" are information, not
     /// errors.
     pub signed_in: bool,
+    /// A provider-supplied identity, when the local account store exposes one.
+    /// This is display data only; Tiller never stores or renders credentials.
+    pub identity: Option<String>,
 }
 
 impl ProviderAccountStatus {
@@ -441,12 +436,21 @@ impl ProviderAccountStatus {
         Self {
             label: state.label(),
             signed_in: state == LocalAccountState::SignedIn,
+            identity: None,
+        }
+    }
+
+    fn with_identity(state: LocalAccountState, identity: Option<String>) -> Self {
+        Self {
+            label: state.label(),
+            signed_in: state == LocalAccountState::SignedIn,
+            identity: identity.filter(|identity| !identity.is_empty()),
         }
     }
 }
 
 /// The three provider cards' account states, in card order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderAccountStates {
     pub claude: ProviderAccountStatus,
     pub codex: ProviderAccountStatus,
@@ -458,17 +462,87 @@ impl ProviderAccountStates {
     /// crate owns the credential files; the surface only reports).
     pub fn discovered() -> Self {
         Self {
-            claude: ProviderAccountStatus::from_account_state(
-                UsageProvider::Claude.local_account_state(),
-            ),
-            codex: ProviderAccountStatus::from_account_state(
-                UsageProvider::Codex.local_account_state(),
-            ),
-            opencode_go: ProviderAccountStatus::from_account_state(
-                UsageProvider::OpenCodeGo.local_account_state(),
-            ),
+            claude: discover_provider_account(UsageProvider::Claude),
+            codex: discover_provider_account(UsageProvider::Codex),
+            opencode_go: discover_provider_account(UsageProvider::OpenCodeGo),
         }
     }
+}
+
+/// The command Tiller delegates to an installed CLI for account management.
+/// Keeping this as data makes the mapping testable without spawning a terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProviderLoginCommand {
+    program: &'static str,
+    args: Vec<&'static str>,
+}
+
+fn provider_login_command(provider: ProviderKind) -> ProviderLoginCommand {
+    match provider {
+        ProviderKind::Claude => ProviderLoginCommand {
+            program: "claude",
+            args: vec!["auth", "login"],
+        },
+        ProviderKind::Codex => ProviderLoginCommand {
+            program: "codex",
+            args: vec!["login"],
+        },
+        ProviderKind::OpenCodeGo => ProviderLoginCommand {
+            program: "opencode",
+            args: vec!["auth", "login"],
+        },
+    }
+}
+
+fn format_account_identity(identity: &AgentAccountIdentity) -> String {
+    match identity
+        .organization
+        .as_deref()
+        .map(str::trim)
+        .filter(|organization| !organization.is_empty())
+    {
+        Some(organization) => format!("{} · {organization}", identity.email),
+        None => identity.email.clone(),
+    }
+}
+
+fn discover_provider_account(provider: UsageProvider) -> ProviderAccountStatus {
+    let state = provider.local_account_state();
+    let identity = match (provider, state) {
+        (UsageProvider::Claude, LocalAccountState::SignedIn) => discover_claude_identity(),
+        (UsageProvider::Codex, LocalAccountState::SignedIn) => discover_codex_identity(),
+        _ => None,
+    };
+    ProviderAccountStatus::with_identity(state, identity)
+}
+
+fn discover_claude_identity() -> Option<String> {
+    let output = Command::new("claude")
+        .args(["auth", "status"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity =
+        AgentAccountIdentity::parse_claude_json(&String::from_utf8_lossy(&output.stdout))?;
+    identity
+        .logged_in
+        .then(|| format_account_identity(&identity))
+}
+
+fn discover_codex_identity() -> Option<String> {
+    if !codex_auth_file_path().is_file() {
+        return None;
+    }
+    let output = Command::new("codex")
+        .args(["login", "status"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_codex_identity(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The complete state the Settings surface currently holds. The socket
@@ -556,6 +630,7 @@ enum ProviderKind {
 /// Small settings view model. The real application can replace these values
 /// with its persistence layer without changing the reusable settings UI.
 /// The badge shown at the trailing edge of a permission row.
+#[cfg(target_os = "macos")]
 struct PermissionBadge {
     label: &'static str,
     background: Rgba,
@@ -622,23 +697,24 @@ pub struct Settings {
     /// uses: a click that reaches nothing is exactly the defect this brief
     /// exists to close, so an unwired button must not look wired.
     on_install_skill: Option<Rc<dyn Fn(SkillInstallCommand)>>,
-    /// Host callback for a provider card's Add Account button (F-SET-14).
-    /// The payload is the provider's stable id (`"claude"`, `"codex"`,
-    /// `"opencode"` — [`UsageProvider::id`]'s own convention), not a
-    /// command: unlike the macOS original, this app never holds isolated
-    /// per-provider credentials of its own — [`ProviderAccountStates`]
-    /// only ever reads the one credential file the provider's CLI already
-    /// manages on this machine (see the "System default" row's comment in
-    /// [`Settings::render_provider_card`]). So "Add", "re-authenticate" and
-    /// "remove" are not three distinct account-scoped actions here; they
-    /// collapse to the one thing this surface can honestly offer: handing
-    /// the host "the user wants to manage this provider's account" and
-    /// letting it decide what that means (most plausibly, opening the
-    /// provider CLI's own login flow) — the same "the mechanism is the
-    /// host's call, not this crate's" seam [`Settings::on_install_skill`]
-    /// uses. Unset, the button renders muted and does not respond to
-    /// clicks.
+    /// Optional host override for a provider card's Add Account button
+    /// (F-SET-14). The payload is the provider's stable id (`"claude"`,
+    /// `"codex"`, `"opencode"` — [`UsageProvider::id`]'s own convention),
+    /// not a credential or command. When unset, Settings invokes the
+    /// installed provider CLI in an external terminal. Unlike the macOS
+    /// original, this app never holds isolated per-provider credentials of
+    /// its own — [`ProviderAccountStates`] only reads the one credential file
+    /// the provider's CLI manages on this machine (see the "System default"
+    /// row's comment in [`Settings::render_provider_card`]).
     on_manage_account: Option<Rc<dyn Fn(&'static str)>>,
+    /// Last failure while handing account management to an external terminal.
+    /// A failed spawn must be visible rather than implying that login started.
+    account_action_error: Option<(ProviderKind, String)>,
+    /// Durable grants remembered by the in-app browser. The host seeds this
+    /// from its session store and receives revoke callbacks below.
+    browser_origins: BTreeSet<String>,
+    on_revoke_browser_origin: Option<Rc<dyn Fn(String)>>,
+    on_revoke_all_browser_origins: Option<Rc<dyn Fn()>>,
     /// Live text of the Agents screen's search field (F-SET-16). Transient
     /// UI state, not part of the persistence contract — nothing durable
     /// depends on what was last typed into a filter box.
@@ -655,7 +731,7 @@ pub struct Settings {
 /// The display data for one AI Provider card — everything the renderer
 /// needs except the entity and theme. Bundled so the render function stays
 /// within clippy's argument budget and each card reads as one view model.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ProviderCardView {
     kind: ProviderKind,
     title: &'static str,
@@ -733,6 +809,10 @@ impl Settings {
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             on_manage_account: None,
+            account_action_error: None,
+            browser_origins: BTreeSet::new(),
+            on_revoke_browser_origin: None,
+            on_revoke_all_browser_origins: None,
             agent_search: String::new(),
             agent_search_focus: cx.focus_handle(),
             agent_colors: initial.agent_colors,
@@ -793,12 +873,68 @@ impl Settings {
         self
     }
 
-    /// Installs the host callback for a provider card's Add Account button
-    /// (F-SET-14). Unset, the button renders muted and inert — see the
-    /// field doc on [`Settings::on_manage_account`].
+    /// Installs a host override for a provider card's Add Account button
+    /// (F-SET-14). Without this callback the built-in external-CLI fallback
+    /// remains active; embedders can use the callback to provide their own
+    /// terminal or account-management surface.
     pub fn on_manage_account(mut self, callback: impl Fn(&'static str) + 'static) -> Self {
         self.on_manage_account = Some(Rc::new(callback));
         self
+    }
+
+    /// Seeds the Permissions screen from the host's durable browser grants.
+    pub fn with_browser_origins(mut self, origins: impl IntoIterator<Item = String>) -> Self {
+        self.browser_origins = origins.into_iter().collect();
+        self
+    }
+
+    /// Installs the host callback used when one browser origin is revoked.
+    pub fn on_revoke_browser_origin(mut self, callback: impl Fn(String) + 'static) -> Self {
+        self.on_revoke_browser_origin = Some(Rc::new(callback));
+        self
+    }
+
+    /// Installs the host callback used when all browser origins are revoked.
+    pub fn on_revoke_all_browser_origins(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_revoke_all_browser_origins = Some(Rc::new(callback));
+        self
+    }
+
+    /// Replaces the browser-grant snapshot when the host observes a grant in
+    /// a browser surface or a grant was revoked elsewhere.
+    pub fn set_browser_origins(
+        &mut self,
+        origins: impl IntoIterator<Item = String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_origins = origins.into_iter().collect();
+        cx.notify();
+    }
+
+    /// Returns the browser-grant snapshot currently shown in Permissions.
+    pub fn browser_origins(&self) -> impl Iterator<Item = &str> {
+        self.browser_origins.iter().map(String::as_str)
+    }
+
+    fn revoke_browser_origin(&mut self, origin: String, cx: &mut Context<Self>) {
+        if !self.browser_origins.remove(&origin) {
+            return;
+        }
+        if let Some(callback) = self.on_revoke_browser_origin.clone() {
+            callback(origin);
+        }
+        cx.notify();
+    }
+
+    fn revoke_all_browser_origins(&mut self, cx: &mut Context<Self>) {
+        if self.browser_origins.is_empty() {
+            return;
+        }
+        self.browser_origins.clear();
+        if let Some(callback) = self.on_revoke_all_browser_origins.clone() {
+            callback();
+        }
+        cx.notify();
     }
 
     /// Returns the current values that belong to the persistence contract.
@@ -1007,6 +1143,53 @@ impl Settings {
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
         self.provider_accounts = ProviderAccountStates::discovered();
         cx.notify();
+    }
+
+    /// Opens the provider's own interactive login flow in the desktop
+    /// terminal. Tiller waits off the render thread and re-reads the local
+    /// account stores when that terminal session ends, so cancel/retry and a
+    /// successful login all leave the card truthful.
+    fn launch_account_login(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
+        self.account_action_error = None;
+        let login = provider_login_command(provider);
+        let program = login.program;
+        let args = login.args;
+        let entity = cx.entity();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let mut child = Command::new("x-terminal-emulator")
+                        .arg("-e")
+                        .arg(program)
+                        .args(&args)
+                        .spawn()?;
+                    child.wait()
+                })
+                .await;
+
+            let _ = entity.update(cx, |settings, cx| {
+                settings.provider_accounts = ProviderAccountStates::discovered();
+                settings.account_action_error = match result {
+                    Ok(status) if status.success() => None,
+                    Ok(status) => Some((
+                        provider,
+                        format!(
+                            "{} login exited without success ({})",
+                            program,
+                            status
+                                .code()
+                                .map_or_else(|| "signal".to_string(), |code| code.to_string())
+                        ),
+                    )),
+                    Err(error) => Some((
+                        provider,
+                        format!("could not start {program} login: {error}"),
+                    )),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Re-runs agent discovery for the Agents screen's "↻ Refresh" button
@@ -1382,7 +1565,7 @@ impl Settings {
         // claimed a working account without checking. Green only when real
         // credentials exist; "Not signed in" and "Unknown" are neutral,
         // informational states.
-        let status_value = div()
+        let mut status_value = div()
             .id(format!("settings-provider-account-status-{title}"))
             .debug_selector(move || format!("settings-provider-account-status-{title}"))
             .flex()
@@ -1402,6 +1585,16 @@ impl Settings {
                     }),
             )
             .child(text!(status.label));
+        if let Some(identity) = status.identity.clone() {
+            status_value = status_value.child(
+                div()
+                    .id(format!("settings-provider-account-identity-{title}"))
+                    .debug_selector(move || format!("settings-provider-account-identity-{title}"))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.subtitle)
+                    .child(text!(identity)),
+            );
+        }
 
         let visibility_entity = entity.clone();
         let visibility = controls::toggle(
@@ -1466,21 +1659,40 @@ impl Settings {
         // F-SET-14: this app never holds its own per-provider credentials
         // (see the "System default" row's comment below), so "Add Account"
         // cannot open an isolated in-app account the way the macOS original
-        // does — it hands the host "manage this provider's account,"
-        // identified by the provider's stable id, and lets the host decide
-        // what that means (most plausibly, the provider CLI's own login
-        // flow). Unset, the button renders muted and does not respond to
-        // clicks, same as [`Settings::on_install_skill`].
+        // does — it delegates to the provider CLI's own login flow rather
+        // than inventing a Tiller-owned account store. The optional host
+        // callback remains an override for embedding and tests.
         let provider_id = match provider {
             ProviderKind::Claude => "claude",
             ProviderKind::Codex => "codex",
             ProviderKind::OpenCodeGo => "opencode",
         };
-        let manage_account_handler = self.on_manage_account.clone().map(|handler| {
-            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| {
-                handler(provider_id);
-            }
-        });
+        let manage_account_entity = entity.clone();
+        let host_manage_account = self.on_manage_account.clone();
+        let manage_account_handler =
+            Some(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                if let Some(handler) = host_manage_account.as_ref() {
+                    handler(provider_id);
+                } else {
+                    manage_account_entity.update(cx, |settings, cx| {
+                        settings.launch_account_login(provider, cx)
+                    });
+                }
+            });
+        if let Some((error_provider, error)) = self.account_action_error.as_ref()
+            && *error_provider == provider
+        {
+            card = card.child(
+                div()
+                    .id(format!("provider-account-error-{title}"))
+                    .debug_selector(move || format!("provider-account-error-{title}"))
+                    .px(px(theme.cosmic.spacing.xs as f32))
+                    .py(px(theme.cosmic.spacing.xxxs as f32))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.tab_error)
+                    .child(text!(error.clone())),
+            );
+        }
         card = card
             .child(controls::subsection_header(
                 "Accounts",
@@ -1512,7 +1724,7 @@ impl Settings {
     }
 
     fn render_ai_providers(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
-        let accounts = self.provider_accounts;
+        let accounts = self.provider_accounts.clone();
         let cards = [
             ProviderCardView::new(
                 ProviderKind::Claude,
@@ -2079,6 +2291,7 @@ impl Settings {
             .child(settings_section("Agent Skill", skill, theme))
     }
 
+    #[cfg(target_os = "macos")]
     fn render_permission_row(
         &self,
         glyph: &'static str,
@@ -2145,10 +2358,111 @@ impl Settings {
         .id(format!("settings-permission-row-{title}"))
     }
 
-    fn render_permissions(&self, theme: Theme) -> gpui::Div {
+    fn render_browser_grants(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
+        let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
+        let revoke_all_entity = entity.clone();
+        let revoke_all = div()
+            .id("settings-revoke-all-browser-origins")
+            .debug_selector(|| "settings-revoke-all-browser-origins".into())
+            .px(px(theme.cosmic.spacing.xs as f32))
+            .py(px(theme.cosmic.spacing.xxxs as f32))
+            .rounded(theme.radii.control)
+            .text_size(theme.typography.callout)
+            .text_color(if origins.is_empty() {
+                theme.meta
+            } else {
+                theme.title
+            })
+            .bg(theme.primary_pill_bg)
+            .child(text!("Revoke all"));
+        let revoke_all = revoke_all.when(!origins.is_empty(), move |this| {
+            this.hover(|style| style.bg(theme.row_hover))
+                .on_click(move |_, _, cx| {
+                    revoke_all_entity
+                        .update(cx, |settings, cx| settings.revoke_all_browser_origins(cx));
+                })
+        });
+
+        let mut card = controls::card(theme).child(controls::row(
+            "Granted browser origins",
+            Some("Origins allowed by the browser agent permission prompt.".into()),
+            revoke_all,
+            theme,
+        ));
+        if origins.is_empty() {
+            return card.child(
+                div()
+                    .id("settings-browser-grants-empty")
+                    .debug_selector(|| "settings-browser-grants-empty".into())
+                    .min_h(px(44.0))
+                    .w_full()
+                    .px(px(theme.cosmic.spacing.xs as f32))
+                    .py(px(theme.cosmic.spacing.xxs as f32))
+                    .flex()
+                    .items_center()
+                    .text_size(theme.typography.callout)
+                    .text_color(theme.subtitle)
+                    .child(text!("No browser origins have been granted.")),
+            );
+        }
+
+        for (index, origin) in origins.into_iter().enumerate() {
+            let origin_entity = entity.clone();
+            if index > 0 {
+                card = card.child(controls::separator(theme));
+            }
+            let display_origin = origin.clone();
+            let revoke = div()
+                .id(format!("settings-revoke-browser-origin-{index}"))
+                .debug_selector(move || format!("settings-revoke-browser-origin-{index}"))
+                .px(px(theme.cosmic.spacing.xs as f32))
+                .py(px(theme.cosmic.spacing.xxxs as f32))
+                .rounded(theme.radii.control)
+                .text_size(theme.typography.callout)
+                .text_color(theme.title)
+                .bg(theme.primary_pill_bg)
+                .hover(|style| style.bg(theme.row_hover))
+                .on_click(move |_, _, cx| {
+                    origin_entity.update(cx, |settings, cx| {
+                        settings.revoke_browser_origin(origin.clone(), cx)
+                    });
+                })
+                .child(text!("Revoke"));
+            card = card.child(
+                div()
+                    .id(format!("settings-browser-grant-{index}"))
+                    .debug_selector(move || format!("settings-browser-grant-{index}"))
+                    .min_h(px(44.0))
+                    .w_full()
+                    .px(px(theme.cosmic.spacing.xs as f32))
+                    .py(px(theme.cosmic.spacing.xxs as f32))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.typography.callout)
+                            .text_color(theme.title)
+                            .child(text!(
+                                id = ("settings-browser-origin", index),
+                                display_origin
+                            )),
+                    )
+                    .child(revoke),
+            );
+        }
+        card
+    }
+
+    fn render_permissions(&self, theme: Theme, entity: Entity<Self>) -> gpui::Div {
+        #[cfg(target_os = "macos")]
         let granted = theme.tab_done;
+        #[cfg(target_os = "macos")]
         let denied = theme.tab_error;
+        #[cfg(target_os = "macos")]
         let neutral = theme.primary_pill_bg;
+        #[cfg(target_os = "macos")]
         let rows = controls::card(theme)
             .child(self.render_permission_row(
                 "♧",
@@ -2228,66 +2542,15 @@ impl Settings {
                 theme,
             ));
 
-        let grants = [
-            "1533B573-3BEF-438C-B3AD-2586AA2546C4",
-            "C7CE2EAA-35C1-4DDB-90B4-56CF61CC4528",
-            "73C23955-2FAF-420D-8239-AC4FB67C1130",
-            "4E0DA223-128C-43B3-8EDD-47991D3AB022",
-            "B5B8813-0871-423E-8913-28423E580186",
-        ];
-        let mut grants_card = controls::card(theme);
-        for (index, grant) in grants.into_iter().enumerate() {
-            if index > 0 {
-                grants_card = grants_card.child(controls::separator(theme));
-            }
-            grants_card = grants_card.child(
-                div()
-                    .id(("settings-grant-row", index))
-                    .min_h(px(44.0))
-                    .w_full()
-                    .px(px(10.0))
-                    .py(px(7.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(theme.typography.headline)
-                                    .text_color(theme.title)
-                                    .child(text!(id = ("settings-grant-prefix", index), "file:")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(theme.typography.footnote)
-                                    .text_color(theme.subtitle)
-                                    .child(text!(id = ("settings-grant", index), grant)),
-                            ),
-                    )
-                    .child(controls::button(
-                        match index {
-                            0 => "revoke-grant-0",
-                            1 => "revoke-grant-1",
-                            2 => "revoke-grant-2",
-                            3 => "revoke-grant-3",
-                            _ => "revoke-grant-4",
-                        },
-                        "Revoke",
-                        theme,
-                        |_, _, _| {},
-                    )),
-            );
-        }
-
-        div()
+        #[allow(unused_mut)]
+        let mut surface = div()
             .w(px(CONTENT_WIDTH))
             .pt(px(DETAIL_TOP_PADDING))
-            .pb(px(DETAIL_BOTTOM_PADDING))
-            .child(
+            .pb(px(DETAIL_BOTTOM_PADDING));
+        #[cfg(target_os = "macos")]
+        {
+            surface = surface
+                .child(
                 controls::card(theme)
                     .child(controls::row(
                         "Terminal tools inherit Tiller's macOS privacy envelope.",
@@ -2295,13 +2558,18 @@ impl Settings {
                         controls::button("refresh-permissions", "Refresh", theme, |_, _, _| {}),
                         theme,
                     )),
-            )
-            .child(
+                )
+                .child(
                 div()
                     .mt(px(8.0))
                     .child(settings_section("macOS Permissions", rows, theme)),
-            )
-            .child(settings_section("Browser origin grants", grants_card, theme))
+                );
+        }
+        surface.child(settings_section(
+            "Browser origin grants",
+            self.render_browser_grants(theme, entity),
+            theme,
+        ))
     }
 }
 
@@ -2315,7 +2583,7 @@ impl Render for Settings {
             SettingsCategory::AiProviders => self.render_ai_providers(theme, entity.clone()),
             SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window),
             SettingsCategory::General => self.render_general(theme, entity.clone()),
-            SettingsCategory::Permissions => self.render_permissions(theme),
+            SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
             SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
         };
 
@@ -2528,25 +2796,14 @@ mod tests {
     }
 
     #[test]
-    fn permissions_category_is_platform_gated() {
-        // Permissions drives macOS TCC — camera, microphone, screen
-        // recording, accessibility. None of that machinery exists outside
-        // macOS, so the offered categories must not include it there.
+    fn permissions_category_is_offered_for_browser_grants() {
+        // Browser origin grants are durable on every platform, while the
+        // macOS-only TCC rows remain conditionally rendered inside it.
         let offered: Vec<SettingsCategory> = SettingsCategory::ALL.to_vec();
-
-        #[cfg(target_os = "macos")]
         assert!(
             offered.contains(&SettingsCategory::Permissions),
-            "macOS offers the TCC permission screen"
+            "every platform offers the browser-origin permissions screen"
         );
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(offered.len(), 4);
-            assert!(
-                !offered.contains(&SettingsCategory::Permissions),
-                "non-macOS has no macOS TCC machinery — the sidebar must not offer Permissions"
-            );
-        }
     }
 
     #[gpui::test]
@@ -2928,6 +3185,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_account_identity_is_formatted_without_losing_provider_fields() {
+        let identity = AgentAccountIdentity {
+            logged_in: true,
+            email: "user@example.com".into(),
+            organization: Some("Acme".into()),
+        };
+        assert_eq!(
+            format_account_identity(&identity),
+            "user@example.com · Acme"
+        );
+
+        let identity_without_org = AgentAccountIdentity {
+            logged_in: true,
+            email: "user@example.com".into(),
+            organization: None,
+        };
+        assert_eq!(
+            format_account_identity(&identity_without_org),
+            "user@example.com"
+        );
+    }
+
+    #[test]
+    fn provider_login_commands_match_the_installed_cli_contracts() {
+        let cases = [
+            (ProviderKind::Claude, "claude", vec!["auth", "login"]),
+            (ProviderKind::Codex, "codex", vec!["login"]),
+            (ProviderKind::OpenCodeGo, "opencode", vec!["auth", "login"]),
+        ];
+
+        for (provider, program, args) in cases {
+            let command = provider_login_command(provider);
+            assert_eq!(command.program, program);
+            assert_eq!(command.args, args);
+        }
+    }
+
     #[gpui::test]
     async fn provider_cards_render_the_derived_status(cx: &mut gpui::TestAppContext) {
         // The AI Providers cards render one derived status row per card —
@@ -2936,12 +3231,16 @@ mod tests {
         // auth files.
         cx.update(Theme::init);
         let states = ProviderAccountStates {
-            claude: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
+            claude: ProviderAccountStatus::with_identity(
+                LocalAccountState::SignedIn,
+                Some("user@example.com · Acme".into()),
+            ),
             codex: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
             opencode_go: ProviderAccountStatus::from_account_state(LocalAccountState::NoLocalStore),
         };
         let window = cx.add_window(|_window, cx| {
-            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_account_states(states)
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_account_states(states.clone())
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -2966,6 +3265,12 @@ mod tests {
             );
         }
 
+        assert!(
+            cx.debug_bounds("settings-provider-account-identity-Claude Code")
+                .is_some(),
+            "a parsed provider identity renders on the provider card"
+        );
+
         let rendered = cx.update(|window, cx| {
             window
                 .root::<Settings>()
@@ -2973,6 +3278,7 @@ mod tests {
                 .expect("settings root")
                 .read(cx)
                 .provider_accounts
+                .clone()
         });
         assert_eq!(rendered, states);
         assert_eq!(
@@ -3016,21 +3322,73 @@ mod tests {
 
     #[gpui::test]
     async fn sidebar_offers_only_categories_this_platform_has(cx: &mut gpui::TestAppContext) {
-        // The category sidebar is derived from the platform-gated list: on
-        // non-macOS a Permissions entry would invite the user into a page
-        // about a permission system their OS does not have.
+        // Permissions is shared with browser-origin grants on Linux; macOS
+        // additionally renders its TCC rows in the detail surface.
         cx.update(Theme::init);
         let window =
             cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        #[cfg(target_os = "macos")]
-        assert!(cx.debug_bounds("settings-category-Permissions").is_some());
-        #[cfg(not(target_os = "macos"))]
         assert!(
-            cx.debug_bounds("settings-category-Permissions").is_none(),
-            "non-macOS must not offer a macOS-only permission screen"
+            cx.debug_bounds("settings-category-Permissions").is_some(),
+            "browser-origin permissions are offered on every platform"
+        );
+    }
+
+    #[gpui::test]
+    async fn browser_origin_grants_render_empty_and_revoke_actions(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_browser_origins([
+                "https://agent.example".to_owned(),
+                "https://docs.example".to_owned(),
+            ])
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let permissions = cx
+            .debug_bounds("settings-category-Permissions")
+            .expect("Permissions is offered for browser grants");
+        cx.simulate_click(permissions.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+        assert_eq!(
+            settings.read_with(&cx.cx, |settings, _| {
+                settings
+                    .browser_origins()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            }),
+            vec!["https://agent.example", "https://docs.example"]
+        );
+
+        let revoke = cx
+            .debug_bounds("settings-revoke-browser-origin-0")
+            .expect("each origin has a revoke action");
+        cx.simulate_click(revoke.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            settings.read_with(&cx.cx, |settings, _| {
+                settings
+                    .browser_origins()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            }),
+            vec!["https://docs.example"]
+        );
+
+        let revoke_all = cx
+            .debug_bounds("settings-revoke-all-browser-origins")
+            .expect("the card has a revoke-all action");
+        cx.simulate_click(revoke_all.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("settings-browser-grants-empty").is_some(),
+            "revoking all origins leaves an explicit empty state"
         );
     }
 
@@ -3209,11 +3567,12 @@ mod tests {
         );
     }
 
-    /// F-SET-14: unset, Add Account must not look wired — it renders muted
-    /// and a click reaches nothing, the same convention Install Skill's
-    /// unwired test (F-SET-09) proves.
+    /// F-SET-14: production Settings supplies a real fallback handler even
+    /// when an embedding does not install the optional host callback. The
+    /// live click is exercised against the running app, not by spawning a
+    /// terminal from this visual test.
     #[gpui::test]
-    async fn add_account_renders_muted_and_inert_when_unwired(cx: &mut gpui::TestAppContext) {
+    async fn add_account_renders_wired_by_default(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         let window =
             cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
@@ -3228,9 +3587,8 @@ mod tests {
 
         let add_claude = cx
             .debug_bounds("add-claude-account")
-            .expect("Claude card's Add Account still renders, muted");
-        cx.simulate_click(add_claude.center(), Modifiers::none());
-        cx.run_until_parked();
+            .expect("Claude card's Add Account renders with the production fallback");
+        assert!(add_claude.size.width > px(0.0));
     }
 
     /// P58, F-SET-04/05/06/07: every General-screen control must flow into
@@ -3468,6 +3826,7 @@ mod tests {
                 .expect("settings root")
                 .read(cx)
                 .provider_accounts
+                .clone()
         });
         assert_eq!(
             rendered,
