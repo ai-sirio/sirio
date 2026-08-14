@@ -188,3 +188,69 @@ untracked files under `chat.rs` or `tiller_acp` scope; the previously-documented
 untracked-module trap is not present in the current tree. The temporary investigation example
 (`tiller_acp/examples/p91_live_check.rs`) was deleted; the temporary `_meta` `eprintln!` probes in
 `lib.rs` were fully reverted (`git diff` against `f3069d6` is empty).
+
+## Live UI pass — sonnet, 2026-08-14 (continued)
+
+The lock freed up. This closes the gap item 3 above named explicitly: actually watching `chat.rs`
+paint these events on the real, windowed app, not just GPUI tests against realistic fixtures.
+
+**Setup.** Held `/tmp/tiller-drive-1.lockd` (`label=sonnet-p91-live-ui`) for the full session,
+launched the real `target/debug/tiller` binary directly (not `linux-drive.sh`'s one-shot model,
+since a live chat turn takes longer than a single launch-act-capture-kill cycle), and drove it with
+a standalone `xdotool`/`import` harness scripted to match the script's own click/type/key/screenshot
+helpers.
+
+**Blocker found and worked around, not fixed: the restored session's "Browser" tab's native
+webview child window never unmaps.** The session restored with several stale `Browser` panes open.
+Switching tabs, closing every `Browser` entry in both the sidebar and the top tab strip — confirmed
+by `Files` and `Terminal` panes visibly responding underneath — still left the exact same "Example
+Domain" content painted over the main viewport. `xwininfo -root -tree` on the app's window showed
+why: an XEmbed-style child window (`0x800024`, 850×792) sits under the app's own top-level window,
+holding the *entire* content pane's screen region, and it was still mapped after its owning tab was
+closed through the UI. This is one level worse than what `ENVIRONMENT.md`'s existing P72 note says
+("a native child window sits above the GL surface and cannot be reordered") — it isn't just
+un-reorderable, closing its tab doesn't unmap it either. Worked around for this session only by
+`xdotool windowunmap 0x800024` directly, which is not a real fix and doesn't belong in this task's
+scope — flagging it here since whoever owns P72 will want the extra detail (the exact window ID
+pattern and that tab-close doesn't clean it up), not editing that row myself per the standing rule
+that a critic moves verdicts, not the builder.
+
+**F-CHAT-22 (grouped tool calls) — confirmed on screen.** Prompted the live agent (same
+`@agentclientprotocol/claude-agent-acp` bridge as item 3, this time through the actual composer, not
+a Rust example) to read two files. The transcript rendered a collapsed "2 steps" header immediately
+expandable to two individually-labeled `Completed · Read <path>` rows — real grouped-run rendering
+from two real, consecutive tool calls, on screen.
+
+**F-CHAT-23 / F-CHAT-31 / F-CHAT-32 — confirmed on screen.** Prompted the agent to write a scratch
+file, edit one line in it, then read it back — a real Write → permission gate → Edit → permission
+gate → Read chain, each step approved live via the "Allow Once" button in the permission-request
+card. The expanded `Edit` tool-call card rendered a genuine colored diff:
+
+```
+/tmp/p91-edit-test.txt
+    hello p91
+-   world
++   world edited
+```
+
+red `-`/green `+` lines, driven by a real `Content::Diff` from the live agent, not a fixture. This is
+on-screen evidence for the detail card (23) and the diff preview (31) at once; I did not find a
+separate distinct "summary" affordance beyond this expanded card (no separate "+1/-1" badge in the
+collapsed header), so I'm treating the diff card itself as satisfying 32 too rather than asserting a
+UI element I didn't actually see.
+
+**F-CHAT-21 (thinking collapse/expand) — attempted live, not landed.** This is the one row this pass
+could not close. Sent four separate prompts designed to force a visible thinking block — two with
+"think hard" / "ultrathink" triggers under the session's default `Opus Plan Mode`, two more after
+switching the composer's model selector to plain `Default (recommended)` at `XHIGH` reasoning effort
+— and in all four turns the agent answered directly with no distinct collapsible thought entry
+rendered anywhere in the transcript. The connected agent simply never emitted a `ThoughtChunk` this
+session, under any model/effort/trigger combination tried. That means the collapse/expand control
+itself was never exercised against a real thought this pass; the GPUI unit-test evidence cited in
+item 1 above (constructed thought entry, simulated click) remains the only exercised evidence for
+this specific row. Recording this as a real, attempted-and-missed gap rather than either asserting a
+screenshot that doesn't exist or repeating the earlier "did not force this" framing — this time the
+lock was held, the agent was live, and the feature still didn't surface.
+
+**Teardown.** App process killed, `/tmp/tiller-drive-1.lockd` removed, after this addendum was
+written.
