@@ -153,3 +153,91 @@ Two separate things to close this row:
   `main.rs:3750`), `rust/crates/tiller_activity/src/notification.rs` (optional: add unit
   coverage for the no-agent/identical-status branches directly, no logic change needed there)
 - **size**: M
+
+---
+
+## `F-CORE-ACT-24` — FAILED — absent
+
+**Needs: build.** Confirmed directly, live-shaped: `AgentAdapter::resume_command` exists on
+every adapter (`rust/crates/tiller_agents/src/{claude,codex,omp,opencode,pi}.rs`) but has
+**zero callers** anywhere in `rust/crates/tiller/src` — grepped every call site of `.command(`
+and `.resume_command(` in `main.rs`; only two hits, both `.command(` (`main.rs:4621` in
+`add_agent_tab`, and `main.rs:5084`), fresh-launch always. This matches the row's own live
+finding exactly: two real restarts, two fresh random `--session-id`s, `resume_command` never
+invoked.
+
+To build this: `add_agent_tab` (or a new restore-specific path) needs to know, at restart
+time, which of a worktree's persisted agent tabs have a prior session id it can resume, and
+call `adapter.resume_command(...)` instead of `adapter.command(...)` for those. That
+knowledge doesn't fully exist yet either — see ACT-25 below, same subsystem, same gap.
+`session.ref`/`session_refs` (`main.rs:6883` `load_session_refs`, referenced in
+`ADJUDICATION-BACKLOG.md`) already persists *some* session-reference data across restart and
+is the most likely existing seam to extend, rather than inventing a new persistence path.
+
+- **files**: `rust/crates/tiller/src/main.rs` (restart/restore path — `add_agent_tab` or its
+  restore-time caller — must resolve resumable vs. fresh and call `resume_command`),
+  `rust/crates/tiller_agents/src/*.rs` (resume_command already correct per-adapter, no change
+  expected unless the call-site needs a different signature)
+- **size**: L — this is a real restore-classification feature, not a one-line wiring fix; see
+  `sharedCause` below.
+- **sharedCause**: `F-CORE-ACT-24` and `F-CORE-ACT-25` are two clauses over one missing
+  subsystem — "on restart, know which prior agent sessions/worktrees to resume/prioritize,
+  and act on that knowledge." Building the classification once (which content IDs are
+  resumable vs. prunable, which worktrees are priority vs. deferred) and threading it through
+  both `add_agent_tab`'s command choice (ACT-24) and the worktree mount order at startup
+  (ACT-25) is one piece of work, not two.
+
+---
+
+## `F-CORE-ACT-25` — NOT EXERCISED
+
+**Needs: reclassify → build**, on stronger evidence than the manifest currently records.
+
+The manifest's own reasoning ("single post-restart snapshot can't distinguish absent
+priority/deferred split from one resolving faster than sampled") is honest about the *live*
+capture being ambiguous — but it doesn't need to stay ambiguous, because the code answer is
+unambiguous: `BootstrapRestoreOrder::partition` (`rust/crates/tiller_activity/src/
+bootstrap.rs:16`) — the function this row's clause names — has **exactly one caller in the
+entire workspace**, and it is its own test
+(`rust/crates/tiller_activity/tests/activity_domain_integration.rs:179`). Nothing in
+`rust/crates/tiller/src` calls it. There is no priority/deferred split for the live snapshot
+to have resolved "faster than sampled" — the function that would produce that split is never
+invoked at startup at all. This is the same shape DEAD-MODULES.md already established for
+`ids_to_evict` (ACT-26, below) and for half a dozen other mechanically-unreachable
+`tiller_activity` symbols: `NOT EXERCISED` reads as "code looks right, proof owed," but the
+correct read here is `FAILED — absent` — the reachability check is stronger evidence than the
+inconclusive live snapshot, and it settles the direction the snapshot couldn't.
+
+Not changing the verdict per this pass's brief — flagging it. The build, when it happens, is
+the same subsystem as ACT-24 (see sharedCause there): whatever startup path decides restore
+order needs to call `BootstrapRestoreOrder::partition` with the real open/selected worktree
+ids, then mount `priority` before `deferred`.
+
+- **files**: `rust/crates/tiller/src/main.rs` (startup/restore path — wherever worktrees get
+  remounted on launch needs to call `partition` and honor its ordering),
+  `rust/crates/tiller_activity/src/bootstrap.rs` (no change expected; already correct and
+  tested in isolation)
+- **size**: L (same subsystem as ACT-24 — do not schedule as a separate small item)
+
+---
+
+## `F-CORE-ACT-26` — FAILED — absent
+
+**Needs: build.** Confirmed: `WorktreeMountPolicy::ids_to_evict`
+(`rust/crates/tiller_activity/src/mount.rs:9`) has exactly one caller in the workspace, its
+own test (`activity_domain_integration.rs:211`). Nothing in `main.rs` calls it, and — this is
+the sharper finding — the *setting* that would drive it is equally disconnected:
+`AppSettings::mount_cap` (`rust/crates/tiller_project/src/settings.rs:12`, clamped 1-64,
+default 8) has **zero references anywhere in `rust/crates/tiller/src/main.rs`**. It's
+persisted, clamped, and completely inert — nothing reads it to decide when to evict, and
+`ids_to_evict` — the function that would act on that decision — is never called. There is no
+partial eviction path to find; both the policy and the trigger are absent together.
+
+- **files**: `rust/crates/tiller/src/main.rs` (needs an eviction call site — likely wherever a
+  worktree is opened/mounted, check the current mount_cap against open worktree count and call
+  `ids_to_evict`), `rust/crates/tiller_activity/src/mount.rs` (no change expected; correct and
+  tested in isolation), `rust/crates/tiller_project/src/settings.rs` (no change expected;
+  `mount_cap` field already exists and clamps correctly)
+- **size**: M
+- **sharedCause**: shares its root with the mount-cap half of `F-CORE-SET-01` below — one
+  missing "read `mount_cap`, call `ids_to_evict` when it's exceeded" call site closes both.
