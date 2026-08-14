@@ -276,3 +276,130 @@ before re-driving from scratch, though their own logs don't record which item wa
 - **size**: S
 
 ---
+
+## `F-TERM-08` — half-proven → **reclassify (undersold)**
+
+**Needs: build**, not "gesture owed" as the current half-proven framing implies. Reading
+`close_terminal_at` (`rust/crates/tiller/src/main.rs:5149-5185`) shows two things the evidence
+doesn't surface:
+
+1. **No confirmation dialog exists anywhere in the port for closing a terminal.**
+   `close_terminal_at` goes straight from "remove the pane" to sending `[3, 4]` (Ctrl-C/Ctrl-D)
+   to the terminal — there is no prompt, no accept/cancel step, nothing a user could "confirm."
+   `ActivityStatus::requires_close_confirmation` (`rust/crates/tiller_activity/src/activity.rs
+   :30`) is the only piece of the mechanism that exists, and it has exactly two references in
+   the whole workspace — both its own tests (confirmed independently by `F-CORE-ACT-23`'s
+   evidence in the ledger, same symbol, same zero-caller finding). The row's clause is "See a
+   terminal/process close confirmation" — that surface is absent, not merely unexercised.
+2. **The single-pane case is a silent no-op.** `if tab.panes.leaf_ids().len() <= 1 ||
+   !tab.panes.contains(focused_pane) { return; }` (`main.rs:5159`) returns immediately with no
+   feedback when the tab has only one pane — the overwhelmingly common case for a terminal tab.
+   Clicking "Close Terminal…" on a fresh single-pane tab does nothing at all. This matches the
+   manifest's own note ("Prior single-pane no-op defect (guard short-circuits) stands").
+
+What the manifest's evidence *does* correctly establish is narrower than the row: that
+`pane.close` over the control socket, for a multi-pane tab, genuinely kills the child process
+via the same `close_terminal_at` path (proven by `f-term-08-sleep-running.png`/
+`f-term-08-after-close.png`). That's real, but it's the removal mechanism, not the
+confirmation the row asks for — and it doesn't fire for the single-pane case either, since the
+guard short-circuits before reaching it.
+
+- **files**: `rust/crates/tiller/src/main.rs` (add confirmation-dialog state gated on
+  `requires_close_confirmation`, wired into `close_terminal_at`/`close_focused_pane`; fix the
+  single-pane guard to actually close instead of no-op — likely by removing the *tab* rather
+  than just the pane when it's the last one, matching `CloseTab`'s existing behavior), `rust/
+  crates/tiller_activity/src/activity.rs` (already correct — `requires_close_confirmation`
+  needs a caller, not a change)
+- **size**: M
+
+---
+
+## `F-TERM-09` — FAILED — defective
+
+**Needs: build.** The verdict is correct and the live evidence (four real agent launches,
+named screenshots) is stronger proof than anything a static read could add — this is not a
+reclassify. What's worth adding: the wiring the evidence describes as absent ("no title/
+content/process layer wired to the badges") is not quite accurate as a code claim, and getting
+that right matters for scoping the fix. All three layers *are* wired:
+`subscribe_terminal_activity` (`main.rs:2843-2867`) routes `TerminalActivityEvent` through
+`panes::apply_terminal_activity_event`, which dispatches OSC-title (Layer B, via
+`tiller_activity::title.rs`), settled-output (Layer C, via `content.rs`), and child-exit
+signals; `start_process_signal_refresh` (`main.rs:2872-2905`) polls Layer D
+(`process.rs::inspect_foreground_agent`) every 500 ms. All of this is unit- and even real-PTY
+integration-tested green (`panes.rs`'s `real_pty_activity_status_follows_osc_title_then_
+settled_content`, `process_refresh_preserves_process_ownership_until_process_gone`). So the
+skeleton is not missing — it produces wrong results against real CLI output. The most likely
+cause, per CLAUDE.md's own note that each CLI's title convention was "captured empirically, not
+guessed" for the Swift original: `tiller_activity/src/title.rs`'s patterns
+(`identify_agent_from_title`, `detect_status_from_title`) were ported from the Swift source but
+may not match what the real installed Claude/Codex CLIs actually emit in their OSC titles today
+— exactly the kind of thing only a live drive against the real binaries (which pass 17 did)
+can catch. The sidebar-dot-never-clears half additionally points at `AgentActivityModel`'s
+clearing paths (`is_process_owned`/`is_title_owned`/`process_gone` in
+`tiller_activity/src/model.rs`) not being reached for a *dead* process the way
+`refresh_process_signal`'s own test proves it can be for a *live* one that exits — worth
+checking whether `start_process_signal_refresh`'s polling loop is even still running once the
+terminal itself reports exited (its `keep_running` check returns `false` and stops the loop —
+if that happens before the clearing transition is observed, the dot is orphaned).
+
+- **files**: `rust/crates/tiller_activity/src/title.rs` (verify/correct real CLI title
+  patterns — likely primary root cause), `rust/crates/tiller_activity/src/model.rs` (clearing
+  paths for a process that's already gone by the time the poll loop would have caught it),
+  `rust/crates/tiller/src/main.rs` (`subscribe_terminal_activity`/`start_process_signal_refresh`
+  at ~2843–2905, and wherever `agent_spawned` is/isn't called for a plain non-split agent
+  launch — confirm it's reached on every launch path, not only the split-with-agent path at
+  `main.rs:5127`), `rust/crates/tiller_terminal` (confirm `TerminalActivityEvent::OscTitle` is
+  actually emitted for real CLI output, not only for the synthetic shells the tests use)
+- **size**: L — this is a debugging task against real agent binaries with four independently
+  broken symptoms (badge doesn't show working, doesn't clear on idle, doesn't clear on death,
+  survives relaunch), not a single fix
+
+---
+
+## `F-TERM-11` — FAILED — absent
+
+**Needs: build.** `SEAMS.md` already names this exact seam and its owner: Half A
+(`TerminalView::empty_prompt()`, rendering "No terminal in this pane" with New Terminal/New…
+buttons and emitting `TerminalPromptEvent` — visible at `rust/crates/tiller_terminal/src/
+lib.rs:1370-1420`, the `TerminalState::Pending` + `self.empty_prompt` branch) is done. Half B —
+mount that prompt when no worktree is selected at all, and handle the resulting
+`NewTerminal`/`NewTerminalWithCommand` events in the app-level tab/pane owner — was never
+picked up. This is a clean, scoped, already-diagnosed row; no new investigation needed, just
+the `main.rs` integration.
+
+- **files**: `rust/crates/tiller/src/main.rs` (mount `TerminalView::empty_prompt()`-driven
+  state for the no-worktree-selected case; subscribe to `TerminalPromptEvent` and handle both
+  variants), `rust/crates/tiller_terminal/src/lib.rs` (already correct, reference only —
+  `empty_prompt` and `TerminalPromptEvent`/`TerminalPromptAction`)
+- **size**: M
+
+---
+
+## `F-TERM-PTY-06` — NOT EXERCISED → **both, not purely instrument-blocked**
+
+**Needs: both**, and the manifest's framing conflates two different drop mechanisms that need
+splitting. `receive_file_drop` (`rust/crates/tiller_terminal/src/lib.rs:765-780`) is real,
+wired via `.on_drop::<PathBuf>` on the terminal's root element
+(`lib.rs:1453-1457`), and has a passing drawn test
+(`a_drawn_terminal_inserts_a_quoted_file_drop_without_a_newline`, `lib.rs:2638`). But that
+`on_drop::<PathBuf>` is GPUI's **typed in-app drag payload** mechanism — the same one
+`right_panel.rs:1921`'s Files-panel rows and `changes.rs:993`'s changed-file rows use via
+`.on_drag(path, ...)`. It fires only for a drag that originated inside this GPUI app. `grep -rn
+ExternalPaths rust/crates` returns nothing anywhere in the workspace — GPUI's OS-level
+drag-and-drop payload type (what a real XDND drop from Nautilus/a file manager delivers) is
+never registered on anything. So:
+- The **in-app** path (drag a Files-panel row onto a terminal pane) is built and unit-tested,
+  and — unlike true XDND — it is *not* blocked by `ENVIRONMENT.md`'s XDND limitation, since
+  it's a synthetic in-app drag `xdotool` can drive with a held-button mouse move. This half is
+  `exercise`, and the current "instrument-blocked" verdict is too pessimistic for it.
+  ENVIRONMENT.md's XDND caveat correctly applies only to the true OS-drop case.
+- The **OS-level XDND** path (the row's literal spec, ported from macOS Finder-drop behavior)
+  does not exist in the code at all — this half is `build`, not merely blocked-and-waiting.
+
+- **files**: `rust/crates/tiller_terminal/src/lib.rs` (register a `gpui::ExternalPaths`
+  `.on_drop` handler alongside the existing `PathBuf`/`(PathBuf, String)` ones, routing through
+  the same `receive_file_drop`/classification logic) for the build half; no files needed for
+  the in-app exercise half
+- **size**: S for the in-app exercise; M for adding real XDND support
+
+---
