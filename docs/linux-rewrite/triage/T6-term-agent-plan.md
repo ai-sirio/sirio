@@ -403,3 +403,95 @@ never registered on anything. So:
 - **size**: S for the in-app exercise; M for adding real XDND support
 
 ---
+
+## `F-TERM-SPLIT-01` — FAILED — defective
+
+**Needs: build.** Both defects the ledger names are confirmed live in current code, with the
+first one now precisely located:
+
+1. **"Left inserts on the right" is real, and it's the control-socket handler specifically —
+   not the menu, and not the underlying tree logic.** `PaneNode::split_focused_with_placement`
+   (`rust/crates/tiller/src/panes.rs:319-380`) correctly honors `SplitPlacement::Before`/
+   `After`, and the terminal context-menu's `SplitLeft`/`SplitAbove` items thread `Before`
+   correctly (`main.rs:2191-2205`). But the `pane.split` control-socket handler — what P106's
+   drive actually used — discards placement entirely:
+   ```rust
+   "pane.split" => {
+       let direction = match direction.as_str() {
+           "right" | "left" => SplitDirection::Horizontal,   // main.rs:1297
+           "down" | "up" => SplitDirection::Vertical,
+           ...
+       };
+       self.queue_action(request, move |reply| ControlAction::SplitPane { direction, reply })
+   }
+   ```
+   `ControlAction::SplitPane` (`main.rs:302`) carries no placement field, and its handler
+   (`main.rs:2446-2449`) calls `workspace.split_focused_terminal(direction, None, cx)`, which
+   calls `split_terminal_at` with `SplitPlacement::After` hardcoded (`main.rs:4972-4984`). So
+   `"left"` and `"right"` are literally the same request over the socket today — both produce a
+   rightward split. The same is true of the `SplitPaneRight`/`SplitPaneDown` keyboard-chord
+   actions, which share this same `After`-only path — there is currently no socket or
+   keyboard-chord way to split left/above at all, only the context menu reaches it.
+2. **`TerminalPaneCache` remains unintegrated**, confirmed unchanged since P106/RECENSUS:
+   `rust/crates/tiller_terminal/src/lifecycle.rs:63`'s `TerminalPaneCache<T>` and
+   `move_within_worktree` (`:131`) have callers only in their own module's tests. The recursive
+   pane tree in `main.rs` (`render_pane_tree` at `main.rs:5362`, confirmed still the
+   production renderer) recreates leaves rather than reusing cached ones, so terminal content
+   identity, PTY controllers, and focus are not preserved across a tree restructuring the way
+   `SEAMS.md` specifies.
+
+- **files**: `rust/crates/tiller/src/main.rs` — this is the primary file for both defects: add
+  a placement parameter to `ControlAction::SplitPane` (`:302`) and thread it from the
+  `pane.split` handler (`:1292-1310`) through to `split_focused_terminal`/`split_terminal_at`
+  (`:4956-4990`, currently `After`-hardcoded); separately, integrate `TerminalPaneCache` into
+  `render_pane_tree` (`:5362`) and the split/close/move call sites so leaves are looked up
+  rather than recreated. `rust/crates/tiller_terminal/src/lifecycle.rs` (already correct,
+  reference only — `TerminalPaneCache`, `move_within_worktree`)
+- **size**: L — two independent defects in one row, the second (cache integration) touching
+  the recursive tree-rendering path broadly enough that `WORK-BREAKDOWN.md` already sizes its
+  containing effort (`B-07`) as M on its own; the placement fix is comparatively small (S) but
+  do not fold the sizes together into one estimate
+
+---
+
+## `F-TERM-UI-01` — half-proven
+
+**Needs: exercise**, same shared cause #2 as `F-TERM-04`/`F-TERM-06`, plus one already-recorded
+defect to not re-discover: the row's clause is broader than either single-item row (menu
+renders, *and* every item delegates correctly), so its remaining half is the full twelve-item
+walk — `Copy`/`Paste` (→ `F-TERM-04`), `Copy Pane ID`/`Copy Terminal ID` (→ `F-TERM-06`),
+`Close Terminal…` (→ `F-TERM-08`, which is `build` not `exercise` — this row inherits that
+same gap for its "offers close" clause), the four `Split …` items, `Clear Terminal`, `Copy
+Context`, and `Set Title`. `QUEUE.md:2166-2171` already recorded a real, separate defect on
+this row while recovering the pass-17 evidence: the Files panel paints **over** the open
+context menu, truncating long labels at the panel's edge (visible in `p17-f1-menu.png`, e.g.
+"Copy C…", "Set Titl…"). Both are GPUI elements, so this is a paint-order bug Tiller owns, not
+a platform limitation like the P72 webview occlusion — whoever drives this row next should fix
+or file that separately rather than reporting a truncated label as a missing menu item.
+
+- **files**: exercise itself needs none; the recorded z-order defect, if picked up alongside,
+  is in `rust/crates/tiller/src/main.rs` (paint/z-order of the Files panel vs. the terminal
+  context menu — both GPUI elements in the same window, order is app-controlled)
+- **size**: S for the exercise; S for the z-order fix if bundled
+
+---
+
+## `F-TERM-UI-02` — NOT EXERCISED
+
+**Needs: exercise.** Code reading confirms the platform-modifier routing is implemented as
+`SEAMS.md`'s P82 ruling specifies: `opens_terminal_link(event.modifiers.platform)`
+(`rust/crates/tiller_terminal/src/lib.rs:988`) gates the click, and `TerminalLinkEvent`
+(`lib.rs:90,999`) carries the URL to the owning terminal's own subscriber
+(`main.rs:2830-2841`'s `subscribe_terminal_links`, matched against the clicked pane's id) —
+per-pane routing, not global `open_url`. This matches the row's clause exactly. The manifest's
+"no xdg-open twice" result is most plausibly COSMIC intercepting the Super key at the
+compositor level before it ever reaches the app's `Modifiers.platform` bit, which is a window-
+manager/environment question, not a code defect — consistent with the row's own "NOT EXERCISED
+— blocked on display" framing rather than a FAILED. Worth trying on both drive lanes before
+concluding the block is total: the X11 lane (`DISPLAY=:1`, an XWayland client) may see Super
+differently than the native Wayland lane, since XWayland's key routing to a focused client can
+differ from what a Wayland-native compositor grabs globally for its own shell chrome.
+
+- **files**: none (exercise only; `rust/crates/tiller_terminal/src/lib.rs:988` is already
+  correct against the P82 platform ruling)
+- **size**: S
