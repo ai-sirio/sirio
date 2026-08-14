@@ -146,3 +146,46 @@ Claim: `could-not-reach` — same conclusion as the E08 sweep's independent re-c
 gesture this row requires (press-hold-drag) has no primitive anywhere on the Wayland lane, and
 the one route that has one is barred to this slice. This is an environmental block, not a
 platform-impossible claim — the production drag/drop code itself reads as real on both ends.
+
+## F-CHG-22 (ledger line 213, currently half-proven)
+
+Manifest says: exercise — data-tier status mapping and per-status glyph rendering
+(`main.rs:1991`, `right_panel.rs:1142-1156`) are both correct; the owed half is navigating to
+and expanding the actual Activity section (not the Changes tab, which is what the prior three
+new captures accidentally re-showed) with running/done/needs-input agents present, and
+capturing it.
+
+- Created three real panes (`panel.create worktree=/tmp/w10chg-fixture cmd=cat`, capturing each
+  real `pane-<pid>-N` id from the reply — not guessed) and drove Layer A directly:
+  `notify session=<id1> status=running`, `status=needs-input` on the second, `status=done` on the
+  third — the three status values this row is specifically about, distinct from the E08 sweep's
+  prior running/done/error trio (that one skipped needs-input).
+- Located the Activity toggle by scanning click y-coordinates at fixed x=1512 (panel body centre)
+  from 900 to 972 in one session (no code assumption, just the pixel evidence): the colour count
+  jumped from ~8080 (collapsed) to ~8360-8390 and stayed there once a click landed at y=940, and
+  earlier/later y values in the same scan did not move it — i.e. click **(1512, 940)** hits the
+  Activity header when collapsed (its render is `absolute().bottom_0()` per `right_panel.rs:788`,
+  so the header's own on-screen position moves once expanded, which is also why a same-coordinate
+  second click does not re-collapse it — expected from the code, not a bug in this drive).
+- With the three agents' statuses already set, captured collapsed (`final2-collapsed`, 1715x972,
+  8087 colours) then clicked (1512, 940) and captured expanded twice
+  (`final2-expanded-1`/`-2`, 8363/8390 colours).
+- Same-resolution (1715x972) full-frame diff collapsed vs expanded: `compare -metric AE` =
+  1,799 non-zero pixels — modest but real, consistent with three small status rows (icon + label,
+  `ACTIVITY_ROW_HEIGHT`=48px each) appearing in a 405px-wide corner rather than a full-panel
+  content swap. A tighter crop matching the activity box's own geometry
+  (`405x171+1310+801`, header 27px + 3×48px rows, anchored to the bottom-right) confirms the
+  effect is concentrated exactly where the section renders: stddev rises from 7.90 to 9.85 and
+  `AE` in that crop = 219, not spread noise elsewhere in the frame.
+- This directly answers the manifest's owed half: the capture is now of the Activity section
+  itself, actually expanded, with the specific running/needs-input/done trio present — not the
+  Changes tab the prior half-proven captures mistakenly showed.
+- Captures: `reference/linux-progress/wavea-W10-chg/02-final2-collapsed.png`,
+  `04-final2-expanded-2.png`, `03-final2-expanded-1.png`, `05-final2-recollapsed.png`.
+
+Claim: `exercised-working` — the specific missing half (navigate to and expand the real Activity
+section with running/needs-input/done agents present, capture it) is now driven and captured,
+discriminating against a genuine collapsed-state control from the same session. As with the
+other rows here, I cannot read the pixels myself to confirm the exact glyph shapes match each
+status 1:1 — that residual sighted-read gap is the same one already on record for this row's
+data-tier half (E08 sweep) and is not new to this drive.
