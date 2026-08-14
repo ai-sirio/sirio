@@ -146,6 +146,12 @@ enum Entry {
     /// result, the files touched, and the raw input sent, when the agent
     /// reported them. `expanded` starts `false`, same as `Thought`
     /// (F-CHAT-21): the card renders as one line until the reader opts in.
+    ///
+    /// `group_expanded` (F-CHAT-22) is read only on the *last* entry of a
+    /// consecutive run of tool calls — that is the entry the transcript
+    /// renders the "N steps" toggle against, since a run has no separate
+    /// grouping record of its own. It is meaningless, and ignored, on any
+    /// entry that is not currently a run's tail.
     ToolCall {
         id: String,
         title: String,
@@ -155,6 +161,7 @@ enum Entry {
         locations: Vec<ToolCallLocationInfo>,
         raw_input: Option<String>,
         expanded: bool,
+        group_expanded: bool,
     },
     /// A question the agent put to the user, answered in place (F-CHAT-25).
     /// `resolved` is the recorded answer once one is chosen or typed;
@@ -694,6 +701,17 @@ impl Chat {
         cx.notify();
     }
 
+    /// F-CHAT-22: flips a run of tool calls between its compact "N steps"
+    /// summary and every step shown as its own full card. `index` is the
+    /// run's last entry — the one the group's header renders against.
+    fn toggle_tool_call_group_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Entry::ToolCall { group_expanded, .. }) = self.entries.get_mut(index) {
+            *group_expanded = !*group_expanded;
+            self.remeasure_entry(index);
+        }
+        cx.notify();
+    }
+
     /// Install the composer keymap in the host application.
     pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
@@ -776,6 +794,7 @@ impl Chat {
                     locations,
                     raw_input,
                     expanded: false,
+                    group_expanded: false,
                 });
             }
             AcpEvent::ToolCallUpdated {
@@ -2727,100 +2746,17 @@ impl Chat {
                 locations,
                 expanded,
                 ..
-            } => {
-                let toggle_entity = entity.clone();
-                let header = div()
-                    .id(("tool-call-toggle", entry_index))
-                    .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
-                    .flex_1()
-                    .px(px(CARD_H_PADDING))
-                    .py(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .cursor(CursorStyle::PointingHand)
-                    .child(
-                        IconElement::new(
-                            if expanded {
-                                Icon::ChevronDown
-                            } else {
-                                Icon::ChevronRight
-                            },
-                            px(10.0),
-                        )
-                        .text_color(colors.meta),
-                    )
-                    .child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(colors.meta)
-                            .child(kind),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(typography.callout)
-                            .text_color(colors.title)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(typography.footnote)
-                            .text_color(colors.meta)
-                            .child(status),
-                    )
-                    .on_click(move |_, _, cx| {
-                        toggle_entity.update(cx, |chat, cx| {
-                            chat.toggle_tool_call_expanded(entry_index, cx);
-                        });
-                    });
-                let mut card = div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .rounded(theme.radii.code_block)
-                    .bg(colors.card_fill)
-                    .border_l_2()
-                    .border_color(colors.rail_tool)
-                    .child(header);
-                if expanded {
-                    let mut body = div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .px(px(CARD_H_PADDING))
-                        .pb(px(CARD_V_PADDING));
-                    for item in &content {
-                        match item {
-                            ToolCallContentInfo::Text(text) => {
-                                body = body.child(Self::render_tool_output_text(text, theme));
-                            }
-                            ToolCallContentInfo::Diff(diff) => {
-                                body = body.child(Self::render_tool_diff(diff, theme));
-                            }
-                            ToolCallContentInfo::Other => {}
-                        }
-                    }
-                    if !locations.is_empty() {
-                        body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
-                            locations.iter().map(|location| {
-                                let label = match location.line {
-                                    Some(line) => {
-                                        format!("{}:{line}", location.path.display())
-                                    }
-                                    None => location.path.display().to_string(),
-                                };
-                                div()
-                                    .text_size(typography.footnote)
-                                    .text_color(colors.meta)
-                                    .child(label)
-                            }),
-                        ));
-                    }
-                    card = card.child(body);
-                }
-                card.into_any_element()
-            }
+            } => Self::render_tool_call_card(
+                entry_index,
+                title,
+                status,
+                kind,
+                content,
+                locations,
+                expanded,
+                theme,
+                entity.clone(),
+            ),
             Entry::Permission {
                 request_id,
                 title,
@@ -3077,6 +3013,213 @@ impl Chat {
                     .into_any_element()
             }
         }
+    }
+
+    /// One tool call's card: a chevron-toggle header (kind, title, status)
+    /// and, when `expanded`, its content/diff/location detail. Shared by
+    /// the single-entry render path and by `render_tool_call_group`'s
+    /// expanded view, so a run's members look identical whether they are
+    /// standing alone or inside a group.
+    fn render_tool_call_card(
+        entry_index: usize,
+        title: String,
+        status: String,
+        kind: String,
+        content: Vec<ToolCallContentInfo>,
+        locations: Vec<ToolCallLocationInfo>,
+        expanded: bool,
+        theme: &Theme,
+        entity: gpui::Entity<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let toggle_entity = entity;
+        let header = div()
+            .id(("tool-call-toggle", entry_index))
+            .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
+            .flex_1()
+            .px(px(CARD_H_PADDING))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor(CursorStyle::PointingHand)
+            .child(
+                IconElement::new(
+                    if expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    px(10.0),
+                )
+                .text_color(colors.meta),
+            )
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .text_color(colors.meta)
+                    .child(kind),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(typography.callout)
+                    .text_color(colors.title)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .text_color(colors.meta)
+                    .child(status),
+            )
+            .on_click(move |_, _, cx| {
+                toggle_entity.update(cx, |chat, cx| {
+                    chat.toggle_tool_call_expanded(entry_index, cx);
+                });
+            });
+        let mut card = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(theme.radii.code_block)
+            .bg(colors.card_fill)
+            .border_l_2()
+            .border_color(colors.rail_tool)
+            .child(header);
+        if expanded {
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(CARD_H_PADDING))
+                .pb(px(CARD_V_PADDING));
+            for item in &content {
+                match item {
+                    ToolCallContentInfo::Text(text) => {
+                        body = body.child(Self::render_tool_output_text(text, theme));
+                    }
+                    ToolCallContentInfo::Diff(diff) => {
+                        body = body.child(Self::render_tool_diff(diff, theme));
+                    }
+                    ToolCallContentInfo::Other => {}
+                }
+            }
+            if !locations.is_empty() {
+                body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
+                    locations.iter().map(|location| {
+                        let label = match location.line {
+                            Some(line) => {
+                                format!("{}:{line}", location.path.display())
+                            }
+                            None => location.path.display().to_string(),
+                        };
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child(label)
+                    }),
+                ));
+            }
+            card = card.child(body);
+        }
+        card.into_any_element()
+    }
+
+    /// F-CHAT-22: a consecutive run of tool calls, collapsed by default to
+    /// one "N steps" header. `members` is every entry in the run in order;
+    /// `group_index` is the run's last entry, the only index the transcript
+    /// list actually draws a row for (see `tool_call_run_bounds`), so the
+    /// header's toggle and its `group_expanded` state both key off it.
+    /// Collapsed, each member shows as a compact one-line status row;
+    /// expanded, each renders through `render_tool_call_card` exactly as it
+    /// would standing alone, keyed by its own transcript index so its own
+    /// F-CHAT-23 detail toggle still works independently.
+    fn render_tool_call_group(
+        members: Vec<(usize, Entry)>,
+        group_index: usize,
+        group_expanded: bool,
+        theme: &Theme,
+        entity: gpui::Entity<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let count = members.len();
+        let toggle_entity = entity.clone();
+        let header = div()
+            .id(("tool-call-group-toggle", group_index))
+            .debug_selector(move || format!("tool-call-group-toggle-{group_index}"))
+            .px(px(CARD_H_PADDING))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor(CursorStyle::PointingHand)
+            .hover(|style| style.text_color(colors.title))
+            .child(
+                IconElement::new(
+                    if group_expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    px(10.0),
+                )
+                .text_color(colors.meta),
+            )
+            .child(
+                div()
+                    .text_size(typography.callout)
+                    .text_color(colors.subtitle)
+                    .italic()
+                    .child(format!("{count} steps")),
+            )
+            .on_click(move |_, _, cx| {
+                toggle_entity.update(cx, |chat, cx| {
+                    chat.toggle_tool_call_group_expanded(group_index, cx);
+                });
+            });
+        let mut column = div().w_full().flex().flex_col().gap(px(2.0)).child(header);
+        if group_expanded {
+            for (member_index, member) in members {
+                if let Entry::ToolCall {
+                    title,
+                    status,
+                    kind,
+                    content,
+                    locations,
+                    expanded,
+                    ..
+                } = member
+                {
+                    column = column.child(Self::render_tool_call_card(
+                        member_index,
+                        title,
+                        status,
+                        kind,
+                        content,
+                        locations,
+                        expanded,
+                        theme,
+                        entity.clone(),
+                    ));
+                }
+            }
+        } else {
+            for (_, member) in members {
+                if let Entry::ToolCall { title, status, .. } = member {
+                    column = column.child(
+                        div()
+                            .pl(px(CARD_H_PADDING + 16.0))
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child(format!("{status} · {title}")),
+                    );
+                }
+            }
+        }
+        column.into_any_element()
     }
 
     fn render_composer(
@@ -4084,6 +4227,48 @@ impl Render for Chat {
                         list(
                             self.list_state.clone(),
                             cx.processor(move |this, entry_index: usize, _window, _cx| {
+                                // F-CHAT-22: a run of consecutive tool calls
+                                // renders as one group, keyed to the run's
+                                // last index. Every other index in that run
+                                // is "swallowed" — an empty row — since the
+                                // list requires one measured row per index
+                                // but the group's card lives only at the tail.
+                                if let Some((start, end)) =
+                                    tool_call_run_bounds(&this.entries, entry_index)
+                                {
+                                    if entry_index != end {
+                                        return div()
+                                            .id(("chat-entry", entry_index))
+                                            .into_any_element();
+                                    }
+                                    let members: Vec<(usize, Entry)> = (start..=end)
+                                        .filter_map(|index| {
+                                            this.entries
+                                                .get(index)
+                                                .cloned()
+                                                .map(|entry| (index, entry))
+                                        })
+                                        .collect();
+                                    let group_expanded = matches!(
+                                        this.entries.get(end),
+                                        Some(Entry::ToolCall {
+                                            group_expanded: true,
+                                            ..
+                                        })
+                                    );
+                                    return div()
+                                        .id(("chat-entry", entry_index))
+                                        .w(px(TRANSCRIPT_WIDTH))
+                                        .pb(px(8.0))
+                                        .child(Chat::render_tool_call_group(
+                                            members,
+                                            end,
+                                            group_expanded,
+                                            &transcript_theme,
+                                            entity.clone(),
+                                        ))
+                                        .into_any_element();
+                                }
                                 let source_start = transcript_ranges
                                     .get(entry_index)
                                     .map(|range| range.start)
@@ -4416,6 +4601,26 @@ fn thought_summary(text: &str) -> String {
         let truncated: String = flat.chars().take(THOUGHT_SUMMARY_MAX_CHARS).collect();
         format!("{truncated}…")
     }
+}
+
+/// F-CHAT-22: the `[start, end]` bounds (inclusive) of the consecutive run
+/// of `Entry::ToolCall` entries that `index` belongs to, when that run has
+/// more than one member. Returns `None` for a lone tool call or an index
+/// that isn't a tool call at all — the caller then falls back to the
+/// ordinary single-entry render path instead of grouping.
+fn tool_call_run_bounds(entries: &[Entry], index: usize) -> Option<(usize, usize)> {
+    if !matches!(entries.get(index), Some(Entry::ToolCall { .. })) {
+        return None;
+    }
+    let mut start = index;
+    while start > 0 && matches!(entries.get(start - 1), Some(Entry::ToolCall { .. })) {
+        start -= 1;
+    }
+    let mut end = index;
+    while matches!(entries.get(end + 1), Some(Entry::ToolCall { .. })) {
+        end += 1;
+    }
+    (end > start).then_some((start, end))
 }
 
 /// F-CHAT-23: caps a tool call's rendered text output. Kept as the tail
@@ -5777,6 +5982,69 @@ mod tests {
         assert_eq!(rows, vec![DiffLine::Added("brand new".into())]);
     }
 
+    fn test_tool_call(id: &str) -> Entry {
+        Entry::ToolCall {
+            id: id.into(),
+            title: format!("{id} title"),
+            status: "Completed".into(),
+            kind: "Edit".into(),
+            content: vec![],
+            locations: vec![],
+            raw_input: None,
+            expanded: false,
+            group_expanded: false,
+        }
+    }
+
+    #[test]
+    fn tool_call_run_bounds_is_none_for_a_non_tool_call_entry() {
+        let entries = vec![Entry::User("hi".into())];
+        assert_eq!(tool_call_run_bounds(&entries, 0), None);
+    }
+
+    #[test]
+    fn tool_call_run_bounds_is_none_for_a_lone_tool_call() {
+        let entries = vec![
+            Entry::User("hi".into()),
+            test_tool_call("tool-1"),
+            Entry::User("bye".into()),
+        ];
+        assert_eq!(
+            tool_call_run_bounds(&entries, 1),
+            None,
+            "a run of one is not a group"
+        );
+    }
+
+    #[test]
+    fn tool_call_run_bounds_spans_a_consecutive_run_and_ignores_neighbors() {
+        let entries = vec![
+            Entry::User("hi".into()),
+            test_tool_call("tool-1"),
+            test_tool_call("tool-2"),
+            test_tool_call("tool-3"),
+            Entry::User("bye".into()),
+        ];
+        assert_eq!(tool_call_run_bounds(&entries, 1), Some((1, 3)));
+        assert_eq!(tool_call_run_bounds(&entries, 2), Some((1, 3)));
+        assert_eq!(tool_call_run_bounds(&entries, 3), Some((1, 3)));
+    }
+
+    #[test]
+    fn tool_call_run_bounds_treats_two_separate_runs_independently() {
+        let entries = vec![
+            test_tool_call("tool-1"),
+            test_tool_call("tool-2"),
+            Entry::User("in between".into()),
+            test_tool_call("tool-3"),
+            test_tool_call("tool-4"),
+        ];
+        assert_eq!(tool_call_run_bounds(&entries, 0), Some((0, 1)));
+        assert_eq!(tool_call_run_bounds(&entries, 1), Some((0, 1)));
+        assert_eq!(tool_call_run_bounds(&entries, 3), Some((3, 4)));
+        assert_eq!(tool_call_run_bounds(&entries, 4), Some((3, 4)));
+    }
+
     #[test]
     fn acp_program_converts_to_the_adapters_own_agent_command() {
         // The picker contract: the chosen adapter's `AcpProgram` converts
@@ -6030,6 +6298,7 @@ mod tests {
                 locations,
                 raw_input,
                 expanded,
+                group_expanded,
             }) => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(title, "Edit file");
@@ -6039,6 +6308,7 @@ mod tests {
                 assert_eq!(locations.len(), 1);
                 assert!(raw_input.is_some());
                 assert!(!expanded, "a new tool call starts collapsed");
+                assert!(!group_expanded, "a new tool call starts group-collapsed");
             }
             other => panic!("expected a widened ToolCall entry, got {other:?}"),
         });
@@ -6067,6 +6337,7 @@ mod tests {
                 locations: vec![],
                 raw_input: None,
                 expanded: false,
+                group_expanded: false,
             });
             chat
         });
@@ -6128,6 +6399,7 @@ mod tests {
                 locations: vec![],
                 raw_input: None,
                 expanded: false,
+                group_expanded: false,
             });
             chat
         });
@@ -6156,6 +6428,77 @@ mod tests {
         cx.simulate_click(toggle.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
+    }
+
+    #[gpui::test]
+    async fn consecutive_tool_calls_group_under_one_toggle_and_expand_to_full_cards(
+        cx: &mut TestAppContext,
+    ) {
+        // F-CHAT-22: three tool calls run back-to-back land as one "3 steps"
+        // group, not three separate cards — and expanding it reveals every
+        // member as its own full card, keyed by its own transcript index.
+        cx.update(Theme::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            for id in ["tool-1", "tool-2", "tool-3"] {
+                chat.push_entry(Entry::ToolCall {
+                    id: id.into(),
+                    title: format!("{id} title"),
+                    status: "Completed".into(),
+                    kind: "Edit".into(),
+                    content: vec![],
+                    locations: vec![],
+                    raw_input: None,
+                    expanded: false,
+                    group_expanded: false,
+                });
+            }
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        assert!(
+            cx.debug_bounds("tool-call-group-toggle-2").is_some(),
+            "three consecutive tool calls collapse under one group toggle"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-0").is_none(),
+            "a collapsed group does not render its members' own toggles"
+        );
+
+        let group_toggle = cx
+            .debug_bounds("tool-call-group-toggle-2")
+            .expect("group toggle is rendered");
+        cx.simulate_click(group_toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("tool-call-toggle-0").is_some(),
+            "expanding the group renders the first member as its own full card"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-1").is_some(),
+            "expanding the group renders the second member as its own full card"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-2").is_some(),
+            "expanding the group renders the third member as its own full card"
+        );
+
+        let group_toggle = cx
+            .debug_bounds("tool-call-group-toggle-2")
+            .expect("group toggle stays rendered while expanded");
+        cx.simulate_click(group_toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("tool-call-toggle-0").is_none(),
+            "clicking again collapses the group back"
+        );
     }
 
     #[gpui::test]
