@@ -98,9 +98,14 @@ impl AutoNamingThrottle {
     pub const MIN_INTERVAL: Duration = Duration::from_secs(30);
     pub const MIN_GROWTH: usize = 200;
 
+    /// Whether a generated-name request should fire now. The first run is
+    /// never throttled — both gates apply only once a request was recorded,
+    /// mirroring the reference `AutoNamingThrottle.swift`.
     pub fn should_request(&self, now: Instant, transcript_len: usize) -> bool {
-        self.last_request
-            .is_none_or(|last| now.duration_since(last) >= Self::MIN_INTERVAL)
+        let Some(last) = self.last_request else {
+            return true;
+        };
+        now.duration_since(last) >= Self::MIN_INTERVAL
             && transcript_len.saturating_sub(self.last_transcript_len) >= Self::MIN_GROWTH
     }
 
@@ -171,7 +176,10 @@ mod tests {
     fn auto_naming_requires_first_run_or_both_throttles() {
         let start = Instant::now();
         let mut throttle = AutoNamingThrottle::default();
-        assert!(!throttle.should_request(start, 199));
+        assert!(
+            throttle.should_request(start, 199),
+            "the first run is exempt from both gates"
+        );
         assert!(throttle.should_request(start, 200));
         throttle.record_request(start, 200);
         assert!(!throttle.should_request(start + Duration::from_secs(31), 399));
