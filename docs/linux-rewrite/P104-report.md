@@ -360,3 +360,87 @@ rows showed no dot of any kind, same as `F-TERM-PTY-05`. Selected "3. No" to dec
 circle immediately, and a terminal `git diff -- main.rs` afterward confirmed the file was
 untouched (only the pre-existing `README.md` change remained in `git status`). Exited the
 nested session with `/exit` afterward.
+
+## Group 6 · changes surface
+
+Setup for this group: in the scratch fixture repo, staged one modified file
+(`src/lib.rs`, a new `farewell()` function appended) and left a second modified file
+(`README.md`) unstaged, then committed both as a base commit; a branch (`conflict-branch`)
+was created from the prior commit with a different edit to the same `README.md` line, then
+merged into the fixture's `master` to produce a genuine, unresolved merge conflict
+(`git status`: `UU README.md`) for `F-CHG-16`. Opened the surface via the command palette
+(`ctrl-k` → typed "Changes" → the single filtered result → Return did not visibly select it;
+clicking the filtered row directly did).
+
+**F-CHG-11** — Gesture: report the section headers and the control at each header's right
+edge; click the staged section's control; report `git status` before and after. Screen: the
+panel's own top header reads "Local changes (2)" with four controls at its right edge —
+`Stage all`, `Expand All`, `Collapse All`, `Discard all`. Below it, two section headers:
+`Staged (1)` with `Unstage all` at its right edge, and `Changed (1)` with `Stage all` at its
+right edge (capture: `p104-g6-chg11-before.png`). `git status` before: `src/lib.rs` staged
+(`M ` in the index), `README.md` unstaged (` M` in the worktree). Clicked `Unstage all` on the
+`Staged` section — the on-screen change did not appear in the first capture taken immediately
+after (a repeat of the session's known stale-frame lag), but a terminal `git status --short`
+taken at the same moment already showed `M README.md` / ` M src/lib.rs` — both files unstaged.
+A capture taken ~3s later confirmed the screen had caught up: the `Staged` section was gone
+entirely and both files now sat under `Changed (2)` (capture: `p104-g6-chg11-after-unstage.png`).
+
+**F-CHG-13** — Gesture: open a changed file's row menu and choose Open diff; report what
+opens and its tab title. Screen: expanding the `src/lib.rs` row reveals inline row controls at
+its right edge — `Discard`, `Stage`, `Open diff` (with a trailing `↗` glyph) — rather than a
+separate right-click/kebab menu (capture: `p104-g6-chg13-row-controls.png`). Clicking
+`Open diff` did not open any new tab in the top tab strip and did not change the main pane's
+content, which continued to show the same collapsed `Local changes (2)` list. What it did do:
+a second entry, also labelled verbatim `Changes`, was appended to the right-hand Activity
+list (which already had one `Changes` entry from opening the surface) (capture:
+`p104-g6-chg13-opendiff-result.png`). Clicking that new Activity row selected it (grey
+highlight) but showed identical `Local changes (2)` content — not an isolated diff scoped to
+`src/lib.rs`. So the observed tab title for "Open diff" is literally `Changes`, and its
+content is the same multi-file list, not a per-file diff view.
+
+**F-CHG-16** — Gesture: create a conflict first (merge a branch touching the same line); find
+the conflicted row's "Resolve in terminal" control, click it, and report what the terminal
+pane receives. Screen: with the fixture repo's genuine `UU README.md` conflict present, the
+Changes panel showed one file under `Staged (1)` and the same file again under `Changed (1)`,
+both labelled `README.md`. Expanding the `Changed` row's `README.md` revealed inline
+conflict-marker diff content and four controls: `Discard`, `Stage`, `Open diff`,
+`Resolve in terminal` (trailing `↗`) (capture: `p104-g6-chg16-conflict-controls.png`).
+Clicking `Resolve in terminal` replaced the active pane's content with a new terminal pane
+that had already run a command on entry; the pane's inline receive, verbatim:
+
+```
+diff --cc README.md
+index 4bb8216,8c3f725..0000000
+--- a/README.md
++++ b/README.md
+@@ -1,4 -1,3 +1,8 @@@
+  # P104 fixture repo
+
+++<<<<<<< HEAD
+ +Scratch git fixture for driving the tiller app during the P104 critic pass.x
+ +x
+++=======
++ Scratch git fixture for driving the tiller app during the P104 critic pass -- CONFLICT BRANCH.
+++>>>>>>> conflict-branch
+
+Resolve conflict at README.md
+$
+```
+
+(capture: `p104-g6-chg16-terminal-receive.png`), leaving the shell sitting at a fresh prompt
+for manual resolution. The right-hand Activity list gained a new row labelled verbatim
+`Resolve README.md`, distinct from the generic `Terminal`/`Changes` row labels used elsewhere.
+
+**F-CHG-18** — Gesture: press and drag a changed-file row a few centimetres without
+releasing; report what appears under the cursor while dragging; release outside any target
+and report the state afterward. Screen: pressed down on the collapsed `Changed` section's
+`README.md` row and dragged down and sideways in two steps. While held, a small floating chip
+reading verbatim `Diff` appeared over the panel, near the drag's starting area (capture:
+`p104-g6-chg18-dragging.png`) — it did not visibly track the live cursor position across the
+two intermediate `mousemove` steps taken during the same drag. Released the mouse button in
+empty space below the file list, outside any row or drop target: the `Diff` chip remained
+on screen, unchanged, for at least 3 further seconds after the release with no further input.
+A subsequent click elsewhere in the panel made the chip disappear; at that point the
+`Staged (1)` / `Changed (1)` sections were unchanged from before the drag — the file had not
+been staged, unstaged, or reordered by the drag-and-release-outside-target (capture:
+`p104-g6-chg18-after-settle.png`).
