@@ -8,7 +8,7 @@
 //! keeps the last good numbers visibly dimmed rather than showing them as
 //! current.
 
-use gpui::{Context, Render, Rgba, Window, div, prelude::*, px, text};
+use gpui::{AnyView, Context, Render, Rgba, Window, div, prelude::*, px, text};
 use std::rc::Rc;
 use std::time::Duration;
 use tiller_theme::Theme;
@@ -198,6 +198,47 @@ impl StatusBar {
         cx.notify();
     }
 
+    /// Handles the manual refresh control (F-USE-01): tells the host, if
+    /// one is listening via [`Self::on_refresh`], and — independent of
+    /// whether a host is wired up at all — forces every provider segment
+    /// to refetch immediately instead of waiting for the next interval
+    /// tick. Segments flip to their "…" loading text right away so the
+    /// click has a visible effect even before the fetches return.
+    fn on_refresh_clicked(&mut self, cx: &mut Context<Self>) {
+        if let Some(callback) = &self.on_refresh {
+            callback();
+        }
+        self.claude = ProviderUsageState::Loading;
+        self.codex = ProviderUsageState::Loading;
+        self.opencode_go = ProviderUsageState::Loading;
+        self.ollama_cloud = ProviderUsageState::Loading;
+        cx.notify();
+
+        let workspace_override = {
+            let trimmed = self.prefs.opencode_workspace_id_override.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor();
+            let claude = executor.spawn(async move { ClaudeUsageFetcher::fetch() });
+            let codex = executor.spawn(async move { CodexUsageFetcher::fetch() });
+            let opencode_go = executor.spawn(async move {
+                OpenCodeGoUsageFetcher::fetch(workspace_override.as_deref())
+            });
+            let ollama_cloud = executor.spawn(async move { OllamaCloudUsageFetcher::fetch() });
+            let (claude, codex, opencode_go, ollama_cloud) = (
+                claude.await,
+                codex.await,
+                opencode_go.await,
+                ollama_cloud.await,
+            );
+            let _ = this.update(cx, |bar, cx| {
+                bar.apply_outcomes(claude, codex, opencode_go, ollama_cloud, cx);
+            });
+        })
+        .detach();
+    }
+
     /// Arms the periodic refresh task once: fetches immediately, then on
     /// the interval. The loop awaits the background fetches, so the render
     /// thread never blocks. The interval is read from the bar's current
@@ -302,6 +343,7 @@ impl Render for StatusBar {
         let theme = *Theme::get(cx);
         self.ensure_refresh_task(cx);
         let settings = self.on_settings.clone();
+        let refresh_entity = cx.entity();
 
         let icon_button = |id: &'static str, icon: Icon| {
             div()
@@ -346,33 +388,62 @@ impl Render for StatusBar {
             theme.title
         };
 
-        let provider_segment =
-            |display_name: &'static str, mark: Icon, text_color: gpui::Rgba, text: String| {
-                // The `text!` macro derives its element id from its own source
-                // location: inside this closure the location is shared by all
-                // three segments, so the ids must be explicit or the duplicate
-                // element ids make GPUI drop all but one segment.
-                let text_id = format!("{display_name}-usage-text");
-                div()
-                    .debug_selector(move || format!("{display_name}-usage-text"))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(theme.typography.caption2)
-                    .text_color(text_color)
-                    .child(IconElement::new(mark, px(12.0)))
-                    .child(text!(id = text_id, text))
-            };
+        let provider_segment = move |display_name: &'static str,
+                                      mark: Icon,
+                                      text_color: gpui::Rgba,
+                                      text: String| {
+            // The `text!` macro derives its element id from its own source
+            // location: inside this closure the location is shared by all
+            // three segments, so the ids must be explicit or the duplicate
+            // element ids make GPUI drop all but one segment.
+            let text_id = format!("{display_name}-usage-text");
+            // F-USE-02: the segment's own text is the unavailable reason
+            // (or the abbreviated numbers) already — the tooltip repeats it
+            // rather than inventing a second vocabulary, so it stays
+            // correct for every state (Loading/Loaded/Stale/Unavailable)
+            // for free.
+            let segment_id = format!("{display_name}-usage-segment");
+            let tooltip_text = text.clone();
+            div()
+                .id(segment_id)
+                .debug_selector(move || format!("{display_name}-usage-text"))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(theme.typography.caption2)
+                .text_color(text_color)
+                .tooltip(move |_, cx| -> AnyView {
+                    let tooltip_text = tooltip_text.clone();
+                    cx.new(|_| StatusBarTooltip {
+                        theme,
+                        text: tooltip_text,
+                    })
+                    .into()
+                })
+                .child(IconElement::new(mark, px(12.0)))
+                .child(text!(id = text_id, text))
+        };
 
         // The segments follow the settings surface's "Show in usage bar"
         // toggles (F-SET-10): a provider hidden there does not render here.
-        let mut left = div().flex().items_center().gap(px(12.0)).child(
-            icon_button("status-settings", Icon::Settings).on_click(move |_, _, _| {
-                if let Some(callback) = &settings {
-                    callback();
-                }
-            }),
-        );
+        let mut left = div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .child(
+                icon_button("status-settings", Icon::Settings).on_click(move |_, _, _| {
+                    if let Some(callback) = &settings {
+                        callback();
+                    }
+                }),
+            )
+            .child(
+                // F-USE-01: `on_refresh` had a real field and builder but
+                // no control in the render tree ever invoked it.
+                icon_button("status-refresh", Icon::RefreshCw).on_click(move |_, _, cx| {
+                    refresh_entity.update(cx, |bar, cx| bar.on_refresh_clicked(cx));
+                }),
+            );
         if self.prefs.claude_visible {
             left = left.child(provider_segment(
                 "Claude",
@@ -421,6 +492,30 @@ impl Render for StatusBar {
             .child(left)
             .child(div().flex_1())
             .child(text!(format!("{} · {}", self.data.branch, self.data.path)))
+    }
+}
+
+/// F-USE-02: the hover tooltip for one usage-bar segment. Repeats the
+/// segment's own visible text at full opacity — useful when the bar's
+/// caption-size type or a long "not found"/"logged out" reason is easy to
+/// misread at a glance.
+struct StatusBarTooltip {
+    theme: Theme,
+    text: String,
+}
+
+impl Render for StatusBarTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(self.theme.radii.control)
+            .bg(self.theme.canvas)
+            .border_1()
+            .border_color(self.theme.hairline)
+            .text_size(self.theme.typography.caption2)
+            .text_color(self.theme.title)
+            .child(self.text.clone())
     }
 }
 
