@@ -156,3 +156,46 @@ row's time-box tight; nothing here contradicts it.
 **Captures:** `reference/linux-progress/wavea-W05-set/16-patherr-agents.png`.
 
 ---
+
+## `F-SET-11` — ledger line 299, currently **half-proven**
+
+**Approach taken:** triage's approach is to drive the remaining 4 of 5 `UsageReason` clause states
+(`NotInstalled`, `LoggedOut`, `TimedOut`, `Error`) beyond the already-proven `Loaded`/valid state.
+Investigated the real fetch path (`claude.rs`) rather than guess: `ClaudeUsageFetcher::fetch`
+spawns a **login shell** (`login_shell()` → `$SHELL` or `/bin/bash`, run as `-lc claude`), and
+`NotInstalled` fires either when `Pty::spawn` itself fails, or when the PTY output later matches
+`classify_failure`'s "command not found" text. Codex/OpenCode's fetchers follow the same PTY
+pattern (`codex.rs`, 15s/25s real timeouts per the manifest).
+
+**Why the remaining 4 states were not driven this pass:** every route to them touches *shared,
+destructive* state on a machine 10 sibling agents are actively driving from this same session:
+- `NotInstalled` needs `claude`/`codex` to be genuinely unreachable from a **login shell**, not
+  just this process's own `PATH` — `bash -lc` re-sources `~/.bashrc`/`~/.bash_profile`, which on
+  this machine re-exports `PATH` (nvm, `~/.local/bin`) independent of the parent environment (this
+  is exactly why F-SET-17's plain `PATH`-unset trick, which does work for the Agents-screen
+  registry, does not transfer here: that path checks `std::env::var_os("PATH")` directly in-process,
+  this one goes through a fresh login shell). Reproducing it live means either editing the user's
+  real shell dotfiles or `chmod`-ing the real `claude`/`codex` binaries unreachable — both break
+  every other agent's terminal sessions on this shared machine for the rest of the run.
+  Attempted the safer edge (unset `PATH` for the app process only, matching F-SET-17's technique)
+  and rejected it after tracing `login_shell()`'s actual behavior — did not spend the time driving
+  it live only to file a false negative.
+- `LoggedOut` needs real Claude/Codex credentials removed or expired — the same credentials this
+  session's own `13-before-click.png` shows signed in as `e.palmisano@reply.it`, and that every
+  sibling agent's own Claude Code/Codex CLI session depends on for its own work.
+- `TimedOut` needs the real fetch host blackholed for up to the fetcher's real 25 s timeout — no
+  sandboxed route to do that scoped to one process without a namespace/firewall change that would
+  also stall sibling agents' live CLI traffic.
+- `Error` was already flagged by the ledger's own prior pass as needing a stub server — still true,
+  still out of scope for a no-source-edit exercise pass.
+
+**Claim:** could-not-reach for the 4 remaining states — every route available on this lane means
+either mutating shared credentials/PATH/network state that ten concurrently-running sibling agents
+depend on, or a source/infra change outside this pass's scope. The existing `Loaded`/valid-state
+proof on record (Claude 49%/77%, Codex 100%) stands unchanged; nothing here contradicts it or the
+row's current half-proven verdict.
+
+**Captures:** none new for this row — no drive was performed that produced discriminating
+evidence beyond what is already on record.
+
+---
