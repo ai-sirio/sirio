@@ -31,8 +31,9 @@ pub enum LocalAccountState {
     SignedOut,
     /// This platform has no local store for this provider's credentials.
     /// The state is *unknown* — saying "signed out" would be a guess about
-    /// a store that does not exist (e.g. OpenCode Go's cookie lives in the
-    /// macOS Keychain; there is no such store on Linux).
+    /// a store that does not exist (currently only Ollama Cloud, whose
+    /// cookie store is not built yet; OpenCode Go's cookie lives in
+    /// [`crate::CredentialStore`] here and the macOS Keychain there).
     NoLocalStore,
 }
 
@@ -147,23 +148,21 @@ fn claude_credentials_file() -> PathBuf {
 }
 
 fn opencode_go_account_state() -> LocalAccountState {
-    #[cfg(target_os = "macos")]
-    {
-        // The cookie is written into the macOS Keychain by the Swift app
-        // (`com.tiller.usage`). Read it read-only; its presence is the
-        // account state.
-        if crate::opencode_go::opencode_go_has_keychain_cookie() {
-            LocalAccountState::SignedIn
-        } else {
-            LocalAccountState::SignedOut
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // The cookie lives in the macOS Keychain; on this platform there is
-        // no local store to read, so the state is genuinely unknown rather
-        // than "signed out" — a guess about a store that does not exist.
-        LocalAccountState::NoLocalStore
+    // macOS reads the Keychain item the Swift app writes; this platform
+    // reads the app's own credential store, which the settings surface
+    // saves into (F-SET-12). Either way the cookie's presence is the
+    // account state — presence, not validity.
+    state_from_cookie_presence(crate::opencode_go::opencode_go_local_cookie().is_some())
+}
+
+/// The presence→state mapping shared by the platform cookie sources, split
+/// out so tests can drive it from a fixture [`crate::CredentialStore`]
+/// without touching the process environment.
+fn state_from_cookie_presence(present: bool) -> LocalAccountState {
+    if present {
+        LocalAccountState::SignedIn
+    } else {
+        LocalAccountState::SignedOut
     }
 }
 
@@ -241,13 +240,42 @@ mod tests {
             LocalAccountState::NoLocalStore,
             "Ollama Cloud has no local credential store anywhere"
         );
-        #[cfg(not(target_os = "macos"))]
+    }
+
+    /// F-SET-12: the OpenCode Go account state on this platform is the
+    /// cookie's presence in the app's own credential store — no longer
+    /// `NoLocalStore`, because the store now exists. Driven through a
+    /// fixture store: the environment-reading path is one `is_some()` away
+    /// from this mapping.
+    #[test]
+    fn opencode_go_state_is_cookie_presence_in_the_credential_store() {
+        let path = std::env::temp_dir().join(format!(
+            "tiller-account-cookie-{}/credentials.json",
+            std::process::id()
+        ));
+        let store = crate::CredentialStore::at(&path);
+
+        let key = crate::OpenCodeGoUsageFetcher::COOKIE_KEY;
         assert_eq!(
-            UsageProvider::OpenCodeGo.local_account_state(),
-            LocalAccountState::NoLocalStore,
-            "the OpenCode Go cookie lives in the macOS Keychain — on other \
-             platforms the state is unknown, not signed out"
+            state_from_cookie_presence(store.get(key).is_some()),
+            LocalAccountState::SignedOut,
+            "no cookie stored → signed out, an answer — not Unknown"
         );
+
+        store.set(key, "auth=Fe26.2**abc").expect("save cookie");
+        assert_eq!(
+            state_from_cookie_presence(store.get(key).is_some()),
+            LocalAccountState::SignedIn
+        );
+
+        store.delete(key).expect("clear cookie");
+        assert_eq!(
+            state_from_cookie_presence(store.get(key).is_some()),
+            LocalAccountState::SignedOut,
+            "clearing the cookie signs the provider out"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

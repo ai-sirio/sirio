@@ -1,17 +1,19 @@
-//! The OpenCode Go provider: a session cookie from the macOS Keychain and
-//! two HTTPS pages on opencode.ai, ported from
-//! `App/OpenCodeGoUsageFetcher.swift` and
+//! The OpenCode Go provider: a locally stored session cookie and two HTTPS
+//! pages on opencode.ai, ported from `App/OpenCodeGoUsageFetcher.swift` and
 //! `TillerCore/OpenCodeGoUsageParser.swift`.
 //!
-//! The cookie is stored by the Swift app under the `com.tiller.usage`
-//! keychain service; this fetcher reads it read-only through the `security`
-//! CLI (the same item the Swift app writes). Flow: normalize the cookie,
-//! discover the workspace id from `/_server`, then scrape the usage page
-//! (`/workspace/<id>/go`, React Flight wire format) for the session (5h),
-//! weekly (wk) and monthly (mo) windows. A missing cookie → logged out; a
-//! page that refuses or cannot be parsed → error; a fetch that outlives its
-//! budget → `TimedOut` (visibly stale, never a fabricated number).
+//! On macOS the cookie lives in the `com.tiller.usage` Keychain service the
+//! Swift app writes, read read-only through the `security` CLI. On this
+//! platform it lives in the app's own [`crate::CredentialStore`]
+//! (F-SET-12), written by the settings surface. Flow: normalize the cookie,
+//! discover the workspace id from `/_server` (or take the settings
+//! override), then scrape the usage page (`/workspace/<id>/go`, React
+//! Flight wire format) for the session (5h), weekly (wk) and monthly (mo)
+//! windows. A missing cookie → logged out; a page that refuses or cannot
+//! be parsed → error; a fetch that outlives its budget → `TimedOut`
+//! (visibly stale, never a fabricated number).
 
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -21,10 +23,9 @@ use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
 /// The `X-Server-Id` / `id` of the OpenCode Go workspace server, from the
 /// Swift app.
 const SERVER_ID: &str = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f";
-/// The keychain service/account pair the Swift app's `KeychainCredentialStore`
-/// uses for the OpenCode Go cookie.
+/// The keychain service the Swift app's `KeychainCredentialStore` uses.
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "com.tiller.usage";
-const COOKIE_KEY: &str = "opencode-go-cookie";
 /// How long a fetch may take before giving up (the Swift app's bound).
 pub const TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -164,6 +165,7 @@ fn integer_after(text: &str, key: &str) -> Option<u64> {
 }
 
 /// Reads a keychain generic password via the `security` CLI, read-only.
+#[cfg(target_os = "macos")]
 fn keychain_cookie(service: &str, account: &str) -> Option<String> {
     let output = Command::new("security")
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
@@ -176,14 +178,33 @@ fn keychain_cookie(service: &str, account: &str) -> Option<String> {
     (!cookie.is_empty()).then_some(cookie)
 }
 
-/// Whether the OpenCode Go session cookie is present in the Keychain —
-/// **presence, not validity**. macOS only (the `security` CLI does not
-/// exist elsewhere); on other platforms there is no local store to read,
-/// and [`crate::UsageProvider::local_account_state`] says so instead of
-/// guessing.
-#[cfg(target_os = "macos")]
-pub fn opencode_go_has_keychain_cookie() -> bool {
-    keychain_cookie(KEYCHAIN_SERVICE, COOKIE_KEY).is_some()
+/// The OpenCode Go session cookie from this platform's local store —
+/// **presence, not validity**. macOS reads the Keychain item the Swift app
+/// writes; other platforms read the app's own credential file
+/// ([`crate::CredentialStore`]), the store the settings surface saves into
+/// (F-SET-12).
+pub(crate) fn opencode_go_local_cookie() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        keychain_cookie(KEYCHAIN_SERVICE, OpenCodeGoUsageFetcher::COOKIE_KEY)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::CredentialStore::from_env()
+            .ok()?
+            .get(OpenCodeGoUsageFetcher::COOKIE_KEY)
+            .map(|cookie| cookie.trim().to_string())
+            .filter(|cookie| !cookie.is_empty())
+    }
+}
+
+/// A settings override becomes the workspace id only when it has content
+/// after trimming — an empty or whitespace field means "discover", not
+/// "fetch workspace ''" (the Swift fetcher's guard).
+pub fn workspace_id_from_override(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// The OpenCode Go usage fetcher. **Blocking** — bounded by [`TIMEOUT`];
@@ -191,28 +212,43 @@ pub fn opencode_go_has_keychain_cookie() -> bool {
 pub struct OpenCodeGoUsageFetcher;
 
 impl OpenCodeGoUsageFetcher {
-    pub fn fetch() -> UsageFetchOutcome {
-        let Some(raw_cookie) = keychain_cookie(KEYCHAIN_SERVICE, COOKIE_KEY) else {
+    /// The credential key for the session cookie — the Swift
+    /// `OpenCodeGoUsageFetcher.cookieKey`, shared by the Keychain item and
+    /// the on-disk store so the two platforms name the credential
+    /// identically.
+    pub const COOKIE_KEY: &'static str = "opencode-go-cookie";
+
+    /// Fetches usage. A non-empty `workspace_id_override` (the settings
+    /// field) skips `/_server` discovery entirely — the Swift fetcher's
+    /// `workspaceIdOverride` behavior.
+    pub fn fetch(workspace_id_override: Option<&str>) -> UsageFetchOutcome {
+        let Some(raw_cookie) = opencode_go_local_cookie() else {
             return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut);
         };
         let cookie = normalize_cookie(&raw_cookie);
 
-        let server_url = format!("https://opencode.ai/_server?id={SERVER_ID}");
-        let server_body = match get(
-            &server_url,
-            &[("Cookie", &cookie), ("X-Server-Id", SERVER_ID)],
-            TIMEOUT.as_secs(),
-        ) {
-            Ok(response) if (200..300).contains(&response.code) => response.body,
-            Ok(_) => return UsageFetchOutcome::Unavailable(UsageReason::Error),
-            Err(HttpError::TimedOut) => return UsageFetchOutcome::TimedOut,
-            Err(HttpError::Network(error)) => {
-                eprintln!("[opencode-go-usage] server request failed: {error}");
-                return UsageFetchOutcome::Unavailable(UsageReason::Error);
+        let workspace_id = match workspace_id_from_override(workspace_id_override) {
+            Some(id) => id,
+            None => {
+                let server_url = format!("https://opencode.ai/_server?id={SERVER_ID}");
+                let server_body = match get(
+                    &server_url,
+                    &[("Cookie", &cookie), ("X-Server-Id", SERVER_ID)],
+                    TIMEOUT.as_secs(),
+                ) {
+                    Ok(response) if (200..300).contains(&response.code) => response.body,
+                    Ok(_) => return UsageFetchOutcome::Unavailable(UsageReason::Error),
+                    Err(HttpError::TimedOut) => return UsageFetchOutcome::TimedOut,
+                    Err(HttpError::Network(error)) => {
+                        eprintln!("[opencode-go-usage] server request failed: {error}");
+                        return UsageFetchOutcome::Unavailable(UsageReason::Error);
+                    }
+                };
+                match extract_workspace_id(&server_body) {
+                    Some(id) => id,
+                    None => return UsageFetchOutcome::Unavailable(UsageReason::Error),
+                }
             }
-        };
-        let Some(workspace_id) = extract_workspace_id(&server_body) else {
-            return UsageFetchOutcome::Unavailable(UsageReason::Error);
         };
 
         let usage_url = format!("https://opencode.ai/workspace/{workspace_id}/go");
@@ -286,6 +322,19 @@ $R[4]={monthlyUsage:$R[5]={usagePercent:71,resetInSec:300}}"#;
                 .map(|w| (w.used_percent, w.label.as_str())),
             Some((71, "mo"))
         );
+    }
+
+    /// F-SET-12: the workspace-ID override is honored only with content —
+    /// trimmed, and an empty field falls back to `/_server` discovery.
+    #[test]
+    fn workspace_override_requires_content_after_trimming() {
+        assert_eq!(
+            workspace_id_from_override(Some("  wrk_abc  ")),
+            Some("wrk_abc".to_string())
+        );
+        assert_eq!(workspace_id_from_override(Some("")), None);
+        assert_eq!(workspace_id_from_override(Some("   ")), None);
+        assert_eq!(workspace_id_from_override(None), None);
     }
 
     #[test]

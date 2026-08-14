@@ -773,6 +773,9 @@ impl AppDatabase {
                 5,
             );
         }
+        if let Some(value) = self.setting_value(settings_keys::OPENCODE_WORKSPACE_ID_OVERRIDE)? {
+            defaults.opencode_workspace_id_override = value;
+        }
 
         Ok(defaults)
     }
@@ -891,6 +894,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::REFRESH_INTERVAL_MIN,
             &settings.refresh_interval_min.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::OPENCODE_WORKSPACE_ID_OVERRIDE,
+            &settings.opencode_workspace_id_override,
         )?;
         transaction.commit()?;
         Ok(())

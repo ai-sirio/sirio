@@ -377,6 +377,10 @@ pub struct AppSettings {
     pub opencode_show_in_bar: bool,
     /// "usage.refreshIntervalMin" — default 5, clamped to 1...60.
     pub refresh_interval_min: i64,
+    /// "usage.opencodeGo.workspaceIdOverride" — default: empty (the
+    /// fetcher discovers the workspace from `/_server`). Free text, no
+    /// clamp: the Swift `@AppStorage` field it mirrors is unvalidated.
+    pub opencode_workspace_id_override: String,
 }
 
 impl Default for AppSettings {
@@ -398,6 +402,7 @@ impl Default for AppSettings {
             codex_show_in_bar: true,
             opencode_show_in_bar: false,
             refresh_interval_min: 5,
+            opencode_workspace_id_override: String::new(),
         }
     }
 }
@@ -422,6 +427,7 @@ pub mod settings_keys {
     pub const CODEX_SHOW_IN_BAR: &str = "usage.codexVisible";
     pub const OPENCODE_SHOW_IN_BAR: &str = "usage.opencodeVisible";
     pub const REFRESH_INTERVAL_MIN: &str = "usage.refreshIntervalMin";
+    pub const OPENCODE_WORKSPACE_ID_OVERRIDE: &str = "usage.opencodeGo.workspaceIdOverride";
 }
 
 /// The Swift ranges settings values are clamped into.

@@ -1629,6 +1629,7 @@ mod tests {
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
             refresh_interval_min: 11,
+            opencode_workspace_id_override: "wrk_main".into(),
         };
 
         {
@@ -1660,6 +1661,10 @@ mod tests {
                 ("session.resumeAgentSessions".into(), "false".into()),
                 ("usage.claudeVisible".into(), "false".into()),
                 ("usage.codexVisible".into(), "false".into()),
+                (
+                    "usage.opencodeGo.workspaceIdOverride".into(),
+                    "wrk_main".into(),
+                ),
                 ("usage.opencodeVisible".into(), "true".into()),
                 ("usage.refreshIntervalMin".into(), "11".into()),
                 ("worktrees.limitMounted".into(), "true".into()),

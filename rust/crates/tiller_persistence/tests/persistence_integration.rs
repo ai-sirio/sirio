@@ -1037,6 +1037,7 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
             refresh_interval_min: 99,
+            opencode_workspace_id_override: "wrk_relaunch".into(),
             ..AppSettings::default()
         })
         .expect("save Linux settings");
@@ -1055,6 +1056,19 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
     assert!(!settings.codex_show_in_bar);
     assert!(settings.opencode_show_in_bar);
     assert_eq!(settings.refresh_interval_min, 60);
+    // F-SET-12: the workspace-ID override survives the relaunch verbatim —
+    // free text, no clamp, and clearing it (saving "") must also survive.
+    assert_eq!(settings.opencode_workspace_id_override, "wrk_relaunch");
+    db.save_settings(&AppSettings {
+        opencode_workspace_id_override: String::new(),
+        ..settings
+    })
+    .expect("save the cleared override");
+    assert_eq!(
+        db.settings().expect("reload").opencode_workspace_id_override,
+        "",
+        "a cleared override persists as empty, not as the stale value"
+    );
 }
 
 #[test]
