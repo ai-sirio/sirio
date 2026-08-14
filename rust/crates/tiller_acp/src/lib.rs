@@ -6,7 +6,7 @@
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, ImageContent,
+    AuthMethod, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk, ImageContent,
     InitializeRequest, NewSessionRequest, PermissionOption as ProtocolPermissionOption,
     PlanEntry as ProtocolPlanEntry, PlanEntryStatus as ProtocolPlanEntryStatus, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
@@ -14,7 +14,9 @@ use agent_client_protocol::schema::v1::{
     SessionConfigOptionValue, SessionConfigSelectOptions, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus,
 };
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Lines};
+use agent_client_protocol::{
+    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, ErrorCode, Lines,
+};
 use anyhow::{Result, anyhow};
 use async_process::Child;
 use futures::executor::block_on;
@@ -68,6 +70,16 @@ pub enum AcpError {
     Transport(String),
     /// The agent rejected a request or reported an agent-level failure.
     Agent(String),
+    /// The agent rejected `initialize` or `session/new` with ACP's
+    /// `auth_required` error (wire code -32000). The agent has already
+    /// exited by the time this reaches the caller — there is no live
+    /// connection left to authenticate on — so recovery is: run the
+    /// agent's own CLI login out-of-band, then relaunch (F-CHAT-02).
+    AuthRequired {
+        /// Authentication methods the agent advertised during `initialize`,
+        /// when it reported any before the request that failed.
+        methods: Vec<AuthMethodInfo>,
+    },
 }
 
 impl std::fmt::Display for AcpError {
@@ -79,11 +91,44 @@ impl std::fmt::Display for AcpError {
             } => write!(f, "ACP {operation:?} timed out after {duration:?}"),
             Self::Transport(message) => write!(f, "ACP transport error: {message}"),
             Self::Agent(message) => write!(f, "ACP agent error: {message}"),
+            Self::AuthRequired { methods } if methods.is_empty() => {
+                write!(f, "ACP agent requires authentication before it can be used")
+            }
+            Self::AuthRequired { methods } => {
+                let names = methods
+                    .iter()
+                    .map(|method| method.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "ACP agent requires authentication ({names})")
+            }
         }
     }
 }
 
 impl std::error::Error for AcpError {}
+
+/// One authentication method the agent advertised in its `initialize`
+/// response (ACP's `AuthMethod`, flattened to what a caller needs to render
+/// CLI login guidance — the wire `id` doubles as the `authenticate` RPC's
+/// `method_id` for a future live-authenticate flow).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthMethodInfo {
+    /// Protocol identifier for this method.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional agent-provided description.
+    pub description: Option<String>,
+}
+
+fn auth_method_info(method: &AuthMethod) -> AuthMethodInfo {
+    AuthMethodInfo {
+        id: method.id().to_string(),
+        name: method.name().to_string(),
+        description: method.description().map(str::to_string),
+    }
+}
 
 /// The asynchronous event stream returned by [`AcpClient::launch`].
 pub type EventStream = async_channel::Receiver<AcpEvent>;
@@ -394,6 +439,13 @@ pub enum AcpEvent {
         stop_reason: String,
     },
     /// The agent transport failed or closed before the client shut it down.
+    /// A mid-session request rejected with ACP's `auth_required` error
+    /// (F-CHAT-02) also arrives here rather than as its own variant — this
+    /// enum is matched exhaustively by every ACP event consumer in the
+    /// workspace, so widening it is a breaking change across crates this
+    /// slice does not own; [`AcpError::AuthRequired`]'s `Display` renders
+    /// the same auth-guidance text `AcpClient::launch` uses for a startup
+    /// failure, so the message string alone still carries it.
     TransportError(String),
     /// A bounded wait on the agent expired; the child was terminated.
     Timeout {
@@ -434,6 +486,10 @@ pub struct InitializeInfo {
     pub protocol_version: String,
     /// Debug representation of the agent capabilities.
     pub agent_capabilities: String,
+    /// Authentication methods the agent advertised, when it supports any.
+    /// Populated even when the session it precedes was created without
+    /// needing one of them (F-CHAT-02).
+    pub auth_methods: Vec<AuthMethodInfo>,
 }
 
 /// A live client connection to one ACP agent subprocess.
@@ -719,6 +775,11 @@ fn run_connection(
     let prompt_counter = Arc::new(AtomicU64::new(1));
     let active_prompt = Arc::new(AtomicU64::new(0));
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
+    // Captured right after `initialize` succeeds so it survives a later
+    // `session/new` failure — that failure aborts the connection closure via
+    // `?` before a `Startup` carrying this can ever be built, and the AUTH
+    // REQUIRED error handled below needs the advertised methods on hand.
+    let auth_methods: Arc<Mutex<Vec<AuthMethodInfo>>> = Arc::new(Mutex::new(Vec::new()));
     let shutdown_ack: Arc<Mutex<Option<mpsc::SyncSender<()>>>> = Arc::new(Mutex::new(None));
     let agent = AcpAgent::new(
         AcpAgentConfig::new(command.program)
@@ -793,6 +854,7 @@ fn run_connection(
     let started_for_connection = Arc::clone(&started);
     let clean_shutdown_for_connection = Arc::clone(&clean_shutdown);
     let timeout_for_connection = Arc::clone(&timeout_reason);
+    let auth_methods_for_connection = Arc::clone(&auth_methods);
     let worker_for_connection = worker_tx.clone();
     let shutdown_ack_for_connection = Arc::clone(&shutdown_ack);
     let child_for_connection = Arc::clone(&child);
@@ -811,6 +873,7 @@ fn run_connection(
         let timeout_reason = Arc::clone(&timeout_for_connection);
         let permission_timeout_reason = Arc::clone(&timeout_reason);
         let prompt_timeout_reason = Arc::clone(&timeout_reason);
+        let auth_methods_seen = Arc::clone(&auth_methods_for_connection);
         let shutdown_ack = Arc::clone(&shutdown_ack_for_connection);
         let child_for_prompt = Arc::clone(&child_for_connection);
         let outgoing = futures::sink::unfold(stdin, |mut writer, line: String| async move {
@@ -908,6 +971,14 @@ fn run_connection(
                 if initialize.protocol_version != ProtocolVersion::V1 {
                     return Err(agent_client_protocol::Error::internal_error());
                 }
+                let session_auth_methods: Vec<AuthMethodInfo> = initialize
+                    .auth_methods
+                    .iter()
+                    .map(auth_method_info)
+                    .collect();
+                if let Ok(mut seen) = auth_methods_seen.lock() {
+                    *seen = session_auth_methods.clone();
+                }
 
                 let session = connection
                     .send_request(NewSessionRequest::new(cwd))
@@ -916,6 +987,7 @@ fn run_connection(
                 let initialize_info = InitializeInfo {
                     protocol_version: format!("{:?}", initialize.protocol_version),
                     agent_capabilities: format!("{:?}", initialize.agent_capabilities),
+                    auth_methods: session_auth_methods.clone(),
                 };
                 let model_catalog = model_catalog_from_options(session.config_options.as_ref());
                 let effort = effort_from_options(session.config_options.as_ref());
@@ -946,6 +1018,7 @@ fn run_connection(
                             };
                             let session_id = session.session_id.clone();
                             let event_tx = connection_events.clone();
+                            let prompt_auth_methods = session_auth_methods.clone();
                             let prompt_id = prompt_counter.fetch_add(1, Ordering::Relaxed);
                             active_prompt.store(prompt_id, Ordering::Release);
                             let active_prompt_for_result = Arc::clone(&active_prompt);
@@ -962,6 +1035,21 @@ fn run_connection(
                                                         response.stop_reason
                                                     ),
                                                 })
+                                                .await;
+                                        }
+                                        // The session stays alive; the agent
+                                        // just refused this turn pending
+                                        // authentication. Route it through
+                                        // the same guidance text a startup
+                                        // failure gets (F-CHAT-02) rather
+                                        // than the bare transport string.
+                                        Err(error) if error.code == ErrorCode::AuthRequired => {
+                                            let message = AcpError::AuthRequired {
+                                                methods: prompt_auth_methods,
+                                            }
+                                            .to_string();
+                                            let _ = event_tx
+                                                .send(AcpEvent::TransportError(message))
                                                 .await;
                                         }
                                         Err(error) => {
@@ -1087,11 +1175,22 @@ fn run_connection(
         let _ = ack.send(());
     }
     if !started.load(Ordering::Acquire) {
-        let error = timeout_reason
-            .lock()
-            .ok()
-            .and_then(|reason| reason.clone())
-            .unwrap_or_else(|| {
+        let error =
+            if let Some(reason) = timeout_reason.lock().ok().and_then(|reason| reason.clone()) {
+                reason
+            } else if let Err(rpc_error) = connection_result.as_ref()
+                && rpc_error.code == ErrorCode::AuthRequired
+            {
+                // `initialize` or `session/new` rejected the handshake asking
+                // for authentication — distinguish it from a generic transport
+                // failure so the caller can show CLI login guidance and an
+                // actionable retry instead of a raw error string (F-CHAT-02).
+                let methods = auth_methods
+                    .lock()
+                    .map(|seen| seen.clone())
+                    .unwrap_or_default();
+                AcpError::AuthRequired { methods }
+            } else {
                 AcpError::Transport(
                     connection_result
                         .as_ref()
@@ -1099,7 +1198,7 @@ fn run_connection(
                         .map(ToString::to_string)
                         .unwrap_or_else(|| "ACP worker exited before initialization".into()),
                 )
-            });
+            };
         let _ = worker_tx.send(WorkerSignal::Startup(Err(error)));
     } else if !clean_shutdown.load(Ordering::Acquire) {
         if let Some(AcpError::Timeout {
@@ -1930,6 +2029,118 @@ mod tests {
             "startup timeout exceeded its bound: {:?}",
             started.elapsed()
         );
+    }
+
+    /// A tiny ACP agent fixture: reads JSON-RPC lines on stdin and replies
+    /// per the `case` arms in `body`, matching a substring of the request
+    /// line (mirrors the fixture style already used to test the chat layer
+    /// against a fake agent, e.g. `tiller_ui::chat`'s ACP tests).
+    #[cfg(unix)]
+    fn fixture_agent(body: &str) -> AgentCommand {
+        AgentCommand::new("/bin/sh").args([
+            "-c".to_string(),
+            format!(
+                r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in {body} esac; done"#
+            ),
+        ])
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_creation_auth_required_error_becomes_typed_auth_required() {
+        // (F-CHAT-02) The agent advertises a login method during
+        // `initialize`, then refuses `session/new` with ACP's
+        // `auth_required` error (wire code -32000, ErrorCode::AuthRequired).
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;;"#,
+        );
+        let result = AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5));
+
+        let error = match result {
+            Ok((mut client, _events)) => {
+                let _ = client.shutdown();
+                panic!("agent requiring auth unexpectedly created a session")
+            }
+            Err(error) => error,
+        };
+
+        match error.downcast_ref::<AcpError>() {
+            Some(AcpError::AuthRequired { methods }) => {
+                assert_eq!(
+                    methods,
+                    &[AuthMethodInfo {
+                        id: "login".into(),
+                        name: "Login".into(),
+                        description: Some("agent auth login".into()),
+                    }]
+                );
+            }
+            other => panic!("expected typed AuthRequired error, got {other:?} ({error:#})"),
+        }
+        // The Display text is what actually reaches the transcript today
+        // (chat.rs formats the launch error with `{error:#}`), so it must
+        // carry the auth-guidance content, not a bare transport string.
+        assert!(
+            format!("{error:#}").contains("Login"),
+            "auth guidance should name the advertised method, got {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_session_still_carries_advertised_auth_methods() {
+        // An agent may advertise a login method while still letting an
+        // already-authenticated session through — `InitializeInfo` must
+        // carry that even when nothing blocked on it.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;;"#,
+        );
+        let (mut client, _events) =
+            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+                .expect("agent that advertises but does not require auth should still connect");
+
+        assert_eq!(
+            client.initialize_info().auth_methods,
+            vec![AuthMethodInfo {
+                id: "login".into(),
+                name: "Login".into(),
+                description: None,
+            }]
+        );
+        let _ = client.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_auth_required_error_reaches_the_transcript_as_auth_guidance() {
+        // (F-CHAT-02) The connection survives past session creation; the
+        // agent only refuses the *prompt*. This is the mid-turn half of the
+        // row's evidence ("real send confirmed... but transcript pane
+        // rendered nothing") — the fix must not require a fresh launch to
+        // surface the banner.
+        let command = fixture_agent(
+            r#"*initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;;"#,
+        );
+        let (mut client, events) =
+            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+                .expect("fixture agent should create a session");
+
+        client
+            .prompt("hello")
+            .expect("prompt should be accepted by the worker");
+
+        let event = block_on(events.recv()).expect("worker should report the auth failure");
+        match event {
+            AcpEvent::TransportError(message) => {
+                assert!(
+                    message.contains("Login") && message.contains("authentication"),
+                    "expected auth guidance in the transport message, got {message:?}"
+                );
+            }
+            other => panic!("expected a TransportError carrying auth guidance, got {other:?}"),
+        }
+
+        let _ = client.shutdown();
     }
 
     /// Launches a real agent over `npx`, so it depends on the network, on npm
