@@ -270,3 +270,187 @@ on X11 too, not proven-impossible there.
   the transcript region on the X11 lane; confirm the view stops tracking the tail, then scroll
   back to bottom and confirm it re-pins
 - **size**: S
+
+---
+
+## `F-CHAT-25` — NOT EXERCISED
+
+**Needs: exercise.** The row's clause is general — answer a pending question by text, by option,
+or by Cancel — and the option-answer and cancel/dismiss halves of the exact same mechanism
+(`Entry::Permission`, `respond_permission`, `dismiss_permission`) are already live-proven
+elsewhere (`F-CHAT-24`'s Plan-card options, PASSED). What's specifically unproven is the
+free-text sub-case: `Entry::Permission.text_input: Option<AnswerTextInput>` and its own render
+arm, `render_question_answer_row`, both exist in chat.rs and are drawn-tested, but no live drive
+has ever reached a turn where the agent asks a free-text question rather than offering buttons —
+because this build's installed Claude Code CLI reports "no AskUserQuestion tool available" over
+ACP and falls back to plain chat text instead of a real `Entry::Permission` with `text_input`.
+This is confirmed live and directly, not inferred, and it is an environment/CLI limitation, not a
+code gap — the render path is built and only the live proof is missing. Untried lead already
+flagged in the manifest: Pi's `ui/select`. Also untried: Codex's ACP adapter, which has not been
+tested against this specific clause anywhere in the ledger.
+
+- **files**: none — `render_question_answer_row` / `respond_permission` (`rust/crates/tiller_ui/src/chat.rs`) already implement it
+- **size**: S once an agent that actually raises a free-text ACP question is found
+
+---
+
+## `F-CHAT-26` — half-proven
+
+**Needs: exercise.** The backend half is proven live. The visual half's code is fully present and
+correct, confirmed by reading: the `pending-question-bar` block (chat.rs, gated on
+`self.pending_question()`) renders `"Question waiting · {title}"` with a `"Show"` control whose
+`.on_click` calls `self.list_state.scroll_to_reveal_item(index)` — exactly the clause's "click
+Show, confirm the transcript scrolls to the question card." The manifest's own evidence already
+identifies why this was never actually seen: every capture in that drive shows the **Terminal**
+tab foregrounded (confirmed by a tab-bar crop check), not Chat, so the stddev-pixel-band evidence
+cited measured Terminal scrollback noise. This is a drive-sequencing bug (foreground the wrong
+tab, then measure), not a rendering or wiring defect — no code appears to need to change.
+
+- **files**: none — reference only, `rust/crates/tiller_ui/src/chat.rs` (`pending-question-bar` block)
+- **approach**: re-drive; explicitly select/foreground the **Chat** tab immediately before
+  triggering the plan-mode turn and before every capture (e.g. `tab.select` to the chat tab's own
+  index, or click the Chat tab label, right before each screenshot — not once at the start of the
+  session)
+- **size**: S
+
+---
+
+## `F-CHAT-27` — half-proven
+
+**Needs: exercise.** Same shape as `F-CHAT-26`, same file, same root cause. The data-model half
+is proven live and matches source exactly (`expire_unanswered()`/`control_entry_row`,
+cross-checked against chat.rs's render arm and its mirror). The claimed "post-expiry frame" is
+again the Terminal tab foregrounded, not Chat — no capture ever actually points a camera at the
+`Entry::Permission { expired: true, .. }` render arm, which does contain the exact clause text
+`"No answer — the turn ended"` (confirmed present in source, both the plain-permission and the
+Plan-approval render arms carry it). Nothing to build; the drive needs to look at the right tab.
+
+- **files**: none — reference only, `rust/crates/tiller_ui/src/chat.rs` (the `expired` branch of `Entry::Permission`'s render arm)
+- **approach**: re-drive; foreground the Chat tab, let a permission turn expire (or call
+  `surface.chat.stop`), then capture with Chat still foregrounded and read the card text directly
+- **size**: S
+
+---
+
+## `F-CHAT-28` — FAILED — absent
+
+**Needs: reclassify.** See cross-cutting finding B above. `Entry::SubagentTask` is constructed in
+production (`is_subagent_tool_call`, matching titles/raw-input containing "task"/"subagent"/
+"dispatch"/"spawn" or a `subagent_type`/`agent_type` JSON key, then `push_entry(Entry::SubagentTask
+{..})`), rendered (`render_subagent_task_card`, with its own nested tool-call expand/collapse),
+and covered by a full drawn test, `a_subagent_task_card_expands_nested_tool_calls`, which drives
+exactly the clause: send a prompt, get a completed subagent card, click to expand it, click a
+nested tool call to expand that independently. This landed in commit `9c286975` (2026-08-14
+14:19), well after the "pass 8" evidence the current verdict cites. The row is not absent; it is
+built and unit-proven, and needs a live drive (ask a real agent to dispatch a subagent/Task tool
+call) to close for good — but the verdict text describing it as absent is simply wrong today.
+
+- **files**: none — `rust/crates/tiller_ui/src/chat.rs` (`Entry::SubagentTask`, `is_subagent_tool_call`, `render_subagent_task_card`) already implement and test it
+- **size**: S to live-drive once a subagent-dispatching prompt is found for an installed agent
+
+---
+
+## `F-CHAT-29` — FAILED — absent
+
+**Needs: reclassify.** See cross-cutting finding B above. A per-message hover-reveal Copy control
+exists on assistant responses: `CopyTarget::Assistant(entry_index)`, an `assistant-copy` div that
+is `.invisible()` by default and `.group_hover(hover_group, |style| style.visible())` — i.e. it
+only appears on hover, exactly the clause's "hover an assistant response, click Copy" — wired to
+`copy_local_text`, which writes the clipboard and shows a "Copied ✓" confirmation for 2 seconds
+(`chat.copied_target`, cleared by a background timer) — exactly the clause's "transient
+checkmark." This landed in `398c0aea` (2026-08-14 17:25), **14.75 hours after** the pass-17
+evidence (02:40 the same day) that the current verdict cites as "the ONLY copy path is
+CopyTranscript." That finding was true when written and has been false since. The separate
+`ctrl-a`/`ctrl-c` chord-dead finding in the same row's evidence is real but is about a different
+control (`CopyTranscript`, the whole-transcript keyboard shortcut) than this clause names.
+
+- **files**: none — `rust/crates/tiller_ui/src/chat.rs` (`CopyTarget::Assistant`, `copy_local_text`, the `assistant-copy` hover control) already implement it
+- **approach**: re-drive — hover an assistant message, click the revealed Copy control, paste, confirm text and the 2s "Copied ✓" state
+- **size**: S
+
+---
+
+## `F-CHAT-30` — FAILED — absent
+
+**Needs: reclassify.** Same shape and same root cause as `F-CHAT-29`. A per-code-block Copy
+control exists: `CopyTarget::CodeBlock { entry, block: id }`, a `code-block-copy-{entry}-{id}`
+button in the code-block render arm, wired to the same `copy_local_text` with the same 2s
+"Copied ✓" confirmation. This landed in `0ecbd525` (2026-08-14 17:26), also well after the
+pass-17 evidence (02:40) the current verdict cites ("neither chat.rs nor tiller_markdown contains
+a block-copy control"). That was true at 02:40 and stopped being true at 17:26 the same day.
+
+- **files**: none — `rust/crates/tiller_ui/src/chat.rs` (`CopyTarget::CodeBlock`, the code-block copy button) already implements it
+- **approach**: re-drive — click a code block's Copy control (it is not hover-gated the way the
+  assistant-message one is; check the code before assuming a hover is required), paste, confirm
+  the code text and the confirmation state
+- **size**: S
+
+---
+
+## `F-CHAT-32` — FAILED — absent
+
+**Needs: reclassify.** See cross-cutting finding B above. `EditSummaryState` (chat.rs), `fn
+render_edit_summary`, `fn request_edit_revert`/`cancel_edit_revert`/`confirm_edit_revert`
+(discard-via-git, async, tracks `reverting_path`/`reverted_paths`/`revert_error`) all exist and
+are covered by a drawn test, `edit_summary_opens_and_reports_revert_success_or_error`, which
+exercises exactly the clause: trigger an edit summary, Open, Revert, confirm the confirmation,
+reverted, and error states (the test explicitly checks `edit-summary-error-2` renders on a failed
+git discard). This landed in `c23da365` (2026-08-14 17:33), long after the "pass 8" evidence the
+current verdict cites. Not absent; built and unit-proven; needs a live drive.
+
+- **files**: none — `rust/crates/tiller_ui/src/chat.rs` (`EditSummaryState`, `render_edit_summary`, the revert flow) already implements and tests it
+- **size**: S to live-drive (send a prompt that edits a file, then Open/Revert from the resulting card)
+
+---
+
+## `F-CHAT-33` — half-proven
+
+**Needs: build (MCP half only).** The turn-error half already works and is unaffected. The
+MCP-configuration-warning half is genuinely and completely absent, independently reconfirmed:
+`grep -rin mcp crates/tiller_acp/src crates/tiller_ui/src/chat.rs`, excluding tests and comments,
+returns zero hits. There is no MCP concept anywhere in the ACP client layer to warn about — this
+would need the ACP session layer to first recognize an MCP-server configuration problem (if the
+protocol/agent surfaces one at all — unresearched, same caveat as `F-CHAT-02`/`F-CHAT-15`) before
+a new `ErrorKind` variant and banner could render it.
+
+- **files**: `rust/crates/tiller_acp/src/lib.rs` (detect/surface an MCP config problem, if the
+  protocol exposes one), `rust/crates/tiller_ui/src/chat.rs` (new `ErrorKind` variant + banner,
+  reusing the existing `Entry::Error` render/OK-dismiss machinery)
+- **size**: M–L depending on what the ACP wire protocol actually reports for MCP server failures
+
+---
+
+## `F-CHAT-34` — NOT EXERCISED
+
+**Needs: build; also flag for reclassify.** `chat_sessions()` (`rust/crates/tiller_persistence/src/db.rs:523`)
+exists with zero production callers anywhere (`grep -rln chat_sessions crates/` finds only the
+persistence crate itself and its own test file) — matching `ADJUDICATION-BACKLOG.md`'s standing
+finding verbatim. There is no browse/open/delete UI anywhere in `tiller_ui` — `grep -rn
+"ChatHistoryMenu\|chat_sessions\|past chats" crates/tiller_ui/src crates/tiller/src/main.rs`
+finds nothing. The current `NOT EXERCISED` verdict reads as "nobody drove it yet," but the
+correct read is the same as `F-CHAT-35`'s own `FAILED — absent`: there is no route to drive at
+all, only a resume-most-recent path (`ChatSession::restore`, main.rs). Worth a reclassify flag
+alongside the build, since this and `F-CHAT-35` are one missing feature (see next row).
+
+- **files**: `rust/crates/tiller_ui/src/chat.rs` (new history list/menu — likely off the overflow
+  menu next to Follow Edited Files / New Conversation, per `F-CHAT-14`), `rust/crates/tiller_persistence/src/db.rs`
+  (`chat_sessions()` exists; a delete-session query does not and would be needed), `rust/crates/tiller/src/main.rs`
+  (wiring — the overflow menu and its actions are owned there for other chat controls; check
+  before assuming chat.rs alone can own this)
+- **size**: L — new UI surface, a new persistence query, and app-level wiring; build once for
+  this row and `F-CHAT-35` together (see shared cause below)
+
+---
+
+## `F-CHAT-35` — FAILED — absent
+
+**Needs: build. Shared cause with `F-CHAT-34`.** These are the same missing feature: `F-CHAT-34`
+is "browse/open/delete past chats," `F-CHAT-35` is "the empty state when there are none to
+browse." Both require the same new history-list surface described above — there is nothing to
+build separately for the empty state once that surface exists (it is a single conditional branch
+inside it: render "No past chats" when `chat_sessions()` returns empty instead of the list).
+Building `F-CHAT-34`'s surface and closing `F-CHAT-35` should be one brief, not two.
+
+- **files**: same as `F-CHAT-34` — `rust/crates/tiller_ui/src/chat.rs`,
+  `rust/crates/tiller_persistence/src/db.rs`, `rust/crates/tiller/src/main.rs`
+- **size**: folded into `F-CHAT-34`'s L; no separate size if built together
