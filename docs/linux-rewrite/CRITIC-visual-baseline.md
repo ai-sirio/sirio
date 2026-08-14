@@ -270,3 +270,41 @@ and it is available on this machine.
 - `reference/linux-progress/2026-08-14-light-settings-appearance.png`
 - `reference/linux-progress/2026-08-14-chat-completed-turn-empty.png` — the 17:40 finding
 - `reference/linux-progress/2026-08-14-changes-list-clipped.png` — the clipped Changes list
+
+---
+
+# 2026-08-14 18:05 — the Changes list clipping is confirmed, with a positive control
+
+The 17:40 entry raised the clipped Changes list but could not rule out a resize artifact, because
+`shot` alternates the output size to force a repaint. **It is not an artifact.** It reproduces at
+both resolutions after a 12-second settle.
+
+Measured rather than eyeballed — standard deviation of a region is zero only if nothing is drawn in
+it:
+
+| region (centre column) | 1715×972 | 1400×900 |
+|---|---|---|
+| rows band, y=130–230 | stddev **20.0** | stddev **24.0** |
+| below the list, y=250–370 | stddev 4.0 | stddev **0.00** |
+| below the list, y=400–700 | stddev **0.00** | stddev **0.00** |
+| **control** — Files panel, y=400–700 | stddev **22.0** | — |
+
+The control is the part that makes this evidence rather than an impression: the same measurement,
+over the same rows, in the panel beside it, reads 22.0. **The detector is alive; the centre column
+is empty.** (A passing positive control bounds false negatives only — it proves the measurement can
+see content, not that it would catch every kind of content.)
+
+So the Changes surface draws its header, its four action links, `Changed (3)` with three real file
+rows and per-file `−11 +146` counts, then cuts `Untracked (47)` mid-row and draws **nothing** for
+the remaining ~600 px.
+
+Command, for replay:
+
+```bash
+convert <png> -crop 950x300+340+400 +repage -colorspace Gray \
+        -format "%[fx:standard_deviation*255] %[fx:mean*255]" info:-
+```
+
+Captures: `reference/linux-progress/2026-08-14-changes-clipped-settled-{1715,1400}.png`.
+
+`P117` owns the question of whether this and the empty chat transcript share one root cause.
