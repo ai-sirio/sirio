@@ -2161,3 +2161,42 @@ pireview" recorded openly in `tasks/CRITIC-pass17-handover.md`. All drives on th
 - **Ledger totals regenerated** (`ledger-totals.py --write`): 389 rows exactly — PASSED
   204 · half-proven 18 · FAILED-absent 110 · FAILED-defective 18 · UNREACHABLE 3 ·
   N/A-platform 22 · NOT EXERCISED 13 · builder-claimed 1. Never-critic-judged: 24.
+
+## PASS 18 (fable, ~02:35–03:25) — FABLE-09: the editor keyboard tier
+
+- **The builder's claim holds.** Printable characters land at the caret, reach disk on
+  `ctrl-s`, and every gesture in the brief behaves: Backspace, Delete (caret and across a
+  selection), Enter splits without submitting, typing replaces a selection. The proof is
+  per-gesture disk read-backs (`reference/linux-progress/f09-*-*.txt`), not screenshots of
+  text; no verdict in this pass rests on a frame alone.
+- **Two stale FAILED — absent flipped by drive**: `F-EDIT-03` (the `Large file — manual
+  preview` bar exists on a 396021-byte file and `Render preview` actually renders,
+  g1→g3) and `F-EDIT-05` (the conflict banner is mounted on focus-regain; Keep keeps the
+  buffer and lets `ctrl-s` overwrite, Reload adopts disk and discards the local edit —
+  f6/f7/f9 plus `f09-f-keep.txt`/`f09-f-reload.txt`).
+- **`F-EDIT-06` re-anchored**: its PASSED evidence had proved plain save — `F-EDIT-04`'s
+  clause. The actual clause (delete externally, edit the buffer, `ctrl-s` recreates) is
+  now driven: deleted-file banner (`This file was deleted. Saving will recreate it.`, no
+  Reload/Keep), and the save recreated the file — 109 bytes back on disk
+  (`f09-h1/h2.png`, `f09-h-recreated.txt`).
+- **Editor semantics worth knowing (by design, not defects)**: clicking a source line
+  selects the whole line (`select_source_line`) and the next keystroke REPLACES it —
+  insertion needs a caret first (`Home`, arrows). A CLEAN buffer adopts an external
+  change silently on refocus, no banner (`check_external` reloads clean docs) — the
+  banner is the dirty path only.
+- **Interference event, mechanism verified**: at 03:02:56 the orchestrator's
+  control-socket probe hit MY app instance, and a `browser.*` request against an
+  instance with no browser surface auto-creates a Browser tab at example.com
+  (main.rs:4614-4619, read and confirmed) whose native webview then paints over the GL
+  surface (P72-class). The contaminated g-frames were discarded and re-driven on a fresh
+  fixture DB. Standing hazard: the socket is per-instance — a probe against a machine
+  running someone else's fixture app contaminates their captures.
+- **File tabs do not survive relaunch**: every fixture-DB restart logs
+  `[session] tab "aaa-f09-scratch.md" (file) is not restorable in this build; skipped`
+  (in the committed `f09-*.log` files) — F-PER territory, flagged for the owner, not
+  judged in this pass.
+- **Replay kit**: fixtures live at the worktree root, uncommitted scratch —
+  `aaa-f09-scratch.md` (every content state is recorded in the committed read-back
+  `.txt` files) and `aaa-f09-large.md` (any Markdown > 256 KiB reproduces it). Drives
+  used `TILLER_DB` fixture SQLites; coordinates in the ledger rows belong to a 1715x972
+  window with the Files panel open.
