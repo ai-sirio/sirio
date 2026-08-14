@@ -2053,3 +2053,84 @@ first, but on a *different* instance than the one my poller later caught. **Chec
 shared resource is not the same as checking it atomically with the action**, and read-only intent
 does not survive contact with a handler that mutates on a missing precondition. Told the affected
 agent immediately rather than hoping the frame was unaffected.
+
+## Fourteen verdicts that contradicted their own evidence — 2026-08-14, 07:50
+
+The audit I set out to run was "how many `PASSED` rows rest only on a green test, with no live
+evidence." The answer was 71 of 208, which is a number and not yet a finding — for a pure state
+machine a unit test *is* the correct exercise, and demanding a screenshot of `from_exit_code` would
+be theatre.
+
+Splitting them by what the test can see turned the number into something actionable:
+
+| bucket | n | can the test see a wiring gap? |
+|---|---|---|
+| real subsystem — real SQLite, real git, real socket | 17 | yes for the subsystem, no for the caller |
+| UI-isolated — GPUI drawn tests on one component | 28 | **no** |
+| pure logic / unclassified | 25 | not applicable, or no |
+
+Then the actual finding, which came from reading the 25 rather than counting them: **fourteen rows
+carried `PASSED` while their own evidence column said the feature is not wired into the app.**
+
+> `zero app callers — package capability proven, wiring owed`
+
+That sentence is a disproof of the verdict printed two columns to its left. Nobody had to drive
+anything to know these were wrong; the row said so itself and had said so since pass 12.
+
+### Detection is a grep, which is the useful part
+
+```bash
+# PASSED rows whose evidence admits incompleteness
+grep -nE '^\| `F-[A-Z0-9-]+` \| PASSED \|' docs/linux-rewrite/INVENTORY-LEDGER.md \
+  | grep -Ei 'zero app callers|wiring owed|not wired|never called|no call site|not mounted|Half A'
+```
+
+Two regex traps, both of which bit me: `owed` matches inside **showed**, and `stub` matches inside
+**PATH-stubbed**. Four of my seventeen hits were substring artifacts. Anchor on the phrase, not the
+fragment.
+
+### Per-symbol, never per-cluster
+
+Six of the fourteen were `F-GIT-*` and it was tempting to flip them together. Two had gone stale in
+the opposite direction: `clone_repository` is now imported at `project_forms.rs:11` and the diff API
+is among the most-used in the app (`DiffOrigin` 13 refs, `stats` 12). Their verdicts were right and
+only the note was wrong. **The cluster was 10 wrong and 2 right**, and a cluster flip would have
+manufactured two false negatives while fixing ten false positives.
+
+The check has to be at the *import boundary* and it has to use the real exported name. Three near
+misses worth stealing:
+
+- `Transcript` matches ~20 times in `chat.rs` — every one is chat's own selection machinery
+  (`TranscriptSelection`, `CopyTranscript`), not `tiller_agents::transcript`.
+- `GitBranch` matches 6 times in `icons.rs` — every one is the icon enum.
+- I first grepped `directory_status` and `github_owner_from_url`; the real exports are
+  `directory_statuses` and `github_owner`. A misspelled symbol returns 0 references and looks
+  exactly like a confirmed disproof.
+
+### The hedge bought four passes of immunity
+
+Two rows claimed only *half* was dead — `F-CORE-ACT-22` ("the sorted half stays live") and
+`F-CORE-USG-05` ("the merge-save half stays live"). **Both hedges were false.** `AttentionSort` is
+the only export of `sort.rs` and has zero app references; every export of `tiller_usage/src/codex.rs`
+has zero. There was no live half in either.
+
+These were the last two caught, and the reason is worth keeping: **a partial claim reads as more
+careful than a flat one, so it attracts less scrutiny.** The rows that admitted a weakness were
+trusted *because* they admitted one. Only `F-GIT-REMOTE-01` turned out to be genuinely half
+(`project_name` 8 refs and driven live, `github_owner` 0) — and it is now `half-proven`.
+
+### What it cost
+
+`PASSED` 210 → **196**. `UNREACHABLE` 7 → **20**. Nothing regressed; fourteen rows had been counted
+as done since pass 12 or 14 while the app could not reach any of them. Two of them compound defects
+already in flight: `F-CORE-AUTH-01`'s dead `parse_claude_json` pairs with `F-SET-14`'s dead
+`Add Account` button — parser and surface both built, neither connected — and `F-AGENT-SAFE-02`'s
+never-invoked `ClaudeHookMigrator` means the stale `tillerctl` paths that `P87` is fixing at the
+write site are also never repaired at the read site.
+
+### The rule
+
+**A row whose evidence names a gap cannot hold a verdict that denies it.** If the note says wiring is
+owed, the verdict is `UNREACHABLE` and the wiring is a queue item. "Package capability proven" is a
+true statement about a package and never a statement about the app — which is the whole reason this
+ledger counts app behaviour and not library coverage.

@@ -350,13 +350,13 @@ touched the entry — those rows do **not** count toward done.
 | `F-CORE-ACT-14` | PASSED | WAITING/IDLE/WORKING keyword lists + boundary negatives ("already","reworking",codex-notes) tested | pass 10 |
 | `F-CORE-ACT-15` | PASSED | overturn pass9 UNREACHABLE: content.rs matches Swift ScreenManifest; proceed/esc/y-n/confirm/nonmatch tested | pass 10 |
 | `F-CORE-ACT-16` | PASSED | strip_ansi CSI+OSC(BEL+ST) test; content detector uses stripped text | pass 10 |
-| `F-CORE-ACT-17` | PASSED | status priority tested; identity picks status-priority pane == Swift agentIdForWorktree (clause wording imprecise); zero app callers — package capability proven, wiring owed (`agent_id_for_panes` dead, model.rs:377; DEAD-MODELS FABLE-05, re-swept pass 14) | pass 14 |
-| `F-CORE-ACT-18` | PASSED | running_agent_ids dedup + catalog-order test; zero app callers — package capability proven, wiring owed (model.rs:399; DEAD-MODELS FABLE-05, re-swept pass 14) | pass 14 |
+| `F-CORE-ACT-17` | UNREACHABLE | the pass-14 evidence said "zero app callers — wiring owed" and kept PASSED anyway. Re-swept 2026-08-14, still true: `agent_id_for_panes` (`tiller_activity/src/model.rs:377`) has **0 references** in `crates/tiller/src` or `crates/tiller_ui/src`. Worktree-level agent identity is computed nowhere in the app | orchestrator audit, grep evidence, 2026-08-14 |
+| `F-CORE-ACT-18` | UNREACHABLE | the pass-14 evidence was accurate and the verdict contradicted it: "zero app callers — wiring owed" is not a PASSED. Re-swept 2026-08-14, still true — `running_agent_ids` (`tiller_activity/src/model.rs:399`) has exactly two mentions in the workspace, its definition and its own test (`activity_integration.rs:591`). No app path reaches it. Same shape as `F-TERM-02` and `F-TERM-PTY-06`, which critic2 recorded as UNREACHABLE tonight with "complete-and-unreachable is not PASSED" | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-CORE-ACT-19` | NOT EXERCISED | **the pass-14 "zero callers" is stale as of 2026-08-14**: `main.rs:3917` now calls `self.activity.build_payload(…)` inside a real transition-driven chain ending in `Command::new("notify-send")` at main.rs:1732. Wired ≠ delivered: no critic has observed a system notification live (the drives kept the window visible, which the suppression rule gates), so this is a correction of fact, not a promotion — the failed-absent-staleness rule (QUEUE.md 2026-08-14) applied to a defective row | pass 17 |
 | `F-CORE-ACT-20` | NOT EXERCISED | **the pass-14 "zero callers" is stale as of 2026-08-14**: `main.rs:3892` now gates that same chain with `NotificationPolicy::should_notify(transition.old, transition.new, true, visible)`. Delivery through the gate has not been observed live (visible-window suppression during all drives). Moved off FAILED — defective on the code fact; PASSED requires a live notification | pass 17 |
 | `F-CORE-ACT-21` | PASSED | rows test: terminal+chat kept, doc/diff/browser omitted; None->Idle code-verified (test gap: no unrecognized-pane row) | pass 10 |
-| `F-CORE-ACT-22` | PASSED | sorted+urgent_first tests; sort_by_key stable for ties; the `urgent_first` half has zero app callers — package capability proven, wiring owed (sort.rs:20; DEAD-MODELS FABLE-05 partial, re-swept pass 14); the sorted half stays live | pass 14 |
-| `F-CORE-ACT-23` | PASSED | requires_close_confirmation tested for all five states; zero app callers — package capability proven, wiring owed (activity.rs:30; DEAD-MODELS FABLE-05, re-swept pass 14; F-TERM-08 is the consumer-side row) | pass 14 |
+| `F-CORE-ACT-22` | UNREACHABLE | the row hedged that only the `urgent_first` half was dead and "the sorted half stays live" — **the hedge is false**. `AttentionSort` (`tiller_activity/src/sort.rs:6`) is the module's *only* export and has **0 app references**; there is no live half. Attention-ordering is never applied to the sidebar. A partial claim reads as more careful than a flat one, which is why this survived four passes unchecked | orchestrator audit, grep evidence, 2026-08-14 |
+| `F-CORE-ACT-23` | UNREACHABLE | "zero app callers — wiring owed" is not a PASSED. Re-swept 2026-08-14: `requires_close_confirmation` (`activity.rs:30`) has **0 app references** — no close path consults it. `F-TERM-08` is the consumer-side row and is where the wiring is owed | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-CORE-ACT-24` | FAILED — absent | planner resumable/prunable split tested; zero app callers of bootstrap::partition — dead code (snapshot 2026-08-13T13:26Z) | pass 11 |
 | `F-CORE-ACT-25` | FAILED — absent | partition order (selected/open/deferred) tested; zero app callers — launch remount planning never invoked | pass 11 |
 | `F-CORE-ACT-26` | FAILED — absent | ids_to_evict tested; zero app callers — no eviction side effect exists | pass 11 |
@@ -372,7 +372,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-CORE-DOM-04` | PASSED | 5 filter tests: branch match, case-insensitive, empty query, nested tab title | pass 10 |
 | `F-CORE-DOM-05` | PASSED | ordering_ignores_unknown_and_noop_moves | pass 10 |
 | `F-CORE-DOM-06` | PASSED | tab_order_wraps_and_numeric_selection_validates | pass 10 |
-| `F-CORE-DOM-07` | PASSED | auto_naming_requires_first_run_or_both_throttles; zero app callers — package capability proven, wiring owed (`should_request`/`record_request` dead, domain.rs:100/106; DEAD-MODELS FABLE-05, re-swept pass 14) | pass 14 |
+| `F-CORE-DOM-07` | UNREACHABLE | "zero app callers — wiring owed" is not a PASSED. Re-swept 2026-08-14: `should_request` (`domain.rs:100`) has **0 app references**; the auto-naming throttle is never consulted, so auto-naming is not throttled in the running app | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-CORE-DOM-08` | PASSED | once_gate_runs_only_the_first_callback | pass 10 |
 | `F-CORE-WSP-01` | PASSED | legacy_content_exposes_only_terminal_panes_and_chat_tab_activity | pass 10 |
 | `F-CORE-WSP-02` | PASSED | ids tests + document_identity_is_worktree_scoped_and_resolves_symlinks | pass 10 |
@@ -400,12 +400,12 @@ touched the entry — those rows do **not** count toward done.
 | `F-CORE-USG-02` | PASSED | real wham capture + secondary window + labels + malformed + ANSI tests | pass 10 |
 | `F-CORE-USG-03` | PASSED | accepts_only_the_expected_usage_percent_field | pass 10 |
 | `F-CORE-USG-04` | PASSED | cookie normalization + workspace id + real react-flight capture test | pass 10 |
-| `F-CORE-USG-05` | PASSED | CODEX_HOME+~/.codex, token merge-save, 8-day refresh tests; the 8-day-refresh half (`needs_refresh`, codex.rs:51) has zero app callers — package capability proven, wiring owed (DEAD-MODELS FABLE-05 partial, re-swept pass 14); the merge-save half stays live | pass 14 |
+| `F-CORE-USG-05` | UNREACHABLE | the row hedged that only the refresh half was dead and "the merge-save half stays live" — **the hedge is false**. Re-swept 2026-08-14: every export of `tiller_usage/src/codex.rs` has **0 app references** — `needs_refresh` (:52), `classify_token_refresh_failure` (:69), `codex_auth_file_path` (:84), `codex_has_credentials_at` (:99), `load_codex_credentials` (:111), `CodexOAuthCredentials`. No half is live. Same hedge-immunity pattern as `F-CORE-ACT-22` | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-CORE-USG-06` | FAILED — absent | 401 classification tested; transport is hardcoded curl+URL — no injectable seam, controlled success/other-error HTTP tests impossible; live refresh would rotate real tokens | pass 11 |
 | `F-CORE-USG-07` | FAILED — absent | fetch bounded + outcome mapping tested; no injectable transport and a live exercise would refresh the user's real tokens (last_refresh unset) — unexercisable as built | pass 11 |
 | `F-CORE-USG-08` | PASSED | LIVE pass10: real claude PTY fetch -> Success (session 4%, weekly 30%) in 11.6s; bounded/not-installed paths in code | pass 10 |
 | `F-CORE-USG-09` | PASSED | reducer stale-on-timeout + provider catalog/preference tests | pass 10 |
-| `F-CORE-AUTH-01` | PASSED | claude json + codex first-nonempty-line identity tests; zero app callers — package capability proven, wiring owed (`parse_claude_json` dead, account.rs:50; DEAD-MODELS FABLE-05, re-swept pass 14) | pass 14 |
+| `F-CORE-AUTH-01` | UNREACHABLE | "zero app callers — wiring owed" is not a PASSED. Re-swept 2026-08-14: `parse_claude_json` (`account.rs:50`) has **0 app references** — no account identity is ever parsed in the running app. Pairs with `F-SET-14`'s dead `Add Account` button: the surface and the parser are both built and neither is connected | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-CORE-AUTH-03` | N/A — platform | Keychain macOS-only; no keyring store built; absence handled explicitly (unknown state test) | pass 10 |
 | `F-CORE-UI-01` | PASSED | appearance_follows_system_only_in_system_mode | pass 10 |
 | `F-CORE-UI-02` | PASSED | updater_reaches_every_user_visible_state_and_clamps_progress | pass 10 |
@@ -470,9 +470,9 @@ touched the entry — those rows do **not** count toward done.
 | `F-AGENT-OMP-02` | FAILED — defective | unreachable because of the same wrong-name defect as OMP-01 (adapter seeks `omp`, distribution ships `oh-my-pi`); the hook file generation itself (omp-hook.ts) is name-correct but the session can never launch to emit start/turn/shutdown events | pass 16 |
 | `F-AGENT-OMP-03` | FAILED — absent | two layers: no summarizer-command generator exists anywhere in the port (grep summarizer → only the settings choice, no command), and the launch name `omp` doesn't match the distribution's `oh-my-pi` (OMP-01) | pass 16 |
 | `F-AGENT-SAFE-01` | half-proven | worktree-local half measured pass 11 (fake HOME unchanged); skill-provisioning half absent — only the npx command builder exists (in `tiller_project`, not `tiller_agents`: scope correction to the pass-11 evidence), no management-marker or overwrite-refusal logic anywhere (pass 14 re-check) | pass 14 |
-| `F-AGENT-SAFE-02` | PASSED | session_sources tests replayed green (`hook_migration_rewrites_only_stale_tillerctl_leading_paths`, `hook_migration_is_a_noop_for_current_non_tillerctl_or_malformed_settings`, `hook_migration_updates_a_file_and_missing_files_are_noops`, tiller_agents suite 33 green, pass 14); zero app callers — package capability proven, wiring owed: nothing invokes `ClaudeHookMigrator` at launch/session | pass 14 |
-| `F-AGENT-SESSION-01` | PASSED | `session_validator_checks_claude_and_codex_files_but_trusts_other_agents` replayed green (tiller_agents suite, pass 14); zero app callers — package capability proven, wiring owed: the app resume flow never calls `AgentSessionValidator` | pass 14 |
-| `F-AGENT-SESSION-02` | PASSED | session_sources reader tests replayed green (tiller_agents suite, pass 14); zero app callers — package capability proven, wiring owed: no transcript/history surface consumes these sources | pass 14 |
+| `F-AGENT-SAFE-02` | UNREACHABLE | the three migration tests are real and green, and the row's own note — "nothing invokes `ClaudeHookMigrator` at launch/session" — is the disproof of its own verdict. Re-swept 2026-08-14: `ClaudeHookMigrator` (exported `tiller_agents/src/lib.rs:20`) has **0 references** in the app crates. Stale `tillerctl` hook paths are therefore never migrated on a real launch. Note this compounds `P87`: the app writes the literal `"tillerctl"` (main.rs:4706/4713/5035/5046), and the migrator that would repair such paths never runs | orchestrator audit, grep evidence, 2026-08-14 |
+| `F-AGENT-SESSION-01` | UNREACHABLE | the pass-14 evidence stated "zero app callers — wiring owed" and still carried PASSED; that is the contradiction, not a judgement call. Re-swept 2026-08-14: `tiller_agents/src/lib.rs:24` exports `AgentSessionValidator`, and **no file under `crates/tiller/src` or `crates/tiller_ui/src` names it** — the resume flow never validates a session ref before reusing it. Package capability is real (`session_validator.rs:11 is_likely_valid`, `:32 claude_project_slug`, `:38 codex_session_exists`, all tested); the app cannot reach it | orchestrator audit, grep evidence, 2026-08-14 |
+| `F-AGENT-SESSION-02` | UNREACHABLE | same contradiction as `-01`. Re-swept 2026-08-14: `lib.rs:26` exports `ClaudeTranscriptSource`/`CodexTranscriptSource` (`transcript.rs:29`/`:70` `recent_text`), and the only workspace mentions of `session_sources` are inside `tiller_agents` itself — zero references from the app. **Caution for the next sweeper**: `chat.rs` matches `Transcript` ~20 times, but every one is chat's own selection machinery (`TranscriptSelection`, `TranscriptSelectableText`, `CopyTranscript`), not this crate — the disproof has to be taken at the import boundary, not the token | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-AGENT-SESSION-03` | PASSED | shell_quote/json_string_literal round-trips, no slash-escaping | pass 6 |
 | `F-AGENT-PLAT-01` | PASSED | platform-neutral manifest, plain CLI processes, worktree-local outputs | pass 6 |
 
@@ -481,19 +481,19 @@ touched the entry — those rows do **not** count toward done.
 | id | verdict | evidence | judged |
 |---|---|---|---|
 | `F-GIT-RUN-01` | PASSED | success/failure/timeout/launch-failure; deadline enforced; no output limits/cancellation | pass 5 |
-| `F-GIT-RUN-02` | PASSED | pass 12: `streaming_runner_delivers_stderr_before_the_child_exits` green (tests/p41_git_behaviors.rs:69); `GitRunner::run_streaming` + free fn (git.rs:107-131, 232-237); zero app callers — package capability proven, wiring owed | pass 12 |
+| `F-GIT-RUN-02` | UNREACHABLE | "zero app callers" is not a PASSED. Re-swept 2026-08-14: `GitRunner` and `run_streaming` (both exported, `tiller_git/src/lib.rs:61`) have **0 references** in the app crates. Streaming git progress exists and nothing in the app streams it. Contrast `F-GIT-CLONE-01`/`F-GIT-DIFF-03`, whose identical pass-12 note **has since gone stale** — those two are genuinely wired now, which is why each of these was checked per-symbol rather than as a cluster | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-GIT-REPO-01` | PASSED | .git dir/file true, non-repo false, has_head 0/1 | pass 5 |
-| `F-GIT-BRANCH-01` | PASSED | pass 12: `branch_listing_preserves_spaces_in_names` green (p41_git_behaviors.rs:109); `git branch --list --format=%(refname:short)`, line-based parse (branches.rs); zero app callers | pass 12 |
+| `F-GIT-BRANCH-01` | UNREACHABLE | "zero app callers" is not a PASSED, and it is still true. Re-swept 2026-08-14: `list_branches` and `GitBranches` (`lib.rs:53`) have **0 app references**; no surface lists branches. Sweeper caution: `GitBranch` matches 6 times in `tiller_ui/src/icons.rs` and every one is the *icon* enum, not this API | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-GIT-WT-01` | PASSED | create with/without base, duplicate refusal, dirty-removal refusal, clean removal | pass 5 |
-| `F-GIT-CLONE-01` | PASSED | pass 12: `clone_from_local_repository_reports_receiving_progress` green (p41_git_behaviors.rs:122) — incremental Receiving objects % + invalid-source CommandFailed through the runner; zero app callers | pass 12 |
-| `F-GIT-REMOTE-01` | PASSED | pass 12: `remote_parsing_supports_github_ssh_https_and_project_suffixes` green (p41_git_behaviors.rs:169); `github_owner_from_url` + `project_name` (remote.rs); zero app callers | pass 12 |
+| `F-GIT-CLONE-01` | PASSED | pass 12: `clone_from_local_repository_reports_receiving_progress` green (p41_git_behaviors.rs:122) — incremental Receiving objects % + invalid-source CommandFailed through the runner. **The pass-12 "zero app callers" is now stale and is removed**: `clone_repository` is imported at `tiller_ui/src/project_forms.rs:11` and the clone form was driven live at pass 17. Verdict unchanged; the note was the thing that was wrong | orchestrator audit, grep evidence, 2026-08-14 |
+| `F-GIT-REMOTE-01` | half-proven | genuinely half, unlike `F-CORE-ACT-22`/`-USG-05` whose hedges failed. Re-swept 2026-08-14: `GitRemote::project_name` is live with **8 app references** (called at `tiller_ui/src/project_forms.rs:704` to derive a project name from a clone URL, and that form was driven live at pass 17). `github_owner` (`lib.rs:62` — note the pass-12 note misnamed it `github_owner_from_url`) has **0 app references**: owner parsing is proven by test only. The pass-12 "zero app callers" was accurate then and is now half stale | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-GIT-STATUS-01` | PASSED | porcelain-v2 -z parse matches v1: MM/rename/UU/spaces | pass 5 |
-| `F-GIT-STATUS-02` | PASSED | pass 12: `directory_status_aggregates_ancestors_with_precedence_and_renames` green (p41_git_behaviors.rs:216); conflicted>changed>untracked precedence, rename paths both feed ancestors (directory_status.rs); zero app callers | pass 12 |
+| `F-GIT-STATUS-02` | UNREACHABLE | "zero app callers" is not a PASSED, and it is still true. Re-swept 2026-08-14: `directory_statuses` and `DirectoryStatusAggregator` (`lib.rs:59`) have **0 app references** — the Files panel never rolls a child's git status up to its ancestor directories. `tiller_git::status` *is* imported (`right_panel.rs:15`), so per-file status is live; the directory aggregation on top of it is not | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-GIT-ACT-01` | PASSED | stage/unstage/stage_all/discard/discard_all verified in git after each call | pass 5 |
 | `F-GIT-ACT-02` | PASSED | pass 11: stage_refuses_a_conflicted_path_without_changing_git + stage_all_refuses_every_conflicted_path_before_mutation green (worktree unchanged verified); stale+duplicate tested; empty-selection branch code-verified | pass 11 |
 | `F-GIT-DIFF-01` | PASSED | tracked/untracked/binary/added/deleted/renamed/no-HEAD hunks correct | pass 5 |
 | `F-GIT-DIFF-02` | PASSED | tracked/untracked/binary/added/deleted/renamed/no-HEAD hunks correct | pass 5 |
-| `F-GIT-DIFF-03` | PASSED | pass 12: `side_by_side_preserves_hunks_pairs_runs_and_drops_metadata` + `side_by_side_handles_real_rename_binary_and_large_context` green (p41_git_behaviors.rs:268, :307); zero app callers | pass 12 |
+| `F-GIT-DIFF-03` | PASSED | pass 12: `side_by_side_preserves_hunks_pairs_runs_and_drops_metadata` + `side_by_side_handles_real_rename_binary_and_large_context` green (p41_git_behaviors.rs:268, :307). **The pass-12 "zero app callers" is now stale and is removed**: the diff API is among the most-used in the app — `DiffOrigin` 13 refs, `stats` 12, `DiffStat` 7, `FileDiff` 6, `Hunk`/`DiffLine` 5 each — and the Changes panel renders diffs live. Verdict unchanged; the note was the thing that was wrong | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-GIT-DIFF-04` | PASSED | untracked cap is 500,000 bytes, matching the Swift reference exactly (data.count <= 500_000 in GitDiffStats.swift); over-cap files fall back to the diff count (150,000-line file reports its real count, test green); binary -> is_binary | pass 11 |
 | `F-GIT-PLAT-01` | PASSED | git via PATH; whole flow on Linux; process-group kill on timeout | pass 5 |
 
@@ -567,16 +567,19 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 
 | verdict | count |
 |---|---|
-| PASSED | **210** |
-| half-proven | **19** |
+| PASSED | **196** |
+| half-proven | **20** |
 | FAILED — absent | **88** |
 | FAILED — defective | **29** |
-| UNREACHABLE | **7** |
+| UNREACHABLE | **20** |
 | N/A — platform | **12** |
 | NOT EXERCISED | **23** |
 | NOT EXERCISED — blocked on display | **0** |
 | builder-claimed, unverified | **1** |
 | **total** | **389** |
+
+`UNREACHABLE` groups the three spellings in the body (bare, `— opencode not installed`,
+`— no terminalTab table in the Linux schema`); the recount below prints them separately.
 
 Recomputed from the body by counting rows, not by hand, 2026-08-14 — the previous block
 summed to 388 and disagreed with the body on five of nine verdicts. Anyone editing totals
