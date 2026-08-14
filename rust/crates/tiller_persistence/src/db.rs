@@ -766,6 +766,9 @@ impl AppDatabase {
         if let Some(value) = self.setting_value(settings_keys::OPENCODE_SHOW_IN_BAR)? {
             defaults.opencode_show_in_bar = parse_bool_setting(&value, false);
         }
+        if let Some(value) = self.setting_value(settings_keys::OLLAMA_SHOW_IN_BAR)? {
+            defaults.ollama_show_in_bar = parse_bool_setting(&value, false);
+        }
         if let Some(value) = self.setting_value(settings_keys::REFRESH_INTERVAL_MIN)? {
             defaults.refresh_interval_min = clamp_setting(
                 &value,
@@ -885,6 +888,15 @@ impl AppDatabase {
             &transaction,
             settings_keys::OPENCODE_SHOW_IN_BAR,
             if settings.opencode_show_in_bar {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::OLLAMA_SHOW_IN_BAR,
+            if settings.ollama_show_in_bar {
                 "true"
             } else {
                 "false"

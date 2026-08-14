@@ -1628,6 +1628,7 @@ mod tests {
             claude_show_in_bar: false,
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
+            ollama_show_in_bar: true,
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
         };
@@ -1661,6 +1662,7 @@ mod tests {
                 ("session.resumeAgentSessions".into(), "false".into()),
                 ("usage.claudeVisible".into(), "false".into()),
                 ("usage.codexVisible".into(), "false".into()),
+                ("usage.ollamaVisible".into(), "true".into()),
                 (
                     "usage.opencodeGo.workspaceIdOverride".into(),
                     "wrk_main".into(),

@@ -1,8 +1,7 @@
 //! Real agent usage data for the status bar, ported from the Swift app's
 //! `UsageStore` / `ProviderUsage` / the per-provider fetchers.
 //!
-//! The Swift app tracks four providers: Claude, Codex, OpenCode Go and
-//! Ollama Cloud. Three are implemented here:
+//! The Swift app tracks four providers, all implemented here:
 //!
 //! - **Claude** reads local state only: it drives a hidden `claude` PTY and
 //!   parses the `/usage` panel ([`claude`]).
@@ -14,10 +13,8 @@
 //!   store — the app's own [`CredentialStore`] here, the `com.tiller.usage`
 //!   Keychain item on macOS — and scrapes its usage page on opencode.ai
 //!   ([`opencode_go`]).
-//!
-//! Ollama Cloud is not implemented: it needs a session cookie whose store
-//! integration has not been built yet, and no local state exists to read
-//! instead.
+//! - **Ollama Cloud** reads its session cookie from the same store and
+//!   scrapes ollama.com's settings page, best-effort by design ([`ollama`]).
 //!
 //! # Contract
 //!
@@ -57,7 +54,7 @@ pub use codex::{
 pub use model::{
     ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason, UsageWindow, reduce,
 };
-pub use ollama::parse_ollama_cloud_usage;
+pub use ollama::{OllamaCloudUsageFetcher, extract_ollama_cloud_usage, parse_ollama_cloud_usage};
 pub use opencode_go::OpenCodeGoUsageFetcher;
 
 /// The provider identity, matching the Swift `UsageProvider` ids.

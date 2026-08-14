@@ -375,6 +375,8 @@ pub struct AppSettings {
     pub codex_show_in_bar: bool,
     /// "usage.opencodeVisible" — default: false.
     pub opencode_show_in_bar: bool,
+    /// "usage.ollamaVisible" — default: false.
+    pub ollama_show_in_bar: bool,
     /// "usage.refreshIntervalMin" — default 5, clamped to 1...60.
     pub refresh_interval_min: i64,
     /// "usage.opencodeGo.workspaceIdOverride" — default: empty (the
@@ -401,6 +403,7 @@ impl Default for AppSettings {
             claude_show_in_bar: true,
             codex_show_in_bar: true,
             opencode_show_in_bar: false,
+            ollama_show_in_bar: false,
             refresh_interval_min: 5,
             opencode_workspace_id_override: String::new(),
         }
@@ -426,6 +429,7 @@ pub mod settings_keys {
     pub const CLAUDE_SHOW_IN_BAR: &str = "usage.claudeVisible";
     pub const CODEX_SHOW_IN_BAR: &str = "usage.codexVisible";
     pub const OPENCODE_SHOW_IN_BAR: &str = "usage.opencodeVisible";
+    pub const OLLAMA_SHOW_IN_BAR: &str = "usage.ollamaVisible";
     pub const REFRESH_INTERVAL_MIN: &str = "usage.refreshIntervalMin";
     pub const OPENCODE_WORKSPACE_ID_OVERRIDE: &str = "usage.opencodeGo.workspaceIdOverride";
 }
