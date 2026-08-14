@@ -1,0 +1,50 @@
+F-GIT-RUN-02 -- "New Worktree..." click, and why submission could not be driven
+instrument: rendered Wayland lane (p120a), wl-helper.sh (wtype + custom virtual-pointer FIFO)
+
+1. Clicked the sidebar "New Worktree..." affordance (125,401 in a 1715x972 frame). A real inline
+   form opened: "New worktree in tiller" / a focused "branch name" text input / "Enter to create -
+   Esc to cancel" hint. Capture: gitrun02-new-worktree-clicked.png.
+
+2. Typed a branch name into the field via `wtype` text injection. Text landed in the field (with a
+   reproducible quirk: the first character of the typed string is consistently dropped, e.g.
+   "p120-gitrun02-test" arrived as "120-gitrun02-test"; "cleanattempt" arrived as "leanattempt").
+   Capture: gitrun02-typed.png, gitrun02-clean-retry.png.
+
+3. Attempted to submit via Return, across four independent methods, all against a field confirmed
+   freshly focused (orange focus ring) immediately beforehand:
+     - `wtype -k Return`
+     - `wtype -P Return -p Return` (explicit press+release)
+     - a fresh click-into-field then `wtype -k Return` in the same shell invocation with no
+       intervening shot() (to rule out the resolution-toggle-steals-focus effect documented
+       elsewhere in this report)
+     - a literal newline embedded in the text stream: `wtype -- $'\n'`
+   None submitted the form. The field's text was unchanged and the form stayed open in every case.
+   Captures: gitrun02-submit-t0/t1/t2.png, gitrun02-submit-retry-t0/t1.png,
+   gitrun02-noshot-between.png, gitrun02-pressrelease-test.png.
+
+4. Also tried `wtype -k Escape` (the form's own documented cancel gesture) against the same
+   focused field: no effect either. Capture: gitrun02-escape-test.png.
+
+5. Cross-check, to separate "this field's Enter handler is broken" from "this instrument cannot
+   deliver a Return keypress at all": clicked the completely unrelated Chat message box, typed
+   "helloreturntest" (landed as "elloreturntest" -- same leading-character-drop quirk, confirming
+   this is a general typing artifact of the injection method, not specific to the worktree field),
+   then sent `wtype -k Return`. The chat input was NOT cleared and no message was sent -- same
+   failure mode. A literal `wtype -- $'\n'` against the same chat box also did not submit it.
+   Captures: gitrun02-return-diagnostic-chatbox.png, gitrun02-return-diagnostic-newline.png.
+
+Conclusion: printable-character text injection via `wtype` reaches real, focused GPUI text fields
+in this app (confirmed twice, independently). Non-printable named-keysym injection via `wtype -k`
+(`Return`, `Escape`, explicit press/release, and a literal embedded newline) does not register
+anywhere in this app that I tried it, including a field with no relation to worktree creation. That
+rules out "this specific button's Enter handler is broken" as the explanation and points at the
+injection path itself (wtype's virtual-keyboard-protocol delivery of non-printable keysyms on this
+particular compositor/GPUI stack) as the blocker.
+
+I therefore could not submit the "New Worktree..." form and could not observe whether worktree
+creation streams progress incrementally, which is the row's actual VERIFY claim
+(`GitRunner`/`run_streaming` has 0 references in the app crates per the ledger). This is
+UNREACHABLE from this instrument as currently built, not a claim that the row's underlying code is
+broken or fixed -- a driver that can deliver a real Return keypress (or a mouse-only submit
+affordance, if the UI has one I didn't find) would be the correct next step, not a fifth blind
+retry of the same injection method.
