@@ -97,3 +97,31 @@ the manifest's own note that this needs `DISPLAY=:1`/X11.
 **Reason for could-not-reach:** Wayland lane's virtual-pointer tooling has no button-down-only
 or motion-while-held primitive; this is an X11-lane row per this assignment's explicit
 Wayland-only scope.
+
+## `F-USE-03` — See provider usage values, loading, stale, logged-out, and error displays
+
+**Claim: could-not-reach** (missing half only — Loading/Stale; Loaded/logged-out already
+confirmed per the ledger and not re-driven this pass).
+
+**Drove:** Relaunched a fresh instance and captured the status bar within ~1-3s of the socket
+appearing (`02-use-immediate.png`, 1715x972), aiming to catch the transient `Loading` state
+before the first provider refresh settles.
+
+**Observed:** A frame was captured, but this text-only lane has no OCR (`tesseract` is not
+installed) and the measurement instrument available (`convert ... -format
+"%[fx:standard_deviation*255] %[fx:mean*255]"`) reports region variance/brightness, not text
+content — it cannot distinguish "Loading…" from "Signed in" from a stale/dimmed render of the
+same string, since all three are non-empty text in the same region. Region stddev alone is not
+a valid instrument for this row's discriminating question (which *word* is shown), so no claim
+about Loading is defensible from this capture alone.
+
+**Reason for could-not-reach:** No text-reading instrument is available to distinguish the
+documented states from each other (only presence/absence of drawing, which was never in
+question). Additionally, `Stale` requires a refresh to run past its timeout
+(`claude.rs::TIMEOUT` = 25s, `codex.rs::TIMEOUT` = 15s) with a prior `Loaded` value already in
+hand — a multi-tens-of-seconds live sequence with no way to verify its result once captured, for
+the same OCR reason. Both are out of this pass's budget and this lane's instrumentation.
+
+**Captures:**
+`reference/linux-progress/wavea-W12-auto+edit+use+tab/02-use-immediate.png` (uninterpretable
+without OCR — kept for a future pass with a vision-capable reader).
