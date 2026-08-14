@@ -74,7 +74,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-SID-05` | PASSED | drawn selection event + live select-workspace mounts tabs | pass 8 |
 | `F-SID-06` | FAILED — absent | status dot computed only for RowKind::Worktree; project rows never get a badge, collapsed or not — the badge half is not built (state half real, pass 8) | pass 11 |
 | `F-SID-07` | FAILED — absent | P46 builder claim: typed project-settings route and sheet; replay `sidebar_context_items_explain_git_eligibility_and_list_every_new_surface`; palette lists `Project Settings`; independent critic verification required | builder-claimed, unverified |
-| `F-SID-08` | FAILED — absent | P46 builder claim: typed `InitializeGit` route with `AlreadyGitProject`; replay `sidebar_context_items_explain_git_eligibility_and_list_every_new_surface`; palette preserves the typed reason; independent critic verification required | builder-claimed, unverified |
+| `F-SID-08` | NOT EXERCISED | verdict corrected — it read `FAILED — absent` while its own source column read "builder-claimed, unverified", a contradiction. The item is real: sidebar.rs:652 "Initialize Git repository" → `SidebarContextAction::InitializeGit`, enabled on `!is_git` and disabled with `AlreadyGitProject` when it already is one; backend `tiller_git/src/worktree.rs:126`. Still never driven on a real non-Git folder | orchestrator audit, 2026-08-14 |
 | `F-SID-09` | FAILED — absent | P46 builder claim: context-menu `RevealInFileManager` route; replay `right_click_context_menu_dispatches_a_typed_worktree_action`; palette lists `Reveal in File Manager`; independent critic verification required | builder-claimed, unverified |
 | `F-SID-10` | PASSED | pass 8 remove flow + shell remove_project real; pass 13 drawn (live-repo): `remove_project_context_item_confirms_before_emitting` green (sidebar.rs) — right-click project row → Remove Project → platform prompt up with nothing emitted, Cancel emits nothing, "Remove from Tiller" emits `RemoveProject` with the project's id (replaces the pass-11 auto-confirming-prompt test, which lived only in a wiped snapshot) | pass 13 |
 | `F-SID-11` | FAILED — absent | worktree rows render path + agent-status dot only; branch/comment/primary text absent from the row render | pass 11 |
@@ -125,12 +125,12 @@ touched the entry — those rows do **not** count toward done.
 | `F-TAB-09` | PASSED | P65: pane context menu has Open File → picker → `add_file_tab` editor; replayed `drawn_tab_context_open_file_uses_the_picker_and_adds_an_editor_tab` (main.rs:7787) | pass 14 |
 | `F-TAB-10` | PASSED | chords + live split (pass 8, pane-3 created); pass 12: the clause's pane-menu route now exists — drawn `right_click_resolves_this_terminal_and_draws_all_context_actions` green (tiller_terminal lib.rs:1751): right-click draws all 10 items, Split Right click emits typed `TerminalContextEvent` with real pane/terminal ids; shell subscription routes to `split_terminal_at` (main.rs:2325-2341); mapping test `terminal_context_app_actions_have_workspace_routes` green | pass 12 |
 | `F-TAB-11` | FAILED — absent | split_disabled_reason unit-tested but zero UI callers — never rendered; the pass-12 pane context menu (drawn test green) does not carry disabled-reason entries | pass 12 |
-| `F-TAB-12` | FAILED — absent | no move-tab UI | pass 8 |
+| `F-TAB-12` | NOT EXERCISED | pass 8's "no move-tab UI" is **stale**. The tab context menu carries `TabContextAction::MoveEarlier` (main.rs:5701/5707) and the palette offers all four routes verbatim — "Move Tab Earlier"/"Move Tab Later" (command_palette.rs:346/351), "Move Tab to This Pane" (:357/363), "Move Tab to Other Pane" (:371/377); destination ids come from `tab_machinery.rs:232`. Right-click is wired (main.rs:5461). Never driven live: no trial has created two pane groups and moved a tab | orchestrator audit, 2026-08-14 |
 | `F-TAB-13` | FAILED — absent | no move-tab menu or empty state | pass 8 |
 | `F-TAB-14` | FAILED — absent | no rename anywhere | pass 8 |
-| `F-TAB-15` | FAILED — absent | ✕-close real (pass 2 display; close_tab_by_id); pass 12: no tab context menu exists — the clause's context-menu Close Tab route is absent; "Close Tab" exists only as a palette entry (drawn palette dispatch closes tabs, main.rs:6313 — a different surface from the clause's) | pass 12 |
+| `F-TAB-15` | NOT EXERCISED | pass 12's "no tab context menu exists" is **stale**. Right-click is wired at main.rs:5461 and the menu is rendered by `render_tab_context_menu` (tab_bar.rs:106, imported main.rs:52) carrying `TabContextItem::enabled("Close", "close", TabContextAction::Close)` (main.rs:5667) — so the clause's context-menu route exists, not just the palette one. The ✕ route is real too (close_tab_by_id). Neither route has been clicked live | orchestrator audit, 2026-08-14 |
 | `F-TAB-16` | FAILED — absent | close_tab has no confirmation and no dirty check | pass 8 |
-| `F-TAB-17` | FAILED — absent | no close-others/right | pass 8 |
+| `F-TAB-17` | NOT EXERCISED | pass 8's "no close-others/right" is **stale**. Both live in the wired context menu: "Close Others" → `TabContextAction::CloseOthers` (main.rs:5672/5678) and "Close Tabs to the Right" → `TabContextAction::CloseTabsToRight` (main.rs:5686/5692), plus command_palette.rs:341. Never exercised: no trial has created three tabs and confirmed which survive | orchestrator audit, 2026-08-14 |
 | `F-TAB-18` | FAILED — absent | never built in the Linux rewrite — no tab-drag code, only pane divider drags (the reference ships tab reorder at PaneTabStripBar.swift:220; nothing was removed — evidence wording corrected pass 17, verdict unchanged) | pass 8 |
 | `F-TAB-19` | PASSED | ctrl-tab/ctrl-shift-tab bound; handler = live tab.cycle; chord fixture green | pass 8 |
 | `F-TAB-20` | PASSED | ctrl-1..9 bound; handler = live tab.select; chord fixture green | pass 8 |
@@ -299,7 +299,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-SET-11` | FAILED — absent | Loading/Loaded/Stale + dimming visible; the four unavailable reasons (Not found/Logged out/Timed out/Error) all render the same '—' — 4 visuals for 7 claimed states | pass 11 |
 | `F-SET-12` | FAILED — absent | no cookie UI or state | pass 10 |
 | `F-SET-13` | FAILED — absent | no cookie UI or state | pass 10 |
-| `F-SET-14` | FAILED — absent | status-only provider cards; no add/re-auth/remove | pass 10 |
+| `F-SET-14` | FAILED — defective | pass 10's "status-only provider cards" is stale — an "Add Account" button is now drawn per provider (settings.rs:1494, ids add-claude/codex/opencode-account). **But it is a dead control**: its handler `on_manage_account` (settings.rs:799) has exactly one caller in the whole workspace and it is a *test* (settings.rs:3188); main.rs never installs it, so by the field's own documented contract (settings.rs:641 "Unset, the button renders muted and does not respond to clicks") the button is inert. Separately, re-authenticate and remove do not exist by an explicit design decision (settings.rs:632-641): this app holds no isolated per-provider credentials, so all three collapse to one host-delegated action — which is the action nobody installed. Browser-login waiting/cancel/retry absent | orchestrator audit, 2026-08-14 |
 | `F-SET-15` | FAILED — absent | no multi-account model | pass 10 |
 | `F-SET-16` | FAILED — absent | pass 12: "Search agents" is a static text child in a pill-shaped div, not an input (settings.rs:1183); Refresh's handler is the literal no-op `|_, _, _| {}` (settings.rs:1187-1189); no timestamp exists; drawn `agent_rows_render_what_discovery_found` (settings.rs:1839) green proves rows only — every interactive conjunct is dead chrome (contradicts F-SET-17 FAILED, same absent registry) | pass 12 |
 | `F-SET-17` | FAILED — absent | no agent registry | pass 10 |
@@ -307,7 +307,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-SET-19` | half-proven | pass 17 closes the pixel half for Light end-to-end through the user's own path: clicking the Light segment relit the entire surface live (p17-ae1), the DB then held `theme=light`, and a relaunch painted LIGHT at the FIRST frame with the settings page showing Light selected (p17-ag0-startup/ag1). Dark was the ambient state of every earlier frame (default). Still unexercised: choosing System and watching it follow the desktop scheme — flipping the desktop scheme mid-drive is outside the harness. The drawn mechanism test from pass 13 stands underneath | pass 17 |
 | `F-SET-20` | FAILED — defective | pass 17: the translucency conjunct is a dead control, proven three ways — `set_translucency` (settings.rs:871-874) sets the field and `cx.notify()`s but never calls `self.changed()`, unlike EVERY sibling setter; `SettingsSnapshot` (settings.rs:338) has no translucency field, so the value cannot leave the surface; and zero code anywhere consumes the flag (no `background_appearance`/`WindowBackgroundAppearance`/`Blurred` in tiller, tiller_ui or tiller_terminal). Live: toggling repaints only the knob (p17-ae3) and no DB key is ever written. The font halves work: interface stepper 13→14 changed the rendered subtitle live (p17-ae4), both font sizes persisted and survived relaunch (p17-ag1); the terminal-glyph resize itself was not photographed. A clause conjunct that can never be satisfied makes the row defective, not half-proven | pass 17 |
 | `F-SET-21` | FAILED — absent | pass 12: exactly one Files icon choice on Linux — `SEGMENTED_FILE_ICONS=["Material"]` (settings.rs:30), `file_icon_choices()` (settings.rs:161-168); drawn `selecting_the_listed_file_icon_set_changes_the_snapshot` (settings.rs:2109) clicks segment 0 and asserts the only possible value — nothing can change; plus F-CORE-FILE-08: the tree renders only generic File/FolderFill icons | pass 12 |
-| `F-SET-22` | FAILED — absent | pass 13: the Agent Colors section renders five rows with coloured glyphs and display-only `color_swatch` pills (no on_click — no colour choice exists to exercise). Agents page photographed (SET-02) | pass 13 |
+| `F-SET-22` | FAILED — defective | pass 13's "display-only pills, no on_click" is **stale** — the swatch is clickable and the choice reaches `SettingsSnapshot.agent_colors` (green drawn test `agent_color_click_selects_a_new_accent_and_persists`, settings.rs:3547, real `simulate_click`, and only the clicked row moves). **The defect is downstream**: `agent_colors` has zero references anywhere outside settings.rs — no consumer reads it — and `app_settings_from_snapshot` (main.rs:7582) drops it, `AppSettings` having no such field. So the clause's second half ("start/show that agent, confirm its accent color changes") cannot happen by construction, and the colour cannot persist. Choice real, effect nonexistent | orchestrator audit, 2026-08-14 |
 | `F-SET-23` | N/A — platform | TCC permissions | pass 8 |
 | `F-SET-24` | N/A — platform | browser-origin permissions | pass 8 |
 | `F-SET-25` | N/A — platform | TCC refresh on activate | pass 8 |
@@ -569,11 +569,11 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 |---|---|
 | PASSED | **205** |
 | half-proven | **18** |
-| FAILED — absent | **102** |
-| FAILED — defective | **21** |
+| FAILED — absent | **96** |
+| FAILED — defective | **23** |
 | UNREACHABLE | **3** |
 | N/A — platform | **20** |
-| NOT EXERCISED | **19** |
+| NOT EXERCISED | **23** |
 | NOT EXERCISED — blocked on display | **0** |
 | builder-claimed, unverified | **1** |
 | **total** | **389** |
