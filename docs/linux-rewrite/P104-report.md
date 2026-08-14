@@ -304,3 +304,59 @@ COSMIC Files", confirmed both by its window title and by its backing process
 showing the project folder's single `note.md` file (capture:
 `p104-g4-sid09-cosmicfiles-window.png`). Nothing appeared at the bottom of the app's own
 sidebar, consistent with the recipe's stated fallback only applying when nothing opens.
+
+## Group 5 · activity signals
+
+Setup for this group: opened the right-hand "Activity" section (a collapsible entry at the
+bottom of the same panel used for Group 3's Files tab); expanding it replaces the panel with
+a flat list of rows — one per terminal pane and per opened file across the whole session, each
+showing a title, its worktree path, and a small circular status glyph. An ACP-capable agent
+CLI is present on PATH (`/home/enzopalmisano/.local/bin/claude`,
+`/home/enzopalmisano/.local/bin/codex`), so `F-CHG-22` was reachable today.
+
+**F-TERM-PTY-05** — Gesture: in a terminal pane run `sleep 8`; report the sidebar worktree
+row's dot and each Activity-panel row's status text, while it runs and after. Screen: ran
+`sleep 8` twice, captured mid-run (command echoed, no completion badge yet — capture:
+`p104-g5-term05-sleep-midrun.png`) and after completion (the terminal block itself grows a
+duration badge reading `8s Xms` once the command returns — capture:
+`p104-g5-term05-sleep-completed.png`). Neither the sidebar's "master" worktree row nor any row
+in the Activity panel showed any visible change at any point across three captures (start,
+mid-run, after) — no dot appeared on the worktree row, and every Activity row kept its plain,
+uniform circular glyph throughout, with no status text of any kind on any row (running or
+otherwise) anywhere in the panel. The only place the command's running/finished state was
+visible at all was the terminal block's own inline duration badge, not the sidebar or the
+Activity panel.
+
+**F-CHG-22** — Gesture: start an agent CLI in a terminal pane, give it a task that ends in a
+question/permission prompt; while it waits, report every Activity row's status label and the
+sidebar dot. Screen: launched `claude` in a terminal pane. As soon as it reached its own idle
+input prompt (before any task was given), that pane's tab-strip label changed from a plain
+dot to a literal **`?`** glyph, and the matching row in the Activity panel swapped its usual
+plain circle for the same **`?`** glyph — every other row (12 other Terminal rows, `README.md`,
+`main.rs`) kept its plain circle. First tried `Run the shell command: echo
+hi-from-nested-agent` — this executed immediately with no permission prompt at all (this
+nested session's Bash tool was evidently pre-approved), so it did not exercise the row.
+Second try, `Edit the file main.rs and add a comment at the top saying // nested agent edit`,
+did reach a genuine permission prompt: a diff preview of the proposed one-line insertion,
+followed verbatim by:
+
+```
+Do you want to make this edit to main.rs?
+  1. Yes
+  2. Yes, allow all edits during this session (shift+tab)
+  3. No
+
+Esc to cancel · Tab to amend
+```
+
+(capture: `p104-g5-chg22-permission-prompt.png`). While this prompt was up, the same pane's
+Activity-panel row still showed the **`?`** glyph in place of its status circle (unchanged
+from the idle-prompt state above — the recipe's cited id, `activity-status-needs-input-…`, is
+consistent with this being the same "needs input" state rather than a distinct one for
+permission questions specifically); no other Activity row changed; and the sidebar's worktree
+rows showed no dot of any kind, same as `F-TERM-PTY-05`. Selected "3. No" to decline the edit
+— the transcript printed `User rejected update to main.rs` (capture:
+`p104-g5-chg22-after-decline.png`), the Activity row's **`?`** glyph reverted to a plain
+circle immediately, and a terminal `git diff -- main.rs` afterward confirmed the file was
+untouched (only the pre-existing `README.md` change remained in `git status`). Exited the
+nested session with `/exit` afterward.
