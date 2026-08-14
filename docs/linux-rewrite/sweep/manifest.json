@@ -1,191 +1,191 @@
 {
- "S1-core": {
-  "families": [
-   "F-CORE"
-  ],
-  "lane": "wayland",
-  "count": 22,
-  "ids": [
-   "F-CORE-ACT-02",
-   "F-CORE-ACT-06",
-   "F-CORE-ACT-07",
-   "F-CORE-ACT-11",
-   "F-CORE-ACT-19",
-   "F-CORE-ACT-20",
-   "F-CORE-ACT-24",
-   "F-CORE-ACT-25",
-   "F-CORE-ACT-26",
-   "F-CORE-AUTH-01",
-   "F-CORE-DOM-03",
-   "F-CORE-DOM-07",
-   "F-CORE-FILE-03",
-   "F-CORE-FILE-06",
-   "F-CORE-FILE-08",
-   "F-CORE-SET-01",
-   "F-CORE-TERM-02",
-   "F-CORE-USG-05",
-   "F-CORE-USG-06",
-   "F-CORE-USG-07",
-   "F-CORE-WSP-04",
-   "F-CORE-WSP-08"
-  ]
+ "adjudicate": {
+  "A1-P109": {
+   "reports": [
+    "P109-report.md"
+   ],
+   "count": 32,
+   "ids": [
+    "F-CHAT-02",
+    "F-CHAT-16",
+    "F-CHAT-18",
+    "F-CHAT-21",
+    "F-CHAT-22",
+    "F-CHAT-23",
+    "F-CHAT-31",
+    "F-CHG-01",
+    "F-CHG-20",
+    "F-PER-07",
+    "F-PRJ-03",
+    "F-PRJ-04",
+    "F-PRJ-07",
+    "F-PRJ-10",
+    "F-PRJ-11",
+    "F-PRJ-12",
+    "F-PRJ-17",
+    "F-PRJ-18",
+    "F-SET-16",
+    "F-SET-21",
+    "F-SID-06",
+    "F-SID-11",
+    "F-SID-15",
+    "F-SID-16",
+    "F-SID-17",
+    "F-TAB-01",
+    "F-TAB-11",
+    "F-TAB-18",
+    "F-TAB-24",
+    "F-TAB-28",
+    "F-WIN-01",
+    "F-WIN-10"
+   ]
+  },
+  "A2-P120": {
+   "reports": [
+    "P120-report.md"
+   ],
+   "count": 21,
+   "ids": [
+    "F-AGENT-API-01",
+    "F-AGENT-SAFE-02",
+    "F-CORE-ACT-19",
+    "F-CORE-ACT-20",
+    "F-CORE-ACT-24",
+    "F-CORE-ACT-25",
+    "F-CORE-ACT-26",
+    "F-CORE-AUTH-01",
+    "F-CORE-DOM-03",
+    "F-CORE-FILE-03",
+    "F-CORE-FILE-06",
+    "F-CORE-FILE-08",
+    "F-CORE-SET-01",
+    "F-CORE-USG-05",
+    "F-CORE-USG-06",
+    "F-CORE-USG-07",
+    "F-GIT-RUN-02",
+    "F-TERM-UI-02",
+    "F-USE-01",
+    "F-USE-02",
+    "F-USE-03"
+   ]
+  },
+  "A3-P116-P114-P111": {
+   "reports": [
+    "P116-report.md",
+    "P114-report.md",
+    "P111-report.md"
+   ],
+   "count": 12,
+   "ids": [
+    "F-AGENT-OMP-01",
+    "F-AGENT-OMP-02",
+    "F-AGENT-SESSION-01",
+    "F-AGENT-SESSION-02",
+    "F-CHAT-34",
+    "F-CORE-DOM-07",
+    "F-CORE-WSP-04",
+    "F-CORE-WSP-08",
+    "F-CTRL-CLI-02",
+    "F-GIT-BRANCH-01",
+    "F-SET-10",
+    "F-TERM-PTY-06"
+   ]
+  }
  },
- "S2-chat": {
-  "families": [
-   "F-CHAT"
-  ],
-  "lane": "wayland",
-  "count": 16,
-  "ids": [
-   "F-CHAT-02",
-   "F-CHAT-05",
-   "F-CHAT-13",
-   "F-CHAT-16",
-   "F-CHAT-18",
-   "F-CHAT-20",
-   "F-CHAT-21",
-   "F-CHAT-22",
-   "F-CHAT-23",
-   "F-CHAT-24",
-   "F-CHAT-25",
-   "F-CHAT-26",
-   "F-CHAT-27",
-   "F-CHAT-31",
-   "F-CHAT-33",
-   "F-CHAT-34"
-  ]
- },
- "S3-settings": {
-  "families": [
-   "F-SET",
-   "F-USE"
-  ],
-  "lane": "wayland",
-  "count": 16,
-  "ids": [
-   "F-SET-04",
-   "F-SET-05",
-   "F-SET-06",
-   "F-SET-07",
-   "F-SET-09",
-   "F-SET-10",
-   "F-SET-11",
-   "F-SET-15",
-   "F-SET-16",
-   "F-SET-18",
-   "F-SET-19",
-   "F-SET-21",
-   "F-SET-24",
-   "F-USE-01",
-   "F-USE-02",
-   "F-USE-03"
-  ]
- },
- "S4-sidebar": {
-  "families": [
-   "F-PRJ",
-   "F-SID"
-  ],
-  "lane": "wayland",
-  "count": 19,
-  "ids": [
-   "F-PRJ-03",
-   "F-PRJ-04",
-   "F-PRJ-06",
-   "F-PRJ-07",
-   "F-PRJ-09",
-   "F-PRJ-10",
-   "F-PRJ-11",
-   "F-PRJ-12",
-   "F-PRJ-14",
-   "F-PRJ-16",
-   "F-PRJ-17",
-   "F-PRJ-18",
-   "F-SID-06",
-   "F-SID-11",
-   "F-SID-12",
-   "F-SID-15",
-   "F-SID-16",
-   "F-SID-17",
-   "F-SID-19"
-  ]
- },
- "S5-tabs": {
-  "families": [
-   "F-TAB",
-   "F-WIN",
-   "F-EDIT",
-   "F-PER"
-  ],
-  "lane": "wayland",
-  "count": 13,
-  "ids": [
-   "F-EDIT-05",
-   "F-EDIT-12",
-   "F-PER-07",
-   "F-PER-08",
-   "F-TAB-01",
-   "F-TAB-08",
-   "F-TAB-11",
-   "F-TAB-18",
-   "F-TAB-24",
-   "F-TAB-28",
-   "F-WIN-01",
-   "F-WIN-07",
-   "F-WIN-10"
-  ]
- },
- "S6-changes": {
-  "families": [
-   "F-CHG",
-   "F-GIT",
-   "F-PERSIST",
-   "F-CTRL"
-  ],
-  "lane": "wayland",
-  "count": 12,
-  "ids": [
-   "F-CHG-01",
-   "F-CHG-06",
-   "F-CHG-11",
-   "F-CHG-18",
-   "F-CHG-20",
-   "F-CHG-22",
-   "F-CTRL-CLI-02",
-   "F-GIT-BRANCH-01",
-   "F-GIT-REMOTE-01",
-   "F-GIT-RUN-02",
-   "F-PERSIST-DB-06",
-   "F-PERSIST-DB-11"
-  ]
- },
- "S7-term-brw": {
-  "families": [
-   "F-TERM",
-   "F-AGENT",
-   "F-BRW"
-  ],
-  "lane": "wayland + :1 lock holder",
-  "count": 18,
-  "ids": [
-   "F-AGENT-API-01",
-   "F-AGENT-OMP-01",
-   "F-AGENT-OMP-02",
-   "F-AGENT-SAFE-01",
-   "F-AGENT-SAFE-02",
-   "F-AGENT-SESSION-01",
-   "F-AGENT-SESSION-02",
-   "F-BRW-05",
-   "F-BRW-06",
-   "F-BRW-07",
-   "F-BRW-08",
-   "F-BRW-09",
-   "F-TERM-04",
-   "F-TERM-06",
-   "F-TERM-08",
-   "F-TERM-PTY-06",
-   "F-TERM-UI-01",
-   "F-TERM-UI-02"
-  ]
+ "drive": {
+  "D1-settings": {
+   "families": [
+    "F-SET",
+    "F-EDIT"
+   ],
+   "count": 12,
+   "ids": [
+    "F-EDIT-05",
+    "F-EDIT-12",
+    "F-SET-04",
+    "F-SET-05",
+    "F-SET-06",
+    "F-SET-07",
+    "F-SET-09",
+    "F-SET-11",
+    "F-SET-15",
+    "F-SET-18",
+    "F-SET-19",
+    "F-SET-24"
+   ]
+  },
+  "D2-chat-core": {
+   "families": [
+    "F-CHAT",
+    "F-CORE"
+   ],
+   "count": 13,
+   "ids": [
+    "F-CHAT-05",
+    "F-CHAT-13",
+    "F-CHAT-20",
+    "F-CHAT-24",
+    "F-CHAT-25",
+    "F-CHAT-26",
+    "F-CHAT-27",
+    "F-CHAT-33",
+    "F-CORE-ACT-02",
+    "F-CORE-ACT-06",
+    "F-CORE-ACT-07",
+    "F-CORE-ACT-11",
+    "F-CORE-TERM-02"
+   ]
+  },
+  "D3-term-brw": {
+   "families": [
+    "F-BRW",
+    "F-TERM",
+    "F-AGENT",
+    "F-PER"
+   ],
+   "count": 11,
+   "ids": [
+    "F-AGENT-SAFE-01",
+    "F-BRW-05",
+    "F-BRW-06",
+    "F-BRW-07",
+    "F-BRW-08",
+    "F-BRW-09",
+    "F-PER-08",
+    "F-TERM-04",
+    "F-TERM-06",
+    "F-TERM-08",
+    "F-TERM-UI-01"
+   ]
+  },
+  "D4-workspace": {
+   "families": [
+    "F-PRJ",
+    "F-CHG",
+    "F-SID",
+    "F-PERSIST",
+    "F-GIT",
+    "F-TAB",
+    "F-WIN"
+   ],
+   "count": 15,
+   "ids": [
+    "F-CHG-06",
+    "F-CHG-11",
+    "F-CHG-18",
+    "F-CHG-22",
+    "F-GIT-REMOTE-01",
+    "F-PERSIST-DB-06",
+    "F-PERSIST-DB-11",
+    "F-PRJ-06",
+    "F-PRJ-09",
+    "F-PRJ-14",
+    "F-PRJ-16",
+    "F-SID-12",
+    "F-SID-19",
+    "F-TAB-08",
+    "F-WIN-07"
+   ]
+  }
  }
 }
