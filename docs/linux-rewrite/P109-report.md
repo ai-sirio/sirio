@@ -860,3 +860,77 @@ was captured entirely after this recovery, on the fresh process. Flagging
 both halves of this incident (the app's silent exit, and the lock's
 unexplained absence) for the orchestrator: the second is a shared-display
 concurrency-safety issue this report cannot resolve on its own.
+
+## F-CHG rows
+
+### F-CHG-01
+
+Owed gesture: "click the titlebar right-panel toggle both ways" (close-out
+batch, item 11), matching row prose verbatim: "click the titlebar
+right-panel toggle (close, reopen), confirming the panel is Files-only
+either way."
+
+The toggle icon (the same right-edge titlebar icon identified as the only
+titlebar icon during the F-WIN-01 crop above) sits at `(1689,18)`, not
+`(1687,22)` — the first two attempts at `(1687,22)` (captures
+`shots/213-chg01-toggle-close.png`, `shots/214-chg01-toggle-close-retry.png`)
+produced no change at all, byte-for-byte the same Files panel (path
+`/home/enzopalmisano/sonnet-p109-test`, one `.remember` row, collapsed
+`Activity` row) in both; a crop of the icon
+(`shots/214b-crop-toggle.png`) showed its true bounds centred a few pixels
+up and to the right of that coordinate.
+
+Clicked `(1689,18)`: the Files panel closed outright — the whole right
+column disappeared, widening the `Chat`/`Terminal` content area, leaving
+only the toggle icon on the bare titlebar (`shots/215-chg01-toggle-close-precise.png`).
+
+Clicked `(1689,18)` again: the panel reopened, showing the identical
+`Files` header, path, `Refresh` link, the single `.remember` row, and the
+collapsed `Activity` row at the bottom — the same content as before the
+close (`shots/216-chg01-toggle-reopen.png`). **The panel is Files-only on
+both the close and the reopen** — there is no alternate mode (e.g. a
+Changes view) that the toggle reveals or hides; it is a pure show/hide of
+the same Files content, confirming the row's expectation.
+
+### F-CHG-20
+
+Owed gesture: "click the Activity header with nothing running (\"No
+activity\" row)" (close-out batch, item 12), matching row prose verbatim.
+
+The `Chat` and `Terminal` tabs open under `master` were both present at
+the start of this row, so `Activity` (collapsed, chevron `>`, bottom of
+the Files panel) first showed non-empty content once expanded — two rows,
+`Chat` and `Terminal`, each labelled `sonnet-p109-test/master`
+(`shots/220-chg20-activity-r3.png`). That is not "nothing running," so to
+drive the row's actual precondition both were closed via their `×`
+controls inside the Activity list itself
+(`shots/221-chg20-close-chat.png`, `shots/222-chg20-close-terminal.png`),
+leaving the main pane on the app's own `No Terminals` empty state and the
+Activity section still expanded but now with no tracked rows.
+
+**Finding: with nothing running, the Activity section does not render a
+readable "No activity" label — it renders as a handful of isolated,
+sub-pixel-scale coloured specks where the label's text should be, not
+legible text of any kind.** This was checked three ways before concluding
+it was real: (1) the window is only 972px tall against a 1440px-tall
+display and the row sits close to the bottom edge, so clipping-by-window
+was considered first — a crop taken all the way to the window's actual
+bottom edge (`shots/224b-crop-full.png`) showed the anomalous content
+sitting well clear of that edge, ruling out clipping; (2) a
+`brightness-contrast` pass on the crop
+(`shots/224d-crop-contrast.png`) was tried on the hypothesis that this was
+merely low-contrast text — it resolved into a sparse scatter of a dozen or
+so isolated dots at irregular spacing, not the shape of any word at any
+contrast level; (3) attempts to force a repaint (mouse-wheel scroll over
+the row, `ctrl+-` zoom-out) were tried and produced no change to the
+pattern (`shots/223-chg20-scroll-attempt.png`,
+`shots/224-chg20-zoomout.png`). Window resize was attempted first as a more
+direct fix (`xdotool windowmove`/`windowsize`, `wmctrl -b add,maximized_*`)
+to get more room to inspect the row without cropping — none of it moved or
+resized the window at all, itself worth noting: this drive lane has no
+window-manager control over the app's window on `DISPLAY=:1`.
+
+This is reported as a rendering finding, not chased into `rust/` per the
+task's rules. Captures: `shots/220` through `shots/224d` as cited above.
+
+
