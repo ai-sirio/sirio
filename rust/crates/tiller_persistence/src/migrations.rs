@@ -224,6 +224,24 @@ fn migrate_v12(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v13 — the local-account-identity store (F-PERSIST-DB-06). Before this,
+/// `discover_claude_identity`/`discover_codex_identity` (tiller_ui's
+/// Settings surface) only ever shelled out live for a display line; there
+/// was no table for that result to land in, so it could not survive a
+/// restart or a slow/offline shell-out. One row per provider, replaced
+/// wholesale on each successful detection — this is a cache of the last
+/// known-good identity, not a history, so a plain upsert on `provider` is
+/// the whole write path.
+fn migrate_v13(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS account_identity (
+            provider TEXT PRIMARY KEY,
+            identity TEXT NOT NULL,
+            detected_at INTEGER NOT NULL
+        );",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -239,6 +257,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v10,
     migrate_v11,
     migrate_v12,
+    migrate_v13,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -322,5 +341,124 @@ mod tests {
     fn a_fresh_database_starts_at_version_zero() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         assert_eq!(read_user_version(&conn).expect("read"), 0);
+    }
+
+    /// F-PERSIST-DB-11: the schema-creation half was already strongly
+    /// proven (a real database migrates v1->current and boots a populated
+    /// sidebar); what was missing was proof that data planted at an *old*
+    /// schema version survives forward migration through the specific
+    /// renames/backfills later versions perform on it — not just that the
+    /// final CREATE/ALTER statements are syntactically fine on an empty
+    /// database. This plants one row in each of `session_ref`, `tab`, and
+    /// `chat_turn` at v6 (the version right after both `session_ref` and
+    /// `chat_turn` exist, and before v10's `tab.agent_id` and v12's
+    /// `chat_turn.updated_at` are added), migrates forward to the current
+    /// schema, and checks each row is not just present but has the exact
+    /// backfilled value those later migrations document.
+    #[test]
+    fn forward_migration_preserves_pre_existing_session_ref_tab_and_chat_turn_data() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate_up_to(&mut conn, 6).expect("migrate to v6");
+
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path) VALUES ('proj', 'Proj', '/repo');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx)
+                 VALUES ('wt', 'proj', 'main', '/repo', 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-1', 'wt', 'Chat', 'chat', 3, 1);
+             INSERT INTO session_ref (session, reference)
+                 VALUES ('pane-1', 'session-abc');
+             INSERT INTO chat_turn (tab_id, ordinal, payload)
+                 VALUES ('tab-1', 0, x'01020304');",
+        )
+        .expect("plant data at v6, before the later renames/backfills");
+
+        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward to current");
+        assert_eq!(
+            read_user_version(&conn).expect("read"),
+            CURRENT_SCHEMA_VERSION
+        );
+
+        // session_ref: no later migration touches this table at all.
+        let reference: String = conn
+            .query_row(
+                "SELECT reference FROM session_ref WHERE session = 'pane-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session_ref row survives forward migration");
+        assert_eq!(reference, "session-abc");
+
+        // tab: order_idx (planted before v3's active-tab invariant fixup)
+        // survives, and v10's `agent_id` column backfills to NULL for a
+        // row that predates it rather than dropping or blanking the row.
+        let (order_idx, agent_id): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT order_idx, agent_id FROM tab WHERE id = 'tab-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("tab row survives forward migration");
+        assert_eq!(order_idx, 3, "tab ordering survives migration");
+        assert_eq!(
+            agent_id, None,
+            "v10 backfills agent_id to NULL for a pre-existing row"
+        );
+
+        // chat_turn: the payload/ordinal planted at v6 survive, and v12's
+        // `updated_at` column backfills to its documented default (0) for
+        // a row that predates it.
+        let (payload, updated_at): (Vec<u8>, i64) = conn
+            .query_row(
+                "SELECT payload, updated_at FROM chat_turn
+                 WHERE tab_id = 'tab-1' AND ordinal = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("chat_turn row survives forward migration");
+        assert_eq!(payload, vec![1, 2, 3, 4]);
+        assert_eq!(
+            updated_at, 0,
+            "v12 backfills updated_at to its documented DEFAULT 0"
+        );
+    }
+
+    /// F-PERSIST-DB-06: the schema half of the local-account-identity
+    /// store. `account_identity` did not exist before v13; this proves the
+    /// migration both creates it with the right shape (one row per
+    /// provider, replace-on-conflict) and — like the test above — that a
+    /// row planted before a later migration runs (none touch this table
+    /// yet, but the same discipline applies as the table grows) is not
+    /// something a future migration can silently drop.
+    #[test]
+    fn account_identity_table_stores_one_upserted_row_per_provider() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate(&mut conn).expect("migrate to current");
+
+        conn.execute(
+            "INSERT INTO account_identity (provider, identity, detected_at)
+             VALUES ('claude', 'first@example.com', 100)",
+            [],
+        )
+        .expect("insert an identity row");
+        conn.execute(
+            "INSERT INTO account_identity (provider, identity, detected_at)
+             VALUES ('claude', 'second@example.com', 200)
+             ON CONFLICT(provider) DO UPDATE SET
+                 identity = excluded.identity,
+                 detected_at = excluded.detected_at",
+            [],
+        )
+        .expect("re-detecting the same provider replaces its row");
+
+        let (identity, detected_at): (String, i64) = conn
+            .query_row(
+                "SELECT identity, detected_at FROM account_identity WHERE provider = 'claude'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("exactly one row per provider");
+        assert_eq!(identity, "second@example.com");
+        assert_eq!(detected_at, 200);
     }
 }
