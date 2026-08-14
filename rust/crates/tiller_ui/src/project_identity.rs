@@ -114,6 +114,74 @@ impl Default for ProjectIcon {
     }
 }
 
+impl ProjectIcon {
+    /// Returns the stable pair written to `ProjectRecord.icon_kind` and
+    /// `ProjectRecord.icon_value`. The UI crate deliberately returns plain
+    /// strings here so the shell can bridge to persistence without making
+    /// this component depend on SQLite types.
+    pub fn persisted_parts(&self) -> (String, Option<String>) {
+        match &self.value {
+            ProjectIconValue::Symbol(glyph) => ("icon".into(), Some(glyph.id().into())),
+            ProjectIconValue::Emoji(emoji) => ("emoji".into(), Some(emoji.clone())),
+            ProjectIconValue::Avatar(AvatarSource::LocalPng(path)) => (
+                "avatar".into(),
+                Some(format!("png:{}", path.to_string_lossy())),
+            ),
+            ProjectIconValue::Avatar(AvatarSource::GitHub(identifier)) => {
+                ("avatar".into(), Some(format!("github:{identifier}")))
+            }
+            ProjectIconValue::Avatar(AvatarSource::Favicon(domain)) => {
+                ("avatar".into(), Some(format!("favicon:{domain}")))
+            }
+        }
+    }
+
+    /// Rebuilds a picker value from the persisted pair. Unknown or malformed
+    /// values fall back to the reset target instead of making a persisted row
+    /// unusable. `color_id` is kept separate because it is stored in the
+    /// project's existing `color_hex` column.
+    pub fn from_persisted_parts(kind: &str, value: Option<&str>, color_id: Option<&str>) -> Self {
+        let tint = color_id
+            .map(AgentAccentColor::parse)
+            .unwrap_or(AgentAccentColor::Coral);
+        let Some(value) = value.filter(|value| !value.is_empty()) else {
+            return Self {
+                value: ProjectIconValue::Symbol(ProjectGlyph::Folder),
+                tint,
+            };
+        };
+        let value = match kind {
+            "icon" => ProjectGlyph::parse(value)
+                .or_else(|| (value == "folder.fill").then_some(ProjectGlyph::Folder))
+                .map(ProjectIconValue::Symbol),
+            "emoji" => Some(ProjectIconValue::Emoji(value.to_string())),
+            "avatar" => value
+                .strip_prefix("png:")
+                .filter(|path| !path.is_empty())
+                .map(|path| ProjectIconValue::Avatar(AvatarSource::LocalPng(path.into())))
+                .or_else(|| {
+                    value
+                        .strip_prefix("github:")
+                        .filter(|id| !id.is_empty())
+                        .map(|id| ProjectIconValue::Avatar(AvatarSource::GitHub(id.to_string())))
+                })
+                .or_else(|| {
+                    value
+                        .strip_prefix("favicon:")
+                        .filter(|domain| !domain.is_empty())
+                        .map(|domain| {
+                            ProjectIconValue::Avatar(AvatarSource::Favicon(domain.to_string()))
+                        })
+                }),
+            _ => None,
+        };
+        Self {
+            value: value.unwrap_or(ProjectIconValue::Symbol(ProjectGlyph::Folder)),
+            tint,
+        }
+    }
+}
+
 /// Which sub-picker is showing. Independent of `ProjectIcon::value`: a user
 /// can browse the Avatar tab without having committed an avatar yet, the
 /// same way the reference app's own segmented "Icon / Emoji / Avatar"
@@ -182,6 +250,7 @@ pub struct ProjectIconPicker {
     favicon_error: Option<String>,
     png_error: Option<String>,
     on_change: Option<Rc<dyn Fn(ProjectIcon)>>,
+    on_change_with_context: Option<Rc<dyn Fn(ProjectIcon, &mut Context<Self>)>>,
     /// F-PRJ-16's "Open Emoji Picker" opens a system service (the desktop's
     /// own emoji input, e.g. a compositor shortcut or `gnome-characters`) —
     /// not something a `tiller_ui` render function can reach. Unset, the
@@ -216,6 +285,7 @@ impl ProjectIconPicker {
             favicon_error: None,
             png_error: None,
             on_change: None,
+            on_change_with_context: None,
             on_open_emoji_picker: None,
             #[cfg(test)]
             png_test_paths: Vec::new(),
@@ -224,6 +294,16 @@ impl ProjectIconPicker {
 
     pub fn on_change(mut self, callback: impl Fn(ProjectIcon) + 'static) -> Self {
         self.on_change = Some(Rc::new(callback));
+        self
+    }
+
+    /// Context-aware host seam used when the picker is mounted inside a
+    /// parent GPUI entity that must repaint immediately after a selection.
+    pub fn on_change_with_context(
+        mut self,
+        callback: impl Fn(ProjectIcon, &mut Context<Self>) + 'static,
+    ) -> Self {
+        self.on_change_with_context = Some(Rc::new(callback));
         self
     }
 
@@ -252,6 +332,9 @@ impl ProjectIconPicker {
         if let Some(callback) = &self.on_change {
             callback(self.value.clone());
         }
+        if let Some(callback) = &self.on_change_with_context {
+            callback(self.value.clone(), cx);
+        }
         cx.notify();
     }
 
@@ -264,6 +347,9 @@ impl ProjectIconPicker {
         if let Some(callback) = &self.on_change {
             callback(self.value.clone());
         }
+        if let Some(callback) = &self.on_change_with_context {
+            callback(self.value.clone(), cx);
+        }
         cx.notify();
     }
 
@@ -274,6 +360,9 @@ impl ProjectIconPicker {
         self.mode = PickerMode::Icon;
         if let Some(callback) = &self.on_change {
             callback(self.value.clone());
+        }
+        if let Some(callback) = &self.on_change_with_context {
+            callback(self.value.clone(), cx);
         }
         cx.notify();
     }
@@ -863,6 +952,31 @@ mod tests {
             assert_eq!(ProjectGlyph::parse(glyph.id()), Some(glyph));
         }
         assert_eq!(ProjectGlyph::parse("not-a-glyph"), None);
+    }
+
+    #[test]
+    fn project_icon_storage_round_trips_symbol_emoji_and_avatar_variants() {
+        let icons = [
+            ProjectIcon {
+                value: ProjectIconValue::Symbol(ProjectGlyph::GitBranch),
+                tint: AgentAccentColor::Green,
+            },
+            ProjectIcon {
+                value: ProjectIconValue::Emoji("🇮🇹".into()),
+                tint: AgentAccentColor::Blue,
+            },
+            ProjectIcon {
+                value: ProjectIconValue::Avatar(AvatarSource::GitHub("octocat".into())),
+                tint: AgentAccentColor::Purple,
+            },
+        ];
+
+        for icon in icons {
+            let (kind, value) = icon.persisted_parts();
+            let restored =
+                ProjectIcon::from_persisted_parts(&kind, value.as_deref(), Some(icon.tint.id()));
+            assert_eq!(restored, icon, "failed to round-trip {kind:?}/{value:?}");
+        }
     }
 
     /// F-PRJ-13/F-PRJ-15: the glyph grid and the colour row are two

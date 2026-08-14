@@ -28,7 +28,7 @@ use tiller_project::TabKind;
 use tiller_theme::Theme;
 
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
-use crate::project_identity::{ProjectIcon, ProjectIconPicker};
+use crate::project_identity::{ProjectIcon, ProjectIconPicker, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
 
@@ -210,6 +210,8 @@ struct OpenContextMenu {
 struct ProjectSettingsCard {
     id: String,
     name: String,
+    display_name: Rc<RefCell<String>>,
+    display_name_focus: FocusHandle,
     path: PathBuf,
     is_git: bool,
     icon: Rc<RefCell<ProjectIcon>>,
@@ -238,6 +240,8 @@ pub enum SidebarEvent {
     CloseTab(usize),
     /// Open the project settings sheet for a catalog project.
     OpenProjectSettings(String),
+    /// A project-settings edit has changed the durable project identity.
+    ProjectSettingsChanged(ProjectSettingsUpdate),
     /// A typed project/worktree context-menu transition for the shell.
     ContextAction {
         target: SidebarContextTarget,
@@ -250,6 +254,14 @@ pub enum SidebarEvent {
         target_id: usize,
         before: bool,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectSettingsUpdate {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub is_git: bool,
+    pub icon: ProjectIcon,
 }
 
 /// The kinds of rows rendered by [`Sidebar`].
@@ -286,6 +298,8 @@ struct WorktreePrompt {
 pub struct Sidebar {
     rows: Vec<SidebarRow>,
     project_ids: std::collections::HashMap<usize, String>,
+    project_names: std::collections::HashMap<String, String>,
+    project_identities: std::collections::HashMap<String, ProjectIcon>,
     filter: String,
     filter_focus: FocusHandle,
     /// The open worktree-creation prompt, if any.
@@ -383,6 +397,8 @@ impl Sidebar {
         Self {
             rows,
             project_ids: std::collections::HashMap::new(),
+            project_names: std::collections::HashMap::new(),
+            project_identities: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             prompt: None,
@@ -398,9 +414,13 @@ impl Sidebar {
     pub fn from_projects(projects: Vec<SidebarProject>, cx: &mut Context<Self>) -> Self {
         let mut rows = Vec::new();
         let mut project_ids = std::collections::HashMap::new();
+        let mut project_names = std::collections::HashMap::new();
+        let mut project_identities = std::collections::HashMap::new();
         for (project_index, project) in projects.into_iter().enumerate() {
             let project_row_id = project_index * 1000;
-            project_ids.insert(project_row_id, project.id);
+            project_ids.insert(project_row_id, project.id.clone());
+            project_names.insert(project.id.clone(), project.name.clone());
+            project_identities.insert(project.id, ProjectIcon::default());
             let project_is_git = project.is_git;
             let project_path = project.root_path.clone();
             rows.push(SidebarRow {
@@ -462,6 +482,8 @@ impl Sidebar {
         Self {
             rows,
             project_ids,
+            project_names,
+            project_identities,
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             prompt: None,
@@ -479,6 +501,8 @@ impl Sidebar {
         let replacement = Self::from_projects(projects, cx);
         self.rows = replacement.rows;
         self.project_ids = replacement.project_ids;
+        self.project_names = replacement.project_names;
+        self.project_identities = replacement.project_identities;
         self.filter = filter;
         self.pending_reorder = None;
         cx.notify();
@@ -761,8 +785,107 @@ impl Sidebar {
         }
     }
 
-    /// Host entry point for the gear affordance. The sheet is intentionally
-    /// read-only until project-setting mutations have a persistence contract.
+    /// Applies the host's persisted project identity to the live sidebar.
+    /// This is called after initial construction and after catalog refreshes.
+    pub fn set_project_identity(
+        &mut self,
+        project_id: &str,
+        display_name: Option<String>,
+        icon: ProjectIcon,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_identities.insert(project_id.to_string(), icon);
+        let Some(row_id) = self
+            .project_ids
+            .iter()
+            .find_map(|(row_id, id)| (id == project_id).then_some(*row_id))
+        else {
+            return;
+        };
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == row_id) {
+            let base_name = self
+                .project_names
+                .get(project_id)
+                .cloned()
+                .unwrap_or_else(|| row.title.clone());
+            row.title = display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(base_name);
+        }
+        cx.notify();
+    }
+
+    fn project_settings_update(card: &ProjectSettingsCard) -> ProjectSettingsUpdate {
+        ProjectSettingsUpdate {
+            id: card.id.clone(),
+            display_name: {
+                let value = card.display_name.borrow().trim().to_string();
+                (!value.is_empty()).then_some(value)
+            },
+            is_git: card.is_git,
+            icon: card.icon.borrow().clone(),
+        }
+    }
+
+    fn emit_project_settings_changed(&self, cx: &mut Context<Self>) {
+        if let Some(card) = &self.project_settings {
+            cx.emit(SidebarEvent::ProjectSettingsChanged(
+                Self::project_settings_update(card),
+            ));
+        }
+    }
+
+    fn apply_icon_change(&mut self, project_id: String, icon: ProjectIcon, cx: &mut Context<Self>) {
+        let Some(card) = self
+            .project_settings
+            .as_ref()
+            .filter(|card| card.id == project_id)
+        else {
+            return;
+        };
+        *card.icon.borrow_mut() = icon.clone();
+        self.project_identities.insert(project_id, icon);
+        self.emit_project_settings_changed(cx);
+        cx.notify();
+    }
+
+    fn on_display_name_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = &self.project_settings else {
+            return;
+        };
+        let mut draft = card.display_name.borrow_mut();
+        match event.keystroke.key.as_str() {
+            "backspace" | "delete" => {
+                draft.pop();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                {
+                    draft.push_str(character);
+                }
+            }
+        }
+        drop(draft);
+        let update = Self::project_settings_update(card);
+        self.set_project_identity(
+            &update.id,
+            update.display_name.clone(),
+            update.icon.clone(),
+            cx,
+        );
+        cx.emit(SidebarEvent::ProjectSettingsChanged(update));
+        cx.notify();
+    }
+
+    /// Host entry point for the gear affordance.
     pub fn open_project_settings(&mut self, project_id: &str, cx: &mut Context<Self>) {
         let Some(row_id) = self
             .project_ids
@@ -778,16 +901,36 @@ impl Sidebar {
             return;
         };
         self.context_menu = None;
-        let icon = Rc::new(RefCell::new(ProjectIcon::default()));
-        let icon_for_picker = icon.clone();
+        let icon = Rc::new(RefCell::new(
+            self.project_identities
+                .get(project_id)
+                .cloned()
+                .unwrap_or_default(),
+        ));
+        let sidebar_entity = cx.entity();
+        let picker_project_id = project_id.to_string();
         let icon_picker = cx.new(|cx| {
-            ProjectIconPicker::with_value(icon.borrow().clone(), cx).on_change(move |value| {
-                *icon_for_picker.borrow_mut() = value;
-            })
+            ProjectIconPicker::with_value(icon.borrow().clone(), cx).on_change_with_context(
+                move |value, cx| {
+                    sidebar_entity.update(cx, |sidebar, cx| {
+                        sidebar.apply_icon_change(picker_project_id.clone(), value, cx)
+                    });
+                },
+            )
         });
+        let base_name = self
+            .project_names
+            .get(project_id)
+            .cloned()
+            .unwrap_or_else(|| row.title.clone());
+        let display_name = (row.title != base_name)
+            .then(|| row.title.clone())
+            .unwrap_or_default();
         self.project_settings = Some(ProjectSettingsCard {
             id: project_id.to_string(),
-            name: row.title.clone(),
+            name: base_name,
+            display_name: Rc::new(RefCell::new(display_name)),
+            display_name_focus: cx.focus_handle(),
             path,
             is_git: row.is_git,
             icon,
@@ -1724,10 +1867,22 @@ impl Sidebar {
         entity: gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
-        // The picker callback writes this host-side value until the durable
-        // ProjectRecord update seam is supplied by the persistence owner.
-        let _selected_icon = card.icon.borrow().clone();
+        let display_name = card.display_name.borrow().clone();
+        let heading_name = if display_name.trim().is_empty() {
+            card.name.clone()
+        } else {
+            display_name.clone()
+        };
         let close_entity = entity.clone();
+        let name_entity = entity.clone();
+        let focus_entity = entity.clone();
+        let display_name_focus = card.display_name_focus.clone();
+        let initialize_entity = entity.clone();
+        let project_target = SidebarContextTarget::Project {
+            id: card.id.clone(),
+            path: card.path.clone(),
+            is_git: card.is_git,
+        };
         div()
             .id("project-settings-sheet")
             .debug_selector(|| "project-settings-sheet".to_owned())
@@ -1746,7 +1901,7 @@ impl Sidebar {
                     .text_size(theme.typography.headline)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.title)
-                    .child(format!("Project Settings · {}", card.name)),
+                    .child(format!("Project Settings · {heading_name}")),
             )
             .child(
                 div()
@@ -1764,6 +1919,71 @@ impl Sidebar {
                         "Repository: Folder"
                     }),
             )
+            .child(
+                div()
+                    .id("project-display-name-field")
+                    .debug_selector(|| "project-display-name-field".to_owned())
+                    .track_focus(&display_name_focus)
+                    .w_full()
+                    .h(px(32.0))
+                    .px(px(9.0))
+                    .flex()
+                    .items_center()
+                    .rounded(theme.radii.control)
+                    .bg(theme.filter_field_bg)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .text_size(theme.typography.footnote)
+                    .text_color(if display_name.trim().is_empty() {
+                        theme.meta
+                    } else {
+                        theme.title
+                    })
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        focus_entity.update(cx, |sidebar, cx| {
+                            if let Some(card) = &sidebar.project_settings {
+                                card.display_name_focus.focus(window, cx);
+                            }
+                        });
+                    })
+                    .on_key_down(move |event, window, cx| {
+                        name_entity.update(cx, |sidebar, cx| {
+                            sidebar.on_display_name_key(event, window, cx);
+                        });
+                    })
+                    .child(if display_name.trim().is_empty() {
+                        "Display name".to_owned()
+                    } else {
+                        display_name
+                    }),
+            )
+            .when(!card.is_git, |this| {
+                let target = project_target.clone();
+                this.child(
+                    div()
+                        .id("project-settings-initialize-git")
+                        .debug_selector(|| "project-settings-initialize-git".to_owned())
+                        .h(px(30.0))
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radii.control)
+                        .bg(theme.primary_pill_bg)
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.title)
+                        .on_click(move |_, _, cx| {
+                            initialize_entity.update(cx, |_, cx| {
+                                cx.emit(SidebarEvent::ContextAction {
+                                    target: target.clone(),
+                                    action: SidebarContextAction::InitializeGit,
+                                });
+                            });
+                        })
+                        .child("Initialize Git"),
+                )
+            })
             .child(
                 div()
                     .id("project-icon-picker")
@@ -1804,6 +2024,7 @@ impl Sidebar {
     fn render_row(
         row: SidebarRow,
         project_id: Option<String>,
+        project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
         entity: gpui::Entity<Self>,
         theme: Theme,
@@ -1842,9 +2063,19 @@ impl Sidebar {
                 ActivityStatus::NeedsInput => Some(theme.tab_needs_input),
                 ActivityStatus::Running => None,
             });
-        let glyph = Self::row_icon(&row);
+        let glyph = project_icon
+            .as_ref()
+            .and_then(|icon| match &icon.value {
+                ProjectIconValue::Symbol(glyph) => Some(glyph.icon()),
+                ProjectIconValue::Avatar(_) => Some(Icon::Globe),
+                ProjectIconValue::Emoji(_) => None,
+            })
+            .unwrap_or_else(|| Self::row_icon(&row));
         let glyph_color = match kind {
-            RowKind::Project => Self::project_color(&title),
+            RowKind::Project => project_icon
+                .as_ref()
+                .map(|icon| icon.tint.resolve(theme))
+                .unwrap_or_else(|| Self::project_color(&title)),
             RowKind::Tab => theme.tab_needs_input,
             RowKind::Worktree | RowKind::NewWorktree => theme.meta,
         };
@@ -1860,6 +2091,15 @@ impl Sidebar {
         let context_entity = entity.clone();
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
+        let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
+            Some(ProjectIconValue::Emoji(emoji)) => div()
+                .text_size(px(14.0))
+                .child(emoji.clone())
+                .into_any_element(),
+            _ => IconElement::new(glyph, px(if is_project { 14.0 } else { 13.0 }))
+                .text_color(glyph_color)
+                .into_any_element(),
+        };
 
         let row_debug_selector = if kind == RowKind::NewWorktree {
             "new-worktree-row".to_string()
@@ -1987,10 +2227,7 @@ impl Sidebar {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        IconElement::new(glyph, px(if is_project { 14.0 } else { 13.0 }))
-                            .text_color(glyph_color),
-                    ),
+                    .child(project_mark),
             )
             .child(
                 div()
@@ -2140,6 +2377,7 @@ impl Render for Sidebar {
         // The row list consumes one; the worktree prompt below needs another.
         let prompt_owner = entity.clone();
         let project_ids = self.project_ids.clone();
+        let project_identities = self.project_identities.clone();
         let row_drags = rows
             .iter()
             .filter_map(|row| self.row_drag(row).map(|drag| (row.id, drag)))
@@ -2266,8 +2504,18 @@ impl Render for Sidebar {
                         let entity = entity.clone();
                         move |row| {
                             let project_id = project_ids.get(&row.id).cloned();
+                            let project_icon = project_id
+                                .as_ref()
+                                .and_then(|id| project_identities.get(id).cloned());
                             let drag = row_drags.get(&row.id).copied();
-                            Self::render_row(row, project_id, drag, entity.clone(), theme)
+                            Self::render_row(
+                                row,
+                                project_id,
+                                project_icon,
+                                drag,
+                                entity.clone(),
+                                theme,
+                            )
                         }
                     })),
             )
@@ -2395,6 +2643,7 @@ impl Render for Sidebar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_identity::ProjectGlyph;
     use gpui::{
         Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, VisualTestContext,
         point,
@@ -3341,6 +3590,88 @@ mod tests {
             cx.debug_bounds("project-icon-glyph-folder").is_some(),
             "the mounted picker renders its glyph choices"
         );
+    }
+
+    #[gpui::test]
+    async fn project_settings_changes_update_the_row_and_emit_a_durable_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "Project".into(),
+                    is_git: true,
+                    root_path: PathBuf::from("/tmp/project"),
+                    worktrees: Vec::new(),
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach();
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("project-display-name-field")
+            .expect("display-name field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Renamed");
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ProjectSettingsChanged(update)
+                    if update.display_name.as_deref() == Some("Renamed")
+            )),
+            "typing a display name emits a durable project update"
+        );
+
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let glyph = cx
+            .debug_bounds("project-icon-glyph-git-branch")
+            .expect("the glyph picker remains mounted");
+        cx.simulate_click(glyph.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ProjectSettingsChanged(update)
+                    if update.icon.value == ProjectIconValue::Symbol(ProjectGlyph::GitBranch)
+            )),
+            "choosing a glyph emits the selected project icon"
+        );
+        let row_title = cx.update(|window, cx| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+                .read(cx)
+                .rows
+                .first()
+                .expect("project row")
+                .title
+                .clone()
+        });
+        assert_eq!(row_title, "Renamed", "the sidebar reflects the edited name");
     }
 
     /// F-SID-02: typing in the Filter field narrows the drawn rows to the
