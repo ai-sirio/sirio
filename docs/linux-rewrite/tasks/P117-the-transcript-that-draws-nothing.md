@@ -1,8 +1,9 @@
 # P117 — a completed chat turn draws nothing
 
-**Owner: `codex11`, as builder.** Worktree `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`,
-branch `linux/gpui-waku`. You built `P107` and `P114`, so this is your area — and that is exactly
-why **you do not get to judge the result.** `pireview` and the orchestrator do.
+**Owner: `pi`, as builder** (reassigned 18:15 — see the addendum; `codex11` is out of credit and
+never started). Worktree `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, branch
+`linux/gpui-waku`. You did **not** build the chat, which is why you get to fix it and why
+**you do not get to judge the result** — `pireview` and the orchestrator do.
 
 ## The defect
 
@@ -141,3 +142,40 @@ Re-run the drive at the top of this file and report what `chat.read` returned. T
 the transcript region yourself — `WAYLAND-LANE.md` §"A text-only agent can assert on a frame it
 cannot see", with a positive control — or leave the captures and name their paths for a visual pass.
 **A green test still does not close this.**
+
+---
+
+## Addendum 2 — for `pi`, 18:15
+
+Three things changed since the addendum above was written.
+
+**The build blocker you hit on `P119` is gone.** `cargo check -p tiller_ui -p tiller` finished clean
+at 18:12 against the current working tree. The `AppSettings.opencode_workspace_id_override` work
+that was mid-flight has settled. If it breaks again, say so rather than working around it.
+
+**Your own `P119` finding applies directly to this task's gate.** You established that an immediate
+socket read races the app and that the state is there after ~3 s. The `chat.read` in the drive at
+the top of this file is exactly such a read. **It is not the explanation for this defect** — that
+read happened 70 s after send and returned a full transcript, so the model had the entries and the
+screen still drew nothing — but when you re-run the drive, settle before reading so you never have
+to argue about which of the two effects you are looking at.
+
+**There is now a worked example of proving a rendered result you cannot see.**
+`CRITIC-visual-baseline.md` §18:09 drives a click-through and reads the frame back, including the
+rule that caught a weak proof: **when a row's fixed value and its default are the same, a capture of
+that value proves nothing** — drive it to a state the system would never reach on its own. For this
+task that means asserting on a transcript containing a string only your drive could have put there,
+not merely on "the region is no longer blank".
+
+Two instruments are available to you and either is acceptable:
+
+- `cx.debug_bounds("chat-transcript")` — the salvaged test in
+  `docs/linux-rewrite/p117-codex11-unverified.patch` asserts its height is `> px(200.0)`. Fix its
+  `OpenTab` struct literal (it failed `E0063`). **Report this as a test, never as the proof.**
+- The frame itself — `WAYLAND-LANE.md` §"A text-only agent can assert on a frame it cannot see",
+  with the mandatory positive control. Leave captures in `reference/linux-progress/p117/`, never
+  `/tmp`.
+
+Everything else in this file stands, including the second item (the **Changes** clipping) and the
+question of whether one wrapper accounts for both surfaces. **Answer that question explicitly**,
+even if the answer is "two causes".
