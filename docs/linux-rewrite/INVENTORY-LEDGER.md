@@ -511,7 +511,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-PERSIST-DB-08` | PASSED | replayed `a_duplicate_primary_is_reconciled_and_future_writes_are_rejected` + `exact_path_lookup_does_not_normalize_nearby_paths` green (persistence_integration, pass 14) — v8 one-primary integrity + exact path equality — **held on re-check 2026-08-14**: fable's half-flag (`worktree_by_path` prod=0, exact-lookup half test-only) is a true fact that does not reach this clause. The clause's subject is the store itself — "*`ProjectStore` … performs exact-path worktree lookup*" — so a persistence-integration test **is** the correct instrument, exactly as a unit test is for a pure state machine. This is the boundary that separates these rows from the 14 false PASSED overturned at 07:50: those clauses described user-facing features whose delivery needs app wiring, this one describes a store API. Recorded so the next pass does not re-open it | pass 14; re-checked orchestrator 2026-08-14 |
 | `F-PERSIST-DB-09` | PASSED | replayed `a_corrupt_tab_is_skipped_and_quarantined_while_valid_tabs_survive` green (persistence_integration, pass 14) | pass 14 |
 | `F-PERSIST-DB-10` | PASSED | session_references_upsert_load_and_delete + survive store reopen (tests) | pass 10 |
-| `F-PERSIST-DB-11` | PASSED | replayed `current_schema_contains_named_persistence_migrations` green (persistence_integration, pass 14) — v5..v9 named migrations present, CURRENT_SCHEMA_VERSION == MIGRATIONS.len() | pass 14 |
+| `F-PERSIST-DB-11` | half-proven | **the clause's harder conjunct has no test at all.** VERIFY asks to "*Open databases representing **earlier schema versions** and inspect that **each migration preserves data** and creates the expected current records*". The cited test does the second half only: it opens a **fresh** `TempDir` database, asserts `schema_version == CURRENT_SCHEMA_VERSION`, then checks the expected tables (`session_ref`, `chat_turn`, `quarantine_record`, `browser_origin_grant`) and worktree columns exist. It never constructs a database at an earlier version, so it exercises migration in the one case where preservation is trivial — no prior data. Re-swept 2026-08-14: the **only** `user_version` manipulation in the whole suite is `-> 999` at `persistence_integration.rs:1273`, which is the *newer-schema rejection* path (forward, not an upgrade), and no test seeds data at an old version and reopens. So across ten migrations the upgrading user's data-preservation path is unexercised — the exact failure a released app hits and a fresh install never does. Not `FAILED`: the migrations may well be correct, nobody has checked. **Also corrects the stale range in the prior evidence** — `migrate_v1`…`migrate_v10` exist (`migrations.rs:30-205`) with `CURRENT_SCHEMA_VERSION = MIGRATIONS.len()`, not "v5..v9". Closing this needs a test, not a drive — no display required | orchestrator audit, 2026-08-14 |
 | `F-PERSIST-DB-12` | UNREACHABLE — no terminalTab table in the Linux schema | no v17 rename exists; the described mismatch cannot manifest in this lineage | pass 10 |
 | `F-PERSIST-PLAT-01` | PASSED | $TILLER_DB->checkout-scoped(XDG)->user-wide tested; creation/migration/concurrency exercised on Linux path (two-process tests) | pass 10 |
 
@@ -567,8 +567,8 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 
 | verdict | count |
 |---|---|
-| PASSED | **193** |
-| half-proven | **25** |
+| PASSED | **192** |
+| half-proven | **26** |
 | FAILED — absent | **88** |
 | FAILED — defective | **28** |
 | UNREACHABLE | **21** |

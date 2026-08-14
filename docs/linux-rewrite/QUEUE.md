@@ -2544,3 +2544,57 @@ expensive half already exists and what is missing is a subscription, a call site
 `file_events.rs` → `F-CORE-FILE-06`, `link_router.rs` → `F-TERM-UI-02`, the account parsers →
 `F-CORE-AUTH-01` (`P93` is closing that one), `terminal_file_drop` → `F-CORE-FILE-03`. Read apart,
 one list looks like garbage to delete and the other like features to build from scratch.
+
+## The conjunction sweep, run deliberately this time — orchestrator, 2026-08-14 13:45
+
+`F-CHAT-14` and `F-PERSIST-DB-06` were both found by accident, and they share a signature: a VERIFY
+listing several actions, evidence citing **one** test. That is mechanisable. Across the 193 `PASSED`
+rows, 12 match "≥2 `and`/`then` in the VERIFY, exactly one snake_case test cited, evidence under 240
+chars".
+
+Most are fine, and the subject rule from 11:20 says why — for a store or a CLI, a test is the right
+instrument. **One is not, and it is the most consequential row I have touched tonight.**
+
+### `F-PERSIST-DB-11` → `half-proven`: nobody has tested that an upgrade preserves data
+
+VERIFY: *"Open databases representing **earlier schema versions** and inspect that **each migration
+preserves data** and creates the expected current records."*
+
+`current_schema_contains_named_persistence_migrations` opens a **fresh** `TempDir` database, asserts
+the version is current, and checks the expected tables and columns exist. That is the second
+conjunct. For the first it exercises migration in the only case where preservation is free — an
+empty database.
+
+The whole suite's only `user_version` write is `-> 999` (`persistence_integration.rs:1273`), the
+*newer-schema rejection* path. **No test seeds data at an old version and reopens.** Ten migrations
+(`migrate_v1`…`migrate_v10`), and the upgrade path a released app takes on every user's machine has
+never been run. A fresh install never touches it, so nothing else would catch it either.
+
+This is the cheapest kind of gap to close and the worst kind to leave: **it needs a test, not a
+drive** — no display, no lock, no ACP agent. It is also a good argument for reading a cited test
+rather than its name: the name says "contains named persistence migrations", and that is exactly and
+only what it checks. The name was honest; the verdict read more into it.
+
+### `F-CTRL` cluster — four rows whose VERIFY enumerates invocations the evidence does not cover
+
+Not yet judged; recorded so a critic can settle them cheaply — these are **CLI rows, exercisable
+without the display lock**, which makes them ideal for whoever cannot take it.
+
+| row | VERIFY asks for | evidence covers |
+|---|---|---|
+| `F-CTRL-SYS-01` | `ping` **and** `capabilities --json`, compared against the actual method list | `tillerctl_ping_prints_pong` |
+| `F-CTRL-CLI-01` | `--help` **and each command** against a running app | one test + one executed `ping` transcript |
+| `F-CTRL-WIRE-02` | socket mode/path, **concurrent requests**, >1 MiB line, **malformed JSON** | the oversized line only |
+| `F-CTRL-NOTIFY-02` | stdin JSON, each session-id key, rollout path, ambiguous flags, no mode | ambiguous flags only |
+
+`F-CTRL-SYS-01`'s uncovered half — *compare the response fields with the actual method list* — is
+**exactly what `P90` is rewriting**, since that piece changes which methods `system.capabilities`
+advertises. Told `codex12` to prove it as part of P90 rather than leaving it for a later pass: the
+row's gap and the piece's deliverable are the same command.
+
+### Method note
+
+The sweep needed the **clause** files, not the ledger — same lesson as 13:15. And it needed the
+subject rule from 11:20 to avoid flipping the eight persistence/CLI rows where a single test is
+genuinely the right instrument. A detector without that rule would have "found" twelve defects and
+manufactured eight.
