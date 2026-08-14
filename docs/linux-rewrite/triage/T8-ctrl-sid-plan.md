@@ -353,3 +353,272 @@ picks up its persisted comment by path.
 restore/save round-trip together — genuinely a small subsystem, not a one-file patch.
 
 ---
+
+## F-SID-06 — collapsed-project descendant-activity badge
+
+**Ledger verdict:** half-proven (worktree dots shown live; collapsed-project badge not
+exercised, code gates dots to worktree rows).
+
+**needs: build**
+
+The row's evidence is already correctly diagnosed as "code gates dots to worktree rows" —
+I confirmed this is a hard gate, not a missing UI affordance on top of existing data.
+`Sidebar::set_worktree_status` (`rust/crates/tiller_ui/src/sidebar.rs:1166-1183`) filters to
+`row.kind == RowKind::Worktree` explicitly; there is no `set_project_status` or any equivalent,
+and `RowKind::Project`'s render path (`render_row`, `sidebar.rs:2024` onward) never reads an
+`agent_status`-shaped field — `SidebarRow` (`sidebar.rs:96-133`) has exactly one
+`agent_status: Option<ActivityStatus>` field, documented "only meaningful for
+`RowKind::Worktree`."
+
+The deeper reason nobody built this: **the host does not have the data to aggregate even if
+the sidebar API existed.** `TillerWorkspace::sync_activity` (`main.rs:3707-3736`) computes
+`worktree_status` (`main.rs:3334-3339`) purely from `self.tabs` — this workspace's own,
+single, currently-mounted worktree's tabs. There is exactly one `cx.open_window` call in the
+whole app (`main.rs:8174`) — this is a single-window, single-mounted-worktree design where
+`self.tabs`/`self.activity` only ever describe `self.working_directory`. A collapsed project's
+*other* worktrees (the ones this clause needs a badge for) have no live activity tracked
+anywhere in this process while they are not the selected worktree — a Layer-A `tillerctl
+notify` call for a background worktree's pane has nowhere to land today, since `self.activity`
+belongs to the one mounted workspace.
+
+**files:**
+- `rust/crates/tiller_ui/src/sidebar.rs` (`SidebarRow` :96-133, `set_worktree_status`
+  :1166-1183, `render_row` :2024 onward) — needs a project-level status field/setter and a
+  badge-dot render branch for `RowKind::Project`.
+- `rust/crates/tiller/src/main.rs` (`sync_activity` :3707-3736, `worktree_status` :3334-3339) —
+  needs either a cross-worktree activity store or, at minimum, a way for Layer-A `notify` calls
+  targeting a non-mounted worktree's pane to update *something* the sidebar can read when that
+  project is collapsed.
+- Possibly `rust/crates/tiller_activity` (`AgentActivityModel` itself) if the fix is to make
+  activity tracking span more than the single mounted worktree, rather than bolt on a
+  narrower "last known status per worktree id" cache in the app layer.
+
+**approach:** do not treat this as a sidebar rendering task — the rendering half (a badge dot
+on a `RowKind::Project` row, keyed by whether any child worktree row currently shows a
+non-idle dot) is the easy 20%. The real work is deciding how a background/unmounted worktree's
+activity gets tracked at all in a single-window, single-mounted-worktree app, and that answer
+should probably be decided once and reused by any other row that needs cross-worktree
+awareness, not solved narrowly for this badge alone.
+
+**size:** L. This is architecture, not a widget — flag it as such rather than scheduling it
+as a quick UI row.
+
+---
+
+## F-SID-11 — worktree row: branch/folder/primary/comment/status
+
+**Ledger verdict:** half-proven (branch/path/Primary/status shown live; no folder-worktree row
+exists, comment not rendered).
+
+**needs: build**
+
+Two separate gaps under one clause, confirmed against current code:
+
+1. **Comment is not rendered — and this is the exact same dead field as `F-CTRL-WORK-01`.**
+   `SidebarRow` and `SidebarWorktree` (`rust/crates/tiller_ui/src/sidebar.rs:96-133`,
+   `:147-152`) have no `comment` field at all, so `render_row` has nothing to draw even if it
+   wanted to. **Shared cause with `F-CTRL-WORK-01`:** both rows trace back to the identical
+   missing plumbing — `session::CatalogWorktree` has no `comment` field, `worktree.set` never
+   reaches the live catalog, and the DB column that already exists
+   (`tiller_persistence::WorktreeRecord.comment`) is never read on restore. **One fix closes
+   both rows' primary gap** — the persistence/routing work described in `F-CTRL-WORK-01`'s
+   `approach` above (add `comment` to `CatalogWorktree`, route `worktree.set` to the main
+   thread, thread it through save/restore) is a precondition for *this* row's display half too;
+   this row additionally needs `SidebarRow.comment` threaded from that model into
+   `render_row`'s draw.
+2. **"Folder worktree" rows do not exist by design, not by omission.** `SidebarProject.is_git`
+   is documented: "a non-git project has no worktrees" (`sidebar.rs:139-141`), and
+   `context_menu_items`'s `Project` branch (`sidebar.rs:668-693`) only offers "Initialize Git
+   repository" for a non-git project — there is no code path anywhere that synthesizes a
+   folder-backed worktree row for a non-git project's own directory. This is a real design
+   question (does the clause want a synthetic single "worktree" row representing the folder
+   itself?), not a bug in existing code — flag it as such rather than assuming it's a small
+   miss.
+
+**files:**
+- `rust/crates/tiller_ui/src/sidebar.rs` (`SidebarRow` :96-133, `SidebarWorktree` :147-152,
+  `render_row` :2024 onward, `context_menu_items` :660-756) — comment field + render, and
+  (if built) a folder-worktree row kind/branch.
+- `rust/crates/tiller/src/session.rs` and `rust/crates/tiller/src/main.rs` — same files listed
+  under `F-CTRL-WORK-01`'s persistence fix; this row's comment half rides on that fix rather
+  than duplicating it.
+
+**approach:** land the `F-CTRL-WORK-01` persistence/routing fix first (or as one combined
+piece of work — see `sharedCause`), then add `comment: Option<String>` to `SidebarRow`/
+`SidebarWorktree` and a rendered line in `render_row`. Get an explicit answer on the
+folder-worktree question before building it — it changes `SidebarProject`'s and
+`context_menu_items`'s shape, not just a render tweak.
+
+**size:** M for the comment half (once `F-CTRL-WORK-01` lands — trivial on top of it, large if
+done from scratch alongside it). The folder-worktree half is its own M-L depending on the
+design answer.
+
+---
+
+## F-SID-12 — Set/Unset Primary from the worktree context menu
+
+**Ledger verdict:** half-proven (worktree dots and catalog machinery real; right-click not yet
+exercised on this lane).
+
+**needs: exercise**
+
+Confirmed the code is fully wired end to end — this is not a build gap. The context-menu item
+exists (`context_menu_items`, `rust/crates/tiller_ui/src/sidebar.rs:694-708`, "Set Primary" /
+"Unset Primary" toggling on `is_primary`), and the action reaches the model:
+`main.rs:3209-3226` handles `SidebarContextAction::SetPrimary`/`UnsetPrimary` by calling
+`set_worktree_primary` (`main.rs:3237-3248`), which flips `ProjectCatalog`'s marker and
+schedules a save.
+
+The ledger's blocker (`Scripts/wayland-virtual-pointer.c` hardcodes `BTN_LEFT`, no button
+parameter, so a real right-click can't be synthesized on the headless-Wayland lane) is real,
+but **there is already a second, working route to the identical code path that needs no new
+input-driver work at all**: the command palette. `dispatch_sidebar_palette_action`
+(`main.rs:7079-7130`) has a `SidebarPaletteAction::SetPrimary | UnsetPrimary` arm
+(`main.rs:7110-7127`) that emits the exact same `SidebarEvent::ContextAction` with
+`SidebarContextAction::SetPrimary`/`UnsetPrimary` that the context-menu click would — and the
+palette is keyboard-only, which `wayland-drive.sh`'s existing `type`/`key` commands already
+support without any right-click. Separately, `P104`'s sidebar sweep already proved right-click
+context menus work on this project via a different technique (`xdotool click`, not the
+`wayland-virtual-pointer.c` tool) for `F-SID-07`/`F-SID-09` — so a literal right-click gesture
+is also available if the fleet wants the clause's named gesture exactly, without new driver
+code.
+
+**files:** none — `rust/crates/tiller_ui/src/sidebar.rs:694-708` and
+`rust/crates/tiller/src/main.rs:3209-3248,7079-7130` are listed for reference only; no defect
+found.
+
+**approach:** drive it via the command palette (open palette on a selected worktree → invoke
+"Set Primary" → confirm the primary pill renders → invoke "Unset Primary" → confirm it's
+gone) for a pure-keyboard proof, or via `xdotool click` on the worktree row for the clause's
+literally-named right-click gesture, following the technique P104 already used successfully
+for sibling sidebar rows.
+
+**size:** S.
+
+---
+
+## F-SID-15 — Remove Worktree from the context menu, with confirmation
+
+**Ledger verdict:** FAILED — defective (named entry point absent; only door is hover ×, which
+removes with zero confirmation and deletes the on-disk directory).
+
+**needs: build**
+
+Confirmed both halves against current code:
+
+- **No "Remove Worktree" context-menu item exists.** `context_menu_items`'s `Worktree` branch
+  (`rust/crates/tiller_ui/src/sidebar.rs:694-754`) offers Set/Unset Primary and the seven
+  New-Tab variants only — grepped the whole match arm, there is no `RemoveWorktree` action or
+  label anywhere in it.
+- **The only door, the hover `×`, has no confirmation.** `remove_worktree_row`
+  (`sidebar.rs:1438-1473`) calls `remove_worktree(&repo_root, &worktree_path)` — which deletes
+  the on-disk worktree directory — immediately on its single call site
+  (`sidebar.rs:2282-2287`, the `×` control's `on_click`), with no prompt of any kind in
+  between.
+
+The fix is close to mechanical: this exact codebase already has the right pattern one screen
+away. `request_remove_project` (`sidebar.rs:1055-1074`) uses `window.prompt(PromptLevel::
+Warning, "Remove project from Tiller?", Some(...), &["Remove from Tiller", "Cancel"], cx)` and
+only emits its event if the user picks index 0 — a direct template for "Remove worktree and
+delete its directory?" gating `remove_worktree_row`.
+
+**files:**
+- `rust/crates/tiller_ui/src/sidebar.rs` (`context_menu_items` :660-756 — add a
+  `RemoveWorktree` item to the `Worktree` branch; `remove_worktree_row` :1438-1473 — gate
+  behind a `window.prompt` confirmation, following `request_remove_project` :1055-1074 as the
+  template; the `×` control's `on_click` :2282-2287; `SidebarContextAction` enum and its
+  dispatch, e.g. around :761 and wherever `context_target`/action-handling switches on it).
+- `rust/crates/tiller/src/main.rs` (wherever `SidebarContextAction::SetPrimary`/`UnsetPrimary`
+  are dispatched, `main.rs:3209-3226` — add the `RemoveWorktree` arm alongside them).
+
+**approach:** add `SidebarContextAction::RemoveWorktree` (menu item + dispatch, mirroring
+`RemoveProject`'s shape but for a worktree target); route both the new menu item and the
+existing hover-`×` handler through one `window.prompt` confirmation using
+`request_remove_project`'s exact call shape, with wording that's honest about deleting the
+on-disk directory (project removal's copy explicitly says files are *not* deleted — worktree
+removal's should say the opposite, since `remove_worktree` does delete them).
+
+**size:** S-M. Small, well-precedented change; the main cost is threading `window: &mut
+Window` into `remove_worktree_row`'s call sites if it doesn't already have one.
+
+---
+
+## F-SID-17 — reorder worktrees by dragging, within a project
+
+**Ledger verdict:** FAILED — defective (real 15-step press-move-release drag between two
+worktrees in the same project produced no reorder, immediate or delayed; a follow-up capture
+after a hover event ruled out stale repaint).
+
+**needs: build**
+
+I could not find an obvious code-level defect by static reading, and want to say that plainly
+rather than guess — the reorder machinery is generic and shared across `RowKind::Project`
+(`F-SID-16`, proven live to work with the identical technique) and `RowKind::Worktree`:
+`row_drag` (`rust/crates/tiller_ui/src/sidebar.rs:527-538`), `reorder_rows` (`:539-628`), and
+the `on_drag`/`on_drag_move`/`on_drop` wiring (`:2166-2185`) all branch on `row.kind` through
+the same `ReorderScope`/`RowDrag`/`accepts_drop` contract
+(`rust/crates/tiller_ui/src/row_reorder.rs`), with no `Worktree`-specific special case I could
+find. I hand-checked `insertion_index`'s arithmetic against the P109 report's exact scenario
+(two worktrees, "master" and "feature-test", dragging the second onto the first with
+`before=true`) and it computes the correct target index. `reorder_group_for_row` for
+`RowKind::Worktree` (`sidebar.rs:511-524`) also looks right — it scopes to the nearest
+preceding `RowKind::Project` row, and the P109 drag was confirmed same-project (ruling out my
+first hypothesis, a cross-project drag that would legitimately no-op).
+
+Given the logic checks out under hand tracing, the likely failure mode is at the interaction
+tier — GPUI hit-testing/drag-threshold behavior specific to nested (`depth: 1`) rows, or event
+ordering with the worktree row's additional hover-revealed controls (the `×` remove button
+sits in the same row, `sidebar.rs:2268-2290`) — rather than the reorder math itself. That is a
+hypothesis, not a finding; I'm flagging it as the first thing to check rather than a diagnosis.
+
+**files:** `rust/crates/tiller_ui/src/sidebar.rs` (`row_drag` :527-538, `reorder_rows`
+:539-628, `on_drag`/`on_drag_move`/`on_drop` :2166-2185, the `×` control :2268-2290),
+`rust/crates/tiller_ui/src/row_reorder.rs` (`accepts_drop`, `insertion_index` — read, not
+obviously guilty).
+
+**approach:** first re-drive with instrumentation — a debug `eprintln!` in `preview_reorder`/
+`reorder_rows`'s early-return branches would immediately show whether the drag even reaches
+the reorder logic for a worktree row (interaction-tier bug) or reaches it and computes `false`/
+an unexpected index (logic bug I didn't find by hand). If it's interaction-tier, compare
+against what makes `F-SID-16`'s project-row drag succeed — same handlers, different `row.kind`
+and depth, so the delta between the two is the whole search space.
+
+**size:** M. Narrow blast radius (one file, shared machinery already proven half-working), but
+genuinely needs a live debug session to localize — not safely schedulable as a blind read of
+the diff.
+
+---
+
+## F-SID-18 — "No Terminals" empty state for a selected worktree
+
+**Ledger verdict:** FAILED — absent ("no 'No Terminals' empty state", pass 8).
+
+**needs: reclassify**
+
+**Stale — this was built today, after the recorded evidence.** Commit `7289c84` ("feat: add
+no-terminals worktree state", 2026-08-14 17:32:57 — see `docs/linux-rewrite/P110-report.md`
+§F-SID-18) added exactly what the clause asks for: a central empty state with the terminal
+glyph, the literal text **"No Terminals"** (confirmed present at `main.rs:5438`,
+`.child("No Terminals")`), explanatory copy, and a **New Terminal** primary action wired
+through the existing shell-owned tab-creation path. It ships with a drawn test,
+`drawn_selected_worktree_without_tabs_offers_a_new_terminal`
+(`main.rs:11849`), that clicks the real action and asserts a terminal tab replaces the empty
+state — this is not just a render-only stub.
+
+The ledger's `pass 8` evidence predates this by a wide margin and should not be trusted as-is.
+What P110's own report says is still owed, honestly: **the live pointer-click on New Terminal
+was not exercised on the Wayland lane** (no input devices there) — only the drawn-test click
+and a static capture (`reference/linux-progress/p110-f-sid-18/02-no-terminals.png`) exist as
+proof today.
+
+**files:** `rust/crates/tiller/src/main.rs` (the empty-state render, `:5438` and surrounding;
+the drawn test, `:11849`) — listed for reference; no defect found, nothing to build.
+
+**approach:** re-verify live — select a worktree with no open tabs, confirm the "No Terminals"
+state renders with its New Terminal action, then click (or `xdotool click`/palette-invoke)
+that action and confirm a real terminal tab replaces the empty state. This is very likely a
+flip to PASSED or half-proven, not FAILED — absent.
+
+**size:** S (verification only).
+
+---
