@@ -139,6 +139,75 @@ within the time available; both runs used the identical typed sequence and timin
 `f1-chat-active-identified.png`/`f2-chat-active-after-clear.png` (combined
 identify-then-clear, near-null both steps).
 
+## `F-CORE-ACT-25`
+
+**Claim:** could-not-reach (source-grounded, no live drive needed).
+
+**Drove:** `grep -rn "BootstrapRestoreOrder::partition\|BootstrapRestoreOrder"
+rust/crates/*/src/*.rs` across the whole workspace. Confirmed the triage's claim exactly:
+the type's only appearances are its own definition (`bootstrap.rs:13-15`), the `pub use`
+re-export (`tiller_activity/src/lib.rs:50`), and its own tests — **zero** call sites for
+`partition` anywhere else in the crate graph, including `tiller/src/main.rs`'s actual
+startup/restore code (`restore_tabs_in_workspace`, `main.rs:7703`, which does not
+reference `BootstrapRestoreOrder` at all).
+
+**Observed:** This is the same shape as `F-CORE-ACT-26`'s already-`FAILED` `ids_to_evict`:
+a real, unit-tested, pure ordering policy that the production restart/restore path simply
+never calls. No live restart drive can produce evidence either way for a function with no
+caller — reachability alone settles it without needing a session snapshot.
+
+**Verdict left as:** reclassify to FAILED — absent. The manifest's own prior NOT EXERCISED
+verdict cited an ambiguous single-snapshot restart test as the reason it couldn't decide
+between "absent" and "present but resolving faster than sampled"; the caller-count check
+above removes that ambiguity directly, without needing a new restart capture.
+
+## `F-CORE-ACT-07`
+
+**Claim:** could-not-reach.
+
+**Drove:** Attempted the manifest's debounce-race gesture — send a hook `notify`, then
+immediately force a contradictory recognized title (must not replace it), then repeat
+after >1.5s (title may now win) — using the same click+`title`+`tab.select` visual-diff
+technique that produced inconsistent results on `F-CORE-ACT-06` in this same pass (one
+clean isolated run showed the title gesture landing with a real pixel/body-text delta; a
+combined multi-step run in one continuous app lifetime did not). Given that instability was
+observed twice today on the identical typed-title mechanism this row also depends on, and
+the debounce race additionally needs precise sub-2-second timing around a `notify` call
+sandwiched between two `title` calls, I did not spend further budget attempting it live —
+a null result here would be indistinguishable from "the keystrokes didn't land" rather than
+"the debounce doesn't work", which is not useful evidence either way.
+
+**Observed:** Confirmed via source read that the debounce mechanism itself
+(`should_apply_title_signal`, `title.rs:201`, `TITLE_DEBOUNCE = 1500ms`) is real,
+unit-tested code wired into `handle_title_change` (`model.rs:222-229`) — consistent with
+the manifest's "debounce logic already built" claim. Did not attempt the live race.
+
+**Verdict left as:** NOT EXERCISED, unchanged — the live gesture needs a more reliable
+title-injection timing than this pass could establish; see `F-CORE-ACT-06`'s evidence for
+the same instability on the underlying mechanism.
+
+## `F-CORE-ACT-11`
+
+**Claim:** could-not-reach.
+
+**Drove:** Nothing new. This row's claim needs all three ownership classes (title,
+process, spawn) exercised together on three separate panes, with close/kill on each
+observed to clear only the matching pane's state. The spawn-owned leg requires
+`add_agent_tab` — the tab-bar `+` menu's `Claude Code`/`Codex`/etc. item — which this pass
+could not reach: see `F-CORE-ACT-02`'s evidence above for the coordinate-hunt that did not
+find a working click position for that menu under this pass's window state. The
+title-owned and process-owned legs individually have partial evidence on record this pass
+(`F-CORE-ACT-06`, `F-CORE-ACT-10`), but neither is clean enough, and neither was driven
+concurrently with the other two on separate panes as this row requires.
+
+**Observed:** No new capture for this row specifically.
+
+**Verdict left as:** NOT EXERCISED, unchanged — same shared blocker as `F-CORE-ACT-06`/`07`
+(title injection, now technically fixed but unreliable in practice this pass) plus the
+unreached `+` menu for the spawn-owned leg.
+
+Back to `F-CORE-ACT-06`'s own verdict:
+
 **Verdict left as:** NOT EXERCISED — blocker (broken title injection) is genuinely fixed
 and the identify half of the mechanism was driven and produced discriminating evidence
 once, but the clear half was never cleanly isolated: the one run that attempted both steps
