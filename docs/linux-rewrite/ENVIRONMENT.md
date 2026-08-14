@@ -264,3 +264,29 @@ on.
 
 Block only when proceeding under either answer would waste the work. That is rare; it is not the
 common case, and it has never yet been the case on this project.
+
+## A shared file is not a reason to leave work uncommitted
+
+Four agents edit one worktree, so `main.rs`, `settings.rs` and `chat.rs` are usually dirty with
+somebody else's in-progress work. Twice on 2026-08-14 an agent finished a piece and **deliberately
+left it unstaged** for that reason — once on `main.rs`, once on `settings.rs`. Both were being
+careful, and both were choosing the larger risk: **this repo has already lost its object database
+once**, and uncommitted work is exactly what that destroys.
+
+Git's finest granularity here is the file, so staging a shared file necessarily stages whatever the
+other agent has in it right now. That is acceptable. What is not acceptable is committing a **red**
+intermediate state, because that cost lands on everyone at once.
+
+The protocol:
+
+1. `cargo check -p <crate>` — or the narrowest gate that covers the file.
+2. Green → commit path-scoped, and **say in the commit message that the file may carry concurrent
+   edits from another agent.** An honest message costs nothing; a silent one makes the next
+   bisect lie.
+3. Red → attribute the failure before you act on it. If the cause is in files you never touched, it
+   is someone's intermediate state: **say whose and which files in your report**, keep your own work
+   staged-but-uncommitted only until they land, and do not try to fix it. On 2026-08-14 `codex11`
+   did this correctly — 11 errors in `tiller_ui`, attributed to `P91`'s unfinished `raw_output`
+   fields in `chat.rs`/`tiller_acp`, files it had not opened.
+
+Never `git add -A`. Never commit another agent's work under a message describing only your own.
