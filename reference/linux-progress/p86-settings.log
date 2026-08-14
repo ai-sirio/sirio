@@ -1,0 +1,28 @@
+[session] development build: session state is checkout-local at /home/enzopalmisano/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+[session] development build: session state is checkout-local at /home/enzopalmisano/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+[control] listening on /run/user/1000/TillerRust/control.sock
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+
+(tiller:605848): Gdk-CRITICAL **: 03:13:16.296: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:605848): Gdk-CRITICAL **: 03:13:16.300: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:605848): Gdk-CRITICAL **: 03:13:16.307: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:605848): Gdk-CRITICAL **: 03:13:16.317: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:605848): Gdk-CRITICAL **: 03:13:16.330: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(process:606056): libsoup-WARNING **: 03:13:16.511: Failed to execute query: database is locked
+
+(process:606047): libsoup-WARNING **: 03:13:16.511: Failed to execute query: table soup_hsts_policies already exists
+
+(process:606047): libsoup-WARNING **: 03:13:16.511: Failed to execute query: database is locked
+
+(process:606052): libsoup-WARNING **: 03:13:16.511: Failed to execute query: table soup_hsts_policies already exists
+
+(process:606056): libsoup-WARNING **: 03:13:16.511: Failed to execute query: table soup_hsts_policies already exists
+
+(process:606056): libsoup-WARNING **: 03:13:16.511: Failed to execute query: database is locked
+
+(process:606052): libsoup-WARNING **: 03:13:16.511: Failed to execute query: database is locked
