@@ -4,12 +4,14 @@
 //! `browser_spike` example includes it directly so the experiment can answer
 //! whether a WebKitGTK child window can coexist with GPUI's X11 surface.
 
-use std::{cell::RefCell, collections::BTreeSet, ffi::c_ulong, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::BTreeSet, ffi::c_ulong, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
-    App, Bounds, Context, Element, ElementId, FocusHandle, GlobalElementId, InspectorElementId,
-    IntoElement, KeyDownEvent, LayoutId, Pixels, Render, Style, Task, Window, div, prelude::*, px,
-    relative,
+    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, KeyDownEvent,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
+    Render, ShapedLine, SharedString, Style, Task, TextRun, Window, div, fill, point, prelude::*,
+    px, relative, size,
 };
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, WindowHandle, XlibWindowHandle,
@@ -17,7 +19,7 @@ use raw_window_handle::{
 use tiller_theme::Theme;
 use wry::{
     NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder,
-    dpi::LogicalPosition, dpi::LogicalSize,
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
 };
 
 /// GPUI's Linux backend exposes its X11 surface as XCB, while wry's
@@ -258,6 +260,123 @@ pub enum BrowserError {
     Navigation(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AddressEditor {
+    text: String,
+    anchor: usize,
+    caret: usize,
+}
+
+impl AddressEditor {
+    fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let caret = text.len();
+        Self {
+            text,
+            anchor: caret,
+            caret,
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn selection(&self) -> Range<usize> {
+        self.anchor.min(self.caret)..self.anchor.max(self.caret)
+    }
+
+    fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.move_to(self.text.len(), false);
+    }
+
+    fn select_all(&mut self) {
+        self.anchor = 0;
+        self.caret = self.text.len();
+    }
+
+    fn move_to(&mut self, offset: usize, extend: bool) {
+        let offset = self.boundary_at_or_before(offset.min(self.text.len()));
+        if !extend {
+            self.anchor = offset;
+        }
+        self.caret = offset;
+    }
+
+    fn replace_selection(&mut self, replacement: &str) {
+        let selection = self.selection();
+        self.text.replace_range(selection.clone(), replacement);
+        let caret = selection.start + replacement.len();
+        self.anchor = caret;
+        self.caret = caret;
+    }
+
+    fn backspace(&mut self) {
+        if self.selection().is_empty() {
+            let previous = self.previous_boundary(self.caret);
+            if previous == self.caret {
+                return;
+            }
+            self.anchor = previous;
+        }
+        self.replace_selection("");
+    }
+
+    fn delete_forward(&mut self) {
+        if self.selection().is_empty() {
+            let next = self.next_boundary(self.caret);
+            if next == self.caret {
+                return;
+            }
+            self.anchor = next;
+        }
+        self.replace_selection("");
+    }
+
+    fn move_left(&mut self, extend: bool) {
+        if !extend && !self.selection().is_empty() {
+            let start = self.selection().start;
+            self.move_to(start, false);
+        } else {
+            self.move_to(self.previous_boundary(self.caret), extend);
+        }
+    }
+
+    fn move_right(&mut self, extend: bool) {
+        if !extend && !self.selection().is_empty() {
+            let end = self.selection().end;
+            self.move_to(end, false);
+        } else {
+            self.move_to(self.next_boundary(self.caret), extend);
+        }
+    }
+
+    fn previous_boundary(&self, offset: usize) -> usize {
+        self.text[..offset]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, offset: usize) -> usize {
+        self.text[offset..]
+            .chars()
+            .next()
+            .map(|character| offset + character.len_utf8())
+            .unwrap_or(self.text.len())
+    }
+
+    fn boundary_at_or_before(&self, offset: usize) -> usize {
+        if self.text.is_char_boundary(offset) {
+            offset
+        } else {
+            self.previous_boundary(offset)
+        }
+    }
+}
+
 impl std::fmt::Display for BrowserError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -373,7 +492,12 @@ impl BrowserState {
     /// Records that WebKit began loading a URL.
     pub fn did_start_navigation(&mut self, url: &str) {
         if let Ok(url) = normalize_address(url) {
-            self.begin_navigation(url);
+            if !self.loading {
+                self.record_navigation(url.clone());
+            }
+            self.address = url;
+            self.loading = true;
+            self.error = None;
         }
     }
 
@@ -381,7 +505,7 @@ impl BrowserState {
     /// chrome without painting anything over the child window.
     pub fn did_finish_navigation(&mut self, url: &str, title: &str) {
         if let Ok(url) = normalize_address(url) {
-            self.record_navigation(url.clone());
+            self.replace_current_navigation(url.clone());
             self.address = url;
         }
         self.page_title = title.to_owned();
@@ -528,6 +652,15 @@ impl BrowserState {
         self.history.push(address);
         self.history_index = self.history.len() - 1;
     }
+
+    fn replace_current_navigation(&mut self, address: String) {
+        if let Some(current) = self.history.get_mut(self.history_index) {
+            *current = address;
+        } else {
+            self.history.push(address);
+            self.history_index = self.history.len() - 1;
+        }
+    }
 }
 
 /// Normalizes an address-field value to an HTTP(S) URL.
@@ -623,8 +756,9 @@ fn build_production_webview<W: HasWindowHandle>(
 /// pixels live in the proven native X11 child window below it.
 pub struct BrowserSurface {
     state: BrowserState,
-    address_draft: String,
+    address_editor: AddressEditor,
     address_focus: FocusHandle,
+    address_dragging: bool,
     webview: SharedWebView,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
@@ -646,7 +780,7 @@ impl BrowserSurface {
                 Some(error.to_string()),
             ),
         };
-        let address_draft = state.address().to_owned();
+        let address_editor = AddressEditor::new(state.address());
         let web_events = Rc::new(RefCell::new(Vec::new()));
         let (webview, startup_error) = match gtk::init() {
             Ok(()) => match build_production_webview(window, state.address(), &web_events) {
@@ -698,8 +832,9 @@ impl BrowserSurface {
 
         Self {
             state,
-            address_draft,
+            address_editor,
             address_focus: cx.focus_handle(),
+            address_dragging: false,
             webview,
             web_events,
             events: Vec::new(),
@@ -722,7 +857,7 @@ impl BrowserSurface {
     /// Starts an address-field navigation in WebKit.
     pub fn submit_address(&mut self, input: &str) -> Result<(), BrowserError> {
         let address = self.state.submit_address(input)?;
-        self.address_draft = address.clone();
+        self.address_editor.set_text(address.clone());
         self.load_url(&address)
     }
 
@@ -734,7 +869,7 @@ impl BrowserSurface {
     ) -> Result<BrowserEvent, BrowserError> {
         let event = self.state.open_link(url, target)?;
         if let BrowserEvent::Navigate(address) = &event {
-            self.address_draft = address.clone();
+            self.address_editor.set_text(address.clone());
             self.load_url(address)?;
         }
         self.events.push(event.clone());
@@ -788,7 +923,7 @@ impl BrowserSurface {
         if let Err(error) = result {
             self.state.did_fail_navigation(error.to_string());
         } else {
-            self.address_draft = address;
+            self.address_editor.set_text(address);
         }
     }
 
@@ -814,7 +949,7 @@ impl BrowserSurface {
             self.state
                 .did_fail_navigation("Browser child is unavailable".to_owned());
         }
-        self.address_draft = address;
+        self.address_editor.set_text(address);
     }
 
     fn on_stop(&mut self) {
@@ -826,27 +961,61 @@ impl BrowserSurface {
     }
 
     fn on_address_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "a"
+            && (event.keystroke.modifiers.control || event.keystroke.modifiers.platform)
+        {
+            self.address_editor.select_all();
+            cx.notify();
+            return;
+        }
+
+        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+            return;
+        }
+
+        let extend = event.keystroke.modifiers.shift;
         match event.keystroke.key.as_str() {
             "enter" => {
-                let draft = self.address_draft.clone();
+                let draft = self.address_editor.text().to_owned();
                 let _ = self.submit_address(&draft);
                 cx.notify();
             }
-            "backspace" => {
-                self.address_draft.pop();
-                cx.notify();
-            }
+            "backspace" => self.address_editor.backspace(),
+            "delete" => self.address_editor.delete_forward(),
+            "left" => self.address_editor.move_left(extend),
+            "right" => self.address_editor.move_right(extend),
+            "home" => self.address_editor.move_to(0, extend),
+            "end" => self
+                .address_editor
+                .move_to(self.address_editor.text().len(), extend),
             _ => {
                 if let Some(character) = event.keystroke.key_char.as_deref()
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
                     && character != "\n"
                 {
-                    self.address_draft.push_str(character);
-                    cx.notify();
+                    self.address_editor.replace_selection(character);
                 }
             }
         }
+        cx.notify();
+    }
+
+    fn set_address_cursor(&mut self, offset: usize, extend: bool) {
+        self.address_editor.move_to(offset, extend);
+    }
+
+    fn begin_address_drag(&mut self, offset: usize, extend: bool) {
+        self.address_dragging = true;
+        self.set_address_cursor(offset, extend);
+    }
+
+    fn update_address_drag(&mut self, offset: usize) {
+        if self.address_dragging {
+            self.set_address_cursor(offset, true);
+        }
+    }
+
+    fn end_address_drag(&mut self) {
+        self.address_dragging = false;
     }
 
     fn pump_web_events(&mut self) {
@@ -869,7 +1038,7 @@ impl BrowserSurface {
                 WebEvent::PageLoad(PageLoadEventKind::Finished, url) => {
                     let title = self.state.page_title().to_owned();
                     self.state.did_finish_navigation(&url, &title);
-                    self.address_draft = self.state.address().to_owned();
+                    self.address_editor.set_text(self.state.address());
                     self.events.push(BrowserEvent::PageFinished(url));
                 }
                 WebEvent::TitleChanged(title) => {
@@ -887,6 +1056,14 @@ impl BrowserSurface {
         let forward = entity.clone();
         let reload = entity.clone();
         let stop = entity.clone();
+        let address_text = AddressTextElement::new(
+            entity.clone(),
+            self.address_editor.text().to_owned(),
+            self.address_editor.selection(),
+            self.address_editor.caret,
+            address_focus.clone(),
+            theme,
+        );
         let page_title = if self.state.page_title().is_empty() {
             "Browser".to_owned()
         } else {
@@ -957,7 +1134,7 @@ impl BrowserSurface {
                         });
                     })
                     .child(div().mr(px(8.0)).text_color(theme.meta).child("◎"))
-                    .child(self.address_draft.clone()),
+                    .child(div().flex_1().h_full().child(address_text)),
             )
             .child(
                 div()
@@ -1126,6 +1303,226 @@ impl Drop for BrowserSurface {
     }
 }
 
+struct AddressTextElement {
+    entity: gpui::Entity<BrowserSurface>,
+    text: SharedString,
+    selection: Range<usize>,
+    caret: usize,
+    focus: FocusHandle,
+    theme: Theme,
+}
+
+struct AddressTextPrepaint {
+    line: ShapedLine,
+    line_origin: Point<Pixels>,
+    cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
+    hitbox: Hitbox,
+}
+
+impl AddressTextElement {
+    fn new(
+        entity: gpui::Entity<BrowserSurface>,
+        text: String,
+        selection: Range<usize>,
+        caret: usize,
+        focus: FocusHandle,
+        theme: Theme,
+    ) -> Self {
+        Self {
+            entity,
+            text: text.into(),
+            selection,
+            caret,
+            focus,
+            theme,
+        }
+    }
+}
+
+impl IntoElement for AddressTextElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for AddressTextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = AddressTextPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let run: TextRun = style.to_run(self.text.len());
+        let line = window
+            .text_system()
+            .shape_line(self.text.clone(), font_size, &[run], None);
+        let line_height = window.line_height();
+        let line_origin = point(bounds.left(), bounds.center().y - line_height / 2.0);
+        let selection_start = self.selection.start.min(self.text.len());
+        let selection_end = self.selection.end.min(self.text.len());
+        let selection = if selection_start < selection_end {
+            Some(fill(
+                Bounds::from_corners(
+                    point(
+                        line_origin.x + line.x_for_index(selection_start),
+                        line_origin.y,
+                    ),
+                    point(
+                        line_origin.x + line.x_for_index(selection_end),
+                        line_origin.y + line_height,
+                    ),
+                ),
+                self.theme.colors.selection_fill,
+            ))
+        } else {
+            None
+        };
+        let cursor = if selection_start == selection_end && self.focus.is_focused(window) {
+            let caret = self.caret.min(self.text.len());
+            Some(fill(
+                Bounds::new(
+                    point(line_origin.x + line.x_for_index(caret), line_origin.y),
+                    size(px(1.0), line_height),
+                ),
+                self.theme.tab_focus_accent,
+            ))
+        } else {
+            None
+        };
+
+        AddressTextPrepaint {
+            line,
+            line_origin,
+            cursor,
+            selection,
+            hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
+        if let Some(selection) = prepaint.selection.take() {
+            window.paint_quad(selection);
+        }
+        let _ = prepaint.line.paint(
+            prepaint.line_origin,
+            window.line_height(),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+        if let Some(cursor) = prepaint.cursor.take() {
+            window.paint_quad(cursor);
+        }
+
+        let hitbox = prepaint.hitbox.clone();
+        let line = prepaint.line.clone();
+        let line_origin = prepaint.line_origin;
+        let entity = self.entity.clone();
+        let focus = self.focus.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && event.button == MouseButton::Left
+                && hitbox.is_hovered(window)
+            {
+                let offset = line.closest_index_for_x(event.position.x - line_origin.x);
+                entity.update(cx, |surface, cx| {
+                    surface.begin_address_drag(offset, event.modifiers.shift);
+                    cx.notify();
+                });
+                window.focus(&focus, cx);
+                window.prevent_default();
+            }
+        });
+
+        let hitbox = prepaint.hitbox.clone();
+        let line = prepaint.line.clone();
+        let line_origin = prepaint.line_origin;
+        let entity = self.entity.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble && event.dragging() && hitbox.is_hovered(window) {
+                let offset = line.closest_index_for_x(event.position.x - line_origin.x);
+                entity.update(cx, |surface, cx| {
+                    surface.update_address_drag(offset);
+                    cx.notify();
+                });
+            }
+        });
+
+        let hitbox = prepaint.hitbox.clone();
+        let entity = self.entity.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && event.button == MouseButton::Left
+                && hitbox.is_hovered(window)
+            {
+                entity.update(cx, |surface, cx| {
+                    surface.end_address_drag();
+                    cx.notify();
+                });
+            }
+        });
+    }
+}
+
+fn native_webview_rect(bounds: Bounds<Pixels>, scale_factor: f32) -> Rect {
+    let device_bounds = bounds.to_device_pixels(scale_factor);
+    Rect {
+        position: PhysicalPosition::new(
+            i32::from(device_bounds.origin.x),
+            i32::from(device_bounds.origin.y),
+        )
+        .into(),
+        size: PhysicalSize::new(
+            i32::from(device_bounds.size.width).max(1),
+            i32::from(device_bounds.size.height).max(1),
+        )
+        .into(),
+    }
+}
+
 struct NativeWebViewElement {
     webview: SharedWebView,
 }
@@ -1175,22 +1572,11 @@ impl Element for NativeWebViewElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
         if let Some(webview) = self.webview.borrow().as_ref() {
-            let _ = webview.set_bounds(Rect {
-                position: LogicalPosition::new(
-                    f32::from(bounds.origin.x),
-                    f32::from(bounds.origin.y),
-                )
-                .into(),
-                size: LogicalSize::new(
-                    f32::from(bounds.size.width).max(1.0),
-                    f32::from(bounds.size.height).max(1.0),
-                )
-                .into(),
-            });
+            let _ = webview.set_bounds(native_webview_rect(bounds, window.scale_factor()));
         }
         ()
     }
@@ -1256,6 +1642,25 @@ mod tests {
     }
 
     #[test]
+    fn redirect_chain_is_one_history_entry() {
+        let mut browser = BrowserState::new("https://example.com").expect("valid initial URL");
+        browser.did_finish_navigation("https://example.com/", "Example Domain");
+        browser.did_start_navigation("https://iana.org/domains/example");
+        browser.did_start_navigation("https://www.iana.org/domains/example");
+        browser.did_start_navigation("http://www.iana.org/help/example-domains");
+        browser.did_finish_navigation(
+            "https://www.iana.org/help/example-domains",
+            "Example Domains",
+        );
+
+        assert_eq!(
+            browser.go_back(),
+            Some("https://example.com/".to_owned()),
+            "a redirect chain must not create intermediate Back entries"
+        );
+    }
+
+    #[test]
     fn permission_doorhanger_resolves_and_persists_by_origin() {
         let mut browser = BrowserState::new("https://example.com").expect("valid initial URL");
         browser.request_permission("https://agent.example");
@@ -1289,5 +1694,43 @@ mod tests {
             browser.open_link("https://docs.example", BrowserLinkTarget::External),
             Ok(BrowserEvent::OpenExternal("https://docs.example".into()))
         );
+    }
+
+    #[test]
+    fn webview_bounds_convert_gpui_logical_pixels_to_device_pixels() {
+        let bounds = Bounds::new(
+            gpui::point(gpui::px(386.0), gpui::px(133.0)),
+            gpui::size(gpui::px(850.0), gpui::px(792.0)),
+        );
+
+        let rect = native_webview_rect(bounds, 7.0 / 6.0);
+
+        assert_eq!(
+            rect.position,
+            wry::dpi::PhysicalPosition::new(450, 155).into()
+        );
+        assert_eq!(rect.size, wry::dpi::PhysicalSize::new(992, 924).into());
+    }
+
+    #[test]
+    fn address_editor_replaces_selected_text_when_typing() {
+        let mut editor = AddressEditor::new("https://www.iana.org/help/example-domains");
+
+        editor.select_all();
+        editor.replace_selection("https://www.iana.org");
+
+        assert_eq!(editor.text(), "https://www.iana.org");
+        assert_eq!(editor.selection(), editor.text().len()..editor.text().len());
+    }
+
+    #[test]
+    fn address_editor_inserts_at_the_clicked_caret_position() {
+        let mut editor = AddressEditor::new("https://example.com");
+
+        editor.move_to(8, false);
+        editor.replace_selection("www.");
+
+        assert_eq!(editor.text(), "https://www.example.com");
+        assert_eq!(editor.selection(), 12..12);
     }
 }

@@ -1,6 +1,6 @@
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, Render, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, point, prelude::*, px, size,
+    App, AppContext, Bounds, Context, Entity, Render, Window, WindowBounds, WindowDecorations,
+    WindowOptions, div, prelude::*, px, size,
 };
 use gpui_platform::application;
 use tiller_theme::{Theme, ThemeMode};
@@ -22,13 +22,7 @@ impl Render for ChromeDemo {
             .flex()
             .flex_col()
             .bg(canvas)
-            .child(
-                div()
-                    .h(px(32.0))
-                    .w_full()
-                    .bg(canvas)
-                    .child(div().mt(px(2.0)).child(self.titlebar.clone())),
-            )
+            .child(self.titlebar.clone())
             .child(
                 div()
                     .flex_1()
@@ -70,15 +64,22 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
-                    ..Default::default()
-                }),
+                // P76: no `TitlebarOptions`/`traffic_light_position` — that
+                // API asks the OS to draw macOS-style lights, and neither
+                // comet nor Tiller has OS-drawn lights available on Linux.
+                // `titlebar: None` plus an explicit `Client` decoration
+                // request is the bare, X11-realistic window: nothing but
+                // our own drawn `Titlebar`, traffic lights included.
+                titlebar: None,
+                window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },
             |_, cx| {
-                let titlebar = cx.new(Titlebar::new);
+                let titlebar = cx.new(|cx| {
+                    Titlebar::new(cx)
+                        .with_title("Tiller")
+                        .with_subtitle("tiller-linux @ linux/gpui-waku")
+                });
                 let tabbar = cx.new(|cx| {
                     TabBar::new(cx).on_new_tab(|action| {
                         println!("new-tab action: {action:?}");
