@@ -100,3 +100,40 @@ Sparkle/update-channel code in the tree) and drive only the parts that are real 
    pass reported honestly beats a full pass claimed.
 4. Report the verdict deltas. I will not recount for you; the one-liner is in the ledger's Totals
    block.
+
+---
+
+## Amendment — orchestrator, 2026-08-14 10:45: `F-CHAT-14` is settled, and it teaches the rest
+
+**Do not spend a live ACP drive on `F-CHAT-14`'s follow half.** I settled it by grep and moved it
+to `FAILED — defective` (commit `c6b7d22`). Your own `DEAD-MODULES.md` entry is what pointed at it:
+`FileSystemEventMonitor` has zero consumers, and `following_edited_files` (`chat.rs:532`) has six
+references — declaration, init, its own label, its own toggle, and two test assertions that the
+bool flipped. Nothing reads it to act. You wrote *"no row owns the seam"*; the row that owned it
+said `PASSED`.
+
+**What is still owed from you on that row:** the other conjunct. `new_conversation` is real code —
+it clears entries, splices `list_state`, rebuilds the `Composer` and calls `start_connection`.
+Confirm live that choosing New Conversation actually resets the transcript **and** gets a working
+session afterwards, since a reset that leaves you unable to send is a second defect. If it works,
+add that to the row's evidence; the verdict stays `FAILED — defective` either way, because the
+follow half cannot be revived by any observation.
+
+### The rule this hands you, which applies to more of your list
+
+`F-CHAT-14` would have **survived your drive**. You would have opened the menu, clicked New
+Conversation, watched the transcript reset, and correctly recorded that the row worked — because
+the half you touched does work. A conjunctive clause takes its colour from whichever conjunct the
+critic exercised last.
+
+So: **where a clause says "and" or "then", exercise each conjunct separately and record each one.**
+Several of your rows are conjunctions — `-11` (accepts one image **and** rejects the rest), `-07`
+(stop **and** escape), `-09`/`-10` (popup opens **and** the token/chip is actually inserted into
+the sent message, not just rendered). For each, the cheap question is: *which half did I actually
+see, and is the other half a different mechanism?* Where they differ, `FAILED — defective` with
+both halves named beats a single verdict that hides one of them.
+
+`-12` is worth the same suspicion for a different reason: a chip that disappears from the composer
+proves the chip was removed from the *view*. Whether the attachment leaves the outgoing payload is
+the half that matters, and it is invisible on screen — send after removing and check what the
+agent actually received.
