@@ -128,6 +128,18 @@ struct QuestionAnswerState {
     for_request: Option<u64>,
 }
 
+/// A tool call nested inside a subagent task card.
+#[derive(Clone, Debug)]
+struct SubagentToolCall {
+    id: String,
+    title: String,
+    status: String,
+    kind: String,
+    content: Vec<ToolCallContentInfo>,
+    locations: Vec<ToolCallLocationInfo>,
+    expanded: bool,
+}
+
 /// One rendered element of the transcript.
 #[derive(Clone, Debug)]
 enum Entry {
@@ -169,6 +181,17 @@ enum Entry {
         expanded: bool,
         group_expanded: bool,
     },
+    /// A Task/dispatch tool call whose following live calls are presented as
+    /// the child agent's work. ACP v1/v2 carry no parent-child relation, so
+    /// this is deliberately a conservative presentation grouping based on
+    /// the parent tool's title/input and its in-progress lifetime.
+    SubagentTask {
+        id: String,
+        title: String,
+        status: String,
+        tool_calls: Vec<SubagentToolCall>,
+        expanded: bool,
+    },
     /// A question the agent put to the user, answered in place (F-CHAT-25).
     /// `resolved` is the recorded answer once one is chosen or typed;
     /// `expired` means the turn ended and the card is no longer answerable.
@@ -183,6 +206,8 @@ enum Entry {
         text_input: Option<AnswerTextInput>,
         resolved: Option<String>,
         expired: bool,
+        /// The user dismissed an unrenderable request; distinct from denial.
+        dismissed: bool,
     },
     /// The agent's execution plan (F-CHAT-24). Replaced in place as entries
     /// advance; a pending approval attaches its option buttons to the card.
@@ -228,6 +253,20 @@ impl Entry {
                 }
                 lines.join("\n")
             }
+            Self::SubagentTask {
+                title,
+                status,
+                tool_calls,
+                ..
+            } => {
+                let mut lines = vec![format!("Subagent: {title}\n{status}")];
+                lines.extend(
+                    tool_calls
+                        .iter()
+                        .map(|call| format!("{}\n{}", call.title, call.status)),
+                );
+                lines.join("\n")
+            }
             Self::Permission {
                 options, resolved, ..
             } => resolved.clone().unwrap_or_else(|| {
@@ -260,12 +299,20 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
             title: title.clone(),
             status: status.clone(),
         }),
+        Entry::SubagentTask {
+            id, title, status, ..
+        } => Some(ChatEntry::ToolCall {
+            id: id.clone(),
+            title: title.clone(),
+            status: status.clone(),
+        }),
         Entry::Permission {
             request_id,
             title,
             options,
             resolved,
             expired,
+            dismissed,
             ..
         } => {
             let options = options
@@ -280,17 +327,21 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                     },
                 })
                 .collect::<Vec<_>>();
-            let outcome = match (resolved, expired) {
-                (Some(label), _) => ChatPermissionOutcome::Selected {
-                    option_id: options
-                        .iter()
-                        .find(|option| option.name == *label)
-                        .map(|option| option.id.clone())
-                        .unwrap_or_default(),
-                    label: label.clone(),
-                },
-                (None, true) => ChatPermissionOutcome::Expired,
-                (None, false) => ChatPermissionOutcome::Pending,
+            let outcome = if *dismissed {
+                ChatPermissionOutcome::Cancelled
+            } else {
+                match (resolved, expired) {
+                    (Some(label), _) => ChatPermissionOutcome::Selected {
+                        option_id: options
+                            .iter()
+                            .find(|option| option.name == *label)
+                            .map(|option| option.id.clone())
+                            .unwrap_or_default(),
+                        label: label.clone(),
+                    },
+                    (None, true) => ChatPermissionOutcome::Expired,
+                    (None, false) => ChatPermissionOutcome::Pending,
+                }
             };
             Some(ChatEntry::Permission {
                 request_id: *request_id,
@@ -309,11 +360,35 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
                 .collect(),
         }),
         Entry::TurnFooter(text) => Some(ChatEntry::TurnFooter { text: text.clone() }),
-        Entry::Error { message, retryable, .. } => Some(ChatEntry::Error {
+        Entry::Error {
+            message, retryable, ..
+        } => Some(ChatEntry::Error {
             message: message.clone(),
             retryable: *retryable,
         }),
     }
+}
+
+fn is_terminal_tool_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "completed" | "failed" | "cancelled" | "canceled"
+    )
+}
+
+/// ACP does not identify subagents or parent tool calls. These are the
+/// observable names used by the installed ACP adapters; the raw-input check
+/// is only a second signal for adapters that title the call generically.
+fn is_subagent_tool_call(title: &str, raw_input: Option<&str>) -> bool {
+    let title = title.trim().to_ascii_lowercase();
+    title == "task"
+        || title.contains("subagent")
+        || title.contains("dispatch")
+        || title.contains("spawn")
+        || raw_input.is_some_and(|input| {
+            let input = input.to_ascii_lowercase();
+            input.contains("\"subagent_type\"") || input.contains("\"agent_type\"")
+        })
 }
 
 fn restored_entry(entry: ChatEntry) -> Entry {
@@ -351,6 +426,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                     | ChatPermissionOutcome::TimedOut
                     | ChatPermissionOutcome::Expired
             );
+            let dismissed = matches!(&outcome, ChatPermissionOutcome::Cancelled);
             let resolved = match outcome {
                 ChatPermissionOutcome::Selected { label, .. } => Some(label),
                 ChatPermissionOutcome::Cancelled => Some("Cancelled".into()),
@@ -373,6 +449,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                 text_input: None,
                 resolved,
                 expired,
+                dismissed,
             }
         }
         ChatEntry::Plan { entries } => Entry::Plan {
@@ -861,6 +938,28 @@ impl Chat {
         self.list_state.remeasure_items(index..index + 1);
     }
 
+    fn subagent_task_position(&self, id: &str) -> Option<usize> {
+        self.entries.iter().rposition(
+            |entry| matches!(entry, Entry::SubagentTask { id: task_id, .. } if task_id == id),
+        )
+    }
+
+    fn nested_tool_call_position(&self, id: &str) -> Option<(usize, usize)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(task_index, entry)| {
+                let Entry::SubagentTask { tool_calls, .. } = entry else {
+                    return None;
+                };
+                tool_calls
+                    .iter()
+                    .position(|call| call.id == id)
+                    .map(|child_index| (task_index, child_index))
+            })
+    }
+
     /// F-CHAT-21: flips one thought entry's expand/collapse state.
     fn toggle_thought_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(Entry::Thought { expanded, .. }) = self.entries.get_mut(index) {
@@ -875,6 +974,32 @@ impl Chat {
         if let Some(Entry::ToolCall { expanded, .. }) = self.entries.get_mut(index) {
             *expanded = !*expanded;
             self.remeasure_entry(index);
+        }
+        cx.notify();
+    }
+
+    /// Flips the outer subagent task card between its one-line summary and
+    /// the child tool calls reported while its task call was in progress.
+    fn toggle_subagent_task_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Entry::SubagentTask { expanded, .. }) = self.entries.get_mut(index) {
+            *expanded = !*expanded;
+            self.remeasure_entry(index);
+        }
+        cx.notify();
+    }
+
+    /// Flips one nested tool call without changing the parent task card.
+    fn toggle_subagent_tool_call_expanded(
+        &mut self,
+        task_index: usize,
+        child_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Entry::SubagentTask { tool_calls, .. }) = self.entries.get_mut(task_index)
+            && let Some(call) = tool_calls.get_mut(child_index)
+        {
+            call.expanded = !call.expanded;
+            self.remeasure_entry(task_index);
         }
         cx.notify();
     }
@@ -964,18 +1089,49 @@ impl Chat {
                 raw_input,
                 raw_output,
             } => {
-                self.push_entry(Entry::ToolCall {
-                    id,
-                    title,
-                    status,
-                    kind,
-                    content,
-                    locations,
-                    raw_input,
-                    raw_output,
-                    expanded: false,
-                    group_expanded: false,
-                });
+                if is_subagent_tool_call(&title, raw_input.as_deref()) {
+                    self.push_entry(Entry::SubagentTask {
+                        id,
+                        title,
+                        status,
+                        tool_calls: Vec::new(),
+                        expanded: false,
+                    });
+                } else if let Some(index) = self.entries.iter().rposition(|entry| {
+                    matches!(
+                        entry,
+                        Entry::SubagentTask { status, .. }
+                            if !is_terminal_tool_status(status)
+                    )
+                }) {
+                    if let Some(Entry::SubagentTask { tool_calls, .. }) =
+                        self.entries.get_mut(index)
+                    {
+                        tool_calls.push(SubagentToolCall {
+                            id,
+                            title,
+                            status,
+                            kind,
+                            content,
+                            locations,
+                            expanded: false,
+                        });
+                        self.remeasure_entry(index);
+                    }
+                } else {
+                    self.push_entry(Entry::ToolCall {
+                        id,
+                        title,
+                        status,
+                        kind,
+                        content,
+                        locations,
+                        raw_input,
+                        raw_output,
+                        expanded: false,
+                        group_expanded: false,
+                    });
+                }
             }
             AcpEvent::ToolCallUpdated {
                 id,
@@ -987,7 +1143,44 @@ impl Chat {
                 raw_input,
                 raw_output,
             } => {
-                if let Some((index, Entry::ToolCall {
+                if let Some(task_index) = self.subagent_task_position(&id) {
+                    if let Some(Entry::SubagentTask {
+                        title: existing_title,
+                        status: existing_status,
+                        ..
+                    }) = self.entries.get_mut(task_index)
+                    {
+                        if let Some(title) = title {
+                            *existing_title = title;
+                        }
+                        if let Some(status) = status {
+                            *existing_status = status;
+                        }
+                        self.remeasure_entry(task_index);
+                    }
+                } else if let Some((task_index, child_index)) = self.nested_tool_call_position(&id) {
+                    if let Some(Entry::SubagentTask { tool_calls, .. }) =
+                        self.entries.get_mut(task_index)
+                        && let Some(call) = tool_calls.get_mut(child_index)
+                    {
+                        if let Some(title) = title {
+                            call.title = title;
+                        }
+                        if let Some(status) = status {
+                            call.status = status;
+                        }
+                        if let Some(kind) = kind {
+                            call.kind = kind;
+                        }
+                        if let Some(content) = content {
+                            call.content = content;
+                        }
+                        if let Some(locations) = locations {
+                            call.locations = locations;
+                        }
+                        self.remeasure_entry(task_index);
+                    }
+                } else if let Some((index, Entry::ToolCall {
                     title: existing_title,
                     status: existing_status,
                     kind: existing_kind,
@@ -1036,7 +1229,31 @@ impl Chat {
                 raw_input,
                 raw_output,
             } => {
-                if let Some((index, Entry::ToolCall {
+                if let Some(task_index) = self.subagent_task_position(&id) {
+                    if let Some(Entry::SubagentTask { status: existing_status, .. }) =
+                        self.entries.get_mut(task_index)
+                    {
+                        *existing_status = status;
+                        self.remeasure_entry(task_index);
+                    }
+                } else if let Some((task_index, child_index)) = self.nested_tool_call_position(&id) {
+                    if let Some(Entry::SubagentTask { tool_calls, .. }) =
+                        self.entries.get_mut(task_index)
+                        && let Some(call) = tool_calls.get_mut(child_index)
+                    {
+                        call.status = status;
+                        if let Some(kind) = kind {
+                            call.kind = kind;
+                        }
+                        if let Some(content) = content {
+                            call.content = content;
+                        }
+                        if let Some(locations) = locations {
+                            call.locations = locations;
+                        }
+                        self.remeasure_entry(task_index);
+                    }
+                } else if let Some((index, Entry::ToolCall {
                     status: existing_status,
                     kind: existing_kind,
                     content: existing_content,
@@ -1121,6 +1338,7 @@ impl Chat {
                         });
                     }
                 } else {
+                    let has_structured_question = question.is_some();
                     let structured_prompt = question
                         .as_ref()
                         .map(|question| question.prompt.clone())
@@ -1132,15 +1350,17 @@ impl Chat {
                             prefill: input.prefill,
                         })
                         .or_else(|| {
-                            // A question with no choices must still be
-                            // answerable: offer free text instead of
-                            // dead-ending the surface.
-                            answer_options
-                                .is_empty()
-                                .then_some(AnswerTextInput {
+                            // Structured questions with no choices are still
+                            // answerable through the existing text field. A
+                            // plain permission with no choices is different:
+                            // its wire request has no renderable answer, so it
+                            // gets Dismiss below instead of a fake option.
+                            (has_structured_question && answer_options.is_empty()).then_some(
+                                AnswerTextInput {
                                     placeholder: None,
                                     prefill: None,
-                                })
+                                },
+                            )
                         });
                     self.push_entry(Entry::Permission {
                         request_id,
@@ -1150,6 +1370,7 @@ impl Chat {
                         text_input,
                         resolved: None,
                         expired: false,
+                        dismissed: false,
                     });
                 }
             }
@@ -1262,10 +1483,7 @@ impl Chat {
     /// Converts rendered entries into the durable format, retaining only
     /// turns closed by a footer. A partially streamed tail is deliberately
     /// omitted so a relaunch never presents an unfinished answer as settled.
-    pub(crate) fn transcript_from_entries(
-        tab_id: &str,
-        entries: &[Entry],
-    ) -> ChatTranscript {
+    pub(crate) fn transcript_from_entries(tab_id: &str, entries: &[Entry]) -> ChatTranscript {
         let mut turns = Vec::new();
         let mut current = Vec::new();
         for entry in entries {
@@ -1882,6 +2100,49 @@ impl Chat {
             cancelled = true;
         }
         if cancelled && let Some(client) = &self.client {
+            let _ = client.cancel_permission(request_id);
+        }
+        self.clear_question_answer_focus();
+        cx.notify();
+    }
+
+    /// Dismisses a permission request that has no renderable answer. ACP has
+    /// no `dismissed` outcome, so the wire response is explicitly Cancelled;
+    /// it is never mapped to a rejection option.
+    fn dismiss_permission(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        let mut dismissed = false;
+        if let Some((
+            index,
+            Entry::Permission {
+                expired,
+                dismissed: was_dismissed,
+                resolved,
+                ..
+            },
+        )) = self
+            .entries
+            .iter_mut()
+            .enumerate()
+            .rev()
+            .find(|(_, entry)| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        request_id: id,
+                        resolved: None,
+                        expired: false,
+                        ..
+                    } if *id == request_id
+                )
+            })
+            && resolved.is_none()
+        {
+            *expired = true;
+            *was_dismissed = true;
+            self.remeasure_entry(index);
+            dismissed = true;
+        }
+        if dismissed && let Some(client) = &self.client {
             let _ = client.cancel_permission(request_id);
         }
         self.clear_question_answer_focus();
@@ -3045,6 +3306,21 @@ impl Chat {
                 theme,
                 entity.clone(),
             ),
+            Entry::SubagentTask {
+                title,
+                status,
+                tool_calls,
+                expanded,
+                ..
+            } => Self::render_subagent_task_card(
+                entry_index,
+                title,
+                status,
+                tool_calls,
+                expanded,
+                theme,
+                entity.clone(),
+            ),
             Entry::Permission {
                 request_id,
                 title,
@@ -3053,6 +3329,7 @@ impl Chat {
                 text_input,
                 resolved,
                 expired,
+                dismissed,
             } => {
                 let header = if title.is_empty() {
                     "Permission requested".to_string()
@@ -3084,12 +3361,24 @@ impl Chat {
                             .child(prompt),
                     );
                 }
+                let unrenderable = options.is_empty()
+                    && text_input.is_none()
+                    && resolved.is_none()
+                    && !expired
+                    && !dismissed;
                 if let Some(choice) = resolved {
                     card = card.child(
                         div()
                             .text_size(typography.footnote)
                             .text_color(colors.meta)
                             .child(format!("Answered: {choice}")),
+                    );
+                } else if dismissed {
+                    card = card.child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child("Dismissed — request cancelled"),
                     );
                 } else if expired {
                     // F-CHAT-27: the turn ended unanswered; offering the
@@ -3105,7 +3394,7 @@ impl Chat {
                         request_id,
                         &input,
                         theme,
-                        entity,
+                        entity.clone(),
                         question_answer,
                     ));
                 } else {
@@ -3141,6 +3430,27 @@ impl Chat {
                         );
                     }
                     card = card.child(row);
+                }
+                if unrenderable {
+                    let dismiss_entity = entity.clone();
+                    card = card.child(
+                        div()
+                            .id(("permission-dismiss", request_id as usize))
+                            .debug_selector(move || format!("permission-dismiss-{request_id}"))
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(theme.radii.control)
+                            .bg(colors.primary_pill_bg)
+                            .text_size(typography.footnote)
+                            .text_color(colors.title)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(move |_, _, cx| {
+                                dismiss_entity.update(cx, |chat, cx| {
+                                    chat.dismiss_permission(request_id, cx);
+                                });
+                            })
+                            .child("Dismiss"),
+                    );
                 }
                 card.into_any_element()
             }
@@ -3301,6 +3611,190 @@ impl Chat {
                     .into_any_element()
             }
         }
+    }
+
+    fn render_subagent_task_card(
+        task_index: usize,
+        title: String,
+        status: String,
+        tool_calls: Vec<SubagentToolCall>,
+        expanded: bool,
+        theme: &Theme,
+        entity: gpui::Entity<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let toggle_entity = entity.clone();
+        let header = div()
+            .id(("subagent-task-toggle", task_index))
+            .debug_selector(move || format!("subagent-task-toggle-{task_index}"))
+            .px(px(CARD_H_PADDING))
+            .py(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor(CursorStyle::PointingHand)
+            .child(
+                IconElement::new(
+                    if expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    px(10.0),
+                )
+                .text_color(colors.meta),
+            )
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .text_color(colors.rail_task)
+                    .child("Subagent"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(typography.callout)
+                    .text_color(colors.title)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .text_color(colors.meta)
+                    .child(status),
+            )
+            .on_click(move |_, _, cx| {
+                toggle_entity.update(cx, |chat, cx| {
+                    chat.toggle_subagent_task_expanded(task_index, cx);
+                });
+            });
+        let mut card = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(theme.radii.code_block)
+            .bg(colors.card_fill)
+            .border_l_2()
+            .border_color(colors.rail_task)
+            .child(header);
+        if expanded {
+            for (child_index, call) in tool_calls.into_iter().enumerate() {
+                card = card.child(Self::render_subagent_tool_call_card(
+                    task_index,
+                    child_index,
+                    call,
+                    theme,
+                    entity.clone(),
+                ));
+            }
+        }
+        card.into_any_element()
+    }
+
+    fn render_subagent_tool_call_card(
+        task_index: usize,
+        child_index: usize,
+        call: SubagentToolCall,
+        theme: &Theme,
+        entity: gpui::Entity<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let SubagentToolCall {
+            title,
+            status,
+            kind,
+            content,
+            locations,
+            expanded,
+            ..
+        } = call;
+        let toggle_entity = entity;
+        let header = div()
+            .id(format!(
+                "subagent-tool-call-toggle-{task_index}-{child_index}"
+            ))
+            .debug_selector(move || format!("subagent-tool-call-toggle-{task_index}-{child_index}"))
+            .pl(px(CARD_H_PADDING + 10.0))
+            .pr(px(CARD_H_PADDING))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor(CursorStyle::PointingHand)
+            .child(
+                IconElement::new(
+                    if expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    px(10.0),
+                )
+                .text_color(colors.meta),
+            )
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .text_color(colors.meta)
+                    .child(kind),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(typography.callout)
+                    .text_color(colors.title)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .text_color(colors.meta)
+                    .child(status),
+            )
+            .on_click(move |_, _, cx| {
+                toggle_entity.update(cx, |chat, cx| {
+                    chat.toggle_subagent_tool_call_expanded(task_index, child_index, cx);
+                });
+            });
+        let mut card = div().w_full().flex().flex_col().child(header);
+        if expanded {
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .pl(px(CARD_H_PADDING + 26.0))
+                .pr(px(CARD_H_PADDING))
+                .pb(px(CARD_V_PADDING));
+            for item in &content {
+                match item {
+                    ToolCallContentInfo::Text(text) => {
+                        body = body.child(Self::render_tool_output_text(text, theme));
+                    }
+                    ToolCallContentInfo::Diff(diff) => {
+                        body = body.child(Self::render_tool_diff(diff, theme));
+                    }
+                    ToolCallContentInfo::Other => {}
+                }
+            }
+            if !locations.is_empty() {
+                body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
+                    locations.iter().map(|location| {
+                        let label = match location.line {
+                            Some(line) => format!("{}:{line}", location.path.display()),
+                            None => location.path.display().to_string(),
+                        };
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child(label)
+                    }),
+                ));
+            }
+            card = card.child(body);
+        }
+        card.into_any_element()
     }
 
     /// One tool call's card: a chevron-toggle header (kind, title, status)
@@ -5301,6 +5795,127 @@ mod tests {
             "the turn footer is laid out in the drawn transcript"
         );
         assert!(cx.debug_bounds("chat-status").is_some());
+    }
+
+    /// F-CHAT-28: a protocol Task tool call becomes a subagent card; its
+    /// following tool call is nested under the card and keeps its own
+    /// expand/collapse control.
+    #[gpui::test]
+    async fn a_subagent_task_card_expands_nested_tool_calls(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["subagent"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "inspect the transcript");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::SubagentTask {
+                        tool_calls,
+                        status,
+                        ..
+                    } if status == "Completed" && !tool_calls.is_empty()
+                )
+            })
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("subagent-task-toggle-1").is_some(),
+            "the subagent task card is drawn"
+        );
+        assert!(
+            cx.debug_bounds("subagent-tool-call-toggle-1-0").is_none(),
+            "nested tool calls stay collapsed with their parent card"
+        );
+
+        let task_toggle = cx
+            .debug_bounds("subagent-task-toggle-1")
+            .expect("subagent task toggle");
+        cx.simulate_click(task_toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("subagent-tool-call-toggle-1-0").is_some(),
+            "expanding the task reveals its nested tool call"
+        );
+
+        let child_toggle = cx
+            .debug_bounds("subagent-tool-call-toggle-1-0")
+            .expect("nested tool call toggle");
+        cx.simulate_click(child_toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                matches!(
+                    chat.entries.get(1),
+                    Some(Entry::SubagentTask { tool_calls, .. })
+                        if tool_calls.first().is_some_and(|call| call.expanded)
+                )
+            }),
+            "the nested tool call expands independently"
+        );
+    }
+
+    /// F-CHAT-23: a permission request with no renderable choice is not
+    /// silently stranded; Dismiss is drawn and answers ACP with cancellation,
+    /// not with a rejection option.
+    #[gpui::test]
+    async fn an_unrenderable_permission_can_be_dismissed(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["permission-unrenderable"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "run the unknown permission");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        options,
+                        text_input: None,
+                        resolved: None,
+                        expired: false,
+                        ..
+                    } if options.is_empty()
+                )
+            })
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("permission-dismiss-1").is_some(),
+            "unrenderable permissions expose Dismiss"
+        );
+        assert!(
+            cx.debug_bounds("permission-option-allow").is_none(),
+            "unrenderable permissions do not invent an option button"
+        );
+
+        let dismiss = cx
+            .debug_bounds("permission-dismiss-1")
+            .expect("dismiss control");
+        cx.simulate_click(dismiss.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        dismissed: true,
+                        resolved: None,
+                        expired: true,
+                        ..
+                    }
+                )
+            }) && chat.has_completed_turn
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.pending_question().is_some()),
+            "dismissing the request clears the pending state"
+        );
     }
 
     /// F-CHAT-25 (option answers): a permission prompt renders both option

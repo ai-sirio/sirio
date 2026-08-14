@@ -10,7 +10,11 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    the fixture cannot emit chunk two before the test allows it.
   permission       On every prompt, request a permission with Allow/Deny
                    options, read whichever answer the client sends, and end
-                   the turn. One process handles several prompts, so both
+                   the turn.
+  permission-unrenderable
+                   Request a permission with no options and no structured
+                   question, read the client's cancellation, and end the turn.
+  subagent         Emit a Task tool call followed by a nested Read call. One process handles several prompts, so both
                    answers can be exercised against one connection.
   question         On every prompt, ask a structured question with no wire
                    options (F-CHAT-25 text answers), read the answer, echo
@@ -49,6 +53,16 @@ def response(request_id, result):
     send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
 
+def error(request_id, message):
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32000, "message": message},
+        }
+    )
+
+
 def notification(update):
     send(
         {
@@ -77,15 +91,16 @@ def thought_chunk(text):
     )
 
 
-def tool_call(tool_id, title, status):
-    notification(
-        {
-            "sessionUpdate": "tool_call",
-            "toolCallId": tool_id,
-            "title": title,
-            "status": status,
-        }
-    )
+def tool_call(tool_id, title, status, raw_input=None):
+    update = {
+        "sessionUpdate": "tool_call",
+        "toolCallId": tool_id,
+        "title": title,
+        "status": status,
+    }
+    if raw_input is not None:
+        update["rawInput"] = raw_input
+    notification(update)
 
 
 def tool_call_update(tool_id, status):
@@ -159,6 +174,25 @@ def rich_turn(request):
     tool_call_update("tool-1", "completed")
     usage_update(53000, 200000)
     response(request["id"], {"stopReason": "end_turn"})
+
+
+def request_unrenderable_permission():
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 9001,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId": "tool-unrenderable",
+                    "title": "Unknown permission",
+                    "status": "pending",
+                },
+                "options": [],
+            },
+        }
+    )
 
 
 def request_permission():
@@ -242,6 +276,24 @@ def wait_for_go(dir_path):
     return False
 
 
+def subagent_turn(request):
+    tool_call(
+        "task-1",
+        "Task",
+        "in_progress",
+        {
+            "description": "Inspect the chat transcript",
+            "subagent_type": "explorer",
+        },
+    )
+    time.sleep(0.02)
+    tool_call("child-1", "Read chat.rs", "in_progress")
+    time.sleep(0.02)
+    tool_call_update("child-1", "completed")
+    tool_call_update("task-1", "completed")
+    response(request["id"], {"stopReason": "end_turn"})
+
+
 def main():
     mode = sys.argv[1]
     extra = sys.argv[2] if len(sys.argv) > 2 else None
@@ -283,6 +335,19 @@ def main():
                 request_permission()
                 sys.stdin.readline()  # the client's answer to the permission
                 response(request["id"], {"stopReason": "end_turn"})
+            elif mode == "permission-unrenderable":
+                request_unrenderable_permission()
+                answer_line = sys.stdin.readline()
+                if not answer_line:
+                    return
+                answer = json.loads(answer_line)
+                outcome = answer.get("result", {}).get("outcome", {})
+                if outcome.get("outcome") != "cancelled":
+                    error(request["id"], message="expected cancelled dismissal")
+                    return
+                response(request["id"], {"stopReason": "end_turn"})
+            elif mode == "subagent":
+                subagent_turn(request)
             elif mode == "question":
                 # A structured question with no wire options: the client
                 # must offer a free-text answer, and the answer comes back
