@@ -18,16 +18,21 @@
 //!   rendered here as interactive controls over the model operations.
 
 use gpui::{
-    AnyElement, Context, FocusHandle, HighlightStyle, KeyDownEvent, MouseButton, Render,
-    StyledText, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
+    ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
+    InspectorElementId, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Render, Rgba, StyledText, Subscription, Task, UnderlineStyle, Window,
+    div, point, prelude::*, px, quad, transparent_black,
 };
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tiller_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
+use tiller_project::resolve_file_link;
 use tiller_theme::Theme;
 
 use crate::chat::Chat;
-use crate::editor::{Conflict, Editor, Language, LoadStatus, Selection};
+use crate::editor::{Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at};
 
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
@@ -84,7 +89,24 @@ pub struct FileView {
     /// Re-check the disk snapshot whenever this tab's editor focus is
     /// regained after another surface owned it.
     focus_subscription: Option<Subscription>,
+    /// Whether a mouse-driven selection (F-EDIT-02) is currently being
+    /// dragged. Distinct from `selection_anchor.is_some()`, which also
+    /// covers a shift+arrow selection that should not keep extending on
+    /// an unrelated mouse move.
+    dragging: bool,
 }
+
+/// Emitted so the shell can act on a gesture that started inside this tab
+/// but resolves outside it. Today that is only F-CORE-FILE-04's link click:
+/// resolving the click is this view's job, but opening the resulting path
+/// is the workspace's (the same `add_file_tab` path the Files panel's
+/// "Open" and the chat transcript's link clicks already use).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileViewEvent {
+    OpenFile(PathBuf),
+}
+
+impl gpui::EventEmitter<FileViewEvent> for FileView {}
 
 impl FileView {
     /// Starts loading `path` without doing filesystem work during render.
@@ -130,6 +152,7 @@ impl FileView {
             selection_anchor: None,
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
+            dragging: false,
         }
     }
 
@@ -273,11 +296,88 @@ impl FileView {
         result
     }
 
-    fn select_source_line(&mut self, selection: Selection, cx: &mut Context<Self>) {
-        self.source_selection = Some(selection);
-        self.caret = selection.end;
-        self.selection_anchor = None;
+    // ── F-EDIT-02: real mouse-driven caret placement + drag-select ─────
+    //
+    // These are the mouse-side counterparts of `move_caret` above: a click
+    // starts a collapsed selection at the clicked buffer offset, a drag
+    // extends it exactly like Shift+Arrow does, and a double-click snaps to
+    // the touched word. Before this, the only way `source_selection` became
+    // non-`None` was the keyboard — a click landed formatting at whatever
+    // `source_selection` last held (or end-of-buffer), never at the click.
+
+    /// Starts a mouse selection at `position` (a buffer offset). Called on
+    /// mouse-down; a following drag calls `extend_mouse_selection`.
+    fn begin_mouse_selection(&mut self, position: usize, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let position = position.min(editor.buffer().len());
+        self.caret = position;
+        self.selection_anchor = Some(position);
+        self.source_selection = None;
+        self.dragging = true;
         cx.notify();
+    }
+
+    /// Extends the in-progress mouse selection to `position`. A no-op once
+    /// `end_mouse_selection` has fired, so a stray mouse-move after the
+    /// button is released (or a drag that started elsewhere, e.g. on the
+    /// toolbar) cannot silently move the caret.
+    fn extend_mouse_selection(&mut self, position: usize, cx: &mut Context<Self>) {
+        if !self.dragging {
+            return;
+        }
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let buffer = editor.buffer().to_owned();
+        self.move_caret(position, true, &buffer);
+        cx.notify();
+    }
+
+    /// Ends the in-progress mouse selection (mouse-up).
+    fn end_mouse_selection(&mut self, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.dragging = false;
+            cx.notify();
+        }
+    }
+
+    /// Double-click word selection: selects the word touching `position`,
+    /// or just places the caret there when it is not on a word.
+    fn select_word_at(&mut self, position: usize, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor() else {
+            return;
+        };
+        let buffer = editor.buffer().to_owned();
+        let position = position.min(buffer.len());
+        match word_range_at(&buffer, position) {
+            Some(range) => {
+                self.caret = range.end;
+                self.selection_anchor = Some(range.start);
+                self.source_selection = Selection::new(&buffer, range.start, range.end);
+            }
+            None => {
+                self.caret = position;
+                self.selection_anchor = None;
+                self.source_selection = None;
+            }
+        }
+        self.dragging = false;
+        cx.notify();
+    }
+
+    /// F-CORE-FILE-04: resolves a clicked link's raw target against the
+    /// directory the open file lives in (Markdown's own relative-link
+    /// convention) and, if it resolves to a real path, asks the shell to
+    /// open it — the same `FileViewEvent::OpenFile` -> `add_file_tab` path
+    /// used by the Files panel's "Open" and the chat transcript's link
+    /// clicks (`RightPanelEvent::OpenFile` / `ChatEvent::OpenFile`).
+    fn open_markdown_link(&mut self, target: &str, cx: &mut Context<Self>) {
+        let base = self.path.parent().unwrap_or_else(|| Path::new("/"));
+        if let Some(resolved) = resolve_file_link(target, base) {
+            cx.emit(FileViewEvent::OpenFile(resolved.path));
+        }
     }
 
     fn on_editor_key(
@@ -461,6 +561,14 @@ impl FileView {
         }
     }
 
+    /// The selection the toolbar formats. This mirrors `current_selection`'s
+    /// fallback exactly (collapse to the tracked caret) rather than
+    /// hard-coding end-of-buffer: a plain click (or an un-shifted arrow
+    /// key) leaves `source_selection` `None` by design — that is a real
+    /// collapsed caret at `self.caret`, not "no position is known". Before
+    /// this fix, *any* collapsed position — including one a real mouse
+    /// click had just placed — silently formatted at end-of-buffer instead
+    /// (F-EDIT-02).
     fn formatting_selection(&self, editor: &Editor) -> Selection {
         self.source_selection
             .filter(|selection| {
@@ -468,7 +576,7 @@ impl FileView {
                     && editor.buffer().is_char_boundary(selection.start)
                     && editor.buffer().is_char_boundary(selection.end)
             })
-            .unwrap_or_else(|| Selection::point(editor.buffer().len()))
+            .unwrap_or_else(|| Selection::point(self.caret.min(editor.buffer().len())))
     }
 
     /// F-EDIT-01: switch the Markdown mode. Selecting Preview on a large
@@ -983,11 +1091,6 @@ fn render_content(
                 .text_size(theme.typography.code_size)
                 .text_color(theme.title)
                 .children(lines.iter().map(|(index, line, line_selection)| {
-                    let selected = selection.is_some_and(|current| {
-                        current.start <= line_selection.end && current.end >= line_selection.start
-                    });
-                    let line_entity = entity.clone();
-                    let line_selection = *line_selection;
                     div()
                         .id(("file-line", *index))
                         .debug_selector({
@@ -998,12 +1101,6 @@ fn render_content(
                         .min_h(px(18.0))
                         .flex()
                         .whitespace_nowrap()
-                        .when(selected, |this| this.bg(theme.selected_fill))
-                        .on_click(move |_, _, cx| {
-                            line_entity.update(cx, |view, cx| {
-                                view.select_source_line(line_selection, cx);
-                            });
-                        })
                         .child(
                             div()
                                 .w(px(52.0))
@@ -1011,7 +1108,15 @@ fn render_content(
                                 .text_color(theme.meta)
                                 .child(format!("{:>5} ", index + 1)),
                         )
-                        .child(render_code_spans(line, editor.language(), theme))
+                        .child(EditableLine::new(
+                            ("file-line-text", *index),
+                            line.clone(),
+                            line_selection.start,
+                            editor.language(),
+                            theme,
+                            entity.clone(),
+                            selection,
+                        ))
                 })),
         )
         .into_any_element()
@@ -1143,22 +1248,281 @@ fn code_spans(language: Language, line: &str) -> Vec<CodeSpan> {
     non_overlapping
 }
 
-fn render_code_spans(line: &str, language: Language, theme: Theme) -> impl IntoElement {
-    let highlights = code_spans(language, line).into_iter().map(|span| {
-        let color = match span.kind {
-            CodeSpanKind::Keyword => theme.accent,
-            CodeSpanKind::Literal => theme.diff_addition,
-            CodeSpanKind::Comment => theme.meta,
+/// One rendered code-surface line: painted text plus the mouse machinery
+/// that makes it a real caret/selection surface (F-EDIT-02) instead of the
+/// old click-selects-the-whole-line stand-in, and makes a rendered Markdown
+/// link a real click target (F-CORE-FILE-04). Modeled on
+/// `Chat`'s `TranscriptSelectableText` — same `StyledText` + hitbox +
+/// `index_for_position`/`position_for_index` shape — but scoped to a single
+/// source line, since each line already carries its own buffer-offset
+/// range.
+struct EditableLine {
+    id: ElementId,
+    text: StyledText,
+    line_start: usize,
+    line_len: usize,
+    view: gpui::Entity<FileView>,
+    selection: Option<Selection>,
+    selection_fill: Rgba,
+    /// Byte ranges *local to this line* of clickable Markdown link labels,
+    /// paired with their raw (unresolved) target text.
+    links: Vec<(Range<usize>, String)>,
+    /// Set on mouse-down, consumed on mouse-up: the down position and
+    /// whether the platform modifier was held, so a same-position mouse-up
+    /// on a link (not a drag) can open it (F-CORE-FILE-04) while a plain
+    /// click still only places the caret.
+    pressed: std::rc::Rc<std::cell::Cell<Option<(usize, bool)>>>,
+}
+
+impl EditableLine {
+    fn new(
+        id: impl Into<ElementId>,
+        line: String,
+        line_start: usize,
+        language: Language,
+        theme: Theme,
+        view: gpui::Entity<FileView>,
+        selection: Option<Selection>,
+    ) -> Self {
+        let line_len = line.len();
+        let links: Vec<(Range<usize>, String)> = if language == Language::Markdown {
+            markdown_links_in_line(&line)
+                .into_iter()
+                .map(|span| (span.label_range, span.target))
+                .collect()
+        } else {
+            Vec::new()
         };
-        (
-            span.range,
-            HighlightStyle {
-                color: Some(color.into()),
-                ..Default::default()
-            },
-        )
-    });
-    StyledText::new(line.to_owned()).with_highlights(highlights)
+        let mut highlights: Vec<(Range<usize>, HighlightStyle)> = code_spans(language, &line)
+            .into_iter()
+            .map(|span| {
+                let color = match span.kind {
+                    CodeSpanKind::Keyword => theme.accent,
+                    CodeSpanKind::Literal => theme.diff_addition,
+                    CodeSpanKind::Comment => theme.meta,
+                };
+                (
+                    span.range,
+                    HighlightStyle {
+                        color: Some(color.into()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        highlights.extend(links.iter().map(|(range, _)| {
+            (
+                range.clone(),
+                HighlightStyle {
+                    color: Some(theme.accent.into()),
+                    underline: Some(UnderlineStyle {
+                        thickness: px(1.0),
+                        color: Some(theme.accent.into()),
+                        wavy: false,
+                    }),
+                    ..Default::default()
+                },
+            )
+        }));
+        // `code_spans` only ever fires for non-Markdown languages and
+        // `links` only for Markdown, so the two sets never overlap — this
+        // only needs a stable sort for `StyledText::with_highlights`, which
+        // expects highlights in range order.
+        highlights.sort_by_key(|(range, _)| range.start);
+        let text = StyledText::new(line).with_highlights(highlights);
+        Self {
+            id: id.into(),
+            text,
+            line_start,
+            line_len,
+            view,
+            selection,
+            selection_fill: theme.selected_fill,
+            links,
+            pressed: std::rc::Rc::new(std::cell::Cell::new(None)),
+        }
+    }
+
+    /// Paints the part of `self.selection` that falls on this line, clipped
+    /// to this line's own bounds. Each line computes its own overlap
+    /// independently, so a selection spanning several lines highlights the
+    /// exact selected run on the first/last line and the full width of any
+    /// line fully inside it — never a whole line that is only partly
+    /// selected, which is what the old line-level background did.
+    fn paint_selection(&self, bounds: Bounds<Pixels>, window: &mut Window) {
+        let Some(selection) = self.selection.filter(|selection| !selection.is_collapsed())
+        else {
+            return;
+        };
+        let line_end = self.line_start + self.line_len;
+        let start = selection.start.max(self.line_start);
+        let end = selection.end.min(line_end);
+        if start >= end {
+            return;
+        }
+        let layout = self.text.layout();
+        let line_height = layout.line_height();
+        let start_position = layout
+            .position_for_index(start - self.line_start)
+            .unwrap_or(bounds.origin);
+        let end_position = layout
+            .position_for_index(end - self.line_start)
+            .unwrap_or(gpui::point(bounds.right(), bounds.origin.y));
+        if end_position.x <= start_position.x {
+            return;
+        }
+        window.paint_quad(quad(
+            Bounds::from_corners(
+                point(start_position.x, bounds.origin.y),
+                point(end_position.x, bounds.origin.y + line_height),
+            ),
+            px(0.0),
+            self.selection_fill,
+            Edges::default(),
+            transparent_black(),
+            BorderStyle::default(),
+        ));
+    }
+}
+
+impl Element for EditableLine {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.text.request_layout(id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.text
+            .prepaint(id, inspector_id, bounds, state, window, cx);
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.paint_selection(bounds, window);
+        window.set_cursor_style(CursorStyle::IBeam, hitbox);
+
+        let layout = self.text.layout().clone();
+        let line_start = self.line_start;
+        let line_len = self.line_len;
+        let view = self.view.clone();
+        let pressed = self.pressed.clone();
+        let hitbox_for_down = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && event.button == MouseButton::Left
+                && hitbox_for_down.is_hovered(window)
+            {
+                let local = match layout.index_for_position(event.position) {
+                    Ok(index) | Err(index) => index.min(line_len),
+                };
+                let global = line_start + local;
+                pressed.set(Some((global, event.modifiers.platform)));
+                if event.click_count >= 2 {
+                    view.update(cx, |view, cx| view.select_word_at(global, cx));
+                } else {
+                    view.update(cx, |view, cx| view.begin_mouse_selection(global, cx));
+                }
+                window.prevent_default();
+            }
+        });
+
+        let layout = self.text.layout().clone();
+        let line_start = self.line_start;
+        let line_len = self.line_len;
+        let view = self.view.clone();
+        let hitbox_for_move = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && event.dragging()
+                && hitbox_for_move.is_hovered(window)
+            {
+                let local = match layout.index_for_position(event.position) {
+                    Ok(index) | Err(index) => index.min(line_len),
+                };
+                view.update(cx, |view, cx| {
+                    view.extend_mouse_selection(line_start + local, cx)
+                });
+            }
+        });
+
+        let layout = self.text.layout().clone();
+        let line_start = self.line_start;
+        let line_len = self.line_len;
+        let view = self.view.clone();
+        let links = self.links.clone();
+        let pressed_for_up = self.pressed.clone();
+        let hitbox_for_up = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble
+                && event.button == MouseButton::Left
+                && hitbox_for_up.is_hovered(window)
+            {
+                if let Some((down_global, down_platform)) = pressed_for_up.take() {
+                    let local = match layout.index_for_position(event.position) {
+                        Ok(index) | Err(index) => index.min(line_len),
+                    };
+                    let up_global = line_start + local;
+                    let clicked_in_place = down_global == up_global;
+                    let platform_held = down_platform || event.modifiers.platform;
+                    if clicked_in_place && platform_held {
+                        let local_click = up_global - line_start;
+                        if let Some((_, target)) =
+                            links.iter().find(|(range, _)| range.contains(&local_click))
+                        {
+                            let target = target.clone();
+                            view.update(cx, |view, cx| view.open_markdown_link(&target, cx));
+                        }
+                    }
+                }
+                view.update(cx, |view, cx| view.end_mouse_selection(cx));
+                window.prevent_default();
+            }
+        });
+
+        self.text
+            .paint(id, inspector_id, bounds, state, &mut (), window, cx);
+    }
+}
+
+impl IntoElement for EditableLine {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 /// The Markdown formatting operations the toolbar offers (F-EDIT-02),
@@ -1884,5 +2248,171 @@ mod tests {
             assert_ne!(current, previous, "{selector} changes Markdown source");
             previous = current;
         }
+    }
+
+    // ── F-EDIT-02: real mouse-driven caret placement + drag-select ─────
+
+    #[gpui::test]
+    async fn mouse_click_formats_the_clicked_line_not_end_of_buffer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Two lines: a short first line and a much longer second one. The
+        // old defect fell back to `Selection::point(buffer.len())` on any
+        // mouse click, which lands inside the *second* line here — so a
+        // click on line 0 followed by Bold proves the fix only if the
+        // markers show up in line 0, not at the very end of the buffer.
+        let file = TempFile::with_extension("md", "ab\nsecond line is much longer\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        let code = cx
+            .debug_bounds("file-mode-code")
+            .expect("the Code option is drawn");
+        cx.simulate_click(code.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let line0 = cx
+            .debug_bounds("file-source-line-0")
+            .expect("line 0 is drawn");
+        // A couple of pixels past the 52px line-number gutter: inside line
+        // 0's own rendered text for any non-empty first line, regardless of
+        // the exact glyph metrics.
+        cx.simulate_click(
+            point(line0.left() + px(53.0), line0.center().y),
+            Modifiers::none(),
+        );
+        cx.run_until_parked();
+
+        let bold = cx
+            .debug_bounds("file-format-bold")
+            .expect("the Bold control is drawn");
+        cx.simulate_click(bold.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let buffer = view.read_with(&cx.cx, |view, _| {
+            view.editor().expect("editor loaded").buffer().to_owned()
+        });
+        let first_line = buffer.split('\n').next().unwrap_or_default();
+        assert!(
+            first_line.contains("**"),
+            "clicking line 0 then Bold must format there, not fall back to \
+             end-of-buffer: buffer was {buffer:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn drag_selection_produces_the_dragged_range_not_a_whole_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("md", "hello world\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        // Mirrors what the drawn `EditableLine` element does on
+        // down/move/up: it resolves a pixel to a buffer offset and calls
+        // exactly these three methods, which is the state machine actually
+        // under test here (the pixel->offset half is GPUI's own
+        // `index_for_position`, already exercised by `Chat`'s identical use
+        // of it elsewhere in this crate).
+        view.update(&mut cx.cx, |view, cx| {
+            view.begin_mouse_selection(2, cx); // inside "hello"
+            view.extend_mouse_selection(4, cx); // still inside "hello"
+            view.end_mouse_selection(cx);
+        });
+
+        let (selection, dragging) =
+            view.read_with(&cx.cx, |view, _| (view.source_selection, view.dragging));
+        assert_eq!(
+            selection,
+            Selection::new("hello world\n", 2, 4),
+            "the selection is exactly the dragged range"
+        );
+        assert!(!dragging, "mouse-up ends the drag");
+
+        // And formatting acts on that exact range, not the whole line.
+        view.update(&mut cx.cx, |view, cx| {
+            let selection = selection.expect("drag left a real selection");
+            view.format_markdown(MarkdownFormatOp::Bold, selection, cx);
+        });
+        let buffer = view.read_with(&cx.cx, |view, _| {
+            view.editor().expect("editor loaded").buffer().to_owned()
+        });
+        assert_eq!(buffer, "he**ll**o world\n");
+    }
+
+    #[gpui::test]
+    async fn double_click_selects_the_touched_word_not_the_whole_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("md", "hello world\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.select_word_at(8, cx); // inside "world" (offsets 6..11)
+        });
+        let selection = view.read_with(&cx.cx, |view, _| view.source_selection);
+        assert_eq!(
+            selection,
+            Selection::new("hello world\n", 6, 11),
+            "double-click selects the word, not the whole line"
+        );
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.format_markdown(MarkdownFormatOp::Italic, selection.unwrap(), cx);
+        });
+        let buffer = view.read_with(&cx.cx, |view, _| {
+            view.editor().expect("editor loaded").buffer().to_owned()
+        });
+        assert_eq!(
+            buffer, "hello *world*\n",
+            "Italic wraps the double-clicked word, not the whole line"
+        );
+    }
+
+    // ── F-CORE-FILE-04: a rendered link is a real click target ─────────
+
+    #[gpui::test]
+    async fn platform_click_on_a_link_label_resolves_and_emits_open_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-file-view-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create worktree dir");
+        let note = dir.join("note.md");
+        std::fs::write(&note, "see [setup](setup.md) for details\n").expect("write file");
+        std::fs::write(dir.join("setup.md"), "# setup\n").expect("write target file");
+
+        let (mut cx, view) = mounted_file_view(cx, note.clone());
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        view.update(&mut cx.cx, |view, cx| {
+            view.open_markdown_link("setup.md", cx);
+        });
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [FileViewEvent::OpenFile(dir.join("setup.md"))],
+            "a relative link resolves against the open file's directory and \
+             asks the shell to open it, the same OpenFile path RightPanel \
+             and Chat already use"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

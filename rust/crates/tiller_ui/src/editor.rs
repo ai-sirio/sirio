@@ -806,6 +806,88 @@ impl Editor {
     }
 }
 
+/// An inline Markdown link `[label](target)` found in a line of source
+/// text: the label's byte range within *that line* (what a click should
+/// land on, F-CORE-FILE-04) and the raw target text between the parens
+/// (what [`Selection`]-free code hands to a link resolver).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkdownLinkSpan {
+    pub label_range: std::ops::Range<usize>,
+    pub target: String,
+}
+
+/// Finds inline `[label](target)` links in one line of Markdown source, for
+/// the code surface's click-to-open affordance (F-CORE-FILE-04). Image
+/// syntax (`![alt](src)`) is skipped — an image reference is not something
+/// the file view can open as a document. Reference-style links
+/// (`[label][ref]`) are out of scope: the toolbar only ever writes the
+/// inline form (see [`Editor::make_link`]), so that is what this looks for.
+pub fn markdown_links_in_line(line: &str) -> Vec<MarkdownLinkSpan> {
+    let bytes = line.as_bytes();
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'[' {
+            index += 1;
+            continue;
+        }
+        let label_start = index + 1;
+        let Some(close_bracket) = line[label_start..].find(']') else {
+            index += 1;
+            continue;
+        };
+        let label_end = label_start + close_bracket;
+        let after_bracket = label_end + 1;
+        if bytes.get(after_bracket) != Some(&b'(') {
+            index += 1;
+            continue;
+        }
+        let target_start = after_bracket + 1;
+        let Some(close_paren) = line[target_start..].find(')') else {
+            index += 1;
+            continue;
+        };
+        let target_end = target_start + close_paren;
+        let is_image = index > 0 && bytes[index - 1] == b'!';
+        if !is_image && label_start < label_end {
+            spans.push(MarkdownLinkSpan {
+                label_range: label_start..label_end,
+                target: line[target_start..target_end].to_string(),
+            });
+        }
+        index = target_end + 1;
+    }
+    spans
+}
+
+/// The word touching `offset` — the contiguous run of alphanumeric/`_`
+/// bytes adjacent to it — for double-click word selection (F-EDIT-02).
+/// `None` when `offset` sits between two non-word characters (a click on
+/// whitespace or punctuation), which leaves the caret collapsed rather
+/// than manufacturing an empty selection.
+pub fn word_range_at(buffer: &str, offset: usize) -> Option<std::ops::Range<usize>> {
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+    let before = buffer[..offset].chars().next_back();
+    let after = buffer[offset..].chars().next();
+    if !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char) {
+        return None;
+    }
+    let start = buffer[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word_char(*c))
+        .last()
+        .map(|(index, _)| index)
+        .unwrap_or(offset);
+    let end = buffer[offset..]
+        .char_indices()
+        .take_while(|(_, c)| is_word_char(*c))
+        .last()
+        .map(|(index, c)| offset + index + c.len_utf8())
+        .unwrap_or(offset);
+    Some(start..end)
+}
+
 /// Byte range of the whole lines covered by `selection`, from the start of
 /// the line containing `start` to the end (exclusive of the newline) of the
 /// line containing `end`. A collapsed selection covers its own line. The
@@ -1439,6 +1521,60 @@ mod tests {
         let after = caret_editor.make_link(caret, "https://example.com");
         assert_eq!(caret_editor.buffer(), "see [](https://example.com)\n");
         assert_eq!(after, Selection::point(5), "caret is inside the brackets");
+    }
+
+    // ── F-CORE-FILE-04: rendered link spans are real click targets ─────
+
+    #[test]
+    fn markdown_links_in_line_finds_the_label_range_and_target() {
+        let line = "visit the [docs](notes/setup.md:12) page";
+        let spans = markdown_links_in_line(line);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].label_range, 11..15, "the bracketed label");
+        assert_eq!(&line[spans[0].label_range.clone()], "docs");
+        assert_eq!(spans[0].target, "notes/setup.md:12");
+    }
+
+    #[test]
+    fn markdown_links_in_line_skips_images_and_finds_several() {
+        let line = "![alt](img.png) then [a](a.md) and [b](b.md)";
+        let spans = markdown_links_in_line(line);
+        assert_eq!(
+            spans.iter().map(|span| span.target.as_str()).collect::<Vec<_>>(),
+            vec!["a.md", "b.md"],
+            "the image link is not a document to open"
+        );
+    }
+
+    #[test]
+    fn markdown_links_in_line_ignores_unterminated_syntax() {
+        assert!(markdown_links_in_line("no links here").is_empty());
+        assert!(markdown_links_in_line("[unterminated(link.md)").is_empty());
+        assert!(markdown_links_in_line("[label](unterminated").is_empty());
+    }
+
+    // ── F-EDIT-02: double-click word selection ──────────────────────────
+
+    #[test]
+    fn word_range_at_finds_the_touching_word() {
+        let buffer = "the quick brown fox";
+        assert_eq!(word_range_at(buffer, 6), Some(4..9), "middle of 'quick'");
+        assert_eq!(word_range_at(buffer, 4), Some(4..9), "leading edge of 'quick'");
+        assert_eq!(word_range_at(buffer, 9), Some(4..9), "trailing edge of 'quick'");
+    }
+
+    #[test]
+    fn word_range_at_returns_none_between_non_word_characters() {
+        let buffer = "a  b";
+        assert_eq!(word_range_at(buffer, 2), None, "middle of the gap");
+    }
+
+    #[test]
+    fn word_range_at_keeps_multibyte_boundaries() {
+        let buffer = "café au lait";
+        // Click inside "é" itself would be an invalid char boundary; click
+        // right after it lands on the whole word.
+        assert_eq!(word_range_at(buffer, 5), Some(0..5), "end of 'café'");
     }
 
     #[test]
