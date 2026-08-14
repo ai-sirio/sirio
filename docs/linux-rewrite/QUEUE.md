@@ -2498,3 +2498,49 @@ dedicated diff tab for that file. A truncating pipe manufactures false negatives
 like confirmed disproofs — same shape as the substring bug (`owed` matching inside "showed") and the
 misspelled-symbol trap (`directory_status` for `directory_statuses`). **Never let `head` decide
 whether something exists; count first, then read.**
+
+## Searching the summary for the thing — orchestrator, 2026-08-14 13:15
+
+`DEAD-MODULES.md` labelled four dead modules **"no row"**. Three of the four are owned, and two of
+those are owned by clauses that quote the dead function's behaviour almost word for word:
+
+- `file_events.rs` → `F-CORE-FILE-06`, whose PLATFORM note literally says *"Linux needs
+  inotify/fanotify or equivalent"*.
+- `tiller_project/file.rs` → `F-CORE-FILE-03`, whose clause is *"Accepted terminal file drops become
+  one shell-quoted, space-separated path string… written to the pane"* — a prose rendering of
+  `terminal_file_drop`. Also `F-TERM-PTY-06`, which names the symbol in its own evidence.
+- `ollama.rs` → `F-CORE-USG-03`, whose VERIFY is *"Feed representative Ollama Cloud payloads"*.
+
+The one that held (`transcript.rs`) is the one that was **argued** rather than labelled: it quoted
+SESSION-02's wording and showed the symbol it points at is a different one.
+
+**The mechanism, which is not carelessness.** The check ran against row *titles* and *ledger
+evidence* — where these modules are genuinely invisible — instead of against the frozen *clause*
+text, where they are described in full. A clause is a description of behaviour written before the
+code existed; it contains no symbol names by construction. **Searching a summary for the thing it
+summarises returns nothing, reliably, and the nothing looks like a finding.** Same family as the
+misspelled-symbol trap and the truncating `head -5`: an instrument pointed at the wrong surface
+produces a confident zero.
+
+So: **to ask "does a row own this code?", grep `01-inventory-app.md` and
+`02-inventory-packages.md`** — the clause files — **not the ledger.** The ledger records what was
+judged; the clauses record what was promised, and orphaned code is a promise nobody kept.
+
+### Why this one mattered more than a documentation nit
+
+In `DEAD-MODULES.md`, **"no row" functions as a deletion licence** — the document exists to find
+code nothing needs. `FileSystemEventMonitor`, `terminal_file_drop` and `classify_file_drop` are not
+orphans; they are the **built halves of rows still marked `FAILED — absent`**, waiting on a
+subscriber or a call site. Deleting them would destroy the only implementation of features the
+inventory still owes, **and the ledger would not register the loss** — those rows are already
+`FAILED`, so nothing would change colour. A negative verdict is a blind spot: it cannot get worse,
+so regressions inside it are invisible.
+
+### The reframing worth keeping
+
+The dead-module list and the `FAILED — absent` list are two indexes of one set of defects — one by
+code, one by clause. Read together they are the cheapest work queue in the project, because the
+expensive half already exists and what is missing is a subscription, a call site or a handler:
+`file_events.rs` → `F-CORE-FILE-06`, `link_router.rs` → `F-TERM-UI-02`, the account parsers →
+`F-CORE-AUTH-01` (`P93` is closing that one), `terminal_file_drop` → `F-CORE-FILE-03`. Read apart,
+one list looks like garbage to delete and the other like features to build from scratch.

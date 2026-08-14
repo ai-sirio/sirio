@@ -71,7 +71,16 @@ The weakly-live queue (14 files) triaged one at a time, mirror test applied:
   `load_file_tree`, `FileTreeEntry`: the **file-drop / file-tree data layer, built and
   consumed by nothing**. The fn census binned these as `local` (lib.rs mentions), which
   is precisely the blindness this tier exists for. Bears ↑ on F-BRW ×9 / F-PRJ drop
-  rows: their surfaces are absent, but a data layer exists beneath them. **No row.**
+  rows: their surfaces are absent, but a data layer exists beneath them. ~~**No row.**~~
+  **CORRECTED 2026-08-14: split it — the drop half is owned three times over.**
+  `F-CORE-FILE-03`'s clause is *"Accepted terminal file drops become one shell-quoted,
+  space-separated path string… written to the pane"*, which is `terminal_file_drop` /
+  `classify_file_drop` verbatim; `F-TERM-PTY-06` (`UNREACHABLE`) names
+  `tiller_project::terminal_file_drop` in its own evidence; `F-EDIT-12` covers the drag
+  source. Only `load_file_tree` / `FileTreeEntry` may still be unowned — and that half is
+  more likely a **parallel dead model**, since the Files panel renders from `right_panel.rs`
+  and does not import this one (the same shape as `sidebar.rs:33`'s duplicated
+  `ActivityStatus` noted above).
 - **tiller_git/directory_status.rs** — publication-only (lib.rs `mod` + `pub use`);
   STATUS-family pass-12 "zero app callers" precedent, corroborated at module grain.
 
@@ -142,12 +151,25 @@ can own a module without naming it in the title.
 |---|---|---|
 | `tiller_markdown/file_events.rs` | ✗ wrong | `F-CORE-FILE-06` owns it, PLATFORM note names inotify |
 | `tiller_usage/ollama.rs` | ✗ wrong | `F-CORE-USG-03` owns the parser — and its `PASSED` is correct |
+| `tiller_project/file.rs` | ✗ wrong (drop half) | `F-CORE-FILE-03` quotes the function's behaviour as its clause; `F-TERM-PTY-06` names the symbol; `F-EDIT-12` owns the drag source. Only `load_file_tree`/`FileTreeEntry` may still be unowned |
 | `tiller_agents/transcript.rs` | ✓ **right** | SESSION-02 names `session_sources`, not this pair |
 
 **The one that held is the one that was argued.** The `transcript.rs` entry did not assert "no row";
-it named SESSION-02's actual wording and showed the symbol it points at is a different one. The two
-that failed were labels. That is a usable rule for this document: *a "no row" claim is only as good
-as the clause text quoted next to it.*
+it named SESSION-02's actual wording and showed the symbol it points at is a different one. The
+three that failed were labels. That is a usable rule for this document: *a "no row" claim is only as
+good as the clause text quoted next to it.*
+
+The failure mode is specific and worth naming, because it is not carelessness: **the check was run
+against row titles and evidence, where these modules are invisible, instead of against the frozen
+clause text, where three of them are quoted almost verbatim.** `F-CORE-FILE-03`'s clause *is* a
+prose description of `terminal_file_drop`; nothing in the row's title or its ledger evidence
+contains the symbol. Searching the summary of a thing for the thing itself returns nothing, reliably
+and convincingly.
+
+Not corrected, and correct as it stands: `F-SET-09` at row 51. The census calls
+`agent_skill_install_command` "already built" and the ledger says `FAILED — defective`; those agree
+— built, tested, and wired to a button whose handler is `|_, _, _| {}`. A cross-check that matches
+on "FAILED" flags this pairing as a contradiction when it is the system working.
 
 ### Why this is worth correcting rather than shrugging at
 
