@@ -2363,3 +2363,34 @@ is per-agent worktrees, which is a change to the user's setup and not mine to ma
 then, **a red gate needs its cause attributed before it is reported**: "the gate is red" and "the
 gate is red because of my change" are different claims, and only the second is actionable by the
 agent making it.
+
+## A dead half hiding behind a live half — orchestrator, 2026-08-14 10:40
+
+`F-CHAT-14` was `PASSED` since pass 14. Its clause is a conjunction — *toggle Follow Edited
+Files on/off, **then** choose New Conversation and confirm the composer/transcript resets*. One
+conjunct is real and one is a label that changes its own text.
+
+`following_edited_files` (`chat.rs:532`) has exactly six references in the workspace: the
+declaration, the `false` init, its own menu label, its own toggle, and two test assertions that
+the bool flipped. Nothing reads it to act. The watcher that would do the following —
+`FileSystemEventMonitor` — has **zero** references in `tiller/src` or `tiller_ui/src`. `fable`
+had already flagged that module in `DEAD-MODULES.md` and written *"no row owns the seam"*. A row
+did own it; the row said `PASSED`.
+
+**Why this shape is worse than an ordinary dead control.** `new_conversation` is fully
+implemented — it clears entries, splices the list state, rebuilds the composer, resets streaming
+and calls `start_connection`. A critic driving `F-CHAT-14` opens the menu, clicks New
+Conversation, watches the transcript reset, and has just seen the row work. The live half does
+not merely fail to reveal the dead half; **it supplies positive evidence that re-confirms the
+row**. Every other dead control found tonight was found by driving it. This one survives a drive.
+
+The general rule, and it is cheap: **when a clause contains "and" or "then", verify per conjunct
+and record per conjunct.** A single verdict over a conjunction takes its colour from whichever
+half the critic touched last. Where the halves differ, the row is `FAILED — defective` and the
+evidence must say which half is which — otherwise the next pass re-drives the working half and
+promotes it again.
+
+Corollary for the drive budget: this verdict was settled by grep and **does not depend on the
+pending drive**. `new_conversation` may work live or not; the follow half is dead either way. A
+disproof that no observation can overturn should be taken before the drive, not after it — it is
+the only kind of finding that makes a critic's live time cheaper instead of more expensive.

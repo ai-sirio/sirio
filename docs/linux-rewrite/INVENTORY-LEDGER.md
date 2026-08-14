@@ -160,7 +160,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-CHAT-11` | PASSED | drawn `attach_control_accepts_one_image_and_rejects_the_rest` green (tiller_ui suite, pass 14) | pass 14 |
 | `F-CHAT-12` | PASSED | chip × removal exercised by the drawn attach test's removal half, green (tiller_ui suite, pass 14) | pass 14 |
 | `F-CHAT-13` | NOT EXERCISED | instrument-unreachable for this critic (pass 17): xdotool cannot synthesize an XDND drag (no source window to negotiate the protocol), and the alternative "+" attach control opens the Wayland portal picker, which is invisible to X captures (ENVIRONMENT.md) — a human CAN drop a file, so this is not UNREACHABLE, it is unexercisable by the current harness. Needs either a real hand or an XDND-capable driver | pass 17 |
-| `F-CHAT-14` | PASSED | drawn `overflow_menu_toggles_follow_and_resets_to_a_new_conversation` green (tiller_ui suite, pass 14) | pass 14 |
+| `F-CHAT-14` | FAILED — defective | conjunctive clause, one half live and one half dead; the dead half is settled without a drive. **Follow Edited Files does nothing.** `following_edited_files` (chat.rs:532) has exactly six references in the workspace: declaration, init `false` (:624), its own menu label (:3363), its own toggle (:3401), and two test assertions (:6064/:6073) that the bool flipped. Nothing reads it to act. The watcher that would implement following — `FileSystemEventMonitor` (`tiller_markdown/file_events.rs`, flagged by fable in DEAD-MODULES.md) — has **0** references in `tiller/src` or `tiller_ui/src`; its only mentions are its own `mod` and `pub use` (`tiller_markdown/src/lib.rs:34,41`). The control and its engine are each other's missing half. The `FollowMode::Tail` calls at :581/:634/:637-638 are transcript autoscroll (that is `F-CHAT-20`), a different concept. **New Conversation is real** — `new_conversation` clears entries, splices `list_state`, rebuilds the `Composer`, resets popups/streaming/selection and calls `start_connection`; its live behaviour is still owed and rides with P92 Tier 2, but no drive outcome can revive the follow half, so this verdict does not depend on it. The pass-14 test asserts only that the bool changed, which is the whole implementation — mechanism (c), a test that pins the stub in place | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-CHAT-15` | FAILED — defective | the pill DISPLAYS truthfully through every state — `Opus Plan Mode` pre-session, `● Ask ⌄` post-completion, mode/model/effort all correct (pass 17 frames p17-ah3/aj7) — but the chooser NEVER opens: clicks on the pill at idle and at offline, waits of 2s and 4s (menus elsewhere in this app paint ≤2.5s), zero dropdown (p17-am2/an4-modemenu-long/aj7). The clause's action — "choose each available mode" — is impossible; the pill is display-only in practice | pass 17 |
 | `F-CHAT-16` | FAILED — absent | pass 12: no search input, no no-match state, no "Recommended" string in chat.rs/composer.rs (grep, zero hits); drawn `model_picker_selects_an_agent_advertised_model_and_escape_dismisses` (chat.rs:3743) green — proves select+escape only | pass 12 |
 | `F-CHAT-17` | PASSED | drawn `model_picker_offers_effort_levels_and_updates_the_selection` green (tiller_ui suite, pass 14) | pass 14 |
@@ -493,7 +493,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-GIT-ACT-02` | PASSED | pass 11: stage_refuses_a_conflicted_path_without_changing_git + stage_all_refuses_every_conflicted_path_before_mutation green (worktree unchanged verified); stale+duplicate tested; empty-selection branch code-verified | pass 11 |
 | `F-GIT-DIFF-01` | PASSED | tracked/untracked/binary/added/deleted/renamed/no-HEAD hunks correct | pass 5 |
 | `F-GIT-DIFF-02` | PASSED | tracked/untracked/binary/added/deleted/renamed/no-HEAD hunks correct | pass 5 |
-| `F-GIT-DIFF-03` | PASSED | pass 12: `side_by_side_preserves_hunks_pairs_runs_and_drops_metadata` + `side_by_side_handles_real_rename_binary_and_large_context` green (p41_git_behaviors.rs:268, :307). **The pass-12 "zero app callers" is now stale and is removed**: the diff API is among the most-used in the app — `DiffOrigin` 13 refs, `stats` 12, `DiffStat` 7, `FileDiff` 6, `Hunk`/`DiffLine` 5 each — and the Changes panel renders diffs live. Verdict unchanged; the note was the thing that was wrong | orchestrator audit, grep evidence, 2026-08-14 |
+| `F-GIT-DIFF-03` | UNREACHABLE | **corrects my own 08:00 ruling, which was wrong.** I kept this PASSED after checking `DiffOrigin`/`stats`/`FileDiff` and finding them heavily used — but those live in `diff.rs`, and this row's evidence cites `side_by_side.rs`. Checked the crate instead of the row's own artefact. Re-swept per-symbol: **all six `side_by_side` exports have 0 app references** (`DiffSideBySideLine`, `DiffSideBySideRow`, `GitDiffSideBySide`, `GitDiffSideBySideLine`, `GitDiffSideBySideRow`, `side_by_side_rows`, `lib.rs:63-66`) and nothing outside `tiller_git` names the module at all. The clause requires the user to "compare left/right rows"; `changes.rs:1` states it renders **unified** diffs and holds no side-by-side path. So the model is complete, correct and tested against a real repo, and no surface displays it. `DEAD-MODULES.md` (FABLE-06, pass 13) reached this first — "F-GIT-DIFF-03's 'the display works' is true of changes.rs, not of this module" — and went unapplied for a day | orchestrator audit, grep evidence, 2026-08-14 |
 | `F-GIT-DIFF-04` | PASSED | untracked cap is 500,000 bytes, matching the Swift reference exactly (data.count <= 500_000 in GitDiffStats.swift); over-cap files fall back to the diff count (150,000-line file reports its real count, test green); binary -> is_binary | pass 11 |
 | `F-GIT-PLAT-01` | PASSED | git via PATH; whole flow on Linux; process-group kill on timeout | pass 5 |
 
@@ -567,11 +567,11 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 
 | verdict | count |
 |---|---|
-| PASSED | **196** |
+| PASSED | **194** |
 | half-proven | **24** |
 | FAILED — absent | **88** |
-| FAILED — defective | **27** |
-| UNREACHABLE | **20** |
+| FAILED — defective | **28** |
+| UNREACHABLE | **21** |
 | N/A — platform | **12** |
 | NOT EXERCISED | **21** |
 | NOT EXERCISED — blocked on display | **0** |
