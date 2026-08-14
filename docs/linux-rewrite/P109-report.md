@@ -573,3 +573,176 @@ underlying worktree directory on disk: the Files panel, still pointed at
 the now-gone `/home/enzopalmisano/Sonnet P109 Test Display-feature-test`,
 switched to `Files unavailable: No such file or directory (os error 2)`
 with a `Retry` button (visible in `shots/122` and `shots/123`).
+
+## F-TAB rows
+
+### F-TAB-01
+
+Owed gesture per row prose: "the clause's document tab (file open is a
+picker/Files-panel click) and the modify-a-document dirty route (typing)."
+
+Drove the Files-panel click route. After re-selecting `master` (the prior
+worktree removal had left the Files panel pointed at the deleted
+`feature-test` path, showing the same `Files unavailable` error noted
+above; clicking `master` at `150,210` restored it to
+`/home/enzopalmisano/sonnet-p109-test`), expanded `.remember` in the Files
+panel (click on the row at `1330,141`, `shots/135-tab01-remember-retry.png`)
+to reveal children `logs`, `tmp`, `.gitignore`.
+
+Clicking a child row inside the expanded folder — tried three times with
+full isolated single clicks (`click()`, one per tool call, no batching):
+`.gitignore` at `1345,246` (`shots/136`, then again isolated at
+`shots/142-tab01-gitignore-isolated.png`) and the `logs` subfolder at
+`1330,176` (`shots/138-tab01-logs-clicked.png`) — every time collapsed
+`.remember` back to closed instead of acting on the child: no document tab
+opened in the tab strip (still only `Chat`/`Terminal`/`Claude Code`), and
+`logs` did not expand into its own children. Re-expanding `.remember` and
+retrying reproduced the same collapse each time, with isolated clicks (full
+round-trip settle between each) ruling out the rapid-input-coalescing
+explanation documented earlier in this report — this reproduced cleanly on
+single, separately-dispatched clicks.
+
+**Finding: the Files panel's expanded-folder child rows are not
+individually clickable on this lane — any click on a child (file or
+subfolder) collapses the parent folder instead of opening/expanding the
+child.** This blocks the owed gesture's document-tab route entirely: no
+document tab could be opened via Files-panel click, so neither the
+document-kind tab icon nor the modify-a-document dirty route (typing) was
+reachable — both conjuncts are unexercised as a direct consequence of this
+bug, not skipped.
+
+### F-TAB-11
+
+Owed gesture (close-out batch item + row prose, consistent): "nothing
+exercisable — both the clause's 'resize until ineligible' and 'sole tab'
+trials dead-end at a menu that has no disabled-reason surface." The row
+prose adds that on the original census lane the right-click itself was
+input-gated; on this `DISPLAY=:1` lane it is not, so the right-click was
+driven directly rather than assumed unreachable.
+
+Drove the sole-tab trial: switched to the `Terminal` tab (only pane, no
+splits present) and right-clicked the terminal body.
+
+- Right-click on empty terminal area away from the prompt (`700,400` and
+  `700,500`, `shots/145-tab11-rclick-soletab.png`,
+  `shots/147-tab11-rclick-empty-area.png`) opened no menu at all.
+- Right-click near the shell-prompt line (`600,150`) opened a small context
+  menu whose only visible entry, verbatim, is **`Copy`** —
+  `shots/146-tab11-rclick-retry.png`, reproduced again identically at
+  `shots/148-tab11-rclick-confirm.png`. No `Split Left`/`Split Right`/
+  `Split Above`/`Split Down` items, no disabled/greyed entries, no reason
+  text of any kind.
+
+This confirms the row's conclusion, and adds a detail beyond it: in the
+sole-tab state the terminal's right-click menu doesn't merely omit a
+disabled-reason label on a split item — it omits the split items
+themselves, showing only a plain-text `Copy` entry. "Resize until
+ineligible" was not separately driven — with a single pane and no splitter
+present, there is nothing on screen to resize.
+
+Side note: the F-TAB-11 `Copy` menu from `600,150` remained open and did
+not dismiss on `Escape` or on an outside click at `700,700` (matching the
+undismissable-popover pattern already on record for the F-SID-11 worktree
+menu and the F-CHAT-16 Effort selector). It was not chased further; it
+closed on its own as a side effect of the F-TAB-18 drag below.
+
+### F-TAB-18
+
+Owed gesture: "drag a tab to a new strip position and drop" (close-out
+batch, matching row prose verbatim).
+
+Starting order was `Chat`, `Terminal`, `Claude Code` (the `Claude Code`
+tab present in this worktree from earlier in the session — see prior
+sections). Dragged the `Claude Code` tab from `745,60` to `405,60` (before
+`Chat`) using the lane's real press-move-release `drag()` helper, 12
+intermediate move steps.
+
+Result — `shots/151-tab18-after-drag.png`: the strip re-ordered to `Chat`,
+**`Claude Code`**, `Terminal`. The sidebar's per-worktree tab list under
+`master` updated to the same new order. `Terminal` (the tab active before
+the drag) remained the active tab, now in the third slot. The drag also
+had the side effect of dismissing the stray `Copy` menu noted under
+F-TAB-11.
+
+### F-TAB-24
+
+Owed gesture: "begin a tab drag, press Escape before dropping" (close-out
+batch, matching row prose verbatim: "observe the strip return to its
+original order (expected to fail per the re-verified absence [of a cancel
+handler] — but the trial is what converts it)").
+
+Starting order (post F-TAB-18): `Chat`, `Claude Code`, `Terminal`,
+`Terminal` active. Used the lane's `drag_escape()` helper — mousedown on
+`Terminal` at `710,60`, move to `420,60` (over the `Chat`/`Claude Code`
+boundary), press `Escape`, then mouseup.
+
+Result — `shots/152-tab24-after-drag-escape.png`: the strip order is
+unchanged, still `Chat`, `Claude Code`, `Terminal`, `Terminal` still
+active. No reorder occurred. This is consistent with the row's own
+prediction (no drag-cancel handler exists in the source per the
+re-verified `grep`), though from the screen alone it cannot be
+distinguished whether `Escape` actively cancelled the drag or whether the
+drop simply never committed once `Escape` fired mid-drag — the observation
+is that the order held, not which code path produced that.
+
+### F-TAB-23
+
+Owed gesture: "right-click a terminal pane, click each of the four Split
+items" (row prose).
+
+Right-clicked the (sole) `Terminal` pane at several distinct locations,
+each isolated (single `rclick()`, full round-trip settle before the next
+action):
+
+- On the shell-prompt text (`600,150`): opened a small menu whose only
+  entry, verbatim, is **`Copy`** — `shots/145-tab11-rclick-soletab.png`,
+  reproduced at `shots/146`/`shots/148`.
+- On the terminal's header pill (`448,88`): opened a larger menu, verbatim
+  top to bottom **`Copy`**, **`Paste`**, **`Copy Context`** —
+  `shots/154-tab23-rclick-pill.png`. This menu also proved undismissable
+  by outside-click (`700,700`) and by clicking its own `Copy Context` item
+  (`shots/155`, `shots/156` — no visible change either time); it only
+  closed as a side effect of switching tabs away and back.
+- On empty terminal body away from any text (`700,400`/`700,500`, twice,
+  isolated): opened **no menu at all** —
+  `shots/145-tab11-rclick-soletab.png` (upper region), `shots/147`,
+  `shots/161-tab23-rclick-empty-final.png`.
+
+**No right-click at any tried location produced `Split Left`, `Split
+Right`, `Split Above`, or `Split Down`.** Every menu that did open was a
+plain clipboard menu (`Copy` alone, or `Copy`/`Paste`/`Copy Context`)
+scoped to text/terminal content, not a pane-level menu. None of the four
+Split items was reachable this way, so none could be clicked — the owed
+gesture's four-item trial did not run because the menu it depends on did
+not appear anywhere it was tried.
+
+### F-TAB-28
+
+Owed gesture: "press ctrl-w on a clean active tab (expect close), then on
+a dirty one (expect the confirm; Cancel keeps the tab)" (close-out batch,
+matching row prose verbatim).
+
+Drove the clean-tab half first: made `Chat` (no messages sent, no dirty
+indicator) the active tab via the sidebar row (the tab-strip click on
+`Chat` at `440,60` intermittently failed to switch — reproduced twice,
+`shots/162`/`shots/163` — the sidebar route at `150,258` did switch,
+`shots/164-tab28-sidebar-chat-click.png`), then pressed `ctrl-w`.
+
+- First press: no change — `Chat` remained open and active
+  (`shots/165-tab28-ctrlw-chat.png`).
+- Repeated, isolated: no change again (`shots/166-tab28-ctrlw-retry.png`).
+- Repeated a third time after explicitly clicking the tab header first (to
+  rule out focus sitting in the empty `Message…` composer swallowing the
+  chord): still no change (`shots/167-tab28-ctrlw-tabfocus.png`).
+
+Drove the dirty-tab half: switched to `Terminal` (live PTY, carries
+`tab_is_dirty` per the F-TAB-01 census) and pressed `ctrl-w`.
+
+- No confirm dialog appeared, and the tab did not close
+  (`shots/169-tab28-ctrlw-terminal.png`) — byte-for-byte the same screen
+  as before the keypress.
+
+**Finding: `ctrl-w` produced no observable effect on either tab, clean or
+dirty, on this lane** — no close on the clean tab, no confirm dialog on
+the dirty one. The owed gesture's two-part trial (close on clean, confirm
+on dirty) could not be completed because the first step never fired.
