@@ -24,9 +24,12 @@ one cannot work — it is verified working, with screenshots in `reference/linux
 | ✅ **Synthetic left-click, text and named-key input** | `click`, `move`, `type` and `key` in `wayland-drive.sh` use persistent virtual devices created **before** Tiller connects — see trap 3 and P112. Pointer drags, right-click, modifiers/chords and IME/non-ASCII text are not yet exercised. |
 | ❌ **No webview content** | the embedded browser needs an X11 window handle and gets a Wayland one; its chrome renders, the page does not. Every `F-BRW` row belongs on `DISPLAY=:1` |
 
-**A row whose `VERIFY` line names a click, a right-click, a drag or typed text cannot be closed
-here.** Use the drive lock for those. A screenshot that merely *contains* a control is not proof the
-control works — that is the same mistake that produced this project's false `PASSED`s.
+**A row whose `VERIFY` line names an absolute move, left-click, ASCII typed text, or named key can
+be closed here** when `move`/`click`/`type`/`key` drives that exact gesture and a forced-repaint
+capture shows its result. Right-click, button-held drag, modifier chords (including `Shift+Tab`),
+non-ASCII text, and IME input still require `DISPLAY=:1` until separately proven. A screenshot that
+merely *contains* a control is not proof the control works — that is the same mistake that produced
+this project's false `PASSED`s.
 
 ## Driving without a pointer — what this lane can actually close
 
