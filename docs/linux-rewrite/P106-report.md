@@ -347,3 +347,120 @@ The same run passed
 `["w1"]`. Re-running `rg 'WorktreeMountPolicy::ids_to_evict' rust/crates` found only the
 integration test, with no production mount/eviction caller. No cap-driven live mount observation
 or capture.
+
+### Rows 11–17
+
+### F-CORE-DOM-03
+
+The project/worktree control route was live, with `current-workspace --json` selecting
+`linux/gpui-waku`, but no project-creation/default-location control call was available in the
+socket API. The built `default_project_base` function was re-read: it selects
+`TILLER_PROJECTS_DIR`, then `$XDG_DATA_HOME/Tiller/projects`, then `$HOME/Tiller/projects`, with a
+`Tiller/projects` fallback when HOME is absent. Re-running
+`rg 'default_project_base' rust/crates` found only the export and its definition; the production
+project-creation path does not call it. No proposed default location was observed in the running
+app and no capture was available. The environment/default policy and the missing creation-path
+consumer are recorded separately here.
+
+### F-CORE-WSP-04
+
+The pure layout package was exercised with:
+
+```text
+cargo test -p tiller_project
+```
+
+The run reported 46 library, 6 discovery-integration, and 3 naming-throttle tests passed. The
+layout tests exercised structural/nonstructural classification, including Insert, divider-fraction,
+and Rename examples. The live control capability list contains no workspace-layout command; the
+`panel split` calls below exercise the terminal pane tree, not `tiller_project::LayoutCommand`.
+Re-running `rg 'classify_layout_command' rust/crates/tiller/src rust/crates/tiller_ui/src` found no
+production caller (only the project export, definition, and its own tests). No UI/control exercise
+of insert, move, close, activate, view-state, divider, or rename commands was reached and no
+capture was available.
+
+### F-CORE-WSP-08
+
+The `tiller_project` run exercised layout serialization and validation, but no live control method
+can change editor caret/selection/scroll/folds, chat draft/attachments/transcript/follows-tail,
+or terminal viewport state. `WorkspaceTabViewState` still declares all of those fields and is
+embedded in `WorkspaceTab`; the rechecked production session path instead persists
+`SessionTabState`/`TabStateRecord` and scrollback. `rg 'WorkspaceTabViewState'` found the model,
+layout command, export, and test fixture, but no session-store consumer. No close/reopen restore
+of these fields was observed and no capture was available.
+
+### F-CORE-FILE-08
+
+The production Files row calls `right_panel.rs::file_glyph`. Re-reading the live implementation
+showed directory → `FolderFill`; shell files and `.bash`/`.zsh`/`.profile` → `SquareTerminal`;
+`.git*`, `gitignore`, `gitattributes`, and `gitmodules` → `GitBranch`; `.env*`, `.editorconfig`,
+`.gitconfig`, and `.npmrc` → `Settings`; all other files → `File`. The representative mapping
+test `file_glyph_resolves_known_kinds_from_the_embedded_set` was present, but the narrow
+`tiller_ui` test run could not compile because of the unrelated `chat.rs` `dismissed` field errors
+recorded under F-USE-03.
+
+No live Files-tree capture was obtained. The remaining clause elements were not reached: exact
+filename/extension coverage beyond this small hardcoded set, named directory icons, selected
+theme/resource mapping, and SF fallback resolution. `file_glyph` is production-called, but the
+full theme/resource behavior was not observed.
+
+### F-CORE-SET-01
+
+The persisted settings half was exercised with:
+
+```text
+cargo test -p tiller_persistence --test persistence_integration settings -- --nocapture
+```
+
+All four filtered tests passed: defaults for unwritten settings, Linux settings surviving a DB
+relaunch with clamps, the project/worktree/settings round trip, and out-of-range/unparseable
+fallbacks. The `tiller_project` suite also exercised `SettingsPolicy` clamping and its
+`TILLER_SOCKET_ENABLE` override. The private app Settings response returned live values including
+`resumeAgentSessions:"true"`, `autoNaming:"false"`, `limitMountedWorktrees:"false"`,
+`mountedWorktrees:"6"`, `refreshInterval:"5"`, and `controlSocketEnabled:"true"`.
+
+The missing part was rechecked at the conversion seam: `SettingsSnapshot`/`AppSettings` carry the
+persisted contract fields, but the UI's `translucency` state and sidebar/right-panel width policy
+fields do not appear in the snapshot or persistence model. The control socket has no settings
+mutation command, so no change/relaunch readback for those fields was possible. No capture.
+
+### F-AGENT-API-01
+
+The adapter package was exercised with:
+
+```text
+cargo test -p tiller_agents
+```
+
+The run reported 11 library, 22 adapter, 1 home-isolation, 5 session-row, and 8 session-source
+tests passed. `catalog_has_the_five_adapters_in_order` observed IDs `claude`, `codex`, `opencode`,
+`pi`, `omp`, display names `Claude Code`, `Codex`, `OpenCode`, `Pi`, `Oh-My-Pi`, and hook flags
+`[true, true, false, false, true]`; the adapter tests also exercised prepare, launch, resume,
+availability, and worktree-local hook behavior.
+
+The missing half was rechecked in `AgentAdapter`: it exposes identity, hook flag, prepare,
+command, resume, and ACP-program methods, but no optional noninteractive summarizer method or
+command. `rg 'summar|summarize' rust/crates/tiller_agents` found no adapter summarizer API. No
+agent picker/launch gesture was sent and no capture was available.
+
+### F-TERM-SPLIT-01
+
+Drove the live pane split route:
+
+```text
+panel split right --from pane-491706-1 --cmd 'printf P106_SPLIT_RIGHT'
+panel split down --from pane-491706-1 --cmd 'printf P106_SPLIT_DOWN'
+panel list --json
+```
+
+The calls returned `pane-491706-2` and `pane-491706-3`. The final list contained the original
+`pane-491706-1`, a `printf (right)` pane, and a `printf (down)` pane, with the down pane active;
+the restored Chat and Terminal panes remained present. This exercised real PTY creation and
+right/down pane-tree mutation through the control socket.
+
+The current split geometry needles were also re-read: `SEAM_WIDTH` is `6.0` and
+`MIN_SPLIT_PANE_SIZE` is `160.0`, with corresponding app tests. `tiller_terminal`'s lifecycle
+tests passed all 3 cache-preservation tests. The missing integration half remains visible in
+`rg 'TerminalPaneCache|move_within_worktree' rust/crates/tiller/src rust/crates/tiller_ui/src`:
+the cache types have no production consumer in the app, only lifecycle tests. No resize-to-limit,
+close/prune/focus-restore visual capture was obtained.
