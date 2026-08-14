@@ -95,3 +95,33 @@ half already established by triage from the drawn test `code_block_copy_writes_c
 (0ecbd525) — not disputed here.
 
 **Captures:** none new; see `F-CHAT-29`'s captures for the shared compositor-baseline finding.
+
+## F-CHAT-32 — edit summary open/revert
+
+**Drove:** real ACP turn asking the connected Claude Code CLI to write a throwaway probe file
+(`docs/scratch/w04chat32_probe.md`, one line `PROBE_LINE_32`) — a genuine file-editing tool call,
+which the row's clause needs to reach an edit summary at all. Polled `surface.chat.read` to
+completion.
+
+**Observed:** the turn completed with a real `Write` tool call
+(`{"kind":"tool","status":"Completed","text":"Write docs/scratch/w04chat32_probe.md"}`), and —
+checked directly on disk, not inferred from the transcript text — the file genuinely existed
+at that path with exactly the requested content (`cat` confirms `PROBE_LINE_32`;
+`git status --porcelain` showed it `??` untracked). This is a real ACP write, not a chat-only
+claim, and the diff-carrying tool call is exactly what `render_edit_summary` (chat.rs:3442)
+needs to attach an edit-summary card to. Removed the probe file afterward with `git clean -fd
+docs/scratch` (not an app edit — deleting a test artifact this drive created).
+
+**Claim:** could-not-reach for the Open/Revert click gesture, for the same structural reason as
+`F-CHAT-29`/`F-CHAT-30`: `render_edit_summary`'s card is a child of the same list-virtualized,
+content-dependent-height transcript, and `control_entry_row` exposes no bounds for it. Unlike
+the copy rows, this row has no clipboard/paste barrier — Open/Revert are both plain left-clicks,
+so a lane with real visual feedback (`DISPLAY=:1`) could plausibly close this by seeing the card
+and clicking it precisely, without needing right-click. What is exercised here: the trigger
+condition (a real diff-carrying tool call landing in the transcript) is live-confirmed with a
+side effect only this drive could have produced. Backend Open/Revert/error-state mechanism
+already established by triage from the drawn test
+`edit_summary_opens_and_reports_revert_success_or_error` (c23da365) — not disputed here.
+
+**Captures:** `reference/linux-progress/wavea-W04-chat/f32/01-baseline.png`,
+`reference/linux-progress/wavea-W04-chat/f32/02-02-after-send.png`
