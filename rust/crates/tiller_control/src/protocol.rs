@@ -396,6 +396,66 @@ pub mod request {
         request("surface.settings.read", BTreeMap::new())
     }
 
+    /// Opens the non-drawing chat surface for a worktree.
+    pub fn chat_open(worktree: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if let Some(worktree) = worktree {
+            params.insert("worktree".to_string(), worktree.to_string());
+        }
+        request("surface.chat.open", params)
+    }
+
+    /// Submits text to a chat surface without waiting for the final response.
+    pub fn chat_send(surface_id: &str, text: &str) -> ControlRequest {
+        request(
+            "surface.chat.send",
+            BTreeMap::from([
+                ("surfaceId".to_string(), surface_id.to_string()),
+                ("text".to_string(), text.to_string()),
+            ]),
+        )
+    }
+
+    /// Changes the draft or queued text on a chat surface.
+    pub fn chat_compose(surface_id: &str, text: &str) -> ControlRequest {
+        request(
+            "surface.chat.compose",
+            BTreeMap::from([
+                ("surfaceId".to_string(), surface_id.to_string()),
+                ("text".to_string(), text.to_string()),
+            ]),
+        )
+    }
+
+    /// Resolves a permission card exposed by a live chat turn.
+    pub fn chat_permission(surface_id: &str, request_id: u64, option_id: &str) -> ControlRequest {
+        request(
+            "surface.chat.permission",
+            BTreeMap::from([
+                ("surfaceId".to_string(), surface_id.to_string()),
+                ("requestId".to_string(), request_id.to_string()),
+                ("optionId".to_string(), option_id.to_string()),
+            ]),
+        )
+    }
+
+    /// Stops the in-flight turn, leaving readback to distinguish `stopped`
+    /// from a normal `completed` outcome.
+    pub fn chat_stop(surface_id: &str) -> ControlRequest {
+        request(
+            "surface.chat.stop",
+            BTreeMap::from([("surfaceId".to_string(), surface_id.to_string())]),
+        )
+    }
+
+    /// Reads the complete observable state of a chat surface.
+    pub fn chat_read(surface_id: &str) -> ControlRequest {
+        request(
+            "surface.chat.read",
+            BTreeMap::from([("surfaceId".to_string(), surface_id.to_string())]),
+        )
+    }
+
     pub fn system_ping() -> ControlRequest {
         request("system.ping", BTreeMap::new())
     }
@@ -421,6 +481,17 @@ pub mod request {
 
     pub fn workspace_list() -> ControlRequest {
         request("workspace.list", BTreeMap::new())
+    }
+
+    pub fn project_list() -> ControlRequest {
+        request("project.list", BTreeMap::new())
+    }
+
+    pub fn project_add(path: &str) -> ControlRequest {
+        request(
+            "project.add",
+            BTreeMap::from([(String::from("path"), path.to_string())]),
+        )
     }
 
     pub fn workspace_create(project: &str, branch: Option<&str>) -> ControlRequest {
@@ -637,5 +708,56 @@ mod tests {
         let clear = request::worktree_set("/tmp/wt", None, None);
         assert_eq!(clear.method, "worktree.set");
         assert_eq!(clear.params.len(), 1);
+    }
+
+    #[test]
+    fn project_request_builders_use_resource_method_names() {
+        assert_eq!(request::project_list().method, "project.list");
+
+        let add = request::project_add("/tmp/tiller-fixture");
+        assert_eq!(add.method, "project.add");
+        assert_eq!(
+            add.params.get("path").map(String::as_str),
+            Some("/tmp/tiller-fixture")
+        );
+    }
+
+    #[test]
+    fn chat_request_builders_use_observable_surface_methods() {
+        let open = request::chat_open(Some("wt-1"));
+        assert_eq!(open.method, "surface.chat.open");
+        assert_eq!(
+            open.params.get("worktree").map(String::as_str),
+            Some("wt-1")
+        );
+
+        let send = request::chat_send("chat-1", "hello");
+        assert_eq!(send.method, "surface.chat.send");
+        assert_eq!(
+            send.params.get("surfaceId").map(String::as_str),
+            Some("chat-1")
+        );
+        assert_eq!(send.params.get("text").map(String::as_str), Some("hello"));
+
+        let compose = request::chat_compose("chat-1", "draft");
+        assert_eq!(compose.method, "surface.chat.compose");
+        assert_eq!(
+            compose.params.get("surfaceId").map(String::as_str),
+            Some("chat-1")
+        );
+
+        let permission = request::chat_permission("chat-1", 7, "deny");
+        assert_eq!(permission.method, "surface.chat.permission");
+        assert_eq!(
+            permission.params.get("requestId").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            permission.params.get("optionId").map(String::as_str),
+            Some("deny")
+        );
+
+        assert_eq!(request::chat_stop("chat-1").method, "surface.chat.stop");
+        assert_eq!(request::chat_read("chat-1").method, "surface.chat.read");
     }
 }

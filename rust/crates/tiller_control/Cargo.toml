@@ -20,6 +20,11 @@ serde_json = "1"
 # One libc call (getuid) for the socket ownership sanity check.
 libc = "0.2"
 
+[dev-dependencies]
+anyhow = "1"
+tiller_acp = { path = "../tiller_acp" }
+tiller_persistence = { path = "../tiller_persistence" }
+
 [[bin]]
 name = "tillerctl"
 path = "src/bin/tillerctl.rs"

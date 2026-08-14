@@ -12,11 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tiller_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot};
 use tiller_control::protocol::rows;
 use tiller_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, protocol::request, round_trip,
 };
+use tiller_persistence::{AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
 struct TempDir(PathBuf);
 impl TempDir {
@@ -77,6 +79,8 @@ impl ControlHandler for TestHandler {
                     "system.capabilities",
                     "system.identify",
                     "system.quit",
+                    "project.list",
+                    "project.add",
                     "workspace.list",
                     "workspace.create",
                     "workspace.select",
@@ -133,6 +137,27 @@ impl ControlHandler for TestHandler {
                 result.insert("workspaces".to_string(), rows::encode(&[row]));
                 ControlResponse::success(&request.id, result)
             }
+            "project.list" => {
+                let row = BTreeMap::from([
+                    ("id".to_string(), "project-1".to_string()),
+                    ("name".to_string(), "tiller".to_string()),
+                    ("path".to_string(), "/Users/me/tiller".to_string()),
+                    ("isGit".to_string(), "true".to_string()),
+                    ("worktreeCount".to_string(), "1".to_string()),
+                    ("empty".to_string(), "false".to_string()),
+                ]);
+                ControlResponse::success(
+                    &request.id,
+                    BTreeMap::from([("projects".to_string(), rows::encode(&[row]))]),
+                )
+            }
+            "project.add" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([
+                    ("added".to_string(), "true".to_string()),
+                    ("projectId".to_string(), "project-1".to_string()),
+                ]),
+            ),
             "workspace.current" => {
                 let mut result = BTreeMap::new();
                 result.insert("id".to_string(), "wt-1".to_string());
@@ -351,6 +376,37 @@ fn oversized_request_line_is_rejected_not_buffered() {
     let response =
         round_trip(&server.socket_path, &request, Duration::from_secs(5)).expect("still serving");
     assert!(response.ok);
+}
+
+#[test]
+fn oversized_complete_request_line_is_rejected_before_dispatch() {
+    let (server, handler) = TestServer::start();
+    let padding = "x".repeat(tiller_control::server::MAX_BUFFER_BYTES);
+    let request = format!(
+        r#"{{"id":"oversized-complete","method":"system.ping","params":{{"padding":"{padding}"}}}}
+"#
+    );
+    assert!(request.len() > tiller_control::server::MAX_BUFFER_BYTES);
+
+    let mut stream = UnixStream::connect(&server.socket_path).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    stream.write_all(request.as_bytes()).expect("write request");
+
+    let mut reader = LineReader::new();
+    let response_line = reader.read_line(&mut stream);
+    let response = tiller_control::decode_response(&response_line[..response_line.len() - 1])
+        .expect("rejection response decodes");
+    assert!(!response.ok);
+    assert_eq!(response.error.as_deref(), Some("request line too large"));
+    assert!(
+        handler
+            .requests()
+            .iter()
+            .all(|request| request.id != "oversized-complete"),
+        "oversized complete lines must not reach the handler"
+    );
 }
 
 #[test]
@@ -667,6 +723,55 @@ fn tillerctl_ping_prints_pong() {
 }
 
 #[test]
+fn tillerctl_accepts_socket_before_command_as_documented() {
+    let (server, _) = TestServer::start();
+    let output = Command::new(env!("CARGO_BIN_EXE_tillerctl"))
+        .args([
+            "--socket",
+            server.socket_path.to_str().expect("socket path"),
+            "ping",
+        ])
+        .output()
+        .expect("tillerctl runs");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "pong");
+}
+
+#[test]
+fn tillerctl_rejects_ambiguous_notify_modes() {
+    let (server, handler) = TestServer::start();
+    let output = tillerctl(
+        &server.socket_path,
+        &[
+            "notify",
+            "--session",
+            "pane-1",
+            "--status",
+            "running",
+            "--title",
+            "done",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ambiguous notify modes"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        handler
+            .requests()
+            .iter()
+            .all(|request| request.method != "notification.create" && request.method != "notify"),
+        "ambiguous notify input must not reach the socket"
+    );
+}
+
+#[test]
 fn tillerctl_quit_requests_a_graceful_application_exit() {
     let (server, handler) = TestServer::start();
     let output = tillerctl(&server.socket_path, &["quit"]);
@@ -823,6 +928,32 @@ fn pane_registry_shutdown_for_only_its_worktree() {
     assert!(registry.close(&first.id).is_err());
     registry.shutdown();
     assert!(wait_for_processes_to_exit(&second_pids, deadline));
+}
+
+#[test]
+fn workspace_close_terminates_process_group_when_worktree_is_missing() {
+    let dir = TempDir::new("workspace-close-missing");
+    let pid_file = dir.path().join("pids");
+    let command = format!(
+        "( trap \"\" TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
+        pid_file.display()
+    );
+    let registry = PaneRegistry::new();
+    registry
+        .create(dir.path(), Some(&command), "workspace-close")
+        .expect("spawn workspace pane");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let pids = wait_for_pid_file(&pid_file, deadline);
+    assert!(pids.iter().all(|pid| process_exists(*pid)));
+
+    std::fs::remove_dir_all(dir.path()).expect("remove worktree before close");
+    registry
+        .shutdown_for(dir.path())
+        .expect("closing a missing worktree still terminates its panes");
+    assert!(
+        wait_for_processes_to_exit(&pids, deadline),
+        "workspace close must terminate the process group even after the directory disappears"
+    );
 }
 
 #[test]
@@ -1141,6 +1272,40 @@ fn tillerctl_capabilities_lists_methods() {
     assert!(stdout.contains("system.ping"), "got: {stdout}");
     assert!(stdout.contains("workspace.list"), "got: {stdout}");
     assert!(stdout.contains("notify"), "got: {stdout}");
+}
+
+#[test]
+fn tillerctl_project_list_prints_observable_catalog_rows() {
+    let (server, _) = TestServer::start();
+    let output = tillerctl(&server.socket_path, &["project", "list"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "project-1\ttiller\t/Users/me/tiller\ttrue\t1\tfalse"
+    );
+}
+
+#[test]
+fn tillerctl_project_add_sends_the_path_and_reports_identity() {
+    let (server, handler) = TestServer::start();
+    let output = tillerctl(
+        &server.socket_path,
+        &["project", "add", "/tmp/tiller-fixture"],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "true\tproject-1"
+    );
+    let requests = handler.requests();
+    let request = requests
+        .iter()
+        .find(|request| request.method == "project.add")
+        .expect("project.add request");
+    assert_eq!(
+        request.params.get("path").map(String::as_str),
+        Some("/tmp/tiller-fixture")
+    );
 }
 
 #[test]
@@ -1496,4 +1661,461 @@ fn wait_for_processes_to_exit(pids: &[i32], deadline: std::time::Instant) -> boo
         std::thread::sleep(Duration::from_millis(10));
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// P53 — a real socket door for the non-drawing chat adapter
+// ---------------------------------------------------------------------------
+
+const CHAT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tiller_acp/tests/fixtures/acp_fixture.py"
+);
+
+struct ChatDoorHandler {
+    session: Mutex<Option<ChatSession>>,
+    database_path: PathBuf,
+    tab_id: String,
+    worktree_id: String,
+}
+
+impl ChatDoorHandler {
+    fn new(database_path: PathBuf) -> Arc<Self> {
+        let db = AppDatabase::open(&database_path).expect("open chat door database");
+        db.save_project(&ProjectRecord::new(
+            "project-chat",
+            "fixture",
+            "/tmp/fixture",
+        ))
+        .expect("save chat project");
+        db.save_worktree(&WorktreeRecord::new(
+            "worktree-chat",
+            "project-chat",
+            "main",
+            "/tmp/fixture",
+        ))
+        .expect("save chat worktree");
+        db.save_tabs(
+            "worktree-chat",
+            &[TabRecord::new("chat-1", "worktree-chat", "Chat", "chat")],
+        )
+        .expect("save chat tab");
+
+        Arc::new(Self {
+            session: Mutex::new(None),
+            database_path,
+            tab_id: "chat-1".into(),
+            worktree_id: "worktree-chat".into(),
+        })
+    }
+
+    fn launch(&self, mode: &str) -> anyhow::Result<ChatSession> {
+        ChatSession::launch(ChatSessionConfig::new(
+            &self.tab_id,
+            &self.worktree_id,
+            AgentCommand::new("python3").args([CHAT_FIXTURE, mode]),
+            std::env::temp_dir(),
+            &self.database_path,
+        ))
+    }
+
+    fn open(&self) -> anyhow::Result<()> {
+        let mut session = self.session.lock().expect("chat session lock");
+        if session.is_none() {
+            *session = Some(self.launch("normal")?);
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> anyhow::Result<ChatSnapshot> {
+        self.session
+            .lock()
+            .expect("chat session lock")
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("chat surface is not open"))?
+            .read()
+    }
+
+    fn send(&self, text: &str) -> anyhow::Result<ChatSnapshot> {
+        {
+            let session = self.session.lock().expect("chat session lock");
+            session
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("chat surface is not open"))?
+                .send(text)?;
+        }
+        self.snapshot()
+    }
+
+    fn compose(&self, text: &str) -> anyhow::Result<ChatSnapshot> {
+        {
+            let session = self.session.lock().expect("chat session lock");
+            session
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("chat surface is not open"))?
+                .compose(text)?;
+        }
+        self.snapshot()
+    }
+
+    fn permission(&self, request_id: u64, option_id: &str) -> anyhow::Result<ChatSnapshot> {
+        {
+            let session = self.session.lock().expect("chat session lock");
+            session
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("chat surface is not open"))?
+                .respond_permission(request_id, option_id)?;
+        }
+        self.snapshot()
+    }
+
+    fn stop(&self) -> anyhow::Result<ChatSnapshot> {
+        {
+            let session = self.session.lock().expect("chat session lock");
+            session
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("chat surface is not open"))?
+                .stop()?;
+        }
+        self.snapshot()
+    }
+
+    fn relaunch_restore(&self) -> anyhow::Result<()> {
+        let mut session = self.session.lock().expect("chat session lock");
+        if let Some(mut live) = session.take() {
+            live.shutdown()?;
+        }
+        *session = Some(ChatSession::restore(
+            &self.database_path,
+            &self.tab_id,
+            &self.worktree_id,
+        )?);
+        Ok(())
+    }
+
+    fn restart_live(&self, mode: &str) -> anyhow::Result<()> {
+        let mut session = self.session.lock().expect("chat session lock");
+        if let Some(mut old) = session.take() {
+            old.shutdown()?;
+        }
+        *session = Some(self.launch(mode)?);
+        Ok(())
+    }
+}
+
+impl ControlHandler for ChatDoorHandler {
+    fn handle(&self, request: &ControlRequest) -> ControlResponse {
+        let result: anyhow::Result<ChatSnapshot> = (|| match request.method.as_str() {
+            "surface.chat.open" => self.open().and_then(|()| self.snapshot()),
+            "surface.chat.send" => {
+                let text = request
+                    .params
+                    .get("text")
+                    .ok_or_else(|| anyhow::anyhow!("surface.chat.send requires text"));
+                text.and_then(|text| self.send(text))
+            }
+            "surface.chat.compose" => {
+                let text = request
+                    .params
+                    .get("text")
+                    .ok_or_else(|| anyhow::anyhow!("surface.chat.compose requires text"));
+                text.and_then(|text| self.compose(text))
+            }
+            "surface.chat.permission" => {
+                let request_id = request
+                    .params
+                    .get("requestId")
+                    .ok_or_else(|| anyhow::anyhow!("surface.chat.permission requires requestId"))?
+                    .parse::<u64>()
+                    .map_err(|error| anyhow::anyhow!("invalid requestId: {error}"));
+                let option_id = request
+                    .params
+                    .get("optionId")
+                    .ok_or_else(|| anyhow::anyhow!("surface.chat.permission requires optionId"));
+                request_id
+                    .and_then(|request_id| option_id.map(|option_id| (request_id, option_id)))
+                    .and_then(|(request_id, option_id)| self.permission(request_id, option_id))
+            }
+            "surface.chat.stop" => self.stop(),
+            "surface.chat.read" => self.snapshot(),
+            other => Err(anyhow::anyhow!("unknown method: {other}")),
+        })();
+
+        match result {
+            Ok(snapshot) => ControlResponse::success(&request.id, snapshot_result(&snapshot)),
+            Err(error) => ControlResponse::failure(&request.id, error.to_string()),
+        }
+    }
+}
+
+fn snapshot_result(snapshot: &ChatSnapshot) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::from([
+        ("surfaceId".into(), snapshot.tab_id.clone()),
+        ("status".into(), snapshot.status.as_str().into()),
+        ("composerText".into(), snapshot.composer_text.clone()),
+        ("queuedText".into(), snapshot.queued_text.clone()),
+        (
+            "transcript".into(),
+            rows::encode(
+                &snapshot
+                    .transcript
+                    .turns
+                    .iter()
+                    .flat_map(|turn| turn.entries.iter().map(chat_entry_row))
+                    .collect::<Vec<_>>(),
+            ),
+        ),
+    ]);
+    if let Some(agent_session_id) = &snapshot.agent_session_id {
+        result.insert("agentSessionId".into(), agent_session_id.clone());
+    }
+    if let Some(error) = &snapshot.error {
+        result.insert("error".into(), error.clone());
+    }
+    result
+}
+
+fn chat_entry_row(entry: &tiller_persistence::ChatEntry) -> BTreeMap<String, String> {
+    let mut row = BTreeMap::new();
+    match entry {
+        tiller_persistence::ChatEntry::UserMessage { text } => {
+            row.insert("kind".into(), "user".into());
+            row.insert("text".into(), text.clone());
+        }
+        tiller_persistence::ChatEntry::AssistantMessage { text } => {
+            row.insert("kind".into(), "assistant".into());
+            row.insert("text".into(), text.clone());
+        }
+        tiller_persistence::ChatEntry::Thought { text } => {
+            row.insert("kind".into(), "thought".into());
+            row.insert("text".into(), text.clone());
+        }
+        tiller_persistence::ChatEntry::ToolCall { id, title, status } => {
+            row.insert("kind".into(), "tool".into());
+            row.insert("id".into(), id.clone());
+            row.insert("text".into(), title.clone());
+            row.insert("status".into(), status.clone());
+        }
+        tiller_persistence::ChatEntry::Permission {
+            request_id,
+            outcome,
+            ..
+        } => {
+            row.insert("kind".into(), "permission".into());
+            row.insert("id".into(), request_id.to_string());
+            match outcome {
+                tiller_persistence::ChatPermissionOutcome::Pending => {
+                    row.insert("status".into(), "pending".into());
+                }
+                tiller_persistence::ChatPermissionOutcome::Selected { option_id, .. } => {
+                    row.insert("status".into(), "selected".into());
+                    row.insert("optionId".into(), option_id.clone());
+                }
+                tiller_persistence::ChatPermissionOutcome::Cancelled => {
+                    row.insert("status".into(), "cancelled".into());
+                }
+                tiller_persistence::ChatPermissionOutcome::TimedOut => {
+                    row.insert("status".into(), "timed_out".into());
+                }
+                tiller_persistence::ChatPermissionOutcome::Expired => {
+                    row.insert("status".into(), "expired".into());
+                }
+            }
+        }
+        tiller_persistence::ChatEntry::Plan { entries } => {
+            row.insert("kind".into(), "plan".into());
+            row.insert(
+                "text".into(),
+                entries
+                    .iter()
+                    .map(|entry| format!("{} · {}", entry.status, entry.content))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        tiller_persistence::ChatEntry::TurnFooter { text } => {
+            row.insert("kind".into(), "turn".into());
+            row.insert("text".into(), text.clone());
+        }
+        tiller_persistence::ChatEntry::Error { message, .. } => {
+            row.insert("kind".into(), "error".into());
+            row.insert("text".into(), message.clone());
+        }
+    }
+    row
+}
+
+fn chat_read(socket_path: &Path) -> BTreeMap<String, String> {
+    let response = round_trip(
+        socket_path,
+        &request::chat_read("chat-1"),
+        Duration::from_secs(5),
+    )
+    .expect("chat read round trip");
+    assert!(response.ok, "chat read failed: {response:?}");
+    response.result.expect("chat read result")
+}
+
+fn wait_for_chat_read<F>(socket_path: &Path, mut predicate: F) -> BTreeMap<String, String>
+where
+    F: FnMut(&BTreeMap<String, String>) -> bool,
+{
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let result = chat_read(socket_path);
+        if predicate(&result) {
+            return result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "chat read did not reach the expected state: {result:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn chat_door_streams_stops_and_restores_transcript_over_a_real_socket() {
+    let dir = TempDir::new("chat-door");
+    let database_path = dir.path().join("chat.sqlite");
+    let socket_path = dir.path().join("chat.sock");
+    let handler = ChatDoorHandler::new(database_path);
+    let server = ControlServer::new(socket_path.clone(), handler.clone());
+    server.start().expect("chat door server starts");
+
+    let opened = round_trip(
+        &socket_path,
+        &request::chat_open(Some("worktree-chat")),
+        Duration::from_secs(5),
+    )
+    .expect("open chat over socket");
+    assert!(opened.ok, "chat open failed: {opened:?}");
+    assert_eq!(
+        opened
+            .result
+            .as_ref()
+            .and_then(|result| result.get("status"))
+            .map(String::as_str),
+        Some("idle")
+    );
+
+    let sent = round_trip(
+        &socket_path,
+        &request::chat_send("chat-1", "exercise the chat door"),
+        Duration::from_secs(5),
+    )
+    .expect("send chat turn over socket");
+    assert!(sent.ok, "chat send failed: {sent:?}");
+
+    let first_chunk = wait_for_chat_read(&socket_path, |result| {
+        result.get("status").map(String::as_str) == Some("streaming")
+            && rows::decode(result.get("transcript").expect("transcript")).is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("kind").map(String::as_str) == Some("assistant")
+                        && row.get("text").map(String::as_str) == Some("first ")
+                })
+            })
+    });
+    assert!(
+        rows::decode(first_chunk.get("transcript").expect("transcript"))
+            .expect("first transcript rows")
+            .iter()
+            .all(|row| row.get("kind").is_some())
+    );
+
+    let pending = wait_for_chat_read(&socket_path, |result| {
+        rows::decode(result.get("transcript").expect("transcript")).is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("kind").map(String::as_str) == Some("permission")
+                    && row.get("status").map(String::as_str) == Some("pending")
+            })
+        })
+    });
+    assert_eq!(pending.get("status").map(String::as_str), Some("streaming"));
+    assert!(
+        rows::decode(pending.get("transcript").expect("transcript"))
+            .expect("pending transcript rows")
+            .iter()
+            .any(|row| row.get("kind").map(String::as_str) == Some("tool"))
+    );
+
+    let permission = round_trip(
+        &socket_path,
+        &request::chat_permission("chat-1", 1, "deny"),
+        Duration::from_secs(5),
+    )
+    .expect("resolve permission over socket");
+    assert!(permission.ok, "chat permission failed: {permission:?}");
+
+    let completed = wait_for_chat_read(&socket_path, |result| {
+        result.get("status").map(String::as_str) == Some("completed")
+            && rows::decode(result.get("transcript").expect("transcript")).is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("kind").map(String::as_str) == Some("tool")
+                        && row.get("status").map(String::as_str) == Some("Completed")
+                }) && rows.iter().any(|row| {
+                    row.get("kind").map(String::as_str) == Some("permission")
+                        && row.get("status").map(String::as_str) == Some("selected")
+                        && row.get("optionId").map(String::as_str) == Some("deny")
+                })
+            })
+    });
+    let completed_rows = rows::decode(completed.get("transcript").expect("transcript"))
+        .expect("completed transcript rows");
+    let assistant_text = completed_rows
+        .iter()
+        .filter(|row| row.get("kind").map(String::as_str) == Some("assistant"))
+        .filter_map(|row| row.get("text"))
+        .cloned()
+        .collect::<String>();
+    assert_eq!(assistant_text, "first streamed denied");
+
+    handler
+        .relaunch_restore()
+        .expect("relaunch chat adapter from persisted transcript");
+    let restored = chat_read(&socket_path);
+    assert_eq!(
+        restored.get("status").map(String::as_str),
+        Some("completed")
+    );
+    assert_eq!(restored.get("transcript"), completed.get("transcript"));
+
+    handler
+        .restart_live("cancel")
+        .expect("restart live chat for stop proof");
+    round_trip(
+        &socket_path,
+        &request::chat_send("chat-1", "stop this turn"),
+        Duration::from_secs(5),
+    )
+    .expect("send cancellable turn over socket");
+    wait_for_chat_read(&socket_path, |result| {
+        result.get("status").map(String::as_str) == Some("streaming")
+            && rows::decode(result.get("transcript").expect("transcript")).is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row.get("kind").map(String::as_str) == Some("assistant")
+                        && row.get("text").map(String::as_str) == Some("partial")
+                })
+            })
+    });
+    let stopped_request = round_trip(
+        &socket_path,
+        &request::chat_stop("chat-1"),
+        Duration::from_secs(5),
+    )
+    .expect("stop in-flight turn over socket");
+    assert!(stopped_request.ok, "chat stop failed: {stopped_request:?}");
+    let stopped = wait_for_chat_read(&socket_path, |result| {
+        result.get("status").map(String::as_str) == Some("stopped")
+    });
+    assert!(
+        rows::decode(stopped.get("transcript").expect("transcript")).is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("kind").map(String::as_str) == Some("turn")
+                    && row.get("text").map(String::as_str) == Some("Cancelled")
+            })
+        })
+    );
+
+    server.stop();
 }

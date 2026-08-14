@@ -493,7 +493,10 @@ impl PaneRegistry {
     /// cleared by the workspace host; this method exists so a workspace close
     /// cannot leave a socket-created PTY alive behind that host transition.
     pub fn shutdown_for(&self, working_directory: impl AsRef<Path>) -> Result<(), PaneError> {
-        let working_directory = checked_directory(working_directory.as_ref())?;
+        // A close can race with worktree deletion. Cleanup must still use the
+        // registry's ownership metadata when the path is no longer on disk.
+        let requested_directory = working_directory.as_ref();
+        let canonical_directory = requested_directory.canonicalize().ok();
         let (ids, entries) = {
             let mut panes = self
                 .panes
@@ -501,7 +504,12 @@ impl PaneRegistry {
                 .map_err(|_| PaneError::Io("pane registry lock poisoned".to_string()))?;
             let ids = panes
                 .iter()
-                .filter(|(_, pane)| pane.working_directory == working_directory)
+                .filter(|(_, pane)| {
+                    pane.working_directory == requested_directory
+                        || canonical_directory
+                            .as_ref()
+                            .is_some_and(|directory| pane.working_directory == *directory)
+                })
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>();
             let entries = ids
