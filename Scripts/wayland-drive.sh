@@ -5,17 +5,22 @@
 # This is the sibling of linux-drive.sh. The difference that matters:
 #
 #     linux-drive.sh   one shared X pointer  -> a global mutex, real clicks, one driver at a time
-#     wayland-drive.sh no pointer at all     -> no lock, socket calls only, any number in parallel
+#     wayland-drive.sh virtual pointer       -> no lock, socket calls and real input, any number in parallel
 #
-# So this lane is for rows whose evidence is "the app entered this state and rendered it", and the
-# X lane is for rows whose evidence is "a person clicked this". Read WAYLAND-LANE.md before
-# recording anything from here — especially the paragraph about which half of a row you proved.
+# Pointer and keyboard devices are created BEFORE Tiller connects, then kept alive for the whole
+# drive. A transient wlrctl/wtype client can send its first event before GPUI has bound the matching
+# wl_pointer/wl_keyboard. Read WAYLAND-LANE.md before recording anything from here — especially the
+# paragraph about which half of a row you proved.
 #
 # Usage:
 #   Scripts/wayland-drive.sh <outdir> '<actions>' [settle]
 #
 # Inside <actions> you get:
 #   ctl <method> [k=v ...]   send a ControlRequest, print the JSON reply
+#   click <x> <y>            left-click absolute nested-output coordinates
+#   move <x> <y>             move to absolute nested-output coordinates
+#   type <text>              type text through wtype (click a text target first)
+#   key <name>               type a named key through wtype, e.g. key Tab
 #   shot <name>              force a repaint, capture <outdir>/NN-<name>.png, print its colour count
 #   $SOCK $WD $APP_LOG       socket path, wayland display, the app's stdout+stderr
 #
@@ -49,6 +54,16 @@ SWAYLOG="/tmp/$LABEL-sway.log"
 SOCK="/tmp/$LABEL.sock"
 APP_LOG="/tmp/$LABEL.log"
 DB="/tmp/$LABEL.sqlite"
+INPUT_DIR="/tmp/$LABEL-input"
+VP_FIFO="$INPUT_DIR/commands"
+VP_ACK="$INPUT_DIR/ack"
+VP_READY="$INPUT_DIR/ready"
+VP_LOG="$INPUT_DIR/virtual-pointer.log"
+VK_LOG="$INPUT_DIR/virtual-keyboard.log"
+VP_PID=""
+VK_PID=""
+POINTER_ENABLED=0
+POINTER_COMMAND_ID=0
 
 mkdir -p "$OUTDIR"
 [ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p tiller)" >&2; exit 2; }
@@ -63,7 +78,12 @@ kill_ours() {
   done
 }
 cleanup() {
-  [ -n "${TILLER_WL_KEEP:-}" ] && { echo "NOTE: leaving $LABEL running (SOCK=$SOCK WAYLAND_DISPLAY=$WD)"; return 0; }
+  [ -n "${TILLER_WL_KEEP:-}" ] && {
+    echo "NOTE: leaving $LABEL running (SOCK=$SOCK WAYLAND_DISPLAY=$WD VP_FIFO=$VP_FIFO)"
+    return 0
+  }
+  [ -n "${VP_PID:-}" ] && kill "$VP_PID" 2>/dev/null || true
+  [ -n "${VK_PID:-}" ] && kill "$VK_PID" 2>/dev/null || true
   kill_ours TILLER_SOCKET "$SOCK" tiller
   kill_ours SWAYSOCK "$SWAYSOCK" sway
   return 0
@@ -75,6 +95,7 @@ kill_ours SWAYSOCK "$SWAYSOCK" sway
 
 W1=1715 H1=972          # the two sizes shot() alternates between; see the repaint note below
 W2=1400 H2=900
+OUTPUT_W="$W1" OUTPUT_H="$H1"
 # Xwayland off: the app is a native Wayland client here, and Xwayland claims a global
 # /tmp/.X11-unix/XN. Two instances of this script race for the same number and the loser refuses
 # to start at all — which is fatal to the one property this lane is for, running in parallel.
@@ -108,10 +129,76 @@ for _ in $(seq 1 60); do
 done
 [ -n "$WD" ] || { echo "FAIL: sway never announced a display — see $SWAYLOG" >&2; tail -20 "$SWAYLOG" >&2; exit 3; }
 
+# Every injector in this script is guarded against the operator's real compositor. The compositor
+# config path is unique to this run, so it is a stronger check than trusting a wayland-N name.
+export XDG_RUNTIME_DIR=/run/user/"$(id -u)"
+export WAYLAND_DISPLAY="$WD"
+verify_nested_sway() {
+  [ "${WAYLAND_DISPLAY:-}" = "$WD" ] || {
+    echo "FAIL: WAYLAND_DISPLAY is not this nested instance" >&2
+    return 1
+  }
+  swaymsg -s "$SWAYSOCK" -t get_version | EXPECTED_SWAYCONF="$SWAYCONF" python3 -c '
+import json, os, sys
+version = json.load(sys.stdin)
+if version.get("loaded_config_file_name") != os.environ["EXPECTED_SWAYCONF"]:
+    raise SystemExit("FAIL: swaymsg is not this nested compositor")
+print("SAFE: sway {} on {}".format(version["human_readable"], version["loaded_config_file_name"]))
+'
+}
+
+# A pointer must exist before GPUI connects: wlrctl's one-shot client creates the device, sends its
+# event, then destroys it before the app can bind wl_pointer. Build a tiny persistent client only
+# when the action block asks for pointer input, preserving the visual-only lane's startup cost.
+start_virtual_pointer() {
+  command -v gcc >/dev/null || { echo "FAIL: gcc is required for Wayland pointer input" >&2; return 1; }
+  command -v wayland-scanner >/dev/null || { echo "FAIL: wayland-scanner is required for Wayland pointer input" >&2; return 1; }
+  pkg-config --exists wayland-client || { echo "FAIL: wayland-client development files are required" >&2; return 1; }
+  verify_nested_sway || return 1
+  mkdir -p "$INPUT_DIR"
+  rm -f "$VP_FIFO" "$VP_ACK" "$VP_READY"
+  mkfifo "$VP_FIFO"
+  local header="$INPUT_DIR/wlr-virtual-pointer-client-protocol.h"
+  local protocol_c="$INPUT_DIR/wlr-virtual-pointer-client-protocol.c"
+  local binary="$INPUT_DIR/virtual-pointer"
+  wayland-scanner client-header "$ROOT/Scripts/wlr-virtual-pointer-unstable-v1.xml" "$header" || return 1
+  wayland-scanner private-code "$ROOT/Scripts/wlr-virtual-pointer-unstable-v1.xml" "$protocol_c" || return 1
+  gcc -std=c11 -Wall -Wextra -Werror -O2 -I "$INPUT_DIR" \
+    "$ROOT/Scripts/wayland-virtual-pointer.c" "$protocol_c" -o "$binary" \
+    $(pkg-config --cflags --libs wayland-client) || return 1
+  "$binary" "$VP_READY" "$VP_FIFO" "$VP_ACK" >"$VP_LOG" 2>&1 &
+  VP_PID=$!
+  for _ in $(seq 1 40); do
+    [ -f "$VP_READY" ] && break
+    kill -0 "$VP_PID" 2>/dev/null || { cat "$VP_LOG" >&2; return 1; }
+    sleep 0.1
+  done
+  [ -f "$VP_READY" ] || { echo "FAIL: virtual pointer did not become ready — see $VP_LOG" >&2; return 1; }
+  POINTER_ENABLED=1
+}
+
+start_virtual_keyboard() {
+  command -v wtype >/dev/null || { echo "FAIL: wtype is required for Wayland keyboard input" >&2; return 1; }
+  verify_nested_sway || return 1
+  # The press/release happens before Tiller starts; -s then keeps wtype (and its virtual keyboard)
+  # connected without leaving Shift held. Later type/key commands use the already-advertised seat.
+  wtype -M shift -m shift -s 600000 -k Shift_L >"$VK_LOG" 2>&1 &
+  VK_PID=$!
+  sleep 0.1
+  kill -0 "$VK_PID" 2>/dev/null || { cat "$VK_LOG" >&2; return 1; }
+}
+
+if grep -Eq '(^|[;[:space:]])(click|move)([;[:space:]]|$)' <<<"$ACTIONS"; then
+  start_virtual_pointer || exit 3
+fi
+if grep -Eq '(^|[;[:space:]])(type|key)([;[:space:]]|$)' <<<"$ACTIONS"; then
+  start_virtual_keyboard || exit 3
+fi
+
 # DISPLAY must be UNSET, not empty: with it set at all, GPUI takes the X11 path, which under
 # Xvfb/Xephyr has no DRI3 route and presents nothing. A blank frame here is almost always this.
 env -u DISPLAY \
-    XDG_RUNTIME_DIR=/run/user/"$(id -u)" \
+    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     WAYLAND_DISPLAY="$WD" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
     TILLER_DB="$DB" TILLER_SOCKET="$SOCK" \
@@ -125,13 +212,12 @@ for _ in $(seq 1 120); do
 done
 [ -S "$SOCK" ] || { echo "FAIL: no control socket at $SOCK in 30s" >&2; tail -20 "$APP_LOG" >&2; exit 4; }
 
-export SOCK WD SWAYSOCK APP_LOG OUTDIR W1 H1 W2 H2 MIN_COLORS
-export XDG_RUNTIME_DIR=/run/user/"$(id -u)"
+export SOCK WD SWAYSOCK APP_LOG OUTDIR W1 H1 W2 H2 MIN_COLORS VP_FIFO VP_ACK POINTER_ENABLED
 # grim reads WAYLAND_DISPLAY, and on a machine where the operator is logged into a Wayland session
 # that variable is already set to THEIR compositor. Left alone, grim looks for HEADLESS-1 on the
 # user's desktop, finds nothing and writes no file — and on a compositor that did have a matching
 # output it would photograph the operator's actual screen. Point it at ours explicitly.
-export WAYLAND_DISPLAY="$WD"
+# WAYLAND_DISPLAY was exported above, before the virtual pointer and the app were launched.
 
 ctl() {
   local method="$1"; shift
@@ -164,6 +250,38 @@ print(buf.decode(errors="replace").split("\n")[0][:3000])
 PY
 }
 
+pointer_command() {
+  local operation="$1" x="$2" y="$3" id
+  [ "$POINTER_ENABLED" = 1 ] || { echo "FAIL: $operation needs the pre-app virtual pointer" >&2; return 1; }
+  [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]] || { echo "FAIL: coordinates must be non-negative integers" >&2; return 1; }
+  verify_nested_sway || return 1
+  POINTER_COMMAND_ID=$((POINTER_COMMAND_ID + 1))
+  id="$POINTER_COMMAND_ID"
+  printf '%s %s %s %s %s %s\n' "$operation" "$id" "$x" "$y" "$OUTPUT_W" "$OUTPUT_H" >"$VP_FIFO"
+  for _ in $(seq 1 50); do
+    grep -qx "$id" "$VP_ACK" 2>/dev/null && return 0
+    sleep 0.02
+  done
+  echo "FAIL: virtual pointer did not acknowledge $operation — see $VP_LOG" >&2
+  return 1
+}
+
+move() { pointer_command move "$1" "$2"; }
+click() { pointer_command click "$1" "$2"; }
+
+type() {
+  verify_nested_sway || return 1
+  command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
+  wtype "$@"
+}
+
+key() {
+  [ "$#" = 1 ] || { echo "usage: key <name>" >&2; return 2; }
+  verify_nested_sway || return 1
+  command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
+  wtype -k "$1"
+}
+
 # Repaint is lazy. After the first frame the app sits still and grim keeps returning that frame
 # BYTE FOR BYTE — a socket call that demonstrably succeeded can produce an identical PNG. Setting
 # the output to the size it already has is a no-op, so this alternates between two sizes to force
@@ -174,7 +292,11 @@ CUR=1
 shot() {
   local name="${1:-shot}" res
   SHOT_N=$((SHOT_N + 1))
-  if [ "$CUR" = 1 ]; then res="${W2}x${H2}"; CUR=2; else res="${W1}x${H1}"; CUR=1; fi
+  if [ "$CUR" = 1 ]; then
+    res="${W2}x${H2}"; OUTPUT_W="$W2"; OUTPUT_H="$H2"; CUR=2
+  else
+    res="${W1}x${H1}"; OUTPUT_W="$W1"; OUTPUT_H="$H1"; CUR=1
+  fi
   swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "$res" >/dev/null 2>&1
   sleep 1
   local path
@@ -188,7 +310,7 @@ shot() {
   fi
   echo "SHOT $path ($res · $colors colours)"
 }
-export -f ctl shot
+export -f ctl pointer_command move click type key shot verify_nested_sway
 
 sleep "$SETTLE"
 shot baseline || { echo "FAIL: first frame is blank — presentation is broken, not layout. See $APP_LOG" >&2; exit 5; }
