@@ -128,11 +128,20 @@ have no consumer yet, and SET-07's eviction is its own row (ACT-26).
 
 ### Not exercisable from any surface — the dependency, stated
 
-- `F-CORE-ACT-02` — missing half is the model-level notification wiring: `build_payload` /
-  `should_notify` have zero callers outside `tiller_activity` (re-checked today). Falls with
-  ACT-19/20; no route exists until they are wired.
-- `F-CTRL-NOTIFY-03` — missing half is system posting: zero `notify-send` /
-  `org.freedesktop.Notifications` paths in any crate (re-checked today). Needs a poster first.
+- `F-CORE-ACT-02` — ~~missing half is the model-level notification wiring: `build_payload` /
+  `should_notify` have zero callers outside `tiller_activity`~~ **STALE as of 2026-08-14.** Both now
+  have exactly one app caller, `post_activity_notification`, which runs the whole chain through
+  `post_desktop_notification` to `notify-send`. The wiring is not missing; the notifier is starved of
+  pane identity. See `P100`.
+- `F-CTRL-NOTIFY-03` — ~~missing half is system posting: zero `notify-send` /
+  `org.freedesktop.Notifications` paths in any crate~~ **STALE as of 2026-08-14.** A poster exists
+  (`post_desktop_notification`) and `notify-send` is installed and works. What is missing is a route
+  from `notification.create` to it — create stores to an in-memory `Vec` and returns `ok:true`.
+  See `P100`.
+
+**Both bullets above were re-checked and reasserted on later passes while already false.** A
+"re-checked today" note is only as good as the needle it was checked with; a grep scoped to exclude
+the owning crate will keep returning zero long after the app has been wired.
 - `F-AGENT-SAFE-01` — missing half is skill provisioning: only the npx command builder exists
   (`tiller_project/src/skill.rs`), no management-marker or overwrite-refusal logic (pass-14
   re-check; FABLE-09 concurs). Builder-half replay: `cargo test -p tiller_project`.

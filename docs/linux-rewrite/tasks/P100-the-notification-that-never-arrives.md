@@ -3,14 +3,31 @@
 **Owner: the next builder to free up.** Worktree
 `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, branch `linux/gpui-waku`.
 
-Three rows, two defects, one seam. **The desktop notifier works and is correctly written. Nothing
-can reach it.**
+**Six rows, two defects, one seam.** `WORK-BREAKDOWN.md` B-20 calls this cluster *"six ledger
+entries for one piece — the best leverage on the board"*, and it is right. **The desktop notifier
+works and is correctly written. Nothing can reach it.**
 
 | row | clause | now |
 |---|---|---|
 | `F-CTRL-NOTIFY-03` | `notification.create` requires title and body **and posts a user notification**; `list` returns rows; `clear` clears them | `FAILED — defective` |
+| `F-AUTO-06` | create/list/clear **and delivery** | `FAILED — defective` |
+| `F-USE-06` | the notification policy delivers | `FAILED — defective` |
+| `F-CORE-ACT-02` | sidebar status **and** notification on transition | `half-proven` (sidebar half live) |
 | `F-CORE-ACT-19` | an agent transition posts a desktop notification | `NOT EXERCISED` (blocked here) |
 | `F-CORE-ACT-20` | the visible / active / unchanged-status suppression gates | `NOT EXERCISED` (blocked here) |
+
+**Read this before you plan the work.** Three of these rows carry evidence that says
+*"zero app callers of `should_notify`/`build_payload` — no delivery path"*, and
+`UNPROVEN-ROWS-RECIPES.md` repeats it. **That is stale.** As of 2026-08-14 both have exactly one app
+caller, `post_activity_notification`, which runs the full chain: `should_notify` → `build_payload` →
+`post_desktop_notification` → `notify-send`. Verify it yourself in one grep before you start:
+
+```bash
+grep -rn "should_notify\|build_payload" rust/crates/ --include=*.rs | grep -v "^rust/crates/tiller_activity/"
+```
+
+**You are not building a notification system. It is built.** You are connecting two seams that
+starve it. If you plan this as construction work you will rewrite something that already exists.
 
 `notify-send` is **no longer the blocker** — `libnotify-bin` was installed on this machine on
 2026-08-14 and posts fine from a shell. Every earlier note that says "no desktop notifier available"
