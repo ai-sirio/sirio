@@ -89,3 +89,55 @@ defect is the proof of why: 134 tests pass over a transcript that draws nothing.
   contention with six panes committing: **retry, never delete the lock.**
 - Report to `docs/linux-rewrite/P117-report.md`.
 - Do not idle on an approval gate — `ENVIRONMENT.md` §"Working with the orchestrator".
+
+---
+
+## Addendum — reassigned, with a code trace and a salvaged patch (orchestrator, 18:20)
+
+**`codex11` is out of credit until 2026-08-20 08:19 and never started this.** Its plan survives at
+`docs/superpowers/plans/2026-08-14-p117-transcript.md` with every box unchecked. It left two
+**uncommitted** changes in `main.rs`, which I have reversed out and preserved verbatim at
+`docs/linux-rewrite/p117-codex11-unverified.patch`. I reversed them because `codex12` is editing the
+same file and would otherwise have committed them, unverified, under a `P118` message.
+
+**Take nothing in that patch as established.** Neither half was ever run — the test did not compile
+(`E0063`, `OpenTab` constructed with missing fields).
+
+### What is in the patch, and what to make of it
+
+1. **A test worth reviving.** It asserts
+   `cx.debug_bounds("chat-transcript").size.height > px(200.0)` after mounting a Chat into a
+   workspace tab. That is the right shape of assertion, and it matters beyond this row: **a
+   text-only agent can assert on rendered geometry through `debug_bounds`.** Fix its struct literal
+   and it becomes the regression test this defect needs.
+2. **A source change I would not keep without evidence.** At `main.rs:6435` it deleted the wrapper
+   ```rust
+   .child(div().flex_1().w_full().overflow_hidden().child(centre_surface))
+   ```
+   leaving a bare `.child(centre_surface)`. That wrapper is plausibly the very thing giving the
+   centre surface its height — removing it looks like the wrong direction. **Verify before adopting
+   or discarding.**
+
+### The trace, offered as hypotheses
+
+- `chat.rs:5518` — the `Chat` render root is already `.size_full().flex().flex_col()`.
+- `chat.rs:5542-5555` — the transcript is `div().id("chat-transcript").w(px(TRANSCRIPT_WIDTH))
+  .pt(px(22.0)).flex_1().flex()` wrapping `list(self.list_state.clone(), …)`.
+- `chat.rs:939` — `ListState::new(0, ListAlignment::Top, px(2048.0))`; `push_entry` splices one row
+  per entry and keeps the index tree in sync.
+
+So the sizing inside `chat.rs` looks correct on its face, which points **above** it. **A GPUI
+virtualized `list()` inside a container with no definite height measures zero and draws no rows** —
+that is exactly the observed symptom, and it would also explain the composer sitting at the top of
+an empty pane rather than being pushed to the bottom.
+
+`overflow_hidden` on that same wrapper is a candidate for the **Changes** clipping. **One wrapper
+could account for both surfaces** — which is the question this task was asked to answer. It is a
+hypothesis. Test it; do not take it.
+
+### The gate is unchanged
+
+Re-run the drive at the top of this file and report what `chat.read` returned. Then either measure
+the transcript region yourself — `WAYLAND-LANE.md` §"A text-only agent can assert on a frame it
+cannot see", with a positive control — or leave the captures and name their paths for a visual pass.
+**A green test still does not close this.**
