@@ -112,3 +112,28 @@ Claim: `exercised-working` for the three missing status cases at the data/proces
 `panel.state`'s exit classification, genuinely differing not just in text but in shape:
 `exitStatus:"success"` vs `exitStatus:"code:1"`); the visual Activity-row rendering itself
 remains a sighted-pass item, same limitation as F-CHG-06.
+
+## F-CHG-18 (ledger 209, NOT EXERCISED)
+
+Manifest recipe: press and drag a changed-file row a few centimetres without releasing, report
+what appears under the cursor while dragging, release outside every target, report state
+afterwards.
+
+- `could-not-reach` on this lane. `Scripts/wayland-drive.sh` (the whole Wayland lane's driving
+  surface) exposes only `ctl`, `move`, `click`, `type`, `key`, `shot` — there is no
+  press-and-hold / button-down-then-move / release primitive, so a drag (as opposed to a
+  single click at a point) cannot be performed here at all. Confirmed by reading the script
+  directly (`move`/`click` at lines 269-270 each issue one atomic pointer op via the FIFO;
+  nothing composes a hold). `system.capabilities` (54 methods) also has no drag-equivalent
+  control method — everything there is click/select-shaped, not press/move/release-shaped.
+  `WAYLAND-LANE.md` itself says the same: "Pointer drags, right-click, modifiers/chords and
+  IME/non-ASCII text are not yet exercised" and routes drag rows to `DISPLAY=:1` + the drive
+  lock, which I am explicitly forbidden from using in this lane.
+- For context only, not as this drive's own finding: `ADJUDICATION-BACKLOG.md` already records
+  a static-code check ("Checked and holding") that the drag code in `right_panel.rs` lives only
+  behind `cfg(test)` fixtures past line 1559, and `changes.rs` has zero drag handlers in
+  production — i.e. even DISPLAY=:1 driving may find nothing to catch a drop on. That is a
+  prior agent's static read, not something I re-verified live.
+
+Claim: `could-not-reach` — the gesture this row requires (press-hold-drag) has no primitive on
+the Wayland lane; reaching it needs `DISPLAY=:1`, which this slice is barred from using.
