@@ -1882,6 +1882,10 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
             report.opencode_show_in_bar.to_string(),
         ),
         (
+            "ollamaShowInBar".to_string(),
+            report.ollama_show_in_bar.to_string(),
+        ),
+        (
             "refreshInterval".to_string(),
             report.refresh_interval.to_string(),
         ),
@@ -8028,6 +8032,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         claude_show_in_bar: settings.claude_show_in_bar,
         codex_show_in_bar: settings.codex_show_in_bar,
         opencode_show_in_bar: settings.opencode_show_in_bar,
+        ollama_show_in_bar: settings.ollama_show_in_bar,
         refresh_interval: settings.refresh_interval_min.clamp(1, 60) as i32,
         opencode_workspace_id_override: settings.opencode_workspace_id_override,
         // F-SET-22 has no AppSettings field yet; do not pretend this UI-only
@@ -8060,6 +8065,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         claude_show_in_bar: snapshot.claude_show_in_bar,
         codex_show_in_bar: snapshot.codex_show_in_bar,
         opencode_show_in_bar: snapshot.opencode_show_in_bar,
+        ollama_show_in_bar: snapshot.ollama_show_in_bar,
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
     }
@@ -10016,7 +10022,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_settings_round_trip_maps_all_seventeen_fields_explicitly() {
+    fn persisted_settings_round_trip_maps_all_eighteen_fields_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
@@ -10033,6 +10039,7 @@ mod tests {
             claude_show_in_bar: false,
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
+            ollama_show_in_bar: true,
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
         };
@@ -10059,6 +10066,7 @@ mod tests {
         assert!(!snapshot.claude_show_in_bar);
         assert!(!snapshot.codex_show_in_bar);
         assert!(snapshot.opencode_show_in_bar);
+        assert!(snapshot.ollama_show_in_bar);
         assert_eq!(snapshot.refresh_interval, 11);
         assert_eq!(snapshot.opencode_workspace_id_override, "wrk_main");
 
@@ -10090,6 +10098,7 @@ mod tests {
             restored.opencode_show_in_bar,
             persisted.opencode_show_in_bar
         );
+        assert_eq!(restored.ollama_show_in_bar, persisted.ollama_show_in_bar);
         assert_eq!(
             restored.refresh_interval_min,
             persisted.refresh_interval_min
@@ -10133,6 +10142,7 @@ mod tests {
             claude_show_in_bar: false,
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
+            ollama_show_in_bar: true,
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
         };
@@ -10170,6 +10180,7 @@ mod tests {
             restored.opencode_show_in_bar,
             persisted.opencode_show_in_bar
         );
+        assert_eq!(restored.ollama_show_in_bar, persisted.ollama_show_in_bar);
         assert_eq!(
             restored.refresh_interval_min,
             persisted.refresh_interval_min

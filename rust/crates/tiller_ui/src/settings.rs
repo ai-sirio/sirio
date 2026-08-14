@@ -13,7 +13,8 @@ use tiller_project::SkillInstallCommand;
 use tiller_theme::{Theme, ThemeMode};
 use tiller_usage::{
     AgentAccountIdentity, CredentialStore, CredentialStoreError, LocalAccountState,
-    OpenCodeGoUsageFetcher, UsageProvider, codex_auth_file_path, parse_codex_identity,
+    OllamaCloudUsageFetcher, OpenCodeGoUsageFetcher, UsageProvider, codex_auth_file_path,
+    parse_codex_identity,
 };
 
 // The action bound to Escape while the summarizer picker menu is focused.
@@ -356,6 +357,9 @@ pub struct SettingsSnapshot {
     pub claude_show_in_bar: bool,
     pub codex_show_in_bar: bool,
     pub opencode_show_in_bar: bool,
+    /// "Show in usage bar" for Ollama Cloud (F-SET-13) — same contract as
+    /// the three above; its cookie, like OpenCode Go's, is *not* here.
+    pub ollama_show_in_bar: bool,
     /// "Refresh interval" in minutes (F-SET-10), consumed by the status
     /// bar's fetch loop.
     pub refresh_interval: i32,
@@ -390,6 +394,7 @@ impl Default for SettingsSnapshot {
             claude_show_in_bar: true,
             codex_show_in_bar: true,
             opencode_show_in_bar: false,
+            ollama_show_in_bar: false,
             refresh_interval: 5,
             opencode_workspace_id_override: String::new(),
             // Preserves four of the five defaults the surface drew before
@@ -457,12 +462,13 @@ impl ProviderAccountStatus {
     }
 }
 
-/// The three provider cards' account states, in card order.
+/// The four provider cards' account states, in card order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderAccountStates {
     pub claude: ProviderAccountStatus,
     pub codex: ProviderAccountStatus,
     pub opencode_go: ProviderAccountStatus,
+    pub ollama_cloud: ProviderAccountStatus,
 }
 
 impl ProviderAccountStates {
@@ -473,6 +479,7 @@ impl ProviderAccountStates {
             claude: discover_provider_account(UsageProvider::Claude),
             codex: discover_provider_account(UsageProvider::Codex),
             opencode_go: discover_provider_account(UsageProvider::OpenCodeGo),
+            ollama_cloud: discover_provider_account(UsageProvider::OllamaCloud),
         }
     }
 }
@@ -485,20 +492,25 @@ struct ProviderLoginCommand {
     args: Vec<&'static str>,
 }
 
-fn provider_login_command(provider: ProviderKind) -> ProviderLoginCommand {
+/// `None` for Ollama Cloud: the reference card manages it by pasted cookie
+/// only — there is no CLI login flow to delegate to, and its card renders
+/// no Accounts section (F-SET-13), so the button that would call this
+/// never exists for it.
+fn provider_login_command(provider: ProviderKind) -> Option<ProviderLoginCommand> {
     match provider {
-        ProviderKind::Claude => ProviderLoginCommand {
+        ProviderKind::Claude => Some(ProviderLoginCommand {
             program: "claude",
             args: vec!["auth", "login"],
-        },
-        ProviderKind::Codex => ProviderLoginCommand {
+        }),
+        ProviderKind::Codex => Some(ProviderLoginCommand {
             program: "codex",
             args: vec!["login"],
-        },
-        ProviderKind::OpenCodeGo => ProviderLoginCommand {
+        }),
+        ProviderKind::OpenCodeGo => Some(ProviderLoginCommand {
             program: "opencode",
             args: vec!["auth", "login"],
-        },
+        }),
+        ProviderKind::OllamaCloud => None,
     }
 }
 
@@ -570,6 +582,7 @@ pub struct SettingsReport {
     pub claude_show_in_bar: bool,
     pub codex_show_in_bar: bool,
     pub opencode_show_in_bar: bool,
+    pub ollama_show_in_bar: bool,
     pub refresh_interval: i32,
 }
 
@@ -633,6 +646,7 @@ enum ProviderKind {
     Claude,
     Codex,
     OpenCodeGo,
+    OllamaCloud,
 }
 
 /// Small settings view model. The real application can replace these values
@@ -657,6 +671,7 @@ pub struct Settings {
     claude_show_in_bar: bool,
     codex_show_in_bar: bool,
     opencode_show_in_bar: bool,
+    ollama_show_in_bar: bool,
     refresh_interval: i32,
     resume_agent_sessions: bool,
     auto_naming: bool,
@@ -736,6 +751,14 @@ pub struct Settings {
     /// dropping the pasted cookie (the macOS original surfaces "Failed to
     /// update Keychain…" in the same spot).
     opencode_cookie_error: Option<String>,
+    /// The Ollama Cloud session cookie being typed (F-SET-13) — same
+    /// transient-only rule as [`Self::opencode_cookie_input`].
+    ollama_cookie_input: String,
+    /// Focus handle for the Ollama cookie field.
+    ollama_cookie_focus: FocusHandle,
+    /// Last failure writing the Ollama cookie — same forbidden-outcome
+    /// rule as [`Self::opencode_cookie_error`].
+    ollama_cookie_error: Option<String>,
     /// The workspace-ID override (F-SET-12) — part of the persistence
     /// contract, see [`SettingsSnapshot::opencode_workspace_id_override`].
     opencode_workspace_id_override: String,
@@ -850,6 +873,7 @@ impl Settings {
             claude_show_in_bar: initial.claude_show_in_bar,
             codex_show_in_bar: initial.codex_show_in_bar,
             opencode_show_in_bar: initial.opencode_show_in_bar,
+            ollama_show_in_bar: initial.ollama_show_in_bar,
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             on_manage_account: None,
@@ -857,6 +881,9 @@ impl Settings {
             opencode_cookie_input: String::new(),
             opencode_cookie_focus: cx.focus_handle(),
             opencode_cookie_error: None,
+            ollama_cookie_input: String::new(),
+            ollama_cookie_focus: cx.focus_handle(),
+            ollama_cookie_error: None,
             opencode_workspace_id_override: initial.opencode_workspace_id_override,
             opencode_override_focus: cx.focus_handle(),
             credential_store: CredentialStore::from_env().ok(),
@@ -1016,6 +1043,7 @@ impl Settings {
             claude_show_in_bar: self.claude_show_in_bar,
             codex_show_in_bar: self.codex_show_in_bar,
             opencode_show_in_bar: self.opencode_show_in_bar,
+            ollama_show_in_bar: self.ollama_show_in_bar,
             refresh_interval: self.refresh_interval,
             opencode_workspace_id_override: self.opencode_workspace_id_override.clone(),
             agent_colors: self.agent_colors,
@@ -1037,6 +1065,7 @@ impl Settings {
             claude_show_in_bar: self.claude_show_in_bar,
             codex_show_in_bar: self.codex_show_in_bar,
             opencode_show_in_bar: self.opencode_show_in_bar,
+            ollama_show_in_bar: self.ollama_show_in_bar,
             refresh_interval: self.refresh_interval,
         }
     }
@@ -1134,6 +1163,7 @@ impl Settings {
             ProviderKind::Claude => self.claude_show_in_bar = enabled,
             ProviderKind::Codex => self.codex_show_in_bar = enabled,
             ProviderKind::OpenCodeGo => self.opencode_show_in_bar = enabled,
+            ProviderKind::OllamaCloud => self.ollama_show_in_bar = enabled,
         }
         self.changed();
         cx.notify();
@@ -1144,6 +1174,7 @@ impl Settings {
             ProviderKind::Claude => self.claude_show_in_bar,
             ProviderKind::Codex => self.codex_show_in_bar,
             ProviderKind::OpenCodeGo => self.opencode_show_in_bar,
+            ProviderKind::OllamaCloud => self.ollama_show_in_bar,
         }
     }
 
@@ -1212,7 +1243,11 @@ impl Settings {
     /// successful login all leave the card truthful.
     fn launch_account_login(&mut self, provider: ProviderKind, cx: &mut Context<Self>) {
         self.account_action_error = None;
-        let login = provider_login_command(provider);
+        // Unreachable from the UI for a provider without a login command
+        // (its card renders no Add Account button); a no-op beats a panic.
+        let Some(login) = provider_login_command(provider) else {
+            return;
+        };
         let program = login.program;
         let args = login.args;
         let entity = cx.entity();
@@ -1418,6 +1453,82 @@ impl Settings {
         self.opencode_workspace_id_override.clear();
         self.changed();
         cx.notify();
+    }
+
+    /// Raw-keystroke handling for the Ollama Cloud cookie (F-SET-13) —
+    /// transient like [`Self::on_opencode_cookie_key`]: nothing durable
+    /// happens until Save.
+    fn on_ollama_cookie_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "backspace" || key == "delete" {
+            self.ollama_cookie_input.pop();
+        } else if let Some(character) = event.keystroke.key_char.as_deref()
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+        {
+            self.ollama_cookie_input.push_str(character);
+        }
+        cx.notify();
+    }
+
+    /// Saves the typed Ollama Cloud cookie (F-SET-13) — the macOS Save
+    /// button's exact side effects, same shape as
+    /// [`Self::save_opencode_cookie`]: on success the input clears, the
+    /// account state flips to signed in and the bar segment turns on
+    /// through the persistence contract (the status bar refetches from its
+    /// re-derived preferences). On failure the input is *kept* alongside a
+    /// visible error — never a silently dropped paste.
+    fn save_ollama_cookie(&mut self, cx: &mut Context<Self>) {
+        let cookie = self.ollama_cookie_input.trim().to_string();
+        if cookie.is_empty() {
+            return;
+        }
+        let outcome = match &self.credential_store {
+            Some(store) => store.set(OllamaCloudUsageFetcher::COOKIE_KEY, &cookie),
+            None => Err(CredentialStoreError::NoHome),
+        };
+        match outcome {
+            Ok(()) => {
+                self.ollama_cookie_input.clear();
+                self.ollama_cookie_error = None;
+                self.provider_accounts.ollama_cloud =
+                    ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn);
+                self.set_provider_visibility(ProviderKind::OllamaCloud, true, cx);
+            }
+            Err(error) => {
+                self.ollama_cookie_error =
+                    Some(format!("Failed to update the credential store — {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Deletes the stored Ollama Cloud cookie (F-SET-13): the account
+    /// state flips to not signed in and the provider leaves the usage bar,
+    /// mirroring the macOS Clear button.
+    fn clear_ollama_cookie(&mut self, cx: &mut Context<Self>) {
+        let outcome = match &self.credential_store {
+            Some(store) => store.delete(OllamaCloudUsageFetcher::COOKIE_KEY),
+            None => Err(CredentialStoreError::NoHome),
+        };
+        match outcome {
+            Ok(()) => {
+                self.ollama_cookie_error = None;
+                self.provider_accounts.ollama_cloud =
+                    ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut);
+                self.set_provider_visibility(ProviderKind::OllamaCloud, false, cx);
+            }
+            Err(error) => {
+                self.ollama_cookie_error =
+                    Some(format!("Failed to update the credential store — {error}"));
+                cx.notify();
+            }
+        }
     }
 
     /// Tells the surface to take focus on its next render. Called by the
@@ -1803,6 +1914,7 @@ impl Settings {
                 ProviderKind::Claude => "provider-claude-visibility",
                 ProviderKind::Codex => "provider-codex-visibility",
                 ProviderKind::OpenCodeGo => "provider-opencode-visibility",
+                ProviderKind::OllamaCloud => "provider-ollama-visibility",
             },
             self.provider_visibility(provider),
             theme,
@@ -1820,6 +1932,7 @@ impl Settings {
                 ProviderKind::Claude => "provider-claude-refresh",
                 ProviderKind::Codex => "provider-codex-refresh",
                 ProviderKind::OpenCodeGo => "provider-opencode-refresh",
+                ProviderKind::OllamaCloud => "provider-ollama-refresh",
             },
             self.refresh_interval,
             "min",
@@ -1834,6 +1947,7 @@ impl Settings {
                 ProviderKind::Claude => "refresh-claude-now",
                 ProviderKind::Codex => "refresh-codex-now",
                 ProviderKind::OpenCodeGo => "refresh-opencode-now",
+                ProviderKind::OllamaCloud => "refresh-ollama-now",
             },
             "Refresh now",
             theme,
@@ -1857,11 +1971,23 @@ impl Settings {
             .child(controls::action_row(refresh_now, theme))
             .child(controls::separator(theme));
 
-        // F-SET-12: only OpenCode Go authenticates with a pasted web
-        // cookie — Claude and Codex read the credential files their own
-        // CLIs write, so their cards have no equivalent rows.
+        // F-SET-12/F-SET-13: OpenCode Go and Ollama Cloud authenticate
+        // with a pasted web cookie — Claude and Codex read the credential
+        // files their own CLIs write, so their cards have no equivalent
+        // rows.
         if provider == ProviderKind::OpenCodeGo {
             card = self.opencode_cookie_section(card, entity.clone(), theme, window);
+        }
+        if provider == ProviderKind::OllamaCloud {
+            card = self.ollama_cookie_section(card, entity.clone(), theme, window);
+        }
+
+        // F-SET-13: the Ollama Cloud card ends at its cookie section — the
+        // reference card has no Accounts list, no System default row and no
+        // login flow (its only credential is the pasted cookie above), so
+        // none of the account rows below exist for it.
+        if provider == ProviderKind::OllamaCloud {
+            return card;
         }
 
         // F-SET-14: this app never holds its own per-provider credentials
@@ -1874,6 +2000,7 @@ impl Settings {
             ProviderKind::Claude => "claude",
             ProviderKind::Codex => "codex",
             ProviderKind::OpenCodeGo => "opencode",
+            ProviderKind::OllamaCloud => "ollama",
         };
         let manage_account_entity = entity.clone();
         let host_manage_account = self.on_manage_account.clone();
@@ -1910,6 +2037,8 @@ impl Settings {
                         ProviderKind::Claude => "add-claude-account",
                         ProviderKind::Codex => "add-codex-account",
                         ProviderKind::OpenCodeGo => "add-opencode-account",
+                        // Unreachable: the Ollama card returned above.
+                        ProviderKind::OllamaCloud => "add-ollama-account",
                     },
                     "Add Account",
                     theme,
@@ -2141,6 +2270,101 @@ impl Settings {
         .child(controls::separator(theme))
     }
 
+    /// The Ollama Cloud card's cookie rows (F-SET-13): the OpenCode Go
+    /// section's masked-field/Save/Clear shape, minus the workspace
+    /// override the Ollama fetch has no equivalent of.
+    fn ollama_cookie_section(
+        &self,
+        mut card: gpui::Div,
+        entity: Entity<Self>,
+        theme: Theme,
+        window: &Window,
+    ) -> gpui::Div {
+        let spacing = theme.cosmic.spacing;
+        let cookie_text = self.ollama_cookie_input.clone();
+        let cookie_is_empty = cookie_text.is_empty();
+        // Mask dots only — the real value is never drawn, matching the
+        // macOS SecureField.
+        let masked = "•".repeat(cookie_text.chars().count());
+        let cookie_field = Self::opencode_text_field(
+            "provider-ollama-cookie-field",
+            masked,
+            "Session cookie",
+            cookie_is_empty,
+            self.ollama_cookie_focus.clone(),
+            self.ollama_cookie_focus.is_focused(window),
+            theme,
+            |this, window, cx| this.ollama_cookie_focus.focus(window, cx),
+            |this, event, window, cx| this.on_ollama_cookie_key(event, window, cx),
+            entity.clone(),
+        );
+
+        // Save is inert while the trimmed input is empty — the muted
+        // "not wired" rendering, and the macOS Save's disabled condition.
+        let save_entity = entity.clone();
+        let save_handler = if cookie_text.trim().is_empty() {
+            None
+        } else {
+            Some(move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                save_entity.update(cx, |this, cx| this.save_ollama_cookie(cx));
+            })
+        };
+        let clear_cookie_entity = entity;
+
+        card = card
+            .child(
+                div()
+                    .w_full()
+                    .px(px(spacing.xs as f32))
+                    .py(px(spacing.xxs as f32))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(cookie_field)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(controls::button_maybe(
+                                "save-ollama-cookie",
+                                "Save",
+                                theme,
+                                save_handler,
+                            ))
+                            .child(controls::button(
+                                "clear-ollama-cookie",
+                                "Clear",
+                                theme,
+                                move |_, _, cx| {
+                                    clear_cookie_entity
+                                        .update(cx, |this, cx| this.clear_ollama_cookie(cx));
+                                },
+                            )),
+                    ),
+            )
+            .child(Self::opencode_caption(
+                "provider-ollama-cookie-caption",
+                "Paste the raw token value or the full cookie header from \
+                 ollama.com. Find it in your browser's DevTools → Network → \
+                 any ollama.com request → Cookie header.",
+                theme,
+            ));
+        if let Some(error) = self.ollama_cookie_error.clone() {
+            card = card.child(
+                div()
+                    .id("provider-ollama-cookie-error")
+                    .debug_selector(|| "provider-ollama-cookie-error".to_string())
+                    .px(px(spacing.xs as f32))
+                    .py(px(spacing.xxxs as f32))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.tab_error)
+                    .child(text!(error)),
+            );
+        }
+        card.child(controls::separator(theme))
+    }
+
     fn render_ai_providers(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
         let cards = [
@@ -2164,6 +2388,16 @@ impl Settings {
                 "▣",
                 theme.tab_needs_input,
                 accounts.opencode_go,
+            ),
+            // F-SET-13: the fourth reference card. No Ollama brand glyph
+            // exists in the comet set — the cloud mark is a declared
+            // stand-in, not a silent leftover.
+            ProviderCardView::new(
+                ProviderKind::OllamaCloud,
+                "Ollama Cloud",
+                "☁",
+                theme.subtitle,
+                accounts.ollama_cloud,
             ),
         ];
         let mut page = div()
@@ -3766,10 +4000,14 @@ mod tests {
         ];
 
         for (provider, program, args) in cases {
-            let command = provider_login_command(provider);
+            let command = provider_login_command(provider).expect("a CLI login exists");
             assert_eq!(command.program, program);
             assert_eq!(command.args, args);
         }
+
+        // F-SET-13: Ollama Cloud is cookie-only — no CLI login flow
+        // exists to delegate to, and its card renders no Add Account.
+        assert_eq!(provider_login_command(ProviderKind::OllamaCloud), None);
     }
 
     fn cookie_test_states() -> ProviderAccountStates {
@@ -3777,6 +4015,7 @@ mod tests {
             claude: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
             codex: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
             opencode_go: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
+            ollama_cloud: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
         }
     }
 
@@ -4122,6 +4361,267 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// F-SET-13: the Ollama Cloud Save is the macOS button's exact side
+    /// effects — store write, cleared input, signed in, bar segment on —
+    /// driven through the real click/key path like the OpenCode Go test.
+    #[gpui::test]
+    async fn ollama_cookie_save_stores_signs_in_and_shows_in_bar(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-ollama-save-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The Ollama Cloud card is the fourth: at the default test window
+        // size its controls paint (debug_bounds sees them) but sit outside
+        // the window's hit-test bounds, so clicks would land on nothing.
+        // A user reaches them by scrolling; the test grows the window.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Empty input: Save is inert — clicking it must write nothing.
+        let save = cx
+            .debug_bounds("save-ollama-cookie")
+            .expect("the Save button is drawn");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            CredentialStore::at(&store_path)
+                .get(OllamaCloudUsageFetcher::COOKIE_KEY)
+                .is_none(),
+            "an inert Save writes nothing"
+        );
+
+        // Focus the field the way a user does, type, save.
+        let field = cx
+            .debug_bounds("provider-ollama-cookie-field")
+            .expect("the cookie field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("sessdemo");
+        cx.run_until_parked();
+        let save = cx
+            .debug_bounds("save-ollama-cookie")
+            .expect("Save stays drawn with text in the field");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            CredentialStore::at(&store_path).get(OllamaCloudUsageFetcher::COOKIE_KEY),
+            Some("sessdemo".to_string()),
+            "Save writes the typed cookie into the store"
+        );
+        assert!(
+            cx.debug_bounds("provider-ollama-cookie-error").is_none(),
+            "a successful Save shows no error"
+        );
+        let (input, signed_in, show_in_bar) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.ollama_cookie_input.clone(),
+                settings.provider_accounts.ollama_cloud.signed_in,
+                settings.ollama_show_in_bar,
+            )
+        });
+        assert!(input.is_empty(), "a saved cookie clears the input");
+        assert!(signed_in, "the account state flips to signed in");
+        assert!(show_in_bar, "Save turns the usage bar segment on");
+        let last = saved
+            .borrow()
+            .last()
+            .cloned()
+            .expect("Save routed a snapshot through on_change");
+        assert!(last.ollama_show_in_bar);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-13: Clear deletes the stored Ollama cookie, signs the
+    /// provider out and removes its bar segment — the macOS Clear button.
+    #[gpui::test]
+    async fn ollama_cookie_clear_deletes_and_signs_out(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-ollama-clear-{}",
+            std::process::id()
+        ));
+        let store_path = dir.join("credentials.json");
+        let store = CredentialStore::at(&store_path);
+        store
+            .set(OllamaCloudUsageFetcher::COOKIE_KEY, "sess-seeded")
+            .expect("seed the stored cookie");
+
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                let mut states = cookie_test_states();
+                states.ollama_cloud =
+                    ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn);
+                let snapshot = SettingsSnapshot {
+                    ollama_show_in_bar: true,
+                    ..Default::default()
+                };
+                Settings::with_snapshot(cx, snapshot)
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(states)
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The Ollama Cloud card is the fourth: at the default test window
+        // size its controls paint (debug_bounds sees them) but sit outside
+        // the window's hit-test bounds, so clicks would land on nothing.
+        // A user reaches them by scrolling; the test grows the window.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let clear = cx
+            .debug_bounds("clear-ollama-cookie")
+            .expect("the Clear button is drawn");
+        cx.simulate_click(clear.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            store.get(OllamaCloudUsageFetcher::COOKIE_KEY).is_none(),
+            "Clear deletes the stored cookie"
+        );
+        let (signed_in, show_in_bar) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.provider_accounts.ollama_cloud.signed_in,
+                settings.ollama_show_in_bar,
+            )
+        });
+        assert!(!signed_in, "clearing the cookie signs the provider out");
+        assert!(!show_in_bar, "Clear removes the provider from the usage bar");
+        let last = saved
+            .borrow()
+            .last()
+            .cloned()
+            .expect("Clear routed a snapshot through on_change");
+        assert!(!last.ollama_show_in_bar);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-SET-13's forbidden outcome, inverted into a test: a Save that
+    /// cannot write the store must keep the typed value and show the
+    /// failure — same contract as the OpenCode Go field.
+    #[gpui::test]
+    async fn ollama_cookie_save_failure_keeps_the_input_and_reports(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        // The store path's parent is a regular *file*, so creating the
+        // store directory fails deterministically.
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-ollama-fail-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        std::fs::write(dir.join("blocker"), b"").expect("create blocking file");
+        let store_path = dir.join("blocker").join("credentials.json");
+
+        let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
+        let observed = saved.clone();
+        let window = cx.add_window({
+            let store_path = store_path.clone();
+            move |_window, cx| {
+                Settings::with_snapshot(cx, SettingsSnapshot::default())
+                    .with_credential_store(CredentialStore::at(&store_path))
+                    .with_account_states(cookie_test_states())
+                    .on_change(move |snapshot| observed.borrow_mut().push(snapshot))
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The Ollama Cloud card is the fourth: at the default test window
+        // size its controls paint (debug_bounds sees them) but sit outside
+        // the window's hit-test bounds, so clicks would land on nothing.
+        // A user reaches them by scrolling; the test grows the window.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("provider-ollama-cookie-field")
+            .expect("the cookie field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("sessdemo");
+        cx.run_until_parked();
+        let save = cx
+            .debug_bounds("save-ollama-cookie")
+            .expect("the Save button is drawn");
+        cx.simulate_click(save.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("provider-ollama-cookie-error").is_some(),
+            "a failed Save is visible"
+        );
+        let (input, signed_in, show_in_bar, error) = cx.update(|window, cx| {
+            let settings = window.root::<Settings>().flatten().expect("settings root");
+            let settings = settings.read(cx);
+            (
+                settings.ollama_cookie_input.clone(),
+                settings.provider_accounts.ollama_cloud.signed_in,
+                settings.ollama_show_in_bar,
+                settings.ollama_cookie_error.clone(),
+            )
+        });
+        assert_eq!(
+            input, "sessdemo",
+            "a failed Save keeps the typed cookie — dropping it silently is the defect"
+        );
+        assert!(!signed_in, "a failed Save must not claim the provider signed in");
+        assert!(!show_in_bar, "a failed Save must not turn the bar segment on");
+        let error = error.expect("the failure message is held");
+        assert!(
+            error.starts_with("Failed to update the credential store —"),
+            "the message names the store, not a Keychain this platform lacks: {error}"
+        );
+        assert!(
+            saved.borrow().is_empty(),
+            "a failed Save persists nothing through on_change"
+        );
+        assert!(!store_path.exists(), "no store file appears behind the failure");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[gpui::test]
     async fn provider_cards_render_the_derived_status(cx: &mut gpui::TestAppContext) {
         // The AI Providers cards render one derived status row per card —
@@ -4136,6 +4636,7 @@ mod tests {
             ),
             codex: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
             opencode_go: ProviderAccountStatus::from_account_state(LocalAccountState::NoLocalStore),
+            ollama_cloud: ProviderAccountStatus::from_account_state(LocalAccountState::SignedOut),
         };
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default())
@@ -4699,6 +5200,7 @@ mod tests {
             claude: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
             codex: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
             opencode_go: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
+            ollama_cloud: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
         };
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default()).with_account_states(pinned)

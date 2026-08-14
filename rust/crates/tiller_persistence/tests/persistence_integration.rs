@@ -1036,6 +1036,7 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
             claude_show_in_bar: false,
             codex_show_in_bar: false,
             opencode_show_in_bar: true,
+            ollama_show_in_bar: true,
             refresh_interval_min: 99,
             opencode_workspace_id_override: "wrk_relaunch".into(),
             ..AppSettings::default()
@@ -1055,6 +1056,9 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
     assert!(!settings.claude_show_in_bar);
     assert!(!settings.codex_show_in_bar);
     assert!(settings.opencode_show_in_bar);
+    // F-SET-13: the Ollama Cloud toggle rides the same contract — a saved
+    // `true` survives the relaunch (the default is false).
+    assert!(settings.ollama_show_in_bar);
     assert_eq!(settings.refresh_interval_min, 60);
     // F-SET-12: the workspace-ID override survives the relaunch verbatim —
     // free text, no clamp, and clearing it (saving "") must also survive.

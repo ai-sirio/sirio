@@ -31,9 +31,10 @@ pub enum LocalAccountState {
     SignedOut,
     /// This platform has no local store for this provider's credentials.
     /// The state is *unknown* — saying "signed out" would be a guess about
-    /// a store that does not exist (currently only Ollama Cloud, whose
-    /// cookie store is not built yet; OpenCode Go's cookie lives in
-    /// [`crate::CredentialStore`] here and the macOS Keychain there).
+    /// a store that does not exist. No provider constructs this today
+    /// (every cookie provider now reads [`crate::CredentialStore`] here
+    /// and the macOS Keychain there — F-SET-12/F-SET-13); it stays as the
+    /// honest answer for any future provider whose store is not built.
     NoLocalStore,
 }
 
@@ -113,9 +114,11 @@ impl UsageProvider {
                 }
             }
             UsageProvider::OpenCodeGo => opencode_go_account_state(),
-            // Ollama Cloud has no local state anywhere in this app — its
-            // usage needs a session cookie there is no store for.
-            UsageProvider::OllamaCloud => LocalAccountState::NoLocalStore,
+            // F-SET-13: same store, same rule as OpenCode Go — the
+            // cookie's presence is the account state.
+            UsageProvider::OllamaCloud => state_from_cookie_presence(
+                crate::ollama::ollama_cloud_local_cookie().is_some(),
+            ),
         }
     }
 }
@@ -233,13 +236,40 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// F-SET-13: Ollama Cloud's account state is the cookie's presence in
+    /// the app's own credential store — no longer `NoLocalStore`, because
+    /// the store now exists. Driven through a fixture store like the
+    /// OpenCode Go test below: the environment-reading path is one
+    /// `is_some()` away from this mapping.
     #[test]
-    fn providers_without_a_local_store_report_unknown() {
+    fn ollama_cloud_state_is_cookie_presence_in_the_credential_store() {
+        let path = std::env::temp_dir().join(format!(
+            "tiller-account-ollama-cookie-{}/credentials.json",
+            std::process::id()
+        ));
+        let store = crate::CredentialStore::at(&path);
+
+        let key = crate::OllamaCloudUsageFetcher::COOKIE_KEY;
         assert_eq!(
-            UsageProvider::OllamaCloud.local_account_state(),
-            LocalAccountState::NoLocalStore,
-            "Ollama Cloud has no local credential store anywhere"
+            state_from_cookie_presence(store.get(key).is_some()),
+            LocalAccountState::SignedOut,
+            "no cookie stored → signed out, an answer — not Unknown"
         );
+
+        store.set(key, "session=abc").expect("save cookie");
+        assert_eq!(
+            state_from_cookie_presence(store.get(key).is_some()),
+            LocalAccountState::SignedIn
+        );
+
+        store.delete(key).expect("clear cookie");
+        assert_eq!(
+            state_from_cookie_presence(store.get(key).is_some()),
+            LocalAccountState::SignedOut,
+            "clearing the cookie signs the provider out"
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// F-SET-12: the OpenCode Go account state on this platform is the

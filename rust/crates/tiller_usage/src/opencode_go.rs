@@ -23,9 +23,10 @@ use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
 /// The `X-Server-Id` / `id` of the OpenCode Go workspace server, from the
 /// Swift app.
 const SERVER_ID: &str = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f";
-/// The keychain service the Swift app's `KeychainCredentialStore` uses.
+/// The keychain service the Swift app's `KeychainCredentialStore` uses —
+/// one service for every provider's cookie, so [`crate::ollama`] shares it.
 #[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "com.tiller.usage";
+pub(crate) const KEYCHAIN_SERVICE: &str = "com.tiller.usage";
 /// How long a fetch may take before giving up (the Swift app's bound).
 pub const TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -166,7 +167,7 @@ fn integer_after(text: &str, key: &str) -> Option<u64> {
 
 /// Reads a keychain generic password via the `security` CLI, read-only.
 #[cfg(target_os = "macos")]
-fn keychain_cookie(service: &str, account: &str) -> Option<String> {
+pub(crate) fn keychain_cookie(service: &str, account: &str) -> Option<String> {
     let output = Command::new("security")
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .output()

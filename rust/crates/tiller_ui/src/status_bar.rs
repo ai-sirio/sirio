@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::time::Duration;
 use tiller_theme::Theme;
 use tiller_usage::{
-    ClaudeUsageFetcher, CodexUsageFetcher, OpenCodeGoUsageFetcher, ProviderUsageState,
-    UsageFetchOutcome, UsageReason, reduce,
+    ClaudeUsageFetcher, CodexUsageFetcher, OllamaCloudUsageFetcher, OpenCodeGoUsageFetcher,
+    ProviderUsageState, UsageFetchOutcome, UsageReason, reduce,
 };
 
 use crate::sidebar::icons::{Icon, IconElement};
@@ -34,6 +34,8 @@ pub struct UsageBarPrefs {
     pub claude_visible: bool,
     pub codex_visible: bool,
     pub opencode_visible: bool,
+    /// Ollama Cloud segment visibility (F-SET-13).
+    pub ollama_visible: bool,
     /// Refresh interval in minutes, the settings surface's unit (1..=60).
     pub refresh_interval_min: i32,
     /// OpenCode Go workspace-ID override (F-SET-12). A non-empty value is
@@ -48,6 +50,7 @@ impl Default for UsageBarPrefs {
             claude_visible: true,
             codex_visible: true,
             opencode_visible: false,
+            ollama_visible: false,
             refresh_interval_min: 5,
             opencode_workspace_id_override: String::new(),
         }
@@ -63,6 +66,7 @@ impl UsageBarPrefs {
             claude_visible: snapshot.claude_show_in_bar,
             codex_visible: snapshot.codex_show_in_bar,
             opencode_visible: snapshot.opencode_show_in_bar,
+            ollama_visible: snapshot.ollama_show_in_bar,
             refresh_interval_min: snapshot.refresh_interval.clamp(1, 60),
             opencode_workspace_id_override: snapshot.opencode_workspace_id_override.clone(),
         }
@@ -94,6 +98,7 @@ pub struct StatusBar {
     claude: ProviderUsageState,
     codex: ProviderUsageState,
     opencode_go: ProviderUsageState,
+    ollama_cloud: ProviderUsageState,
     /// How often the usage segments re-fetch.
     refresh_interval: Duration,
     /// The settings the bar consumes: segment visibility and the refresh
@@ -115,6 +120,7 @@ impl StatusBar {
             claude: ProviderUsageState::Loading,
             codex: ProviderUsageState::Loading,
             opencode_go: ProviderUsageState::Loading,
+            ollama_cloud: ProviderUsageState::Loading,
             refresh_interval: REFRESH_INTERVAL,
             prefs: UsageBarPrefs::default(),
             refresh_task_started: false,
@@ -171,17 +177,24 @@ impl StatusBar {
         &self.opencode_go
     }
 
+    /// The current Ollama Cloud usage state, for tests and the host.
+    pub fn ollama_cloud_state(&self) -> &ProviderUsageState {
+        &self.ollama_cloud
+    }
+
     /// Applies one round of fetch outcomes; never panics on a bad provider.
     fn apply_outcomes(
         &mut self,
         claude: UsageFetchOutcome,
         codex: UsageFetchOutcome,
         opencode_go: UsageFetchOutcome,
+        ollama_cloud: UsageFetchOutcome,
         cx: &mut Context<Self>,
     ) {
         self.claude = reduce(claude, &self.claude);
         self.codex = reduce(codex, &self.codex);
         self.opencode_go = reduce(opencode_go, &self.opencode_go);
+        self.ollama_cloud = reduce(ollama_cloud, &self.ollama_cloud);
         cx.notify();
     }
 
@@ -213,9 +226,16 @@ impl StatusBar {
                 let opencode_go = executor.spawn(async move {
                     OpenCodeGoUsageFetcher::fetch(workspace_override.as_deref())
                 });
-                let (claude, codex, opencode_go) = (claude.await, codex.await, opencode_go.await);
+                let ollama_cloud =
+                    executor.spawn(async move { OllamaCloudUsageFetcher::fetch() });
+                let (claude, codex, opencode_go, ollama_cloud) = (
+                    claude.await,
+                    codex.await,
+                    opencode_go.await,
+                    ollama_cloud.await,
+                );
                 let interval = match this.update(cx, |bar, cx| {
-                    bar.apply_outcomes(claude, codex, opencode_go, cx);
+                    bar.apply_outcomes(claude, codex, opencode_go, ollama_cloud, cx);
                     bar.refresh_interval
                 }) {
                     Ok(interval) => interval,
@@ -298,12 +318,13 @@ impl Render for StatusBar {
                 .child(IconElement::new(icon, px(12.0)).text_color(theme.meta))
         };
 
-        // The three provider segments, in the reference order: Claude,
-        // Codex, OpenCode Go. A stale or unavailable provider reads dimmer
-        // than fresh numbers — never a plausible-looking fake.
+        // The four provider segments, in the reference order: Claude,
+        // Codex, OpenCode Go, Ollama Cloud. A stale or unavailable provider
+        // reads dimmer than fresh numbers — never a plausible-looking fake.
         let claude_dimmed = Self::segment_dimmed(&self.claude);
         let codex_dimmed = Self::segment_dimmed(&self.codex);
         let opencode_go_dimmed = Self::segment_dimmed(&self.opencode_go);
+        let ollama_cloud_dimmed = Self::segment_dimmed(&self.ollama_cloud);
         let claude_color = if claude_dimmed {
             dim(theme.meta)
         } else {
@@ -315,6 +336,11 @@ impl Render for StatusBar {
             theme.title
         };
         let opencode_go_color = if opencode_go_dimmed {
+            dim(theme.title)
+        } else {
+            theme.title
+        };
+        let ollama_cloud_color = if ollama_cloud_dimmed {
             dim(theme.title)
         } else {
             theme.title
@@ -371,6 +397,17 @@ impl Render for StatusBar {
                 Self::segment_text("OpenCode Go", &self.opencode_go),
             ));
         }
+        if self.prefs.ollama_visible {
+            // F-SET-13: no Ollama brand mark exists in the comet icon set —
+            // the globe is a declared stand-in for a cloud service, not a
+            // silent leftover.
+            left = left.child(provider_segment(
+                "Ollama Cloud",
+                Icon::Globe,
+                ollama_cloud_color,
+                Self::segment_text("Ollama Cloud", &self.ollama_cloud),
+            ));
+        }
 
         div()
             .w_full()
@@ -414,7 +451,8 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        // Defaults: Claude and Codex visible, OpenCode Go hidden.
+        // Defaults: Claude and Codex visible, OpenCode Go and Ollama
+        // Cloud hidden.
         assert!(
             cx.debug_bounds("Claude-usage-text").is_some(),
             "a visible provider renders its segment"
@@ -423,6 +461,10 @@ mod tests {
         assert!(
             cx.debug_bounds("OpenCode Go-usage-text").is_none(),
             "a provider hidden in settings renders no segment"
+        );
+        assert!(
+            cx.debug_bounds("Ollama Cloud-usage-text").is_none(),
+            "Ollama Cloud defaults to hidden (F-SET-13)"
         );
 
         let bar = cx.update(|window, _cx| {
@@ -437,6 +479,7 @@ mod tests {
                     claude_visible: false,
                     codex_visible: true,
                     opencode_visible: true,
+                    ollama_visible: true,
                     refresh_interval_min: 7,
                     ..Default::default()
                 },
@@ -453,6 +496,10 @@ mod tests {
         assert!(
             cx.debug_bounds("OpenCode Go-usage-text").is_some(),
             "showing a provider in settings adds its segment"
+        );
+        assert!(
+            cx.debug_bounds("Ollama Cloud-usage-text").is_some(),
+            "the Ollama Cloud toggle adds its segment (F-SET-13)"
         );
 
         let interval = cx.update(|window, cx| {
@@ -480,6 +527,7 @@ mod tests {
             claude_show_in_bar: false,
             codex_show_in_bar: true,
             opencode_show_in_bar: true,
+            ollama_show_in_bar: true,
             refresh_interval: 999,
             opencode_workspace_id_override: "wrk_prefs".into(),
             ..Default::default()
@@ -488,6 +536,7 @@ mod tests {
         assert!(!prefs.claude_visible);
         assert!(prefs.codex_visible);
         assert!(prefs.opencode_visible);
+        assert!(prefs.ollama_visible, "F-SET-13 rides the same mapping");
         assert_eq!(
             prefs.refresh_interval_min, 60,
             "clamped to the stepper range"
