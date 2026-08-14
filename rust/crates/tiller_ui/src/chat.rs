@@ -502,6 +502,14 @@ struct TranscriptSelection {
     head: usize,
 }
 
+/// The one copy affordance currently showing its short-lived confirmation.
+/// A target, rather than a boolean, ensures one response's acknowledgement
+/// never leaks onto another response or a nested code block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CopyTarget {
+    Assistant(usize),
+}
+
 impl TranscriptSelection {
     fn range(&self) -> Range<usize> {
         if self.anchor <= self.head {
@@ -791,6 +799,7 @@ pub struct Chat {
     list_state: ListState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
+    copied_target: Option<CopyTarget>,
     persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
@@ -917,6 +926,7 @@ impl Chat {
             list_state,
             transcript_selection: None,
             transcript_dragging: false,
+            copied_target: None,
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
@@ -1496,7 +1506,7 @@ impl Chat {
     /// Converts rendered entries into the durable format, retaining only
     /// turns closed by a footer. A partially streamed tail is deliberately
     /// omitted so a relaunch never presents an unfinished answer as settled.
-    pub(crate) fn transcript_from_entries(tab_id: &str, entries: &[Entry]) -> ChatTranscript {
+    fn transcript_from_entries(tab_id: &str, entries: &[Entry]) -> ChatTranscript {
         let mut turns = Vec::new();
         let mut current = Vec::new();
         for entry in entries {
@@ -1699,6 +1709,28 @@ impl Chat {
         if let Some(selected) = self.selected_transcript_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(selected));
         }
+    }
+
+    /// Copies a local transcript fragment and gives just that control a
+    /// brief acknowledgement. The delayed clear is deliberately keyed to
+    /// the target, so a second click cannot have its confirmation cleared by
+    /// the first click's already-scheduled timer.
+    fn copy_local_text(&mut self, target: CopyTarget, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.copied_target = Some(target.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                if chat.copied_target.as_ref() == Some(&target) {
+                    chat.copied_target = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn on_transcript_key(
@@ -3284,6 +3316,7 @@ impl Chat {
         transcript_focus: FocusHandle,
         source_start: usize,
         question_answer: &QuestionAnswerState,
+        copied_target: Option<CopyTarget>,
     ) -> impl IntoElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -3315,8 +3348,62 @@ impl Chat {
                         )),
                 )
                 .into_any_element(),
-            Entry::Assistant { document, .. } => {
-                Self::render_markdown(document, theme, Some(interaction), source_start)
+            Entry::Assistant { text, document } => {
+                let target = CopyTarget::Assistant(entry_index);
+                let copied = copied_target.as_ref() == Some(&target);
+                let hover_group = format!("assistant-response-{entry_index}");
+                let copy_entity = entity.clone();
+                let copy_target = target.clone();
+                let copy_text = text;
+                let mut copy = div()
+                    .id(("assistant-copy", entry_index))
+                    .debug_selector(move || format!("assistant-copy-{entry_index}"))
+                    .absolute()
+                    .top(px(0.0))
+                    .right(px(0.0))
+                    .px(px(7.0))
+                    .py(px(4.0))
+                    .rounded(theme.radii.control)
+                    .bg(colors.raised)
+                    .text_size(typography.footnote)
+                    .text_color(colors.meta)
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(colors.chat_row_hover))
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        copy_entity.update(cx, |chat, cx| {
+                            chat.copy_local_text(copy_target.clone(), copy_text.clone(), cx);
+                        });
+                    });
+                if copied {
+                    copy = copy.child(
+                        div()
+                            .id(("assistant-copy-confirmed", entry_index))
+                            .debug_selector(move || {
+                                format!("assistant-copy-confirmed-{entry_index}")
+                            })
+                            .child("Copied ✓"),
+                    );
+                } else {
+                    copy = copy
+                        .invisible()
+                        .group_hover(hover_group.clone(), |style| style.visible())
+                        .child("Copy");
+                }
+                div()
+                    .id(("assistant-response", entry_index))
+                    .debug_selector(move || format!("assistant-response-{entry_index}"))
+                    .relative()
+                    .group(hover_group)
+                    .w_full()
+                    .child(Self::render_markdown(
+                        document,
+                        theme,
+                        Some(interaction),
+                        source_start,
+                    ))
+                    .child(copy)
+                    .into_any_element()
             }
             Entry::Thought { text, expanded } => {
                 let toggle_entity = entity.clone();
@@ -5232,6 +5319,7 @@ impl Render for Chat {
                                                 transcript_focus.clone(),
                                                 source_start,
                                                 &question_answer,
+                                                this.copied_target.clone(),
                                             ))
                                             .into_any_element()
                                     })
@@ -5979,6 +6067,49 @@ mod tests {
             "the turn footer is laid out in the drawn transcript"
         );
         assert!(cx.debug_bounds("chat-status").is_some());
+    }
+
+    /// F-CHAT-29: hovering an assistant response reveals a local Copy control;
+    /// its click writes the response and replaces its label with a checkmark.
+    #[gpui::test]
+    async fn assistant_response_copy_writes_text_and_confirms(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Assistant {
+                text: "copy this assistant response".into(),
+                document: parse("copy this assistant response"),
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        let response = cx
+            .debug_bounds("assistant-response-0")
+            .expect("assistant response is drawn");
+        cx.simulate_mouse_move(response.center(), None, Modifiers::none());
+        cx.run_until_parked();
+
+        let copy = cx
+            .debug_bounds("assistant-copy-0")
+            .expect("hovering an assistant response reveals Copy");
+        cx.simulate_click(copy.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("copy this assistant response".into()),
+            "Copy writes only the assistant response"
+        );
+        assert!(
+            cx.debug_bounds("assistant-copy-confirmed-0").is_some(),
+            "the clicked Copy control visibly acknowledges success"
+        );
+        let _ = chat;
     }
 
     /// F-CHAT-28: a protocol Task tool call becomes a subagent card; its
