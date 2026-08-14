@@ -69,3 +69,54 @@ proven-zero no-op baseline, consistent with `on_file_key`'s documented Enter-ope
 I cannot read the pixels (text-only agent) so I cannot confirm the new content is specifically a
 file viewer rather than some other large repaint; that residual sighted-confirmation gap is the
 same one already on record for other `F-CHG` rows (e.g. F-CHG-06/22 in the E08 sweep).
+
+## F-CHG-03 (ledger line 194, currently FAILED — defective)
+
+Manifest says: reclassify — `right_panel.rs:698-736` already draws a real Loading/Retry state
+(this is the **Files** right-panel error path, `files-loading`/`files-error`/`files-retry`, not
+the Changes tab — confirmed against `01-inventory-app.md`'s own `F-CHG-03` VERIFY clause, which
+names Files/Refresh/inaccessible-path, not Changes). Prior evidence never attempted an
+inaccessible-path Retry trial.
+
+- Read `refresh`/`ensure_tree_refresh` (`right_panel.rs:209-271`): the periodic 1s auto-refresh
+  loop explicitly guards `if panel.refresh_error.is_none()` — once an error is set, the loop
+  stops refreshing on its own, so recovery requires the Retry button, not the passage of time.
+  This predicts a discriminating, code-grounded control: restoring permissions without clicking
+  Retry must leave the error state stuck.
+- With the fixture workspace open and its Files panel showing a healthy tree,
+  `chmod 000 /tmp/w10chg-fixture` (an inaccessible path, exactly the manifest's recipe) was run
+  **inline inside the action block** (the block reaches `eval`, so plain shell commands work
+  alongside `ctl`/`click`/`shot`), then 1.5s settle, then captured.
+- **Stuck-without-Retry control**: restored `chmod 755` but issued **no click**, then captured —
+  full-frame `compare -metric AE` against the still-broken frame = **0**, byte-identical. This
+  independently confirms the code read above: permissions alone do not recover the panel.
+- **Retry click**: same run, `click 1512 500` (roughly the centre of the Files panel body, where
+  the centred error card renders) after restoring permissions. Full-frame diff against the
+  pre-break OK state (a separate run, same fixture) = 5,471 — small, consistent with two
+  independent app instances of the *same* content differing only in incidental repaint noise.
+  Full-frame diff of that same post-click frame against the broken-permission error frame =
+  76,506 — large, of the same order as the direct OK-vs-error diff (78,401). Together these two
+  numbers place the post-click frame next to "OK", not next to "error": the click recovered it.
+  A follow-up scan of further clicks at the same point confirms it lands: colour-count jumped
+  from 8,120 (error) to ~9,100-9,125 immediately at the first click and stayed there.
+- **Self-caught measurement mistake, left in for the trail**: an earlier attempt measured only a
+  small, hand-picked crop (`405x898+1310+74`, my guess at the panel's on-screen bounds) and got a
+  misleadingly small error-vs-after-click diff (218) that looked like Retry had failed. The
+  full-frame comparison above contradicts that — the crop coordinates were simply wrong, not the
+  app. Lesson applied: verify a suspicious small-crop result against a full-frame diff before
+  trusting it.
+- **Loading flash**: not caught. `read_tree`'s failure on a permission-denied root is a single
+  fast syscall failure, not a slow walk, so `refresh_started` is true for a sub-frame duration —
+  consistent with the original P104 evidence ("Refresh produced neither loading state..."). This
+  remains unobserved on this lane; the loading-state code path itself (`right_panel.rs:698-708`)
+  is unconditionally present and code-verified, only its live visibility is unproven.
+- Captures: `reference/linux-progress/wavea-W10-chg/02-chg03-h-ok-a.png` (OK),
+  `02-chg03-scan-err.png` (error, post-chmod-000), `03-chg03-scan-1.png`/`04-chg03-scan-2.png`
+  (post-Retry-click, recovered), `05-chg03-k-err-b.png` (error at 1400 res, same-run control).
+
+Claim: `exercised-working` — the inaccessible-path recipe the manifest asked for was driven
+end-to-end: broke access, captured a genuine error state (confirmed nonzero vs OK), showed it
+does not self-heal (byte-identical control), then recovered it with a real click on Retry
+(large diff back toward OK, both by full-frame comparison and colour count). The one owed piece
+is the transient Loading flash, which is a code-verified but not live-captured detail, not a
+defect in the Retry mechanic this row is actually about.
