@@ -54,3 +54,31 @@ and its Revoke control removes the origin from both the live render and the pers
 `browser_origin_grant` table, driven by a real click on the rendered button.
 
 ---
+
+## F-BRW-06 (ledger line 255) — could-not-reach
+
+**Route checked:** `Browser::request_permission` (`rust/crates/tiller_ui/src/browser.rs:588`,
+wrapper at `:880`) sets `permission_prompt`, which the doorhanger UI at `:1242` renders with
+`browser-permission-allow` / `browser-permission-deny` buttons wired to `allow_permission`
+(`:597`) / `deny_permission` (`:605`).
+
+**Why not reachable:** `grep -rln request_permission rust/ --include=*.rs` returns only
+`browser.rs` itself — the unit test `permission_doorhanger_resolves_and_persists_by_origin`
+(`:1664`) is the **only** caller of `request_permission` in the entire tree. There is no
+production code path (webview permission-request callback, control-socket method, or any
+other event) that ever calls it. This is not a Wayland-lane limitation specifically (the
+manifest's earlier note about needing a browser-driving agent is consistent with this): the
+doorhanger cannot currently be triggered by any live user action anywhere in this build,
+because nothing in the running app invokes the function that would populate
+`permission_prompt`. Confirmed by full-repository grep, not by giving up on the drive early.
+
+No socket method exists to set `permission_prompt` directly (checked `system.capabilities`
+output already recorded for F-BRW-07 in the manifest — no permission-grant/request action is
+listed), and seeding this one via direct SQLite edit (as done for F-BRW-08) is not applicable
+here because `permission_prompt` is in-memory `Browser` view state, not a persisted table.
+
+`claim`: could-not-reach — the permission doorhanger has no live trigger anywhere in the
+current build (production-code caller count is zero outside the unit test); nothing this lane
+(or any lane, on this evidence) could click to raise it.
+
+---
