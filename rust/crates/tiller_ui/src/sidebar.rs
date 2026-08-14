@@ -622,10 +622,19 @@ impl Sidebar {
             })
             .map(|(index, _)| index)
             .collect();
-        let insert_at = remaining_indices
-            .get(insert_position.min(remaining_indices.len()))
-            .copied()
-            .unwrap_or(self.rows.len());
+        // `insert_position == remaining_indices.len()` means "insert after
+        // the group's last remaining sibling" -- NOT "insert at the end of
+        // `self.rows`". A worktree group is always followed by its
+        // project's `NewWorktree` affordance row (and a tab group is
+        // followed by whatever row comes after that worktree), so falling
+        // back to `self.rows.len()` here used to drop the dragged row past
+        // that trailing row instead of right after its new sibling.
+        let insert_at = match remaining_indices.get(insert_position) {
+            Some(&index) => index,
+            None => remaining_indices
+                .last()
+                .map_or(self.rows.len(), |last| last + 1),
+        };
         self.rows.insert(insert_at, row);
         true
     }
@@ -3318,6 +3327,89 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(worktrees, vec!["branch-1", "branch-2", "branch-0"]);
+    }
+
+    #[gpui::test]
+    async fn dragging_worktree_onto_last_sibling_lands_before_new_worktree_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // F-SID-17: a real git project always carries a trailing
+        // `RowKind::NewWorktree` affordance row after its last worktree.
+        // Dropping a dragged worktree row onto the last sibling in its
+        // group used to fall back to `self.rows.len()`, which lands the
+        // row *after* that affordance instead of after its new sibling.
+        cx.update(Theme::init);
+        let project = SidebarProject {
+            id: "project".into(),
+            name: "Project".into(),
+            is_git: true,
+            root_path: PathBuf::from("/repo/project"),
+            worktrees: (0..2)
+                .map(|index| SidebarWorktree {
+                    branch: format!("branch-{index}"),
+                    path: PathBuf::from(format!("/repo/project-{index}")),
+                    is_primary: index == 0,
+                })
+                .collect(),
+        };
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(vec![project], cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let source = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("first worktree row");
+        let target = cx
+            .debug_bounds("sidebar-row-2")
+            .expect("second worktree row");
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let kinds_and_titles = cx.update(|window, cx| {
+            window
+                .root::<Sidebar>()
+                .flatten()
+                .expect("sidebar root")
+                .read(cx)
+                .rows
+                .iter()
+                .map(|row| (row.kind, row.title.clone()))
+                .collect::<Vec<_>>()
+        });
+        // branch-0 must land right after branch-1, and the New Worktree
+        // affordance must stay last in the project's block — not have
+        // branch-0 dumped after it.
+        assert_eq!(
+            kinds_and_titles,
+            vec![
+                (RowKind::Project, "Project".to_string()),
+                (RowKind::Worktree, "branch-1".to_string()),
+                (RowKind::Worktree, "branch-0".to_string()),
+                (RowKind::NewWorktree, "New Worktree...".to_string()),
+            ]
+        );
     }
 
     #[gpui::test]
