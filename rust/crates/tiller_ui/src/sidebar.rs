@@ -1910,6 +1910,8 @@ impl Sidebar {
         let focus_entity = entity.clone();
         let display_name_focus = card.display_name_focus.clone();
         let initialize_entity = entity.clone();
+        let remove_entity = entity.clone();
+        let remove_project_id = card.id.clone();
         let project_target = SidebarContextTarget::Project {
             id: card.id.clone(),
             path: card.path.clone(),
@@ -2025,6 +2027,34 @@ impl Sidebar {
                     .rounded(theme.radii.control)
                     .bg(theme.background)
                     .child(card.icon_picker.clone()),
+            )
+            .child(
+                div()
+                    .id("project-settings-remove")
+                    .debug_selector(|| "project-settings-remove".to_owned())
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .mt(px(4.0))
+                    .w_full()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(theme.radii.control)
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.diff_deletion)
+                    .hover(|style| style.bg(theme.row_hover))
+                    .on_click(move |_, window, cx| {
+                        remove_entity.update(cx, |sidebar, cx| {
+                            sidebar.request_remove_project(
+                                remove_project_id.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    })
+                    .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.diff_deletion))
+                    .child("Remove Project"),
             )
             .child(
                 div()
@@ -4039,6 +4069,65 @@ mod tests {
         cx.simulate_click(item.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        cx.simulate_prompt_answer("Remove from Tiller");
+        cx.run_until_parked();
+        let emitted = events.borrow();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::RemoveProject(id) if id == "proj-1")),
+            "accepting the prompt emits RemoveProject with the project's id, got {emitted:?}"
+        );
+    }
+
+    /// F-PRJ-11: the removal logic (`request_remove_project`) was already
+    /// correct but only reachable from the context menu one level up --
+    /// Project Settings itself had no removal control at all. The sheet's
+    /// own Remove Project must ask for confirmation and emit the same
+    /// event the context-menu path does.
+    #[gpui::test]
+    async fn project_settings_remove_project_confirms_before_emitting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let projects = vec![SidebarProject {
+            id: "proj-1".to_string(),
+            name: "scratch".to_string(),
+            is_git: true,
+            root_path: PathBuf::from("/tmp/proj-1"),
+            worktrees: vec![],
+        }];
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(projects, cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar_entity, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+            sidebar_entity.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("proj-1", cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let remove = cx
+            .debug_bounds("project-settings-remove")
+            .expect("Project Settings draws a Remove Project control");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        assert!(
+            events.borrow().is_empty(),
+            "nothing may be emitted before the user answers"
+        );
+
         cx.simulate_prompt_answer("Remove from Tiller");
         cx.run_until_parked();
         let emitted = events.borrow();
