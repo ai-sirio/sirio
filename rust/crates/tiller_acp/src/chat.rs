@@ -536,19 +536,23 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ToolCallStarted { id, title, status } => {
+        AcpEvent::ToolCallStarted {
+            id, title, status, ..
+        } => {
             state
                 .current_turn
                 .push(ChatEntry::ToolCall { id, title, status });
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ToolCallUpdated { id, title, status } => {
+        AcpEvent::ToolCallUpdated {
+            id, title, status, ..
+        } => {
             update_tool(&mut state.current_turn, &id, title, status);
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ToolCallCompleted { id, status } => {
+        AcpEvent::ToolCallCompleted { id, status, .. } => {
             update_tool(&mut state.current_turn, &id, None, Some(status));
             state.status = ChatStatus::Streaming;
             EventFold::default()

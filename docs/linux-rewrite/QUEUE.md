@@ -2394,3 +2394,58 @@ Corollary for the drive budget: this verdict was settled by grep and **does not 
 pending drive**. `new_conversation` may work live or not; the follow half is dead either way. A
 disproof that no observation can overturn should be taken before the drive, not after it — it is
 the only kind of finding that makes a critic's live time cheaper instead of more expensive.
+
+## The completing half of the conjunction rule — orchestrator, 2026-08-14 11:20
+
+`F-CHAT-14` sent me back to `ADJUDICATION-BACKLOG.md`, where I found the same finding already
+written at `FABLE-06`, passes ago: *"the toggle may flip a bool nothing consumes. Exercise the
+**effect**, not just the menu."* Correct, specific, filed, never applied — the fourth instance of
+the meta-pattern, in the document I had already flagged for it.
+
+So I swept that document for every other unapplied finding. **Two of seven had already been
+applied** (`F-CHG-05` and `F-TERM-SCR-02`, both now `PASSED` on live evidence), which is worth
+saying: the pattern is real but not universal, and assuming the worst about a backlog would have
+cost me two wrong flips. The remaining three were fable's **"half-flags"** — `F-PERSIST-DB-06`,
+`-07`, `-08`, each `PASSED` with a named half that has no app consumer. The `F-CHAT-14` shape,
+three times over.
+
+**One of the three was a false PASSED. Two were not, and the difference is the whole rule.**
+
+- `-07`: the flagged `quarantined_records` *query* has no consumer, but the clause asks only that
+  malformed records *can be quarantined* and that siblings survive. Held.
+- `-08`: `worktree_by_path` is test-only, but the clause's subject is **the store itself** —
+  *"`ProjectStore` … performs exact-path worktree lookup"*. Held.
+- `-06`: the clause's subject is *"**Agent account** and session records persist"* and the VERIFY
+  says *"inspect restore planning **and account lookup**"*. The account half is named twice. It is
+  not built. → `half-proven`.
+
+### The rule, now in both directions
+
+**A half-flag matters if and only if the clause names that half.** The conjunction rule as I wrote
+it at 10:40 said to verify per conjunct; this is its other half — *a consumerless function is not
+a defect unless the clause requires a consumer.* Without this, the rule turns into a machine for
+manufacturing false negatives out of true facts, which is how a correcting pass starts doing more
+damage than the pass it corrects.
+
+The boundary that makes the 07:50 overturns and today's holds consistent: **ask what the clause's
+subject is.** A clause describing a *user-facing feature* ("toggle X and the app does Y") needs app
+wiring, and zero app callers falsifies it. A clause describing a *store's API* ("`ProjectStore`
+performs exact-path lookup") is satisfied by an integration test, exactly as a unit test satisfies
+a pure state machine. The 14 rows overturned at 07:50 were all the first kind.
+
+### And a new trap, from `-06`
+
+Its pass-14 evidence reads *"agent-account rows deliberately absent (**owned by `tiller_usage`**)"*.
+A deferral, disclosed, and it sounds like architecture. `tiller_usage` does not do it either —
+there is no account persistence anywhere in the tree, and `F-CORE-AUTH-01` is `UNREACHABLE` with
+zero app callers. **"Deliberately absent, owned by X" is a claim about X, and it is only true if X
+actually does it.** Two crates each deferred politely to the other and the feature fell in the gap
+with a `PASSED` on top. This is hedge immunity again — a disclosed limitation reads as more
+rigorous than a bare claim, so nobody audits it.
+
+Cheap check whenever an evidence cell hands work to another component: **grep that component for
+it.** One command, and it is the same shape as the 08:55 lesson (when a row is overturned, grep the
+reference files for the claim it rested on).
+
+`-06` now points at `P93`, which owns the account wiring — when that lands the row is re-judgeable
+with no further store work. A row that names its own fix is worth more than one that merely fails.

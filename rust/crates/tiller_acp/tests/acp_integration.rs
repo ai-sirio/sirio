@@ -43,7 +43,7 @@ fn streams_chunks_tool_and_permission_denial() {
                 assert_eq!(id, "tool-1");
                 saw_tool_start = true;
             }
-            AcpEvent::ToolCallCompleted { id, status } => {
+            AcpEvent::ToolCallCompleted { id, status, .. } => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(status, "Completed");
                 saw_tool_completion = true;
