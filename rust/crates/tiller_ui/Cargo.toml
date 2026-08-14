@@ -14,6 +14,7 @@ tiller_acp.workspace = true
 tiller_markdown.workspace = true
 tiller_project.workspace = true
 tiller_agents.workspace = true
+tiller_persistence.workspace = true
 tiller_usage = { path = "../tiller_usage" }
 base64 = "0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
