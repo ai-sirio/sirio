@@ -308,3 +308,90 @@ convert <png> -crop 950x300+340+400 +repage -colorspace Gray \
 Captures: `reference/linux-progress/2026-08-14-changes-clipped-settled-{1715,1400}.png`.
 
 `P117` owns the question of whether this and the empty chat transcript share one root cause.
+
+---
+
+## 18:09 — `F-PRJ-13`/`F-PRJ-15` really are fixed, but not for the reason the evidence said
+
+Two separate findings from auditing `codex12`'s `P118` close-out. The verdict it wanted is right.
+The evidence it left could not have established it.
+
+### The codex panes can read images — that question is closed
+
+`STATE.md` recorded an open question about whether the codex panes are text-only, after a
+`• Viewed Image` line appeared in `codex12`'s transcript. `P118-report.md` claims
+`p118-reset2-retry2/04-reset-settled.png` "shows the folder glyph, coral tint, and the full `Colour`
+row after Reset." I read that frame. **Every clause is accurate** — selected folder glyph with a
+coral selection ring, seven unclipped swatches, the Reset button, and the project id
+`p-c1fd7a5bbfd541af` bottom-left matching the SQLite row the report quotes. It is a description of a
+frame, not a confabulation. Treat `codex*` visual claims as first-hand, and keep judging them anyway.
+
+The `F-PRJ-13` sub-defect of a **clipped `Colour` row** is also gone: seven swatches and the Reset
+button below them all draw.
+
+### The gap: the reset target and the default are the same value
+
+`project_identity.rs:107-114` — `impl Default for ProjectIcon` returns
+`Symbol(ProjectGlyph::Folder)` with `tint: AgentAccentColor::Coral`, commented "F-PRJ-13's reset
+target: the plain folder glyph, undyed."
+
+Every committed `P118` Cluster A capture exercises **Reset**, and Reset's target *is* the default.
+So `p118-reset2-restart/02-reset-restart-sidebar.png` — a coral folder in the sidebar after a
+restart — is exactly the frame an app that **persists nothing at all** would also produce. The
+capture set never shows the sidebar carrying a non-default icon, and the sidebar is the whole claim:
+`F-PRJ-15` says the grid's output is discarded, `F-PRJ-13` names an unwired `on_change`.
+`03-settings-open.png` does show a non-default branch glyph selected — but that frame is the
+settings card, and selection inside the card was never the part in doubt.
+
+This is not a wrong verdict. It is a verdict whose proof does not discriminate against the null
+hypothesis, which is the same failure mode as a green test over a transcript that draws nothing.
+
+### The round trip, driven with a non-default icon
+
+Captures in `reference/linux-progress/p118-orch-roundtrip/`. Sidebar coordinates are stable across
+both of `shot()`'s resolutions because the column is fixed-width.
+
+```bash
+TILLER_WL_LABEL=orchp118b Scripts/wayland-drive.sh /tmp/orchp118b '
+  ctl project.add path=/home/enzopalmisano/Scrivania/Progetti/tiller
+  shot sidebar-default
+  move 150 121          # the settings gear is .invisible() until row hover, sidebar.rs:2255
+  sleep 1
+  click 300 120         # the gear
+  sleep 2
+  shot settings-open
+  click 106 267         # the git-branch glyph — NOT the default
+  sleep 1
+  click 171 371         # the green swatch — NOT the default
+  sleep 1
+  shot settings-chosen
+  click 45 510          # Close
+  sleep 2
+  shot sidebar-after-close
+'
+# then, same label so /tmp/orchp118b.sqlite survives, and deliberately no project.add:
+TILLER_WL_LABEL=orchp118b Scripts/wayland-drive.sh /tmp/orchp118c 'sleep 3; shot sidebar-after-restart; ctl project.list'
+```
+
+| step | frame | what it shows |
+|---|---|---|
+| default | `01-sidebar-default-coral-folder.png` | `tiller` row: **coral folder** |
+| chosen | `03a-settings-branch-green-crop.png` | branch glyph ringed; every glyph re-tinted **green** live |
+| **closed** | `04a-sidebar-after-close-crop.png` | `tiller` row: **green branch** — the selection crossed into the sidebar |
+| **restarted** | `05a-sidebar-after-restart-crop.png` | `tiller` row: **green branch**, with no `project.add` in the drive |
+
+Both halves now discriminate: the post-close frame differs from the default frame, and the
+post-restart frame reproduces the chosen value rather than the default one. `project.list` returned
+the project on the restarted instance without being asked to add it, so the project row itself is
+durable too.
+
+**For `pireview`:** `F-PRJ-13` and `F-PRJ-15` are `PASSED` on this evidence, not on the committed
+`P118` captures. `project.list` does **not** expose `icon`/`tint` (`main.rs:465-482`), so no socket
+assertion exists for this row and the frame is the only instrument — which is why it had to be
+driven rather than read.
+
+### The generalisation worth keeping
+
+**When a row's fix and its default are the same value, a capture of that value proves nothing.**
+Drive the row to a state the system would never reach on its own, then look. This is the visual
+sibling of a positive control, and it is cheap: one extra click on a glyph nobody would have picked.
