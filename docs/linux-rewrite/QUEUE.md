@@ -2316,3 +2316,50 @@ and worth asking, but the one-file fix stands on its own and should not wait for
 
 Both are "the context menu looks wrong in a screenshot", which is exactly why they need to stay
 separate: a driver who reads one and sees the other will report a fix that is not there.
+
+## Six rows awaiting a critic, not a promotion — 2026-08-14, 10:10
+
+`codex12` landed `P87` and `P88` in one 39-minute pass and reported both proved live:
+
+- **P87** — `tillerctl` now installs app-owned at `$XDG_DATA_HOME/TillerRust/bin/tillerctl`, with
+  the absolute path passed to all four call sites and a notice on failure. Claimed live with
+  Claude: hooks fire with no "not found", status `running` → `idle`.
+- **P88** — all 16 settings fields mapped explicitly, numeric clamps, summarizer handled
+  explicitly, anti-reset and round-trip tests. Claimed live after relaunch:
+  `appearance.theme=light` and `general.autoNaming=true` both persist.
+
+**Nothing is promoted on this.** It is a builder's self-report of its own work, which the standing
+goal rules out by name — *a feature the critic has not successfully tried does not exist* — and
+tonight has already shown twice what a builder-claimed live check is worth (`F-PER-01` at pass 17,
+`F-EDIT-04` this morning). The rows a critic should now exercise, with what to do:
+
+| row | current | what to try |
+|---|---|---|
+| `F-CTRL-CLI-02` | `FAILED — absent` | evidence reads "no shim/install mechanism, bare tillerctl relies on PATH" — this is exactly what P87 built. Launch an agent from Tiller and check the hook resolves without PATH help |
+| `F-SET-04` `-05` `-06` `-07` | `half-proven` | each says "DB half absent". Change the setting, quit, relaunch, read the value back **from the DB** (WAL-aware, ENVIRONMENT.md) |
+| `F-SET-10` | `half-proven` | same shape, usage-bar visibility |
+
+Note `P88`'s converter was the row-eating defect: `app_settings_from_snapshot` mapped 5 of 16 fields
+and `..AppSettings::default()` silently reset the other 11 on every save. So these five rows could
+not have persisted before, and their "DB half absent" was accurate rather than stale. **Check the
+DB, not the UI** — the UI half was already green and is what made the defect invisible.
+
+## One worktree, four agents, one broken build — 2026-08-14, 10:10
+
+`codex12` could not run `Scripts/ci-linux.sh` to close its own pass. The blocker was in
+`tiller_ui/src/chat.rs` — `Entry::Thought` changed from a tuple to a struct with the rendering
+pattern left on the old shape — and it was **not `codex12`'s change**. It is `sonnet`, mid-`P91`
+Part 1, which converts that entry so a thought can collapse.
+
+Nobody did anything wrong. `codex12` correctly declined to touch a file that is not its own, and
+`sonnet` is entitled to a non-compiling intermediate state while it works. **The cost falls on
+whoever tries to run the gate during someone else's edit**, and with four agents in one worktree
+that is most of the time.
+
+Worth knowing rather than fixing tonight: a shared worktree makes `cargo test --workspace` a
+shared resource with no lock, unlike the display, which has one. The cheap mitigation is what
+`ENVIRONMENT.md` already advises — prefer `-p <crate>` while the roster is busy — and the real fix
+is per-agent worktrees, which is a change to the user's setup and not mine to make unasked. Until
+then, **a red gate needs its cause attributed before it is reported**: "the gate is red" and "the
+gate is red because of my change" are different claims, and only the second is actionable by the
+agent making it.
