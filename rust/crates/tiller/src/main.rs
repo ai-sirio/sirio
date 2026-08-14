@@ -2976,11 +2976,18 @@ impl TillerWorkspace {
 
     fn update_project_settings(&mut self, update: &ProjectSettingsUpdate, cx: &mut Context<Self>) {
         let (icon_kind, icon_value) = update.icon.persisted_parts();
+        // Carry forward the worktree-base/location-override fields (F-PRJ-17,
+        // F-PRJ-18): this call site only edits icon/color/name, so a
+        // hard-coded `None` here would silently wipe any user-set base or
+        // override on the next unrelated identity edit.
+        let existing = self.project_catalog.project_settings(&update.id);
         let settings = CatalogProjectSettings {
             color_hex: Some(update.icon.tint.id().to_string()),
             display_name: update.display_name.clone(),
             icon_kind,
             icon_value,
+            default_worktree_base: existing.default_worktree_base,
+            worktree_location_override: existing.worktree_location_override,
         };
         match self
             .project_catalog
