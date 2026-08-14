@@ -1,0 +1,8 @@
+# F09 scratch
+
+DIRTY-LOCAL
+AB
+**TYPED-OVER**
+tail line stays unchanged
+EXTERNAL-LINE-1
+EXTERNAL-LINE-3
