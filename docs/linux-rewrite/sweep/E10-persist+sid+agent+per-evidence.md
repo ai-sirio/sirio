@@ -51,3 +51,46 @@ Captures: `reference/linux-progress/drive-E10-persist+sid+agent+per/03-empty-ret
 `reference/linux-progress/drive-E10-persist+sid+agent+per/04-ctrlt-with-keyboard-init.png`,
 `reference/linux-progress/drive-E10-persist+sid+agent+per/02-after-real-click-newterminal.png`
 (positive control).
+
+## F-PERSIST-DB-11 (ledger line 514)
+
+**Missing half named by the note**: "*Open databases representing earlier schema versions
+and inspect that each migration preserves data and creates the expected current records*" —
+only the "creates expected current records" half had a test (fresh `TempDir`, no prior data).
+Drove the harder half directly: hand-built a real v1-schema SQLite file with `python3`'s
+`sqlite3` module (schema copied verbatim from `migrate_v1` in `migrations.rs` — reading, not
+editing, `rust/`), `PRAGMA user_version = 1`, and one project + one worktree row pointed at a
+real on-disk git fixture (`/tmp/.../scratchpad/e10-fixture`, branch `master`). Pointed
+`TILLER_DB` at that file and launched the prebuilt binary.
+
+**Table-creation half confirmed live**: after one boot the file's `PRAGMA user_version` reads
+`12` (this build has more than the `v1..v10` the ledger note assumed — a stale range worth
+flagging back), and `sqlite_master` lists `browser_origin_grant`, `chat_turn`, `project`,
+`quarantine_record`, `session_ref`, `setting`, `sidebar_expanded_project`, `sidebar_state`,
+`tab`, `tab_state`, `worktree` — the full current schema, built forward from a real v1 file,
+not a fresh `TempDir`.
+
+**Data-preservation half — genuine, nuanced finding, not a clean PASS/FAIL**: the planted row
+did **not** survive with its stored identity. Before boot: `project.id='p-v1test'`,
+`name='MIGRATION-MARKER-PROJECT'`, `worktree.branch='MIGRATION-MARKER-BRANCH'`. After one
+boot: the row is gone; in its place is `project.id='p-ed057236f356327b'` (a path-derived id
+seen from this same fixture path throughout this slice's other drives),
+`name='e10-fixture'` (the directory basename), `worktree.branch='master'` (the fixture's real
+git branch) — confirmed both on-screen (sidebar: `reference/linux-progress/drive-E10-persist+sid+agent+per/02-migration-marker2.png`)
+and by re-opening the file with `sqlite3` after the app exited. A first attempt with a
+fictional path (`/tmp/v1-marker-path`) logged `[session] project v1project-marker vanished:
+/tmp/v1-marker-path` — proving there is a live "does this path still exist" reconciliation
+pass on load that discards and **regenerates** project/worktree rows from the filesystem/git
+rather than trusting the stored `name`/`branch`/`id` verbatim. The project is not lost from
+the user's point of view (it reappears, correctly pointed at the real repo), but the row's
+*stored* data was not preserved across the migration boot — it was silently overwritten by
+live discovery. That is a real answer to the row's VERIFY clause, not a dodge: schema
+migration works; **row-content preservation does not**, at least for `project`/`worktree`
+identity fields, because a reconciliation pass runs on every load regardless of schema
+version and always wins.
+
+Captures: `reference/linux-progress/drive-E10-persist+sid+agent+per/02-migration-marker2.png`
+(sidebar showing the regenerated project/worktree after the v1 boot). Raw before/after rows
+recorded above are reproducible with the `python3`/`sqlite3` snippet in this session's shell
+history; not re-saved as a script file since it is three inline `CREATE TABLE` statements
+copied from `migrate_v1`.
