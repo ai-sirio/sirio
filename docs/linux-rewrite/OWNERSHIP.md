@@ -131,3 +131,40 @@ Two seams that used to be listed here are **gone**, not resolved: `composer.rs`/
 `tiller_markdown`/`file_view.rs` each now sit with a single owner. Losing a pane shrank the surface
 where two owners had to agree, which is the one good thing to come out of it — and it is the
 cheapest fix available whenever a seam looks permanent: give both halves to one owner.
+
+## Amendment — 2026-08-14, 09:50: `chat.rs` + `tiller_acp/**` to `sonnet` for P91
+
+**`chat.rs`, `composer.rs` and `tiller_acp/**` move to `sonnet` for the duration of `P91`.**
+`codex11` must not touch those three while it is in flight.
+
+### This is a correction of an orchestrator error, not a plan
+
+I dispatched `P91` to `sonnet` as a builder without checking this file. Both files were
+`codex11`'s and `sonnet` had been recorded as owning none. The brief even says "Owner:
+`sonnet`, as builder" — written against a roster I remembered instead of one I read, which is
+the exact failure the top of this document was created to prevent, committed by the person
+maintaining it.
+
+Recording it rather than reversing it, for two reasons that would hold even if I had planned it:
+
+- **This document's own escape clause fires.** It says *"`codex11` is now carrying more than
+  `codex12`… revisit if `codex11` becomes the queue."* `codex11` now owns thirteen crates plus
+  six `tiller_ui` files and has `P89` in flight; it is the queue. `sonnet` was idle.
+- **The seam principle is satisfied either way.** `P91`'s seam is `tiller_acp` (widen the event)
+  → `chat.rs` (render it). Both halves are in this transfer, so one owner still holds both —
+  which was the whole reason `chat.rs` went to `codex11` in the first place.
+
+### What it costs, stated plainly
+
+**Critic throughput, which this document calls the project's rate limit.** Two critics become
+one (`fable`) while `P91` runs. That is the real price and it is why this is scoped to one
+piece and not made permanent.
+
+It costs nothing in *independence*: `sonnet` built the chat surfaces before the reassignment, so
+the rule below — nobody may judge `F-CHAT-*` on `sonnet`'s tests — already applied and still
+does. `sonnet` could not have judged this tier either way.
+
+### On expiry
+
+When `P91` lands, `chat.rs`, `composer.rs` and `tiller_acp/**` return to `codex11` and `sonnet`
+returns to critic duty. Until then this amendment is the map for those three paths.
