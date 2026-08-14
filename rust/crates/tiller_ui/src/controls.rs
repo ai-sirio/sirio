@@ -218,16 +218,11 @@ pub fn segmented(
     control
 }
 
-/// A numeric stepper with a value label and up/down controls.
-pub fn stepper<F>(id: &'static str, value: i32, theme: Theme, callback: F) -> impl IntoElement
-where
-    F: Fn(i32, &mut App) + Clone + 'static,
-{
-    stepper_with_unit(id, value, "pt", theme, callback)
-}
-
-/// A numeric stepper whose value can use a domain-specific unit.
-pub fn stepper_with_unit<F>(
+/// A numeric stepper with a value label and up/down controls. Pass `""` for a bare count.
+///
+/// `unit` is required rather than defaulting: while it defaulted to `"pt"`, the two count rows in
+/// General rendered as "100 pt" chats and "6 pt" worktrees.
+pub fn stepper<F>(
     id: &'static str,
     value: i32,
     unit: &'static str,
@@ -272,7 +267,11 @@ where
                 .justify_center()
                 .text_size(theme.typography.callout)
                 .text_color(theme.title)
-                .child(format!("{value} {unit}")),
+                .child(if unit.is_empty() {
+                    value.to_string()
+                } else {
+                    format!("{value} {unit}")
+                }),
         )
         .child(
             div()
