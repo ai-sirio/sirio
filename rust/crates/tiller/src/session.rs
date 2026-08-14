@@ -377,6 +377,17 @@ pub struct CatalogProjectSettings {
     pub display_name: Option<String>,
     pub icon_kind: String,
     pub icon_value: Option<String>,
+    /// F-PRJ-17: the branch/ref new worktrees for this project are created
+    /// from by default (e.g. the current branch, a pinned branch, or the
+    /// primary worktree), when the user has not typed one explicitly in the
+    /// New Worktree prompt. Threaded through `write_catalog`/`restore_catalog`
+    /// to the already-migrated `project.default_worktree_base` column.
+    pub default_worktree_base: Option<String>,
+    /// F-PRJ-18: overrides `resolve_parent_directory`'s default (a sibling
+    /// of the primary worktree) with a fixed parent directory every new
+    /// worktree for this project is created under. Threaded the same way,
+    /// to `project.worktree_location_override`.
+    pub worktree_location_override: Option<String>,
 }
 
 impl Default for CatalogProjectSettings {
@@ -386,6 +397,8 @@ impl Default for CatalogProjectSettings {
             display_name: None,
             icon_kind: "icon".to_string(),
             icon_value: None,
+            default_worktree_base: None,
+            worktree_location_override: None,
         }
     }
 }
@@ -808,6 +821,8 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
         record.display_name = settings.display_name;
         record.icon_kind = settings.icon_kind;
         record.icon_value = settings.icon_value;
+        record.default_worktree_base = settings.default_worktree_base;
+        record.worktree_location_override = settings.worktree_location_override;
         db.save_project(&record)?;
 
         let desired_worktree_ids: std::collections::HashSet<String> = project
@@ -874,6 +889,10 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
                             display_name: record.display_name.clone(),
                             icon_kind: record.icon_kind.clone(),
                             icon_value: record.icon_value.clone(),
+                            default_worktree_base: record.default_worktree_base.clone(),
+                            worktree_location_override: record
+                                .worktree_location_override
+                                .clone(),
                         },
                     );
                     projects.push(project);
@@ -2070,6 +2089,61 @@ mod tests {
                 worktree_id(&projects[0].id, 0),
                 worktree_id(&projects[0].id, 1),
             ]
+        );
+    }
+
+    /// F-PRJ-17/F-PRJ-18: `default_worktree_base` and
+    /// `worktree_location_override` round-trip through `write_catalog` and
+    /// `restore_catalog` the same way `color_hex`/`display_name` already do
+    /// above. Before this, `CatalogProjectSettings` had no fields for
+    /// either — `write_catalog` never set the already-migrated
+    /// `project.default_worktree_base`/`worktree_location_override`
+    /// columns, and `restore_catalog` never read them back, so a value
+    /// set through `update_project_settings` was silently dropped at the
+    /// next save and could never survive a relaunch.
+    #[test]
+    fn default_worktree_base_and_location_override_round_trip_through_the_catalog_store() {
+        let dir = TempDir::new();
+        let root = dir.0.join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir");
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.email", "tiller-tests@example.com"]);
+        run_git(&root, &["config", "user.name", "Tiller Tests"]);
+        std::fs::write(root.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&root, &["add", "README"]);
+        run_git(&root, &["commit", "--quiet", "-m", "fixture"]);
+
+        let database = dir.db_path("worktree-defaults");
+        let store = SessionStore::open(&database);
+        let discovered = discover_project(&root).expect("discover the fixture repo");
+        let project = catalog_project(&root, discovered);
+        let mut catalog = ProjectCatalog::from_projects(vec![project.clone()]);
+        catalog
+            .update_project_settings(
+                &project.id,
+                CatalogProjectSettings {
+                    default_worktree_base: Some("develop".to_string()),
+                    worktree_location_override: Some("/srv/worktrees".to_string()),
+                    ..CatalogProjectSettings::default()
+                },
+            )
+            .expect("project is in the catalog");
+        store.schedule_catalog(&catalog);
+
+        let restored = restore_catalog(&database);
+        let restored_settings = restored
+            .settings
+            .get(&project.id)
+            .expect("project identity settings restore with the canonical id");
+        assert_eq!(
+            restored_settings.default_worktree_base.as_deref(),
+            Some("develop"),
+            "the default worktree base survives a write/restore round trip"
+        );
+        assert_eq!(
+            restored_settings.worktree_location_override.as_deref(),
+            Some("/srv/worktrees"),
+            "the worktree location override survives a write/restore round trip"
         );
     }
 
