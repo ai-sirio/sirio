@@ -142,3 +142,26 @@ multi-origin `Revoke all` path — seeded 2 origins, one real click cleared both
 DB re-query and a changed capture region.
 
 Captures: `reference/linux-progress/wavea-W11-ctrl+brw+sid/brw08/{01-baseline,02-before-revoke-all,03-after-click-158}.png`.
+
+## F-SID-12 — ledger line 81, currently half-proven
+
+**Drove:** re-confirmed independently: `grep -n "BTN_LEFT\|button" Scripts/wayland-virtual-pointer.c`.
+
+**Observed:**
+```
+132:  zwlr_virtual_pointer_v1_button(pointer, milliseconds(), 0x110,
+137:  zwlr_virtual_pointer_v1_button(pointer, milliseconds(), 0x110,
+```
+`0x110` is `BTN_LEFT`, hardcoded with no button parameter anywhere in the file —
+`Scripts/wayland-drive.sh`'s `click` action can only ever send a left button on this lane.
+There is no command-palette or socket path to "Set as Primary" that substitutes for a
+right-click context menu (the command palette opens on `ctrl-shift-p`, itself a modifier
+chord, also out of scope here per `WAYLAND-LANE.md`). No new gesture became available since
+the prior pass; matches the existing record exactly.
+
+**Claim:** partially-exercised. Catalog/dispatch half
+(`worktree_primary_context_transition_reaches_the_catalog` route, sidebar.rs:694-708,
+main.rs:3209-3248) remains correctly proven by source inspection; the gesture half
+(right-click a worktree row) is could-not-reach on Wayland — needs `DISPLAY=:1`.
+
+No new captures (grep-only re-confirmation, matches prior evidence).
