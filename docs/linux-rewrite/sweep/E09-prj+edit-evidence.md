@@ -149,3 +149,26 @@ manually against the same already-running instance's `$VP_FIFO`/`$SWAYSOCK`/`$WA
 Captures: `02-fedit05e-fileopen.png`, `02-fedit05j-open.png`, `99-fedit05k-conflict.png`
 (clean-tab silent reload, negative control), `04-fedit05l-dirty.png`, `99-fedit05m-conflict-dirty.png`,
 `99-fedit05n-keep.png`, `99-fedit05p-banner2.png`, `99-fedit05q-reload.png`.
+
+## F-EDIT-12 — could-not-reach: this lane's virtual pointer has no drag primitive
+
+Checked the actual capability, not just tried and given up: `Scripts/wayland-virtual-pointer.c`
+(the compiled helper `wayland-drive.sh` uses for all synthetic pointer input) parses exactly two
+operations, `move` and `click` (`sscanf(line, "%7s %u %u %u %u %u", operation, …)` gated on
+`strcmp(operation, "move") … "click"`). `click` is hard-coded to move, sleep 25ms, press, sleep
+25ms, release — there is no button-down-only, button-up-only, or motion-while-held primitive
+anywhere in this binary or in `wayland-drive.sh`'s `pointer_command`/`click`/`move` wrappers. A
+drag (press, move while held, release) cannot be composed from `move` and `click` alone.
+
+This matches `WAYLAND-LANE.md`'s own listed limitation verbatim: "Pointer drags, right-click,
+modifiers/chords … are not yet exercised" and "still require `DISPLAY=:1` until separately
+proven." My lane assignment for this slice is Wayland-only; `DISPLAY=:1` / `linux-drive.sh` is
+out of scope for this drive by the task's own instructions (single global mutex, other slices
+depend on it). Not attempted further, not worked around by rebuilding the pointer helper
+(compiling anything is out of scope for this drive regardless of directory).
+
+`F-EDIT-12` stays `could-not-reach` on this lane. The `ADJUDICATION-BACKLOG.md` note that the
+drag payload is `(PathBuf, String)`, built and consumed in `changes.rs`/`tiller_terminal/src/lib.rs`,
+is unaffected by this — that was a static-code correction to the row's framing, not a live proof,
+and still stands as the best available evidence pending an X11-lane drive by whichever agent
+holds that lock.
