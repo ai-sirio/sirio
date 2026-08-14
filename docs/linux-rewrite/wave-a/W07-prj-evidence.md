@@ -41,3 +41,40 @@ from zero.
 - **Captures:** 02-hover-row.png, 02-settings-open.png, 03-immediately-after.png,
   02-after-close.png, 02-relaunch-check.png (positive path); 02-icon-picked.png,
   02-after-click-branch.png, 02-reopen.png, 02-after-colour-click.png (flake investigation)
+
+## `F-PRJ-14` — ledger line 107, currently half-proven
+
+- **Triage says:** exercise
+- **Approach:** drive the untried PNG-upload and favicon-domain arms live, Close, confirm the
+  sidebar row shows the Globe glyph for each.
+
+Reused the same project row from F-PRJ-15 (already had a GitHub avatar and, further back, a
+git-branch icon selected — both persisted). Opened Project Settings → Avatar tab
+(`02-avatar-open.png`). **Favicon-domain arm**, previously untried: clicked the domain field,
+typed `example.com`, clicked "Use Favicon" — `Current: favicon for example.com` appeared live
+(`03-favicon-committed.png`). Clicked Close: **the sidebar row switched to the green Globe
+glyph** (`02-favicon-closed2.png`), same propagation path F-PRJ-15 confirmed fixed. Reopening
+Settings afterward showed the favicon selection had round-tripped through the DB
+(`03-png-dialog2.png`, `Current: favicon for example.com` still shown after the app had been
+restarted once in between by an unrelated drive in this same session).
+
+**PNG-upload arm, still untried:** clicked "Choose PNG…" (`03-png-dialog2.png` shows the click
+landing squarely on the button) and captured before/after — no dialog, no visible state change,
+no error text appeared anywhere in the captured frame. `choose_local_png` hands off to the
+platform's native file-open dialog, which this synthetic headless-Wayland lane has no way to
+drive (no portal service, and even if one answered, its window would not necessarily land on
+the `HEADLESS-1` output `grim` captures). This is the same class of gap as `F-BRW`'s embedded
+browser content — a property of the lane, not evidence about the feature. Route this arm to
+`DISPLAY=:1` or leave it as a known instrumentation gap.
+
+- **Claim:** partially-exercised
+- **Drove:** Avatar tab → favicon field → type domain → Use Favicon → Close → sidebar check;
+  separately, Choose PNG… click with before/after capture
+- **Observed:** favicon-domain arm now fully proven end to end, including propagation to the
+  sidebar Globe glyph and persistence across a process restart. PNG-upload arm remains
+  unexercised — not because it failed, but because its control surface (native file dialog) has
+  no synthetic-input path on this lane.
+- **Discriminating:** yes for the favicon half — default project icon is not Globe, and the
+  glyph only appears here because this drive picked a favicon/GitHub avatar source.
+- **Captures:** 02-avatar-open.png, 02-favicon-typed.png, 03-favicon-committed.png,
+  02-favicon-closed.png, 02-favicon-closed2.png, 02-precheck.png, 03-png-dialog2.png
