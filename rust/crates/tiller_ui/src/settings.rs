@@ -1406,6 +1406,7 @@ impl Settings {
         let interface_stepper = controls::stepper(
             "interface-font-size",
             self.interface_font_size,
+            "pt",
             theme,
             move |value, cx| {
                 interface_entity.update(cx, |this, cx| this.set_interface_font_size(value, cx));
@@ -1415,6 +1416,7 @@ impl Settings {
         let terminal_stepper = controls::stepper(
             "terminal-font-size",
             self.terminal_font_size,
+            "pt",
             theme,
             move |value, cx| {
                 terminal_entity.update(cx, |this, cx| this.set_terminal_font_size(value, cx));
@@ -1614,7 +1616,7 @@ impl Settings {
         );
 
         let refresh_entity = entity.clone();
-        let refresh_stepper = controls::stepper_with_unit(
+        let refresh_stepper = controls::stepper(
             match provider {
                 ProviderKind::Claude => "provider-claude-refresh",
                 ProviderKind::Codex => "provider-codex-refresh",
@@ -2186,6 +2188,7 @@ impl Settings {
         let history_stepper = controls::stepper(
             "general-chat-retention",
             self.chat_retention,
+            "",
             theme,
             move |value, cx| {
                 history_stepper_entity.update(cx, |this, cx| this.set_chat_retention(value, cx));
@@ -2201,6 +2204,7 @@ impl Settings {
         let mounted_stepper = controls::stepper(
             "general-mounted-count",
             self.mounted_worktrees,
+            "",
             theme,
             move |value, cx| {
                 mounted_stepper_entity.update(cx, |this, cx| this.set_mounted_worktrees(value, cx));
