@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tiller_persistence::{
-    AppDatabase, AppSettings, AppearanceMode, FileIconTheme, MAX_DATABASE_BYTES, PersistenceError,
-    ProjectRecord, SidebarState, TabRecord, TabStateRecord, WorktreeRecord, migrate_up_to,
+    AppDatabase, AppSettings, AppearanceMode, CURRENT_SCHEMA_VERSION, ChatEntry,
+    ChatPermissionOption, ChatPermissionOutcome, ChatTranscript, ChatTurn, FileIconTheme,
+    MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, TabRecord, TabStateRecord,
+    WorktreeRecord, migrate_up_to,
 };
 
 /// A throwaway directory, removed on drop. Canonicalized so paths match what
@@ -61,6 +63,9 @@ fn sample_worktree(id: &str, project_id: &str, branch: &str) -> WorktreeRecord {
         path: format!("/Users/me/{branch}"),
         order_idx: 0,
         is_primary: branch == "main",
+        comment: None,
+        created_at: None,
+        updated_at: None,
     }
 }
 
@@ -70,9 +75,350 @@ fn sample_tab(id: &str, worktree_id: &str, title: &str, kind: &str) -> TabRecord
         worktree_id: worktree_id.to_string(),
         title: title.to_string(),
         kind: kind.to_string(),
+        agent_id: None,
         order_idx: 0,
         is_active: false,
     }
+}
+
+#[test]
+fn worktree_metadata_and_exact_path_survive_a_relaunch() {
+    let dir = TempDir::new();
+    let path = dir.db_path("worktree-metadata");
+    let mut expected = sample_worktree("wt-1", "proj-1", "main");
+    expected.comment = Some("release checkout".into());
+    expected.created_at = Some(1_700_000_000_123);
+    expected.updated_at = Some(1_700_000_100_456);
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("proj-1", "tiller"))
+            .expect("project");
+        db.save_worktree(&expected).expect("worktree");
+    }
+    let db = AppDatabase::open(&path).expect("reopen");
+    assert_eq!(
+        db.worktree_by_path(&expected.path).expect("lookup"),
+        Some(expected.clone())
+    );
+    assert_eq!(db.worktrees().expect("worktrees"), vec![expected]);
+}
+
+#[test]
+fn a_duplicate_primary_is_reconciled_and_future_writes_are_rejected() {
+    let dir = TempDir::new();
+    let path = dir.db_path("primary-invariant");
+    {
+        let mut conn = rusqlite::Connection::open(&path).expect("open raw database");
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .expect("pragmas");
+        migrate_up_to(&mut conn, 6).expect("migrate to pre-index schema");
+        conn.execute(
+            "INSERT INTO project (id, name, root_path, icon_kind, order_idx)
+             VALUES ('proj-1', 'tiller', '/tmp/tiller', 'icon', 0)",
+            [],
+        )
+        .expect("project");
+        for (id, path, order) in [
+            ("wt-first", "/tmp/tiller", 0),
+            ("wt-second", "/tmp/tiller-second", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO worktree (id, project_id, branch, path, is_primary, order_idx)
+                 VALUES (?1, 'proj-1', ?2, ?3, 1, ?4)",
+                rusqlite::params![id, id, path, order],
+            )
+            .expect("duplicate primary fixture");
+        }
+    }
+
+    let db = AppDatabase::open(&path).expect("open reconciles duplicate primary");
+    let worktrees = db.worktrees_of_project("proj-1").expect("worktrees");
+    assert!(worktrees[0].is_primary);
+    assert!(!worktrees[1].is_primary);
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen raw database");
+    let result = conn.execute(
+        "INSERT INTO worktree (id, project_id, branch, path, is_primary, order_idx)
+         VALUES ('wt-third', 'proj-1', 'third', '/tmp/tiller-third', 1, 2)",
+        [],
+    );
+    assert!(
+        result.is_err(),
+        "the primary index must reject a second primary"
+    );
+}
+
+#[test]
+fn exact_path_lookup_does_not_normalize_nearby_paths() {
+    let dir = TempDir::new();
+    let path = dir.db_path("exact-path");
+    let db = AppDatabase::open(&path).expect("open");
+    db.save_project(&sample_project("proj-1", "tiller"))
+        .expect("project");
+    let worktree = sample_worktree("wt-1", "proj-1", "main");
+    db.save_worktree(&worktree).expect("worktree");
+    assert_eq!(
+        db.worktree_by_path(&worktree.path).expect("exact lookup"),
+        Some(worktree)
+    );
+    assert_eq!(
+        db.worktree_by_path("/Users/me/./main")
+            .expect("nearby lookup"),
+        None
+    );
+}
+
+#[test]
+fn current_schema_contains_named_persistence_migrations() {
+    let dir = TempDir::new();
+    let path = dir.db_path("named-migrations");
+    let db = AppDatabase::open(&path).expect("open");
+    assert_eq!(
+        db.schema_version().expect("schema version"),
+        CURRENT_SCHEMA_VERSION
+    );
+    drop(db);
+
+    let conn = rusqlite::Connection::open(&path).expect("raw open");
+    for table in [
+        "session_ref",
+        "chat_turn",
+        "quarantine_record",
+        "browser_origin_grant",
+    ] {
+        let present: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("table lookup");
+        assert_eq!(present, 1, "named migration must create {table}");
+    }
+    let worktree_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(worktree)")
+        .expect("worktree schema")
+        .query_map([], |row| row.get(1))
+        .expect("worktree columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read worktree columns");
+    for column in ["comment", "created_at", "updated_at"] {
+        assert!(
+            worktree_columns.iter().any(|value| value == column),
+            "metadata migration must create {column}"
+        );
+    }
+    let primary_index: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master
+             WHERE type = 'index' AND name = 'worktree_one_primary_per_project'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("primary index lookup");
+    assert_eq!(primary_index, 1);
+}
+
+#[test]
+fn tab_agent_identity_round_trips_through_a_real_database_file() {
+    let dir = TempDir::new();
+    let path = dir.db_path("tab-agent-identity");
+
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("proj-1", "tiller"))
+            .expect("project");
+        db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
+            .expect("worktree");
+        let tab = TabRecord::new("tab-1", "wt-1", "Codex chat", "chat").with_agent_id("codex");
+        db.save_tab(&tab).expect("tab");
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let tabs = db.tabs_of_worktree("wt-1").expect("tabs");
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0].agent_id.as_deref(), Some("codex"));
+}
+
+#[test]
+fn v9_tab_rows_upgrade_to_current_with_no_recorded_agent_identity() {
+    let dir = TempDir::new();
+    let path = dir.db_path("v9-tab-agent-identity");
+
+    {
+        let mut conn = rusqlite::Connection::open(&path).expect("open raw database");
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .expect("pragmas");
+        migrate_up_to(&mut conn, 9).expect("migrate to v9");
+        conn.execute(
+            "INSERT INTO project (id, name, root_path, icon_kind, order_idx)
+             VALUES ('proj-1', 'tiller', '/Users/me/tiller', 'icon', 0)",
+            [],
+        )
+        .expect("project");
+        conn.execute(
+            "INSERT INTO worktree (id, project_id, branch, path, order_idx)
+             VALUES ('wt-1', 'proj-1', 'main', '/Users/me/tiller', 0)",
+            [],
+        )
+        .expect("worktree");
+        conn.execute(
+            "INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+             VALUES ('tab-1', 'wt-1', 'Legacy chat', 'chat', 0, 1)",
+            [],
+        )
+        .expect("tab");
+    }
+
+    let db = AppDatabase::open(&path).expect("upgrade v9 database");
+    assert_eq!(CURRENT_SCHEMA_VERSION, 12);
+    assert_eq!(db.schema_version().expect("schema version"), 12);
+    let tabs = db.tabs_of_worktree("wt-1").expect("legacy tabs");
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0].agent_id, None);
+}
+
+#[test]
+fn a_corrupt_tab_is_skipped_and_quarantined_while_valid_tabs_survive() {
+    let dir = TempDir::new();
+    let path = dir.db_path("quarantine-tab");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("proj-1", "tiller"))
+            .expect("project");
+        db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
+            .expect("worktree");
+        db.save_tabs(
+            "wt-1",
+            &[
+                sample_tab("tab-bad", "wt-1", "Bad", "terminal"),
+                sample_tab("tab-good", "wt-1", "Good", "chat"),
+            ],
+        )
+        .expect("tabs");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("raw open");
+    conn.execute(
+        "UPDATE tab SET order_idx = 'not-an-integer' WHERE id = 'tab-bad'",
+        [],
+    )
+    .expect("corrupt one tab");
+    drop(conn);
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let tabs = db.tabs_of_worktree("wt-1").expect("load valid tabs");
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0].id, "tab-good");
+    assert!(
+        db.quarantined_records()
+            .expect("quarantine")
+            .iter()
+            .any(|row| row.record_type == "tab" && row.record_id == "tab-bad")
+    );
+}
+
+#[test]
+fn a_corrupt_tab_state_is_quarantined_without_poisoning_siblings() {
+    let dir = TempDir::new();
+    let path = dir.db_path("quarantine-state");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("proj-1", "tiller"))
+            .expect("project");
+        db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
+            .expect("worktree");
+        db.save_tabs(
+            "wt-1",
+            &[
+                sample_tab("tab-1", "wt-1", "Terminal", "terminal"),
+                sample_tab("tab-2", "wt-1", "Chat", "chat"),
+            ],
+        )
+        .expect("tabs");
+        db.save_tab_states(
+            "wt-1",
+            &[
+                TabStateRecord::new("tab-1", r#"{"ok":true}"#),
+                TabStateRecord::new("tab-2", r#"{"ok":false}"#),
+            ],
+        )
+        .expect("states");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("raw open");
+    conn.execute(
+        "UPDATE tab_state SET state = 'not json' WHERE tab_id = 'tab-1'",
+        [],
+    )
+    .expect("corrupt one state");
+    drop(conn);
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let states = db.tab_states_of_worktree("wt-1").expect("load states");
+    assert_eq!(
+        states,
+        vec![TabStateRecord::new("tab-2", r#"{"ok":false}"#)]
+    );
+    assert!(
+        db.quarantined_records()
+            .expect("quarantine")
+            .iter()
+            .any(|row| row.record_type == "tab_state" && row.record_id == "tab-1")
+    );
+}
+
+#[test]
+fn a_corrupt_chat_turn_is_quarantined_without_losing_other_turns() {
+    let dir = TempDir::new();
+    let path = dir.db_path("quarantine-chat");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("proj-1", "tiller"))
+            .expect("project");
+        db.save_worktree(&sample_worktree("wt-1", "proj-1", "main"))
+            .expect("worktree");
+        db.save_tabs("wt-1", &[sample_tab("tab-chat", "wt-1", "Chat", "chat")])
+            .expect("tab");
+        db.save_chat_transcript(&ChatTranscript {
+            tab_id: "tab-chat".into(),
+            turns: vec![
+                ChatTurn {
+                    entries: vec![ChatEntry::UserMessage {
+                        text: "first".into(),
+                    }],
+                },
+                ChatTurn {
+                    entries: vec![ChatEntry::UserMessage {
+                        text: "second".into(),
+                    }],
+                },
+            ],
+        })
+        .expect("transcript");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("raw open");
+    conn.execute(
+        "UPDATE chat_turn SET payload = X'6E6F742D6A736F6E' WHERE ordinal = 0",
+        [],
+    )
+    .expect("corrupt one turn");
+    drop(conn);
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    let transcript = db
+        .load_chat_transcript("tab-chat")
+        .expect("load transcript")
+        .expect("valid sibling survives");
+    assert_eq!(transcript.turns.len(), 1);
+    assert!(matches!(
+        transcript.turns[0].entries[0],
+        ChatEntry::UserMessage { ref text } if text == "second"
+    ));
+    assert!(
+        db.quarantined_records()
+            .expect("quarantine")
+            .iter()
+            .any(|row| row.record_type == "chat_turn")
+    );
 }
 
 #[test]
@@ -86,6 +432,7 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
         terminal_font_size: 14,
         file_icon_theme: FileIconTheme::Material,
         control_socket_enabled: false,
+        ..AppSettings::default()
     };
     let state = SidebarState {
         expanded_project_ids: vec!["proj-1".to_string()],
@@ -120,7 +467,10 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
     // Drop closes the connection; reopen simulates a relaunch.
 
     let db = AppDatabase::open(&path).expect("reopen migrated database");
-    assert_eq!(db.schema_version().expect("version"), 5);
+    assert_eq!(
+        db.schema_version().expect("version"),
+        CURRENT_SCHEMA_VERSION
+    );
 
     let projects = db.projects().expect("load projects");
     assert_eq!(projects.len(), 2);
@@ -147,6 +497,179 @@ fn round_trips_projects_worktrees_tabs_settings_and_sidebar() {
 
     assert_eq!(db.settings().expect("load settings"), settings);
     assert_eq!(db.sidebar_state().expect("load sidebar state"), state);
+}
+
+#[test]
+fn chat_transcript_survives_process_relaunch_with_tool_and_permission_outcome() {
+    let dir = TempDir::new();
+    let path = dir.db_path("chat-relaunch");
+
+    let write = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", "chat_relaunch_helper", "--nocapture"])
+        .env("TILLER_PERSISTENCE_CHAT_HELPER", &path)
+        .env("TILLER_PERSISTENCE_CHAT_MODE", "write")
+        .output()
+        .expect("spawn transcript writer");
+    assert!(
+        write.status.success(),
+        "writer failed: {}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    let read = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", "chat_relaunch_helper", "--nocapture"])
+        .env("TILLER_PERSISTENCE_CHAT_HELPER", &path)
+        .env("TILLER_PERSISTENCE_CHAT_MODE", "read")
+        .output()
+        .expect("spawn transcript reader");
+    assert!(
+        read.status.success(),
+        "reader failed: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&read.stdout).contains("CHAT_OK"),
+        "reader must prove the restored transcript contents: {}",
+        String::from_utf8_lossy(&read.stdout)
+    );
+}
+
+#[test]
+fn chat_relaunch_helper() {
+    let Ok(database_path) = std::env::var("TILLER_PERSISTENCE_CHAT_HELPER") else {
+        return;
+    };
+    let mode = std::env::var("TILLER_PERSISTENCE_CHAT_MODE").expect("chat helper mode");
+    let path = Path::new(&database_path);
+
+    match mode.as_str() {
+        "write" => {
+            let db = AppDatabase::open(path).expect("open writer database");
+            db.save_project(&sample_project("proj-chat", "chat"))
+                .expect("save project");
+            db.save_worktree(&sample_worktree("wt-chat", "proj-chat", "main"))
+                .expect("save worktree");
+            db.save_tabs(
+                "wt-chat",
+                &[sample_tab("tab-chat", "wt-chat", "Chat", "chat")],
+            )
+            .expect("save chat tab");
+            db.save_chat_transcript(&sample_chat_transcript())
+                .expect("save transcript");
+        }
+        "read" => {
+            let db = AppDatabase::open(path).expect("reopen reader database");
+            assert_eq!(
+                db.load_chat_transcript("tab-chat")
+                    .expect("load transcript"),
+                Some(sample_chat_transcript())
+            );
+            println!("CHAT_OK");
+        }
+        other => panic!("unknown chat helper mode {other}"),
+    }
+}
+
+fn sample_chat_transcript() -> ChatTranscript {
+    ChatTranscript {
+        tab_id: "tab-chat".into(),
+        turns: vec![
+            ChatTurn {
+                entries: vec![
+                    ChatEntry::UserMessage {
+                        text: "Inspect the project".into(),
+                    },
+                    ChatEntry::AssistantMessage {
+                        text: "I will inspect it now.".into(),
+                    },
+                    ChatEntry::ToolCall {
+                        id: "tool-1".into(),
+                        title: "Read file".into(),
+                        status: "Completed".into(),
+                    },
+                ],
+            },
+            ChatTurn {
+                entries: vec![
+                    ChatEntry::UserMessage {
+                        text: "Can I apply the change?".into(),
+                    },
+                    ChatEntry::Permission {
+                        request_id: 7,
+                        title: String::new(),
+                        options: vec![ChatPermissionOption {
+                            id: "allow-once".into(),
+                            name: "Allow once".into(),
+                            kind: "allow_once".into(),
+                        }],
+                        outcome: ChatPermissionOutcome::Selected {
+                            option_id: "allow-once".into(),
+                            label: "Allow once".into(),
+                        },
+                    },
+                    ChatEntry::AssistantMessage {
+                        text: "The change was applied.".into(),
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+fn sample_turn(text: &str) -> ChatTurn {
+    ChatTurn {
+        entries: vec![ChatEntry::UserMessage { text: text.into() }],
+    }
+}
+
+#[test]
+fn chat_sessions_list_saved_tabs_by_activity_and_delete_only_transcript() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("chat-history")).expect("open");
+    db.save_project(&sample_project("project", "Project"))
+        .expect("project");
+    db.save_worktree(&sample_worktree("worktree", "project", "main"))
+        .expect("worktree");
+    let mut first = sample_tab("chat-1", "worktree", "First chat", "chat");
+    first.agent_id = Some("codex".into());
+    let second = sample_tab("chat-2", "worktree", "Second chat", "chat");
+    db.save_tabs("worktree", &[first, second]).expect("tabs");
+    db.save_chat_transcript(&ChatTranscript {
+        tab_id: "chat-1".into(),
+        turns: vec![sample_turn("one")],
+    })
+    .expect("first");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    db.save_chat_transcript(&ChatTranscript {
+        tab_id: "chat-2".into(),
+        turns: vec![sample_turn("two"), sample_turn("three")],
+    })
+    .expect("second");
+
+    let sessions = db.chat_sessions("worktree").expect("list");
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|session| session.tab_id.as_str())
+            .collect::<Vec<_>>(),
+        ["chat-2", "chat-1"]
+    );
+    assert_eq!(sessions[0].title, "Second chat");
+    assert_eq!(sessions[0].turn_count, 2);
+    assert_eq!(sessions[1].agent_id.as_deref(), Some("codex"));
+    assert!(sessions[0].last_activity >= sessions[1].last_activity);
+
+    assert!(db.delete_chat_session("chat-2").expect("delete"));
+    assert!(db
+        .chat_sessions("worktree")
+        .expect("list after delete")
+        .iter()
+        .all(|session| session.tab_id != "chat-2"));
+    assert!(db
+        .tabs_of_worktree("worktree")
+        .expect("tabs after delete")
+        .iter()
+        .any(|tab| tab.id == "chat-2"));
 }
 
 #[test]
@@ -225,9 +748,12 @@ fn an_old_version_database_is_migrated_forward_with_rows_intact() {
         .expect("seed setting");
     }
 
-    // Opening with the real database migrates v1 -> v4.
+    // Opening with the real database migrates v1 to the current schema.
     let db = AppDatabase::open(&path).expect("open migrates forward");
-    assert_eq!(db.schema_version().expect("version"), 5);
+    assert_eq!(
+        db.schema_version().expect("version"),
+        CURRENT_SCHEMA_VERSION
+    );
 
     let projects = db.projects().expect("load projects");
     assert_eq!(projects.len(), 1, "project survived the migration");
@@ -253,6 +779,67 @@ fn an_old_version_database_is_migrated_forward_with_rows_intact() {
     let state = db.sidebar_state().expect("load sidebar state");
     assert!(state.expanded_project_ids.is_empty());
     assert_eq!(state.selected_worktree_id, None);
+
+    // The v1 rows above remain usable after the additive chat migration.
+    db.save_tabs(
+        "wt-1",
+        &[
+            sample_tab("tab-1", "wt-1", "Terminal", "terminal"),
+            sample_tab("tab-chat", "wt-1", "Chat", "chat"),
+        ],
+    )
+    .expect("save migrated tabs");
+    db.save_chat_transcript(&sample_chat_transcript())
+        .expect("save transcript after old-db migration");
+    assert_eq!(
+        db.load_chat_transcript("tab-chat")
+            .expect("load migrated transcript"),
+        Some(sample_chat_transcript())
+    );
+}
+
+#[test]
+fn chat_transcript_retains_newest_complete_turns_under_one_megabyte() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("chat-bound")).expect("open");
+    db.save_project(&sample_project("proj-chat", "chat"))
+        .expect("save project");
+    db.save_worktree(&sample_worktree("wt-chat", "proj-chat", "main"))
+        .expect("save worktree");
+    db.save_tabs(
+        "wt-chat",
+        &[sample_tab("tab-chat", "wt-chat", "Chat", "chat")],
+    )
+    .expect("save chat tab");
+
+    let turns = (0..20)
+        .map(|index| ChatTurn {
+            entries: vec![ChatEntry::AssistantMessage {
+                text: format!("marker-{index}-{}", "x".repeat(100_000)),
+            }],
+        })
+        .collect();
+    db.save_chat_transcript(&ChatTranscript {
+        tab_id: "tab-chat".into(),
+        turns,
+    })
+    .expect("save bounded transcript");
+
+    let restored = db
+        .load_chat_transcript("tab-chat")
+        .expect("load bounded transcript")
+        .expect("some newest turns fit");
+    assert!(restored.turns.len() < 20, "old turns must be pruned");
+    let first_text = match &restored.turns[0].entries[0] {
+        ChatEntry::AssistantMessage { text } => text,
+        entry => panic!("unexpected restored entry: {entry:?}"),
+    };
+    let last_text = match &restored.turns.last().expect("last turn").entries[0] {
+        ChatEntry::AssistantMessage { text } => text,
+        entry => panic!("unexpected restored entry: {entry:?}"),
+    };
+    assert!(!first_text.starts_with("marker-0-"));
+    assert!(last_text.starts_with("marker-19-"));
 }
 
 #[test]
@@ -283,7 +870,10 @@ fn an_existing_empty_file_is_corrupt_not_a_fresh_store() {
     std::fs::File::create(&path).expect("create empty file");
 
     let error = AppDatabase::open(&path).expect_err("empty existing file must fail");
-    assert!(matches!(error, PersistenceError::Corrupt { .. }));
+    assert!(
+        matches!(error, PersistenceError::Corrupt { .. }),
+        "empty database error: {error:?}"
+    );
     assert_eq!(
         std::fs::metadata(&path).expect("metadata").len(),
         0,
@@ -301,15 +891,29 @@ fn a_database_truncated_after_close_is_corrupt_and_untouched() {
             .expect("seed row");
     }
     let original_len = std::fs::metadata(&path).expect("metadata").len();
+    let page_size = {
+        let connection = rusqlite::Connection::open(&path).expect("open seeded database");
+        connection
+            .query_row("PRAGMA page_size", [], |row| row.get::<_, u64>(0))
+            .expect("read SQLite page size")
+    };
+    assert!(
+        original_len > page_size,
+        "seed database must contain more than one page"
+    );
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(&path)
         .expect("open for truncation");
-    file.set_len(original_len / 2).expect("truncate database");
+    file.set_len(original_len - page_size)
+        .expect("truncate database");
     let truncated_len = std::fs::metadata(&path).expect("metadata").len();
 
     let error = AppDatabase::open(&path).expect_err("truncated file must fail");
-    assert!(matches!(error, PersistenceError::Corrupt { .. }));
+    assert!(
+        matches!(error, PersistenceError::Corrupt { .. }),
+        "truncated database error: {error:?}"
+    );
     assert_eq!(
         std::fs::metadata(&path).expect("metadata").len(),
         truncated_len,
@@ -353,6 +957,52 @@ fn session_references_upsert_load_and_delete() {
 }
 
 #[test]
+fn browser_origin_grants_survive_relaunch_and_revoke() {
+    let dir = TempDir::new();
+    let path = dir.db_path("browser-origins");
+
+    {
+        let db = AppDatabase::open(&path).expect("open database");
+        db.save_browser_origin_grant("https://agent.example")
+            .expect("save first origin");
+        db.save_browser_origin_grant("https://docs.example")
+            .expect("save second origin");
+        db.save_browser_origin_grant("https://agent.example")
+            .expect("repeated allow is idempotent");
+        assert_eq!(
+            db.browser_origin_grants().expect("load origins"),
+            vec![
+                "https://agent.example".to_owned(),
+                "https://docs.example".to_owned()
+            ]
+        );
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen database");
+    assert_eq!(
+        db.browser_origin_grants().expect("load after relaunch"),
+        vec![
+            "https://agent.example".to_owned(),
+            "https://docs.example".to_owned()
+        ]
+    );
+    assert!(
+        db.revoke_browser_origin("https://agent.example")
+            .expect("revoke one origin")
+    );
+    assert!(
+        !db.revoke_browser_origin("https://missing.example")
+            .expect("missing revoke is harmless")
+    );
+    assert_eq!(db.revoke_all_browser_origins().expect("revoke all"), 1);
+    assert!(
+        db.browser_origin_grants()
+            .expect("load after revoke")
+            .is_empty()
+    );
+}
+
+#[test]
 fn defaults_are_returned_for_settings_never_written() {
     let dir = TempDir::new();
     let db = AppDatabase::open(&dir.db_path("defaults")).expect("open");
@@ -370,6 +1020,44 @@ fn defaults_are_returned_for_settings_never_written() {
 }
 
 #[test]
+fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
+    let dir = TempDir::new();
+    let path = dir.db_path("linux-settings-relaunch");
+    {
+        let db = AppDatabase::open(&path).expect("open writer database");
+        db.save_settings(&AppSettings {
+            resume_agent_sessions: false,
+            auto_naming: true,
+            limit_chat_history: false,
+            chat_retention: 999,
+            limit_mounted_worktrees: true,
+            mounted_worktrees: 1,
+            summarizer_agent: "opencode".into(),
+            claude_show_in_bar: false,
+            codex_show_in_bar: false,
+            opencode_show_in_bar: true,
+            refresh_interval_min: 99,
+            ..AppSettings::default()
+        })
+        .expect("save Linux settings");
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen database after relaunch");
+    let settings = db.settings().expect("load Linux settings");
+    assert!(!settings.resume_agent_sessions);
+    assert!(settings.auto_naming);
+    assert!(!settings.limit_chat_history);
+    assert_eq!(settings.chat_retention, 500);
+    assert!(settings.limit_mounted_worktrees);
+    assert_eq!(settings.mounted_worktrees, 2);
+    assert_eq!(settings.summarizer_agent, "opencode");
+    assert!(!settings.claude_show_in_bar);
+    assert!(!settings.codex_show_in_bar);
+    assert!(settings.opencode_show_in_bar);
+    assert_eq!(settings.refresh_interval_min, 60);
+}
+
+#[test]
 fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
     let dir = TempDir::new();
     let path = dir.db_path("clamp");
@@ -381,6 +1069,7 @@ fn out_of_range_and_unparseable_settings_clamp_and_fall_back() {
             terminal_font_size: 1, // below the 9...24 Swift range
             file_icon_theme: FileIconTheme::SfSymbols,
             control_socket_enabled: true,
+            ..AppSettings::default()
         })
         .expect("save");
     }
@@ -538,7 +1227,10 @@ fn a_pre_invariant_database_with_two_active_tabs_is_reconciled_on_open() {
     // Opening must not refuse the database: it migrates forward and
     // reconciles the violation to a single active tab.
     let db = AppDatabase::open(&path).expect("open reconciles legacy database");
-    assert_eq!(db.schema_version().expect("version"), 5);
+    assert_eq!(
+        db.schema_version().expect("version"),
+        CURRENT_SCHEMA_VERSION
+    );
 
     let tabs = db.tabs_of_worktree("wt-1").expect("load tabs");
     assert_eq!(tabs.len(), 2, "rows survive the migration");

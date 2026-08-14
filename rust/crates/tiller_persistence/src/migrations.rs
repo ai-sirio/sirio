@@ -23,9 +23,10 @@ pub const CURRENT_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// v1 — the initial schema: projects, worktrees, tabs, settings.
 ///
-/// Every statement is idempotent (`IF NOT EXISTS`): migrations only ever
-/// run under the migration write lock, so this is defense in depth — a lost
-/// race must be harmless even if some future path bypasses the lock.
+/// The initial DDL is idempotent (`IF NOT EXISTS`): migrations only ever run
+/// under the migration write lock, so this is defense in depth — a lost race
+/// must be harmless even if some future path bypasses the lock. Later
+/// migrations may intentionally use forward-only ALTER statements.
 fn migrate_v1(db: &Transaction) -> Result<(), rusqlite::Error> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS project (
@@ -133,10 +134,112 @@ fn migrate_v5(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v6 — rendered chat transcript turns, owned by their chat tab.
+///
+/// Each row is one complete serialized turn. Keeping turns as separate rows
+/// lets the persistence API retain the newest complete turns under its byte
+/// budget without ever cutting a JSON payload in half.
+fn migrate_v6(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chat_turn (
+            tab_id TEXT NOT NULL REFERENCES tab(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL,
+            payload BLOB NOT NULL,
+            PRIMARY KEY (tab_id, ordinal)
+        );",
+    )
+}
+
+/// v7 — worktree metadata that belongs to the sidebar record itself.
+fn migrate_v7(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE worktree ADD COLUMN comment TEXT;
+         ALTER TABLE worktree ADD COLUMN created_at INTEGER;
+         ALTER TABLE worktree ADD COLUMN updated_at INTEGER;",
+    )
+}
+
+/// v8 — one primary checkout per project.
+///
+/// Older databases could contain multiple primary flags. Reconcile those
+/// rows deterministically before installing the index that protects future
+/// writes.
+fn migrate_v8(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "UPDATE worktree SET is_primary = 0
+         WHERE id IN (
+             SELECT id FROM (
+                 SELECT id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY project_id
+                            ORDER BY order_idx, id
+                        ) AS position
+                 FROM worktree
+                 WHERE is_primary = 1
+             )
+             WHERE position > 1
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS worktree_one_primary_per_project
+             ON worktree (project_id)
+             WHERE is_primary = 1;",
+    )
+}
+
+/// v9 — durable quarantine for rows whose serialized payload cannot be
+/// materialized. The source row is removed only after its original bytes are
+/// recorded in this table in the same transaction.
+fn migrate_v9(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS quarantine_record (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_type TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            payload BLOB NOT NULL,
+            reason TEXT NOT NULL,
+            quarantined_at INTEGER NOT NULL
+        );",
+    )
+}
+
+/// v10 — retain the agent identity associated with a chat tab.
+fn migrate_v10(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch("ALTER TABLE tab ADD COLUMN agent_id TEXT;")
+}
+
+/// v11 — durable browser-origin grants used by the Linux browser doorhanger.
+fn migrate_v11(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS browser_origin_grant (
+            origin TEXT PRIMARY KEY,
+            granted_at INTEGER NOT NULL
+        );",
+    )
+}
+
+/// v12 — timestamp complete chat transcript snapshots for the history list.
+fn migrate_v12(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE chat_turn
+         ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
-pub(crate) const MIGRATIONS: &[Migration] =
-    &[migrate_v1, migrate_v2, migrate_v3, migrate_v4, migrate_v5];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    migrate_v1,
+    migrate_v2,
+    migrate_v3,
+    migrate_v4,
+    migrate_v5,
+    migrate_v6,
+    migrate_v7,
+    migrate_v8,
+    migrate_v9,
+    migrate_v10,
+    migrate_v11,
+    migrate_v12,
+];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
 /// current, or older, are handled; a database from a *newer* schema version
