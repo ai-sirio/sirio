@@ -238,12 +238,24 @@ enum CodexApiFailure {
 /// refresh token (when present) replaces the stored one, mirroring the
 /// Swift's `CodexTokenRefresher`.
 fn refresh_token(credentials: &CodexCredentials) -> Result<CodexCredentials, TokenRefreshFailure> {
+    refresh_token_at(TOKEN_URL, credentials)
+}
+
+/// [`refresh_token`], against an explicit endpoint rather than the hardcoded
+/// [`TOKEN_URL`] constant — split out so `F-CORE-USG-05`'s tests can drive a
+/// real refresh round trip (the actual HTTP response parsing and
+/// merge-save-on-success path, codex.rs:154-172) against a local fixture
+/// server instead of `auth.openai.com`.
+fn refresh_token_at(
+    url: &str,
+    credentials: &CodexCredentials,
+) -> Result<CodexCredentials, TokenRefreshFailure> {
     let body = format!(
         r#"{{"client_id":"{CLIENT_ID}","grant_type":"refresh_token","refresh_token":"{}","scope":"openid profile email"}}"#,
         credentials.refresh_token
     );
     let response = post(
-        TOKEN_URL,
+        url,
         &[("Content-Type", "application/json")],
         &body,
         TIMEOUT.as_secs(),
@@ -319,6 +331,29 @@ impl CodexUsageFetcher {
             Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
         };
 
+        // F-CORE-USG-05: `needs_refresh`'s 8-day gate (`REFRESH_AFTER`) had
+        // zero callers before this — the token only ever refreshed
+        // reactively, after the API had already rejected it with a 401.
+        // Refresh ahead of that once the on-disk token is old enough. A
+        // failed *proactive* refresh is not fatal here: this call is
+        // optimistic (the token may still be perfectly good, or the
+        // network hiccuped), so fall back to the on-disk token and let the
+        // reactive 401 path below make the real LoggedOut determination.
+        let credentials = if credentials.needs_refresh(SystemTime::now()) {
+            match refresh_token(&credentials) {
+                Ok(refreshed) => {
+                    let _ = save_credentials(&refreshed);
+                    refreshed
+                }
+                Err(failure) => {
+                    eprintln!("[codex-usage] proactive token refresh failed: {failure:?}");
+                    credentials
+                }
+            }
+        } else {
+            credentials
+        };
+
         match fetch_usage(
             &credentials.access_token,
             credentials.account_id.as_deref(),
@@ -335,7 +370,20 @@ impl CodexUsageFetcher {
         // The access token was rejected: refresh once and retry.
         let refreshed = match refresh_token(&credentials) {
             Ok(refreshed) => refreshed,
-            Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+            Err(failure) => {
+                // F-CORE-USG-06: `classify_token_refresh_failure`'s output
+                // (Reused/Revoked/Expired/Other) is real here, but it has
+                // nowhere to go — `UsageReason` (tiller_usage::model, not
+                // owned by this file this wave) has no variant to carry it,
+                // so every case still surfaces to the status bar as the
+                // same generic `LoggedOut`. Logging keeps the
+                // classification from being silently and untraceably
+                // dropped until a `UsageReason` variant (or carried field)
+                // exists to route it into the UI; see the crate report for
+                // the exact model.rs / status_bar.rs shape still needed.
+                eprintln!("[codex-usage] token refresh failed: {failure:?}");
+                return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut);
+            }
         };
         let _ = save_credentials(&refreshed);
         match fetch_usage(
@@ -355,6 +403,101 @@ impl CodexUsageFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// A one-shot local HTTP fixture (F-CORE-USG-05): binds an ephemeral
+    /// loopback port, accepts exactly one connection, replies with
+    /// `status_line`/`body`, and hands back the URL to POST to. Lets a test
+    /// drive [`refresh_token_at`] through a real socket and a real curl
+    /// child process — a genuine refresh round trip — without reaching
+    /// `auth.openai.com`.
+    fn one_shot_http_fixture(status_line: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // The request is small (a single JSON POST body); one read
+                // is enough to drain it before this fixture replies.
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/oauth/token")
+    }
+
+    /// F-CORE-USG-05: drives a *real* successful refresh — a genuine HTTP
+    /// response parsed by [`refresh_token_at`], not a synthetic
+    /// `CodexCredentials` value — into [`save_credentials_to`]'s
+    /// merge-not-overwrite logic (codex.rs:154-172), the path
+    /// `CodexUsageFetcher::fetch` calls on a real refresh success. Confirms
+    /// the auth file's fields Tiller doesn't know about survive the merge.
+    #[test]
+    fn a_real_refresh_success_merges_into_the_auth_file_without_losing_unrelated_fields() {
+        let url = one_shot_http_fixture(
+            "200 OK",
+            r#"{"access_token":"fresh-access","refresh_token":"fresh-refresh"}"#,
+        );
+        let credentials = CodexCredentials {
+            access_token: "stale".into(),
+            refresh_token: "old-refresh".into(),
+            account_id: Some("acct-1".into()),
+            last_refresh: None,
+        };
+        let refreshed =
+            refresh_token_at(&url, &credentials).expect("a 200 response is a successful refresh");
+        assert_eq!(refreshed.access_token, "fresh-access");
+        assert_eq!(refreshed.refresh_token, "fresh-refresh");
+        assert_eq!(refreshed.account_id.as_deref(), Some("acct-1"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-codex-real-refresh-merge-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"auth_mode":"oauth","tokens":{"access_token":"stale","refresh_token":"old-refresh","account_id":"acct-1","id_token":"opaque-jwt"},"custom_field":"kept","last_refresh":"stale-stamp"}"#,
+        )
+        .unwrap();
+        save_credentials_to(&path, &refreshed).expect("saves the real refresh response");
+        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["tokens"]["access_token"], "fresh-access");
+        assert_eq!(json["tokens"]["refresh_token"], "fresh-refresh");
+        // Fields this fetcher never wrote — inside `tokens` and outside it —
+        // survive the merge from a real refresh response, not just a
+        // hand-built `CodexCredentials`.
+        assert_eq!(json["tokens"]["id_token"], "opaque-jwt");
+        assert_eq!(json["auth_mode"], "oauth");
+        assert_eq!(json["custom_field"], "kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-CORE-USG-06: the classification `refresh_token`'s caller currently
+    /// discards (codex.rs:336-339) is real and reachable through a genuine
+    /// non-200 HTTP response, not just a direct
+    /// `classify_token_refresh_failure` call.
+    #[test]
+    fn a_real_401_response_is_classified_through_refresh_token_at() {
+        let url = one_shot_http_fixture("401 Unauthorized", r#"{"error":"refresh token revoked"}"#);
+        let credentials = CodexCredentials {
+            access_token: "stale".into(),
+            refresh_token: "old-refresh".into(),
+            account_id: None,
+            last_refresh: None,
+        };
+        match refresh_token_at(&url, &credentials) {
+            Err(error) => assert_eq!(error, TokenRefreshFailure::Revoked),
+            Ok(_) => panic!("a 401 response must not report a successful refresh"),
+        }
+    }
 
     /// The real wham API response captured from this machine on the review
     /// day (fields elided after the ones the parser reads).
