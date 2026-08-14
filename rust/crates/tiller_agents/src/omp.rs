@@ -39,6 +39,10 @@ impl super::AgentAdapter for OhMyPiAdapter {
         "Oh-My-Pi"
     }
 
+    fn executable_name(&self) -> &'static str {
+        "oh-my-pi"
+    }
+
     fn has_native_hooks(&self) -> bool {
         true
     }
@@ -62,7 +66,7 @@ impl super::AgentAdapter for OhMyPiAdapter {
 
     fn command(&self, worktree_path: &str, _pane_id: &str, _tillerctl_path: &str) -> String {
         let hook_path = format!("{worktree_path}/.tiller/omp-hook.ts");
-        format!("omp --hook {}", shell_quote(&hook_path))
+        format!("oh-my-pi --hook {}", shell_quote(&hook_path))
     }
 
     fn resume_command(
@@ -74,9 +78,16 @@ impl super::AgentAdapter for OhMyPiAdapter {
     ) -> Option<String> {
         let hook_path = format!("{worktree_path}/.tiller/omp-hook.ts");
         Some(format!(
-            "omp --hook {} --resume={}",
+            "oh-my-pi --hook {} --resume={}",
             shell_quote(&hook_path),
             shell_quote(session_ref)
         ))
+    }
+
+    fn acp_program(&self) -> Option<crate::AcpProgram> {
+        // Oh-My-Pi is a pi fork running as a TUI; it has no ACP server.
+        // `None` is the honest answer: a chat tab must not be offered
+        // for it.
+        None
     }
 }

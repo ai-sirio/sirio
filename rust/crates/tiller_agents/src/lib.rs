@@ -46,6 +46,25 @@ impl AgentAvailability {
         self.executable.is_some()
     }
 
+    /// The ACP server program that would back a chat tab for this
+    /// provider, or `None` when the agent has no ACP server.
+    pub fn acp_program(&self) -> Option<AcpProgram> {
+        ALL.iter()
+            .find(|adapter| adapter.id() == self.id)
+            .and_then(|adapter| adapter.acp_program())
+    }
+
+    /// A user-facing label for the provider's ACP chat support. An
+    /// adapter without an ACP server is marked as such — never silently
+    /// offered another agent's server.
+    pub fn acp_status_label(&self) -> &'static str {
+        if self.acp_program().is_some() {
+            "ACP chat available"
+        } else {
+            "No ACP server"
+        }
+    }
+
     /// A user-facing status that distinguishes a missing binary from an
     /// adapter that merely exists in the application.
     pub fn status_label(&self) -> &'static str {
@@ -54,6 +73,28 @@ impl AgentAvailability {
         } else {
             "Not found on PATH"
         }
+    }
+}
+
+/// A program invocation that speaks the Agent Client Protocol.
+///
+/// This is deliberately a static description, not a shell line: it is the
+/// ACP counterpart of [`AgentAdapter::command`], which remains the
+/// terminal/PTY command for launching the CLI in a pane. An adapter whose
+/// [`AgentAdapter::acp_program`] returns `None` cannot back a chat tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AcpProgram {
+    /// Executable name or absolute path, resolved through `PATH` at spawn.
+    pub program: &'static str,
+    /// Arguments passed without shell parsing.
+    pub args: &'static [&'static str],
+}
+
+impl AcpProgram {
+    /// Builds a program invocation from a static program name and args.
+    #[must_use]
+    pub const fn new(program: &'static str, args: &'static [&'static str]) -> Self {
+        Self { program, args }
     }
 }
 
@@ -70,6 +111,12 @@ pub trait AgentAdapter {
     /// Human-readable name, e.g. "Claude Code" or "Codex".
     fn display_name(&self) -> &'static str;
 
+    /// Executable name resolved for availability and launch discovery.
+    /// Stable adapter ids may differ from the distribution's binary name.
+    fn executable_name(&self) -> &'static str {
+        self.id()
+    }
+
     /// True when the agent notifies lifecycle events itself (hooks calling
     /// `tillerctl notify`). False → Tiller watches the pane's exit code
     /// instead.
@@ -80,7 +127,7 @@ pub trait AgentAdapter {
         AgentAvailability {
             id: self.id(),
             display_name: self.display_name(),
-            executable: find_executable_on_path(self.id()),
+            executable: find_executable_on_path(self.executable_name()),
         }
     }
 
@@ -108,6 +155,14 @@ pub trait AgentAdapter {
         tillerctl_path: &str,
         session_ref: &str,
     ) -> Option<String>;
+
+    /// The ACP server program that backs a chat tab for this adapter, or
+    /// `None` when the agent has no ACP server.
+    ///
+    /// `None` is an honest answer: inventing a program name would fail at
+    /// spawn. Consumers must mark the adapter as chat-unavailable rather
+    /// than fall back to another agent's server.
+    fn acp_program(&self) -> Option<AcpProgram>;
 }
 
 /// Resolve a program using the process's current `PATH`.
@@ -191,6 +246,55 @@ mod tests {
             .map(|adapter| adapter.has_native_hooks())
             .collect();
         assert_eq!(hooks, [true, true, false, false, true]);
+    }
+
+    #[test]
+    fn acp_program_differs_by_adapter_with_an_honest_none() {
+        // Claude and Codex ship ACP servers and their programs are exact
+        // and distinct. OpenCode, Pi and Oh-My-Pi have no ACP server — the
+        // honest answer is `None`, never another agent's program.
+        assert_eq!(
+            ClaudeCodeAdapter.acp_program(),
+            Some(AcpProgram::new(
+                "npx",
+                &["-y", "@agentclientprotocol/claude-agent-acp@latest"]
+            ))
+        );
+        assert_eq!(
+            CodexAdapter.acp_program(),
+            Some(AcpProgram::new(
+                "npx",
+                &["-y", "@agentclientprotocol/codex-acp@latest"]
+            ))
+        );
+        let terminal_only: [&dyn AgentAdapter; 3] = [&OpenCodeAdapter, &PiAdapter, &OhMyPiAdapter];
+        for adapter in terminal_only {
+            assert_eq!(
+                adapter.acp_program(),
+                None,
+                "{} has no ACP server; inventing a program name would fail at spawn",
+                adapter.id()
+            );
+        }
+    }
+
+    #[test]
+    fn availability_surface_reports_acp_support_without_a_fallback() {
+        // The picker consumes `AgentAvailability`; it must be able to tell
+        // an ACP-backed agent from a terminal-only one, and a `None`
+        // adapter must be labelled as such — never silently pointed at
+        // Claude's server.
+        let codex = CodexAdapter.availability();
+        assert!(codex.acp_program().is_some());
+        assert_eq!(codex.acp_status_label(), "ACP chat available");
+
+        let opencode = OpenCodeAdapter.availability();
+        assert_eq!(opencode.acp_program(), None);
+        assert_eq!(
+            opencode.acp_status_label(),
+            "No ACP server",
+            "the surface says there is no ACP server rather than falling back"
+        );
     }
 
     #[test]

@@ -468,6 +468,47 @@ mod tests {
     }
 
     #[test]
+    fn saving_writes_a_parseable_last_refresh_and_keeps_unknown_token_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-codex-last-refresh-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"tokens":{"access_token":"old","refresh_token":"old-r","id_token":"opaque-jwt"},"custom":"kept"}"#,
+        )
+        .unwrap();
+        save_credentials_to(
+            &path,
+            &CodexCredentials {
+                access_token: "new".into(),
+                refresh_token: "new-r".into(),
+                account_id: None,
+                last_refresh: None,
+            },
+        )
+        .expect("saves");
+        let reloaded = load_credentials_from(&path).expect("reloads");
+        assert_eq!(reloaded.access_token, "new");
+        assert_eq!(reloaded.refresh_token, "new-r");
+        // The merge-save stamps a fresh last-refresh time the loader can
+        // parse back (the fixture had none, so any parsed value is the
+        // stamp), and it is recent.
+        let last_refresh = reloaded.last_refresh.expect("last_refresh is written");
+        let age = SystemTime::now()
+            .duration_since(last_refresh)
+            .expect("the stamp is in the past");
+        assert!(age < Duration::from_secs(60), "stale stamp: {age:?}");
+        // Unknown fields inside and outside `tokens` survive the merge.
+        let json: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["tokens"]["id_token"], "opaque-jwt");
+        assert_eq!(json["custom"], "kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_or_old_refresh_times_need_refresh_after_eight_days() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let fresh = CodexOAuthCredentials {

@@ -75,4 +75,10 @@ impl super::AgentAdapter for OpenCodeAdapter {
     ) -> Option<String> {
         Some(format!("opencode --session {}", shell_quote(session_ref)))
     }
+
+    fn acp_program(&self) -> Option<crate::AcpProgram> {
+        // OpenCode is a terminal-first CLI with no ACP server. `None` is
+        // the honest answer: a chat tab must not be offered for it.
+        None
+    }
 }

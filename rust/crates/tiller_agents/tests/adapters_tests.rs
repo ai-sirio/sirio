@@ -104,8 +104,13 @@ fn pi_command_is_bare() {
 fn omp_command_points_at_the_worktree_local_hook() {
     assert_eq!(
         OhMyPiAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
-        "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
+        "oh-my-pi --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
     );
+}
+
+#[test]
+fn omp_uses_the_distribution_binary_name_for_discovery() {
+    assert_eq!(OhMyPiAdapter.executable_name(), "oh-my-pi");
 }
 
 #[test]
@@ -118,25 +123,17 @@ fn availability_reports_each_catalog_binary_from_current_path() {
             .collect::<Vec<_>>(),
         vec!["claude", "codex", "opencode", "pi", "omp"]
     );
-    let available = availability
-        .iter()
-        .filter(|agent| agent.is_available())
-        .map(|agent| agent.id)
-        .collect::<Vec<_>>();
-    let unreachable = availability
-        .iter()
-        .filter(|agent| !agent.is_available())
-        .map(|agent| agent.id)
-        .collect::<Vec<_>>();
-    assert_eq!(available, ["claude", "codex", "pi"]);
-    assert_eq!(unreachable, ["opencode", "omp"]);
-    assert_eq!(available.len() + unreachable.len(), 5);
     for agent in &availability {
+        let expected_program = if agent.id == "omp" {
+            "oh-my-pi"
+        } else {
+            agent.id
+        };
         assert_eq!(
             agent.executable,
-            find_executable_in_path(agent.id, &std::env::var_os("PATH").unwrap()),
-            "{} must use the process PATH",
-            agent.id
+            find_executable_in_path(expected_program, &std::env::var_os("PATH").unwrap()),
+            "{} must resolve its distribution executable from the process PATH",
+            expected_program
         );
         assert_eq!(agent.is_available(), agent.executable.is_some());
         assert_eq!(
@@ -219,7 +216,10 @@ fn pi_resume_command() {
 fn omp_resume_command() {
     assert_eq!(
         OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
-        Some("omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'".to_string())
+        Some(
+            "oh-my-pi --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'"
+                .to_string(),
+        )
     );
 }
 
