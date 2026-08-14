@@ -1913,3 +1913,48 @@ the feature live may write `PASSED`. Tonight's correction moved four rows out of
 `PASSED` stayed at 203, which is the point: this is a correction of fact, not a promotion.
 
 **118 rows still carry this verdict.** On tonight's hit rate a meaningful fraction are wrong.
+
+## `N/A — platform` is the *second* self-sealing verdict, and it hides better — found 2026-08-14
+
+The section above says `FAILED — absent` is the least trustworthy verdict in the ledger. It has a
+sibling that is harder to see, and tonight's browser verification walked straight into it.
+
+**Ten of the twenty-four `N/A — platform` rows are excused by "no browser on Linux".** There is a
+browser on Linux now. It opens from the tab-bar `+`, renders a real page through WebKitGTK,
+navigates, and survives quit/relaunch — all driven live tonight.
+
+| row | the excuse it still carries |
+|---|---|
+| `F-TAB-06` | `no browser; NewBrowser typed no-op` — **now `PASSED`**, exercised live |
+| `F-PER-08` | `no browser on Linux` — **now `NOT EXERCISED`**; the v11 grant table exists and holds 0 rows |
+| `F-AUTO-09` | `no browser; explicit unsupported error exercised` |
+| `F-SET-24` | `browser-origin permissions` |
+| `F-CTRL-BROWSER-01`..`-06` | `documented unsupported responses, all 10 methods exercised` |
+
+**Why it hides better than `FAILED — absent`.** An absent row still counts as work outstanding, so
+it shows up in every "what is left" sweep. `N/A — platform` **removes the row from the denominator
+entirely** — it is not failing, it is not pending, it is *excluded*. Nothing sweeps it, nothing
+challenges it, and it never appears in a plan again. `F-PER-08` carried its exemption from pass 2
+until tonight; that is eleven passes of invisibility.
+
+**And these were not sloppy verdicts.** That is the uncomfortable part. `F-CTRL-BROWSER-01`..`-06`
+read `all 10 methods exercised` — somebody really did call every method and really did get the
+documented unsupported error. The verdict was *correct when written*. What expired was not the
+observation but the **premise underneath it**: first the platform gained a browser, and separately
+the project's scope decision changed (a webview is permitted for the browser surface alone, which is
+not the Electron-style app shell the no-webview rule forbids). A correct verdict resting on a
+premise that later changed is indistinguishable, in the ledger, from a lazy one.
+
+**The rule this suggests.** A platform exemption is a claim about the world, and claims about the
+world expire. So write the *premise* into the evidence string, not just the conclusion — "no browser
+on Linux" is checkable in one command and ages loudly; "N/A — platform" ages silently. When a
+capability lands, grep the ledger for the excuse it invalidates **in the same pass**:
+
+```bash
+grep -n "N/A — platform" docs/linux-rewrite/INVENTORY-LEDGER.md | grep -i "<the capability>"
+```
+
+**Eight of the ten are still unjudged.** `F-AUTO-09` and `F-CTRL-BROWSER-01`..`-06` are the
+attractive ones: they are driven through the control socket rather than the screen, so they can be
+exercised while the single X pointer is busy elsewhere — the one class of verification this project
+can run in parallel with everything else.
