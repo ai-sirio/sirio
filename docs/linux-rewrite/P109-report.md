@@ -746,3 +746,117 @@ Drove the dirty-tab half: switched to `Terminal` (live PTY, carries
 dirty, on this lane** — no close on the clean tab, no confirm dialog on
 the dirty one. The owed gesture's two-part trial (close on clean, confirm
 on dirty) could not be completed because the first step never fired.
+
+## F-WIN rows
+
+### F-WIN-01
+
+Owed gesture: "click the titlebar gear; then exit Settings by a click (no
+socket door out)" (close-out batch, item 1, used verbatim).
+
+The app's titlebar (`y=22`, from the traffic-light buttons to the sidebar
+toggle, back/forward arrows, and tab `+`) carries no gear icon — checked
+by cropping the full titlebar strip
+(`shots/173-win01-titlebar-crop.png`); the only icon on its right edge is
+the Files-panel toggle. The gear that opens Settings sits in the
+bottom-left status bar instead, at `(27,948)`
+(`shots/172-win01-statusbar-crop.png`) — the same control located in an
+earlier segment of this task.
+
+Clicked `(27,948)`: **Settings replaced the whole workspace** — no
+sidebar, no tab strip, header reads "‹ Back  Settings", landing on the
+`General` section (Version 0.1.0; toggles for Resume agent sessions on
+launch, Auto-rename tabs and agents, Limit stored chats, Limit mounted
+worktrees, Control socket) — `shots/174-win01-gear-click.png`.
+
+Clicked `‹ Back` (`40,60`): Settings closed and the workspace returned —
+sidebar, tab strip (`Chat`/`Claude Code`/`Terminal`), and Files panel all
+restored to their prior state — `shots/175-win01-back-click.png`,
+confirming the click-only exit route (no socket door out, per the row)
+does work.
+
+### F-WIN-10
+
+Owed gesture: "add a project via the sidebar `+` (invalid path, then
+duplicate) to see the `set_notice` copy; socket `project.add` bypasses
+every notice" (close-out batch, item 2, used verbatim).
+
+Clicked the sidebar `+` next to `Projects` (`342,57`). **The menu this
+build renders has no plain "Add Project" item at all** — only two
+entries, `Clone Repository…` and `Create Project` (verified by cropping
+the menu: `shots/180-win10-menu-crop.png`). `Create Project` is a
+make-a-new-folder flow (name + parent-location fields, a live "Creates
+…" path preview, a `Create project` submit button), not an
+add-an-existing-tracked-path flow — a different feature than the one the
+row's socket evidence (`project.add path=…`) implies a sidebar
+counterpart for. This mismatch is itself the first finding: there is no
+UI door on this build for tracking an *existing* untracked folder by
+path; the only sidebar doors that create a project entry either clone a
+repo or create a brand-new folder.
+
+Drove both trials through the `Create Project` form as the closest
+available surface:
+
+- **Duplicate:** typed `.claude` as the project name (parent location
+  fixed to `/home/enzopalmisano`, matching the existing
+  `/home/enzopalmisano/.claude` directory) and clicked `Create project`.
+  Result — the button re-labelled to `Retry creation` and red text
+  appeared verbatim: "Creation failed: could not create
+  /home/enzopalmisano/.claude: File exists (os error 17)" —
+  `shots/208-win10-dup-create-click.png`. This is a live, OS-level
+  duplicate-path notice, not the `sidebar.set_notice` toast the row's
+  census cites, but it is the closest, and only, duplicate-path signal
+  this build's sidebar `+` produces.
+- **Invalid:** typed a name containing a `/` (targeting a nonexistent
+  intermediate directory) and clicked `Create project` again. Result —
+  verbatim: "Creation failed: project name must be one folder name" —
+  `shots/210-win10-invalid-path-result.png`. This is client-side
+  validation catching the slash before any filesystem call, not a
+  nonexistent-path OS error, but it is a real, rendered invalid-input
+  notice reached from the same door.
+
+Both notices render inline in the dialog (red text above the `Cancel`
+button) and neither auto-dismissed — both were still on screen until the
+dialog was explicitly cancelled (`74,688`,
+`shots/211-win10-cancel.png`), which returned the sidebar and Files panel
+to their prior state cleanly.
+
+**Infrastructure incident during this row — reported in full because it
+bears on trust in nearby findings.** Mid-trial (first pass, before the
+successful drive above), the app stopped responding to keyboard input
+entirely: `type_` into the `Create Project` name field produced no text,
+retried three times over roughly 30s including a differential check
+against the known-good chat composer (also silently accepted no text)
+and bare `key()` presses of single letters (also no effect), all while
+mouse clicks continued to visibly open menus and dialogs. A process
+check (`ps -p <pid>`) then showed the app **had already exited** — no
+window manager crash, and `grep -i panic` over the full session log
+found no panic/abort trace; the log's last line predated the check by
+about twelve minutes. Cause undetermined — this drive has no access to
+system journals/dmesg to look further. Practical consequence: every
+observation this report would otherwise have drawn from that first
+`Create Project` attempt (shots 181 through 190) is **void** — the app
+was dead throughout, so the dialog on screen was a frozen last frame,
+not live behaviour, and none of it is used above.
+
+Separately, while investigating, the `/tmp/tiller-drive-1.lockd` drive
+lock this task has held since early in the session was found **absent**
+— `ls`/`cat` on it returned "no such file or directory." Attempting to
+reclaim it (`mkdir`, atomic) failed with `EEXIST` twice in the same
+minute, both times against a holder file naming a different task's
+driver (`label=p120-term-ui-02`, two different PIDs a minute apart,
+`out=reference/linux-progress/p120/shots/...`) — i.e. a P120 driver had
+started using the same lock and the same display while this task's hold
+on it had silently lapsed, for a reason this drive could not determine
+(no crash trace, no orchestrator message, no self-inflicted release —
+the lock simply was not there when checked). All input to `DISPLAY=:1`
+was stopped at that point rather than risk colliding with the other
+driver. A background poll (`until [ ! -d /tmp/tiller-drive-1.lockd ]`)
+caught the lock free moments later and this drive reclaimed it
+(`mkdir`, holder file rewritten to `label=sonnet-p109`) before the app
+was relaunched (`env -u WAYLAND_DISPLAY DISPLAY=:1 TILLER_DB=…`, fresh
+PID) and driving resumed — the successful duplicate/invalid trial above
+was captured entirely after this recovery, on the fresh process. Flagging
+both halves of this incident (the app's silent exit, and the lock's
+unexplained absence) for the orchestrator: the second is a shared-display
+concurrency-safety issue this report cannot resolve on its own.
