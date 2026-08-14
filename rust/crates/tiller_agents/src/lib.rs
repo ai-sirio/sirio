@@ -177,6 +177,56 @@ pub trait AgentAdapter {
     }
 }
 
+/// Why an availability sweep could not produce an answer (F-SET-17).
+///
+/// Discovery distinguishes two negatives that the infallible API collapses:
+/// "the binary is not on PATH" (a clean [`None`]) and "I could not check"
+/// (this error). Only the first may be rendered as *Not found on PATH*;
+/// the second is the registry error state the settings screen surfaces
+/// with a retry.
+#[derive(Debug)]
+pub enum DiscoveryError {
+    /// `PATH` is not set at all, so no probe can even start.
+    PathUnset,
+    /// A candidate path could not be probed (for example `EACCES` on a
+    /// PATH directory) *and* the program was not found anywhere else, so
+    /// claiming absence would be a guess.
+    Probe {
+        /// The executable name being resolved.
+        program: String,
+        /// The candidate path whose probe failed.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PathUnset => write!(f, "PATH is not set in the environment"),
+            Self::Probe {
+                program,
+                path,
+                source,
+            } => write!(
+                f,
+                "could not probe {} for {program}: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DiscoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PathUnset => None,
+            Self::Probe { source, .. } => Some(source),
+        }
+    }
+}
+
 /// Resolve a program using the process's current `PATH`.
 pub fn find_executable_on_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -188,44 +238,129 @@ pub fn find_executable_on_path(program: &str) -> Option<PathBuf> {
 /// This public seam keeps discovery testable without changing the process's
 /// environment. It only inspects filesystem metadata; it never executes the
 /// candidate.
+///
+/// This is the infallible view: a probe failure collapses into [`None`].
+/// Callers that must distinguish *absent* from *unknowable* use
+/// [`find_executable_in_path_checked`].
 pub fn find_executable_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+    find_executable_in_path_checked(program, path)
+        .ok()
+        .flatten()
+}
+
+/// Resolve a program against an explicit PATH value, keeping probe
+/// failures observable (F-SET-17).
+///
+/// A hit anywhere on PATH wins over an earlier probe error — an unreadable
+/// directory is irrelevant once the binary is found elsewhere. The error is
+/// returned only when it makes the absence claim unsafe: the program was
+/// found nowhere *and* at least one candidate could not be checked. A clean
+/// miss is `Ok(None)`.
+pub fn find_executable_in_path_checked(
+    program: &str,
+    path: &OsStr,
+) -> Result<Option<PathBuf>, DiscoveryError> {
     if program.is_empty() {
-        return None;
+        return Ok(None);
     }
+
+    let probe_error = |path: PathBuf, source: std::io::Error| DiscoveryError::Probe {
+        program: program.to_string(),
+        path,
+        source,
+    };
 
     let candidate = Path::new(program);
     if candidate.is_absolute() || program.contains('/') {
-        return is_executable(candidate).then(|| candidate.to_path_buf());
+        return match probe_executable(candidate) {
+            Ok(true) => Ok(Some(candidate.to_path_buf())),
+            Ok(false) => Ok(None),
+            Err(error) => Err(probe_error(candidate.to_path_buf(), error)),
+        };
     }
 
-    std::env::split_paths(path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| is_executable(candidate))
+    let mut first_error: Option<DiscoveryError> = None;
+    for candidate in std::env::split_paths(path).map(|directory| directory.join(program)) {
+        match probe_executable(&candidate) {
+            Ok(true) => return Ok(Some(candidate)),
+            Ok(false) => {}
+            Err(error) if first_error.is_none() => {
+                first_error = Some(probe_error(candidate, error));
+            }
+            Err(_) => {}
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
 }
 
-fn is_executable(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
+/// Whether `path` names an executable regular file. A missing file (or a
+/// PATH component that is not a directory) is a clean `false`; any other
+/// filesystem error is surfaced so the caller can tell *absent* from
+/// *unknowable*.
+fn probe_executable(path: &Path) -> Result<bool, std::io::Error> {
+    use std::io::ErrorKind;
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
     };
     if !metadata.is_file() {
-        return false;
+        return Ok(false);
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
+        Ok(metadata.permissions().mode() & 0o111 != 0)
     }
 
     #[cfg(not(unix))]
     {
-        true
+        Ok(true)
     }
 }
 
 /// Discover every built-in provider in catalog order.
+///
+/// This is the infallible view consumed by surfaces without an error state
+/// (the tab bar): a sweep that could not be completed reports the affected
+/// providers as unavailable. The settings registry uses
+/// [`try_discover_availability`] so it can render the failure instead.
 pub fn discover_availability() -> Vec<AgentAvailability> {
     ALL.iter().map(|adapter| adapter.availability()).collect()
+}
+
+/// Discover every built-in provider in catalog order, failing the sweep
+/// when any provider's absence would be a guess (F-SET-17).
+///
+/// One error fails the whole sweep — mirroring the Swift registry, which
+/// shows a single banner over the previous rows rather than per-row
+/// partial results.
+pub fn try_discover_availability() -> Result<Vec<AgentAvailability>, DiscoveryError> {
+    let path = std::env::var_os("PATH").ok_or(DiscoveryError::PathUnset)?;
+    try_discover_availability_in(&path)
+}
+
+/// [`try_discover_availability`] against an explicit PATH value — the
+/// testable seam, like [`find_executable_in_path`].
+pub fn try_discover_availability_in(
+    path: &OsStr,
+) -> Result<Vec<AgentAvailability>, DiscoveryError> {
+    ALL.iter()
+        .map(|adapter| {
+            Ok(AgentAvailability {
+                id: adapter.id(),
+                display_name: adapter.display_name(),
+                executable: find_executable_in_path_checked(adapter.executable_name(), path)?,
+            })
+        })
+        .collect()
 }
 
 /// The fixed list of adapters shipped with Tiller, in display order —
