@@ -33,7 +33,7 @@ use tiller_theme::{Theme, ThemeMode};
 use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, acp_agent_command},
+    chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
     file_view::FileView,
     right_panel::{
         ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
@@ -2744,6 +2744,17 @@ impl TillerWorkspace {
         .detach();
     }
 
+    /// Chat-local edit summaries emit only an intent to open a file; the
+    /// workspace owns the editor tab and routes that intent through the same
+    /// de-duplicating path used by the file tree and Changes surface.
+    fn bind_chat(chat: &Entity<Chat>, cx: &mut Context<Self>) {
+        cx.subscribe(chat, |workspace, _, event: &ChatEvent, cx| {
+            let ChatEvent::OpenFile(path) = event;
+            workspace.add_file_tab(path.clone(), cx);
+        })
+        .detach();
+    }
+
     fn bind_terminal(
         terminal: &Entity<TerminalView>,
         tab_id: usize,
@@ -3632,6 +3643,8 @@ impl TillerWorkspace {
         }
         if was_current {
             self.sync_activity(cx);
+            self.right_panel
+                .update(cx, |panel, cx| panel.clear_worktree(cx));
             self.schedule_save(cx);
             cx.notify();
         }
@@ -4157,6 +4170,7 @@ impl TillerWorkspace {
             None => cx.new(Chat::launch),
         };
         let composer_focus = chat.focus_handle(cx);
+        Self::bind_chat(&chat, cx);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
             persistence_id,
@@ -4209,6 +4223,7 @@ impl TillerWorkspace {
             chat
         });
         let composer_focus = chat.focus_handle(cx);
+        Self::bind_chat(&chat, cx);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
             persistence_id,
@@ -4691,6 +4706,9 @@ impl TillerWorkspace {
             if path != self.working_directory {
                 self.select_worktree(path, cx)?;
             }
+        }
+        if !self.has_current_worktree() {
+            return Err("no current workspace".to_string());
         }
         // This is the same typed action used by the New-tab UI callback.
         self.add_changes_tab(cx);
@@ -6419,29 +6437,10 @@ impl TillerWorkspace {
                 )
                 .child(
                     div()
-                        .relative()
                         .flex_1()
                         .w_full()
                         .overflow_hidden()
-                        .child(self.render_group_surfaces(*theme, entity))
-                        .when_some(self.tabs.get(self.active_tab), |this, tab| {
-                            this.when(tab_has_terminal(tab), |this| {
-                                this.child(
-                                    div()
-                                        .absolute()
-                                        .top(px(0.0))
-                                        .right(px(10.0))
-                                        .h(px(24.0))
-                                        .px(px(8.0))
-                                        .flex()
-                                        .items_center()
-                                        .bg(theme.background)
-                                        .text_size(px(13.0))
-                                        .text_color(theme.title)
-                                        .child(self.terminal_breadcrumb.clone()),
-                                )
-                            })
-                        }),
+                        .child(centre_surface),
                 ),
         );
 
@@ -11745,6 +11744,195 @@ mod tests {
                 workspace.tabs.iter().any(|tab| tab.kind == TabKind::Diff)
             }),
             "the right-panel action subscriber opens a Diff tab"
+        );
+    }
+
+    /// F-SID-18: an otherwise selected worktree with no tabs must offer a
+    /// visible terminal-first recovery, rather than the generic empty-pane
+    /// message used for a detached pane group.
+    #[gpui::test]
+    async fn drawn_selected_worktree_without_tabs_offers_a_new_terminal(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_tab_machinery();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("empty-worktree").is_some(),
+            "a selected worktree without tabs needs its terminal empty state"
+        );
+        assert!(
+            cx.debug_bounds("empty-worktree-new-terminal").is_some(),
+            "the empty state must provide the New Terminal action"
+        );
+
+        let new_terminal = cx
+            .debug_bounds("empty-worktree-new-terminal")
+            .expect("new terminal action is drawn");
+        cx.simulate_click(new_terminal.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "New Terminal must replace the empty state with a terminal tab"
+        );
+    }
+
+    /// F-TERM-11: a deselected workspace must cover retained terminal tabs
+    /// with an explicit no-worktree state, not leave stale PTY output visible.
+    #[gpui::test]
+    async fn drawn_deselected_worktree_replaces_terminals_with_an_empty_state(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            let path = workspace.working_directory.clone();
+            assert!(workspace
+                .control_state
+                .lock()
+                .expect("control state")
+                .close_worktree(&path));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("no-worktree-selected").is_some(),
+            "the centre surface must explain that no worktree is selected"
+        );
+        assert!(
+            cx.debug_bounds("pane-0").is_none(),
+            "retained terminal output must not remain visible without a worktree"
+        );
+    }
+
+    /// F-CHG-02: closing the selected worktree must clear the panel's bound
+    /// path as well as the centre surface, so it cannot present old Git data
+    /// as the current selection.
+    #[gpui::test]
+    async fn drawn_closed_worktree_clears_the_right_panel_and_blocks_changes_open(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            let selector = workspace
+                .control_state
+                .lock()
+                .expect("control state")
+                .current_workspace()
+                .expect("selected test worktree")
+                .id
+                .clone();
+            workspace
+                .close_workspace(&selector, cx)
+                .expect("close selected test worktree");
+            assert_eq!(
+                workspace.control_open_changes(None, cx),
+                Err("no current workspace".to_string()),
+                "Changes must not reopen against the last closed worktree"
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("right-panel-no-worktree").is_some(),
+            "the right panel must explain that no worktree is selected"
+        );
+        assert!(
+            cx.debug_bounds("right-panel-files").is_none(),
+            "the old worktree's file list must be unmounted"
+        );
+    }
+
+    /// F-TAB-25: the terminal pane menu exposes Attach only for a terminal
+    /// owned by another tab, and the command moves that live leaf into the
+    /// active terminal's split tree.
+    #[gpui::test]
+    async fn drawn_terminal_menu_attaches_an_eligible_terminal_to_the_current_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.active_tab = 1;
+            assert!(workspace.tab_machinery.select_tab(0, 1));
+            workspace.sync_activity(cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let source_tab = cx.debug_bounds("workspace-tab-0").expect("source terminal tab");
+        cx.simulate_mouse_down(source_tab.center(), MouseButton::Right, Modifiers::none());
+        let attach = cx
+            .debug_bounds("tab-command-attach-to-current-terminal")
+            .expect("Attach to Current Terminal command is drawn for an eligible pane");
+        cx.simulate_click(attach.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.len() == 1
+                    && workspace.tabs[0].id == 1
+                    && workspace.tabs[0].panes.leaf_ids() == vec![1, 0]
+            }),
+            "Attach must preserve the source pane id and join it to the current terminal"
+        );
+    }
+
+    #[gpui::test]
+    async fn drawn_terminal_attach_command_is_disabled_for_the_current_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| workspace.open_tab_menu(0, cx));
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("tab-command-disabled-attach-to-current-terminal")
+                .is_some(),
+            "a terminal cannot attach itself to the current terminal"
         );
     }
 

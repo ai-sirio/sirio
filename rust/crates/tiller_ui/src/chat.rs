@@ -6,7 +6,7 @@
 
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, FocusHandle, Focusable, FollowMode, FontStyle, FontWeight,
+    Edges, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
@@ -24,6 +24,7 @@ use tiller_acp::{
     ToolCallLocationInfo,
 };
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
+use tiller_git::{GitActions, status as git_status};
 use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatTranscript, ChatTurn,
@@ -404,6 +405,25 @@ fn is_subagent_tool_call(title: &str, raw_input: Option<&str>) -> bool {
         })
 }
 
+/// Revert the live worktree change for one ACP-reported path. ACP adapters
+/// may report a path relative to their cwd or absolute beneath it; git's
+/// status model uses the relative spelling, so normalize at the seam.
+fn discard_edited_path(repo: &Path, reported_path: &Path) -> Result<(), String> {
+    let path = reported_path.strip_prefix(repo).unwrap_or(reported_path);
+    let snapshot = git_status(repo).map_err(|error| error.to_string())?;
+    let entry = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .cloned()
+        .ok_or_else(|| format!("No changes to revert for {}.", path.display()))?;
+    if entry.is_untracked() {
+        GitActions::discard_untracked(repo, &[entry]).map_err(|error| error.to_string())
+    } else {
+        GitActions::discard_changes(repo, &[entry]).map_err(|error| error.to_string())
+    }
+}
+
 fn restored_entry(entry: ChatEntry) -> Entry {
     match entry {
         ChatEntry::UserMessage { text } => Entry::User(text),
@@ -509,6 +529,21 @@ struct TranscriptSelection {
 enum CopyTarget {
     Assistant(usize),
     CodeBlock { entry: usize, block: String },
+}
+
+/// A host-owned action requested by an edit-summary card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatEvent {
+    OpenFile(PathBuf),
+}
+
+/// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
+#[derive(Clone, Debug, Default)]
+struct EditSummaryState {
+    confirming_path: Option<PathBuf>,
+    reverted_paths: Vec<PathBuf>,
+    revert_error: Option<String>,
+    reverting_path: Option<PathBuf>,
 }
 
 impl TranscriptSelection {
@@ -805,6 +840,7 @@ pub struct Chat {
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
     copied_target: Option<CopyTarget>,
+    edit_summaries: BTreeMap<usize, EditSummaryState>,
     persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
@@ -839,6 +875,8 @@ pub struct Chat {
     #[cfg(test)]
     attach_test_paths: Vec<PathBuf>,
 }
+
+impl EventEmitter<ChatEvent> for Chat {}
 
 impl Chat {
     /// Launches a real ACP agent and returns a `Chat` wired to its event
@@ -932,6 +970,7 @@ impl Chat {
             transcript_selection: None,
             transcript_dragging: false,
             copied_target: None,
+            edit_summaries: BTreeMap::new(),
             persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
@@ -1733,6 +1772,45 @@ impl Chat {
                     chat.copied_target = None;
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    fn request_edit_revert(&mut self, entry: usize, path: PathBuf, cx: &mut Context<Self>) {
+        let state = self.edit_summaries.entry(entry).or_default();
+        state.confirming_path = Some(path);
+        state.revert_error = None;
+        cx.notify();
+    }
+
+    fn cancel_edit_revert(&mut self, entry: usize, cx: &mut Context<Self>) {
+        if let Some(state) = self.edit_summaries.get_mut(&entry) {
+            state.confirming_path = None;
+        }
+        cx.notify();
+    }
+
+    fn confirm_edit_revert(&mut self, entry: usize, path: PathBuf, cx: &mut Context<Self>) {
+        let state = self.edit_summaries.entry(entry).or_default();
+        state.confirming_path = None;
+        state.revert_error = None;
+        state.reverting_path = Some(path.clone());
+        let repo = self.agent_cwd.clone();
+        let revert_path = path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { discard_edited_path(&repo, &revert_path) })
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                let state = chat.edit_summaries.entry(entry).or_default();
+                state.reverting_path = None;
+                match result {
+                    Ok(()) => state.reverted_paths.push(path),
+                    Err(error) => state.revert_error = Some(error),
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -3358,6 +3436,153 @@ impl Chat {
         column.into_any_element()
     }
 
+    /// F-CHAT-32: an edit tool call ends with an actionable file summary.
+    /// The diff remains available above it; this card is the post-hoc path
+    /// for opening the file or deliberately discarding the reported change.
+    fn render_edit_summary(
+        entry: usize,
+        diffs: Vec<ToolCallDiff>,
+        state: EditSummaryState,
+        theme: &Theme,
+        entity: Entity<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let mut card = div()
+            .id(("edit-summary", entry))
+            .debug_selector(move || format!("edit-summary-{entry}"))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .rounded(theme.radii.code_block)
+            .bg(colors.raised)
+            .px(px(CARD_H_PADDING))
+            .py(px(CARD_V_PADDING))
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.subtitle)
+                    .child(if diffs.len() == 1 {
+                        "1 file changed".to_string()
+                    } else {
+                        format!("{} files changed", diffs.len())
+                    }),
+            );
+        for (index, diff) in diffs.into_iter().enumerate() {
+            let path = diff.path;
+            let open_path = path.clone();
+            let request_path = path.clone();
+            let confirm_path = path.clone();
+            let reverted = state.reverted_paths.contains(&path);
+            let confirming = state.confirming_path.as_ref() == Some(&path);
+            let reverting = state.reverting_path.as_ref() == Some(&path);
+            let open_entity = entity.clone();
+            let request_entity = entity.clone();
+            let confirm_entity = entity.clone();
+            let cancel_entity = entity.clone();
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .id(format!("edit-summary-open-{entry}-{index}"))
+                        .debug_selector(move || format!("edit-summary-open-{entry}-{index}"))
+                        .flex_1()
+                        .text_size(typography.footnote)
+                        .text_color(colors.accent)
+                        .cursor(CursorStyle::PointingHand)
+                        .hover(|style| style.text_color(colors.title))
+                        .on_click(move |_, _, cx| {
+                            open_entity.update(cx, |_, cx| {
+                                cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                            });
+                        })
+                        .child(path.display().to_string()),
+                );
+            if reverted {
+                row = row.child(
+                    div()
+                        .id(format!("edit-summary-reverted-{entry}-{index}"))
+                        .debug_selector(move || format!("edit-summary-reverted-{entry}-{index}"))
+                        .text_size(typography.caption2)
+                        .text_color(colors.meta)
+                        .child("reverted"),
+                );
+            } else if confirming {
+                row = row
+                    .child(
+                        div()
+                            .id(format!("edit-summary-confirm-{entry}-{index}"))
+                            .debug_selector(move || format!("edit-summary-confirm-{entry}-{index}"))
+                            .px(px(7.0))
+                            .py(px(4.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.footnote)
+                            .text_color(colors.git_conflict)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(move |_, _, cx| {
+                                confirm_entity.update(cx, |chat, cx| {
+                                    chat.confirm_edit_revert(entry, confirm_path.clone(), cx);
+                                });
+                            })
+                            .child("Confirm Revert"),
+                    )
+                    .child(
+                        div()
+                            .id(format!("edit-summary-cancel-{entry}-{index}"))
+                            .debug_selector(move || format!("edit-summary-cancel-{entry}-{index}"))
+                            .px(px(7.0))
+                            .py(px(4.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(move |_, _, cx| {
+                                cancel_entity.update(cx, |chat, cx| {
+                                    chat.cancel_edit_revert(entry, cx);
+                                });
+                            })
+                            .child("Cancel"),
+                    );
+            } else {
+                row = row.child(
+                    div()
+                        .id(format!("edit-summary-revert-{entry}-{index}"))
+                        .debug_selector(move || format!("edit-summary-revert-{entry}-{index}"))
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(theme.radii.control)
+                        .text_size(typography.footnote)
+                        .text_color(if reverting { colors.meta } else { colors.git_conflict })
+                        .hover(|style| style.bg(colors.chat_row_hover))
+                        .on_click(move |_, _, cx| {
+                            if !reverting {
+                                request_entity.update(cx, |chat, cx| {
+                                    chat.request_edit_revert(entry, request_path.clone(), cx);
+                                });
+                            }
+                        })
+                        .child(if reverting { "Reverting…" } else { "Revert" }),
+                );
+            }
+            card = card.child(row);
+        }
+        if let Some(error) = state.revert_error {
+            card = card.child(
+                div()
+                    .id(("edit-summary-error", entry))
+                    .debug_selector(move || format!("edit-summary-error-{entry}"))
+                    .text_size(typography.caption2)
+                    .text_color(colors.git_conflict)
+                    .child(error),
+            );
+        }
+        card.into_any_element()
+    }
+
     fn render_entry(
         entry: Entry,
         entry_index: usize,
@@ -3367,6 +3592,7 @@ impl Chat {
         source_start: usize,
         question_answer: &QuestionAnswerState,
         copied_target: Option<CopyTarget>,
+        edit_summary: Option<EditSummaryState>,
     ) -> impl IntoElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -3532,6 +3758,7 @@ impl Chat {
                 content,
                 locations,
                 expanded,
+                edit_summary,
                 theme,
                 entity.clone(),
             ),
@@ -3939,7 +4166,7 @@ impl Chat {
             expanded,
             ..
         } = call;
-        let toggle_entity = entity;
+        let toggle_entity = entity.clone();
         let header = div()
             .id(format!(
                 "subagent-tool-call-toggle-{task_index}-{child_index}"
@@ -4039,12 +4266,13 @@ impl Chat {
         content: Vec<ToolCallContentInfo>,
         locations: Vec<ToolCallLocationInfo>,
         expanded: bool,
+        edit_summary: Option<EditSummaryState>,
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
-        let toggle_entity = entity;
+        let toggle_entity = entity.clone();
         let header = div()
             .id(("tool-call-toggle", entry_index))
             .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
@@ -4135,6 +4363,22 @@ impl Chat {
             }
             card = card.child(body);
         }
+        let diffs = content
+            .iter()
+            .filter_map(|content| match content {
+                ToolCallContentInfo::Diff(diff) => Some(diff.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !diffs.is_empty() {
+            card = card.child(Self::render_edit_summary(
+                entry_index,
+                diffs,
+                edit_summary.unwrap_or_default(),
+                theme,
+                entity.clone(),
+            ));
+        }
         card.into_any_element()
     }
 
@@ -4212,6 +4456,7 @@ impl Chat {
                         content,
                         locations,
                         expanded,
+                        None,
                         theme,
                         entity.clone(),
                     ));
@@ -5372,6 +5617,7 @@ impl Render for Chat {
                                                 source_start,
                                                 &question_answer,
                                                 this.copied_target.clone(),
+                                                this.edit_summaries.get(&entry_index).cloned(),
                                             ))
                                             .into_any_element()
                                     })
@@ -6200,6 +6446,99 @@ mod tests {
             "the clicked code-block control visibly acknowledges success"
         );
         let _ = chat;
+    }
+
+    /// F-CHAT-32: ACP diffs render an edited-files summary. Its Open action
+    /// is host-routed, and each Revert passes through confirmation before the
+    /// card reports either the real git result or the real failure.
+    #[gpui::test]
+    async fn edit_summary_opens_and_reports_revert_success_or_error(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        for args in [
+            ["init"].as_slice(),
+            ["config", "user.email", "test@example.invalid"].as_slice(),
+            ["config", "user.name", "Tiller Test"].as_slice(),
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir.0)
+                .status()
+                .expect("run git setup")
+                .success());
+        }
+        std::fs::write(dir.0.join("edited.rs"), "old\n").expect("seed tracked file");
+        assert!(std::process::Command::new("git")
+            .args(["add", "edited.rs"])
+            .current_dir(&dir.0)
+            .status()
+            .expect("stage seed file")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-m", "seed"])
+            .current_dir(&dir.0)
+            .status()
+            .expect("commit seed file")
+            .success());
+        std::fs::write(dir.0.join("edited.rs"), "new\n").expect("modify tracked file");
+
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                dir.0.clone(),
+                cx,
+            );
+            let diff = |path: &str| ToolCallContentInfo::Diff(ToolCallDiff {
+                path: PathBuf::from(path),
+                old_text: Some("old\n".into()),
+                new_text: "new\n".into(),
+            });
+            chat.push_entry(Entry::ToolCall {
+                id: "edit-ok".into(), title: "Edit file".into(), status: "Completed".into(),
+                kind: "Edit".into(), content: vec![diff("edited.rs")], locations: vec![],
+                raw_input: None, raw_output: None, expanded: false, group_expanded: false,
+            });
+            chat.push_entry(Entry::Assistant { text: "done".into(), document: parse("done") });
+            chat.push_entry(Entry::ToolCall {
+                id: "edit-stale".into(), title: "Edit missing file".into(), status: "Completed".into(),
+                kind: "Edit".into(), content: vec![diff("missing.rs")], locations: vec![],
+                raw_input: None, raw_output: None, expanded: false, group_expanded: false,
+            });
+            chat
+        });
+        let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let opened_events = opened.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                let ChatEvent::OpenFile(path) = event;
+                opened_events.borrow_mut().push(path.clone());
+            })
+            .detach();
+        });
+        refresh_frame(cx);
+
+        let open = cx.debug_bounds("edit-summary-open-0-0").expect("Open file is drawn");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(opened.borrow().as_slice(), [PathBuf::from("edited.rs")]);
+
+        let revert = cx.debug_bounds("edit-summary-revert-0-0").expect("Revert is drawn");
+        cx.simulate_click(revert.center(), Modifiers::none());
+        cx.run_until_parked();
+        let confirm = cx.debug_bounds("edit-summary-confirm-0-0").expect("Revert requires confirmation");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        pump_chat_until(cx, &chat, |chat| chat.edit_summaries.get(&0).is_some_and(|state| !state.reverted_paths.is_empty()));
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("edit-summary-reverted-0-0").is_some(), "successful git discard is shown as reverted");
+
+        let revert = cx.debug_bounds("edit-summary-revert-2-0").expect("second Revert is drawn");
+        cx.simulate_click(revert.center(), Modifiers::none());
+        cx.run_until_parked();
+        let confirm = cx.debug_bounds("edit-summary-confirm-2-0").expect("stale Revert also requires confirmation");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        pump_chat_until(cx, &chat, |chat| chat.edit_summaries.get(&2).is_some_and(|state| state.revert_error.is_some()));
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("edit-summary-error-2").is_some(), "failed git discard is shown on the card");
     }
 
     /// F-CHAT-28: a protocol Task tool call becomes a subagent card; its
