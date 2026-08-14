@@ -339,12 +339,12 @@ touched the entry — those rows do **not** count toward done.
 | `F-CORE-ACT-03` | PASSED | agent_spawned sets running+identity, returns () by construction; test asserts no transition | pass 10 |
 | `F-CORE-ACT-04` | PASSED | from_exit_code 0->done else error; apply_exit_result tests incl untracked/closed->None | pass 10 |
 | `F-CORE-ACT-05` | PASSED | replayed `panes::tests::real_pty_activity_status_follows_osc_title_then_settled_content` — ok (pass 16, full panes:: run: 16 passed 2 failed; this test among the 16) | pass 16 |
-| `F-CORE-ACT-06` | FAILED — defective | the claim's own cited test `panes::tests::process_owned_status_survives_title_and_child_exit_events` FAILS, reproducibly (pass 14 and pass 16 runs, panes.rs untouched since 19:39 — stable, not transient): process-owned state does not survive the title+child-exit sequence the claim describes | pass 16 |
-| `F-CORE-ACT-07` | FAILED — defective | one of the claim's two cited tests fails reproducibly: `layer_a_debounce_still_suppresses_two_title_events_in_order` ok, but `real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second` FAILED (pass 16) — the real-PTY debounce half does not hold | pass 16 |
+| `F-CORE-ACT-06` | NOT EXERCISED | P115 replayed `panes::tests::process_owned_status_survives_title_and_child_exit_events` successfully in a fresh tree at `56977f2` (10/10 exact reruns). This removes the sole stated defective ground, but a passing unit test is not the required live gesture. Owed: identify one pane by title and another by process, replace each title with unrelated text, and observe that only title-owned state clears. | P115, 2026-08-14 |
+| `F-CORE-ACT-07` | NOT EXERCISED | P115 replayed `panes::tests::real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second` successfully in a fresh tree at `56977f2` (10/10 exact reruns). The ledger's unqualified name does not match with `--exact`; plain `cargo test -p tiller` supplied the qualified harness name. This removes the sole stated defective ground, but does not exercise the required live timing gesture. Owed: send a hook status, immediately force a contradictory recognized title, then repeat after more than 1.5 seconds and observe the two outcomes. | P115, 2026-08-14 |
 | `F-CORE-ACT-08` | PASSED | replayed `panes::tests::terminal_events_feed_title_and_settled_content_into_the_one_model` — ok (pass 16) | pass 16 |
 | `F-CORE-ACT-09` | PASSED | replayed `panes::tests::process_refresh_preserves_process_ownership_until_process_gone` — ok (pass 16, among the 16 passing panes:: tests) | pass 16 |
 | `F-CORE-ACT-10` | builder-claimed, unverified | Layer-D tick calls the bounded existing `/proc` walk with the pane shell PID every 500ms | P50 builder claim |
-| `F-CORE-ACT-11` | FAILED — defective | the claim's cited test `panes::tests::process_owned_status_survives_title_and_child_exit_events` FAILS reproducibly (pass 16; stable since pass 14) — ownership-gated clearing does not survive the described sequence | pass 16 |
+| `F-CORE-ACT-11` | NOT EXERCISED | P115 replayed `panes::tests::process_owned_status_survives_title_and_child_exit_events` successfully in a fresh tree at `56977f2` (10/10 exact reruns). This removes the sole stated defective ground, but a passing unit test is not the required separate-pane lifecycle exercise. Owed: exercise title, process, and spawn detection on separate panes; alter or terminate one source at a time, then close each pane and observe that only the owning state is removed. | P115, 2026-08-14 |
 | `F-CORE-ACT-12` | PASSED | overturn pass9 UNREACHABLE: pure classification, every clause case unit-tested (glyphs/pi/pi:/names/bare spinner) | pass 10 |
 | `F-CORE-ACT-13` | PASSED | overturn pass9 UNREACHABLE: detect_claude/detect_pi_family; every clause mapping tested | pass 10 |
 | `F-CORE-ACT-14` | PASSED | WAITING/IDLE/WORKING keyword lists + boundary negatives ("already","reworking",codex-notes) tested | pass 10 |
@@ -570,10 +570,10 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 | PASSED | **190** |
 | half-proven | **34** |
 | FAILED — absent | **14** |
-| FAILED — defective | **47** |
+| FAILED — defective | **44** |
 | UNREACHABLE | **12** |
 | N/A — platform | **12** |
-| NOT EXERCISED | **79** |
+| NOT EXERCISED | **82** |
 | NOT EXERCISED — blocked on display | **0** |
 | builder-claimed, unverified | **1** |
 | **total** | **389** |

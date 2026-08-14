@@ -27,9 +27,9 @@ result line verbatim.
 
 - `F-CORE-ACT-05` + `F-CORE-ACT-08` — run `panes::real_pty_activity_status_follows_osc_title_then_settled_content`
   and `panes::terminal_events_feed_title_and_settled_content_into_the_one_model`.
-- `F-CORE-ACT-07` — run `panes::layer_a_debounce_still_suppresses_two_title_events_in_order`
-  and `panes::real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second`.
-- `F-CORE-ACT-06` + `F-CORE-ACT-11` — run `panes::process_owned_status_survives_title_and_child_exit_events`.
+- `F-CORE-ACT-07` — P115 has already replayed both named tests green; the owed live gesture is to send a hook status, immediately force a contradictory recognized title (which must not replace the hook status), then repeat after more than 1.5 seconds (when the title may replace it).
+- `F-CORE-ACT-06` — first identify a pane by title, then replace its title with unrelated text and observe title-owned state clear; repeat with a process-identified pane and observe unrelated title text does not clear it.
+- `F-CORE-ACT-11` — exercise title, process, and spawn detection on separate panes; alter or terminate one signal source at a time, close each pane, and observe that only the matching ownership state is removed.
 - `F-CORE-ACT-09` — run `panes::process_refresh_preserves_process_ownership_until_process_gone`.
 - `F-CORE-ACT-10` — no named test carries this claim: the 500ms interval is
   `process_signal_interval()` (panes.rs:25), the tick wiring `start_process_signal_refresh`
