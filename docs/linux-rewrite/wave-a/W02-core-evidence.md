@@ -116,3 +116,22 @@ branch (dirty buffer + external edit) not confirmed — inconclusive, not dispro
 **Verdict left as:** half-proven (upgraded from NOT EXERCISED) — the silent-reload half is now
 real evidence the pipeline this row cares about is live and distinct from the Changes panel; the
 conflict-banner half remains owed.
+
+## `F-CORE-TERM-02`
+
+**Claim:** could-not-reach.
+
+**Drove:** Confirmed in the current source that `open_context_menu` is wired only to
+`MouseButton::Right` (`tiller_terminal/src/lib.rs`) with no keyboard-triggered path anywhere
+in the crate. `Scripts/wayland-drive.sh`'s `pointer_command`/virtual-pointer client only
+sends a left-button `click` (see `wayland-virtual-pointer.c` invocation) — there is no
+right-click primitive on this lane. Per the task charter this slice is restricted to the
+Wayland lane only (`DISPLAY=:1` and `linux-drive.sh` are explicitly off-limits here), and
+that is the only lane `WAYLAND-LANE.md` documents as supporting a real right-click gesture.
+
+**Observed:** No new capture. This reconfirms the row's own prior evidence
+(`p17-rclick-term.png`, per-item effects already unit-tested from pass 12) rather than
+attempting a gesture this lane cannot produce.
+
+**Verdict left as:** half-proven, unchanged — the per-item effects remain reachable only on
+the `DISPLAY=:1` lane, out of scope for this slice.
