@@ -31,3 +31,45 @@ JSON field exposes card identity or expanded state to distinguish a hit from a m
 
 **Captures:** `reference/linux-progress/wavea-W04-chat/f28/01-baseline.png`,
 `reference/linux-progress/wavea-W04-chat/f28/02-02-after-send.png`
+
+## F-CHAT-29 — assistant-response Copy + confirmation
+
+**Drove:** real ACP turn (`Reply_with_only_the_single_word:_COPY29MARK` — the model declined
+and answered with a multi-line refusal instead, which is itself fine for this row: any rendered
+`Entry::Assistant` gets the hover-Copy control). Attempted a hover(`move 700 190`)+`click 1350
+186` at an estimated top-right-of-entry coordinate, then forced two repaints back to the
+launch resolution to diff before/after.
+
+**Observed — why this could not be closed live:** two blocking facts, both confirmed this
+drive, not assumed:
+1. **No exposed geometry.** `control_entry_row` (chat.rs:5408-5432) serializes only
+   `kind`/`id`/`text`/`status` for every entry — no bounds, no DOM-like index-to-pixel mapping.
+   The transcript is a virtualized `list()` whose row heights depend on wrapped markdown line
+   count, which depends on the model's actual reply text — not knowable before the reply lands,
+   and not queryable after it either.
+2. **The compositor's actual startup resolution does not match its configured default before an
+   explicit `swaymsg output` call.** A raw `grim` capture taken immediately at launch (no prior
+   `shot`/`swaymsg` call) measured `1400x900`, not the `1715x972` `wayland-sway.conf` declares —
+   confirmed by `identify` on `b1-before.png` vs `b2-after.png` in this very drive. Any click
+   coordinate computed against the documented default is unreliable until the first forced
+   repaint, which itself changes the layout it's meant to verify.
+3. **The clause's second half — "paste elsewhere, and confirm the copied text" — has no
+   reachable path in this lane at all, independent of click precision.** Grepped
+   `composer.rs`, `chat.rs`, and `tiller_terminal/src/lib.rs` for a paste keybinding: the only
+   `Paste` action anywhere in the app is `TerminalContextAction::Paste`, wired solely to the
+   terminal's right-click context menu (`tiller_terminal/src/context_menu.rs:43-44`).
+   `WAYLAND-LANE.md` is explicit that right-click is unexercised on this lane. There is no
+   keyboard paste binding to fall back on.
+
+**Claim:** could-not-reach. The backend/render half (control exists, writes the clipboard,
+shows `Copied ✓` for 2s) is already established by triage from the drawn test
+`assistant_response_copy_writes_text_and_confirms` (398c0aea) and is not disputed here. The live
+gesture half is blocked on this lane by (1) no queryable button geometry and an
+unreliable pre-repaint resolution baseline for blind coordinate guessing, and (2) the clause's
+paste-confirmation half requiring a control this lane has no verified way to invoke. Closing
+this row needs `DISPLAY=:1` (real click precision via visual feedback) — still not right-click,
+since Copy is a plain left-click control, so a left-click-capable lane could reach the Copy half;
+only the paste-elsewhere half is intrinsically right-click-only.
+
+**Captures:** `reference/linux-progress/wavea-W04-chat/f29/b1-before.png`,
+`reference/linux-progress/wavea-W04-chat/f29/b2-after.png`
