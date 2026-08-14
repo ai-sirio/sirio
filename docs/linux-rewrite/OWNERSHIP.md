@@ -36,10 +36,37 @@ unowned *files inside owned crates*, which everyone assumed were somebody's.
 |---|---|
 | `codex11` | `tiller_ui/`: `changes.rs`, `right_panel.rs`, `editor.rs`, `file_view.rs`, `browser.rs` · `tiller_git/**` · `tiller_terminal/**` · `tiller_acp/**` · `tiller_agents/**` · `tiller_persistence/**` · `tiller_project/**` · **`tiller_markdown/**`** |
 | `codex12` | `tiller/`: `main.rs`, `session.rs`, `panes.rs`, `command_palette.rs`, `tab_machinery.rs` · `tiller_ui/`: `tab_bar.rs`, **`sidebar.rs`** · `tiller_control/**` · `tiller_usage/**` · `tiller_activity/**` |
-| `sonnet` | `tiller_ui/`: `titlebar.rs`, `controls.rs`, `composer.rs`, `settings.rs`, `icons.rs`, `sfsymbol.rs`, **`chat.rs`**, **`status_bar.rs`** · `tiller_theme/**` |
+| ~~`sonnet`~~ | **reassigned 2026-08-14 — `sonnet` became the second critic and now owns no source files.** See below. |
 
 `fable` owns no source files **by design** — it is the critic, and a critic that has built something
-cannot judge it.
+cannot judge it. **`sonnet` now owns none for the same reason.**
+
+## `sonnet`'s files, reassigned — 2026-08-14
+
+Promoting `sonnet` to second critic bought critic throughput, which is the project's rate limit, and
+paid for it by **orphaning a large part of `tiller_ui` in the same move** — including `chat.rs`,
+which holds the ten-row transcript tier and most of what makes this an agent client rather than a
+chat box. The handover doc anticipated builders dropping to two; it never said who inherits. This
+does.
+
+It is also a chance to apply `SEAMS.md`'s own advice — *shape the piece so a single owner holds both
+halves* — so two open seams close by reassignment rather than by dispatch:
+
+| file | new owner | why |
+|---|---|---|
+| `chat.rs`, `composer.rs` | `codex11` | chat **is** the ACP surface, and `tiller_acp/**` + `tiller_agents/**` are already `codex11`'s. Keeping the pair together also preserves the `composer.rs`/`render_composer` fix that put both halves with one owner in the first place. |
+| `settings.rs` | `codex11` | **closes `F-BRW-08`.** That seam was "mount the browser Permissions section in `settings.rs`" against browser state in `browser.rs` — and `browser.rs` is `codex11`'s. One owner now holds both halves. |
+| `status_bar.rs` | `codex12` | **closes the `tiller_usage` seam.** `status_bar.rs` consumes `ProviderUsage`/`UsageWindow` from `tiller_usage/**`, which is `codex12`'s; those very imports were the last thing blocking the `CI OK` gate. |
+| `titlebar.rs`, `controls.rs`, `icons.rs`, `sfsymbol.rs`, `tiller_theme/**` | `codex12` | window chrome and the shared visual vocabulary, which pair with `tab_bar.rs` and `sidebar.rs`. |
+| `project_identity.rs` | `codex12` | `sonnet` created it in P80 and it never reached this map — **a new file inside a split crate, which is precisely the case the top of this document calls the dangerous one.** Its mount target is `sidebar.rs::render_project_settings`, already `codex12`'s, so assigning it here puts the picker and its mount with one owner. |
+
+**`codex11` is now carrying more than `codex12`.** That is deliberate: `codex12` owns `main.rs` and
+is the integration bottleneck by construction, so loading it with chrome would slow every other
+pane's Half B. Revisit if `codex11` becomes the queue.
+
+**Nobody may judge `F-CHAT-*`, `F-SET-*`, `F-USE-*` or anything resting on the files above by reading
+`sonnet`'s tests as proof.** `sonnet` built those surfaces and cannot judge them; the new owners did
+not build them and can. Verdicts on them belong to `fable`, or to a new owner exercising them live.
 
 ### Why `pi`'s files went where they did
 
