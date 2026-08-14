@@ -1,0 +1,583 @@
+{
+  "database": "/tmp/pi.sqlite",
+  "user_version": 12,
+  "tables": [
+    "browser_origin_grant",
+    "chat_turn",
+    "project",
+    "quarantine_record",
+    "session_ref",
+    "setting",
+    "sidebar_expanded_project",
+    "sidebar_state",
+    "tab",
+    "tab_state",
+    "worktree"
+  ]
+}
+
+[browser_origin_grant] rows=0
+[
+  {
+    "cid": 0,
+    "name": "origin",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "granted_at",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[]
+
+[chat_turn] rows=0
+[
+  {
+    "cid": 0,
+    "name": "tab_id",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "ordinal",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 2
+  },
+  {
+    "cid": 2,
+    "name": "payload",
+    "type": "BLOB",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 3,
+    "name": "updated_at",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": "0",
+    "pk": 0
+  }
+]
+[]
+
+[project] rows=2
+[
+  {
+    "cid": 0,
+    "name": "id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "name",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 2,
+    "name": "root_path",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 3,
+    "name": "color_hex",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 4,
+    "name": "display_name",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 5,
+    "name": "icon_kind",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": "'icon'",
+    "pk": 0
+  },
+  {
+    "cid": 6,
+    "name": "icon_value",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 7,
+    "name": "avatar_image",
+    "type": "BLOB",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 8,
+    "name": "default_worktree_base",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 9,
+    "name": "worktree_location_override",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 10,
+    "name": "order_idx",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": "0",
+    "pk": 0
+  }
+]
+[
+  {
+    "id": "p-c1fd7a5bbfd541af",
+    "name": "tiller",
+    "root_path": "/home/enzopalmisano/Scrivania/Progetti/tiller",
+    "color_hex": null,
+    "display_name": null,
+    "icon_kind": "icon",
+    "icon_value": null,
+    "avatar_image": null,
+    "default_worktree_base": null,
+    "worktree_location_override": null,
+    "order_idx": 0
+  },
+  {
+    "id": "p-bdcd4c1e4b1614f9",
+    "name": "p116-git",
+    "root_path": "/tmp/p116-git",
+    "color_hex": null,
+    "display_name": null,
+    "icon_kind": "icon",
+    "icon_value": null,
+    "avatar_image": null,
+    "default_worktree_base": null,
+    "worktree_location_override": null,
+    "order_idx": 1
+  }
+]
+
+[quarantine_record] rows=0
+[
+  {
+    "cid": 0,
+    "name": "id",
+    "type": "INTEGER",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "record_type",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 2,
+    "name": "record_id",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 3,
+    "name": "payload",
+    "type": "BLOB",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 4,
+    "name": "reason",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 5,
+    "name": "quarantined_at",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[]
+
+[session_ref] rows=1
+[
+  {
+    "cid": 0,
+    "name": "session",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "reference",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[
+  {
+    "session": "pane-2157148-2",
+    "reference": "p116-native-ref"
+  }
+]
+
+[setting] rows=0
+[
+  {
+    "cid": 0,
+    "name": "key",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "value",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[]
+
+[sidebar_expanded_project] rows=1
+[
+  {
+    "cid": 0,
+    "name": "project_id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  }
+]
+[
+  {
+    "project_id": "p-c1fd7a5bbfd541af"
+  }
+]
+
+[sidebar_state] rows=1
+[
+  {
+    "cid": 0,
+    "name": "id",
+    "type": "INTEGER",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "selected_worktree_id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[
+  {
+    "id": 1,
+    "selected_worktree_id": "p-c1fd7a5bbfd541af-wt-1"
+  }
+]
+
+[tab] rows=3
+[
+  {
+    "cid": 0,
+    "name": "id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "worktree_id",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 2,
+    "name": "title",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 3,
+    "name": "kind",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 4,
+    "name": "order_idx",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 5,
+    "name": "is_active",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": "0",
+    "pk": 0
+  },
+  {
+    "cid": 6,
+    "name": "agent_id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[
+  {
+    "id": "default-chat",
+    "worktree_id": "p-c1fd7a5bbfd541af-wt-1",
+    "title": "Chat",
+    "kind": "chat",
+    "order_idx": 0,
+    "is_active": 0,
+    "agent_id": null
+  },
+  {
+    "id": "default-terminal",
+    "worktree_id": "p-c1fd7a5bbfd541af-wt-1",
+    "title": "Terminal",
+    "kind": "terminal",
+    "order_idx": 1,
+    "is_active": 0,
+    "agent_id": null
+  },
+  {
+    "id": "p-c1fd7a5bbfd541af-wt-1-tab-18cbb63217f8b7a7-2",
+    "worktree_id": "p-c1fd7a5bbfd541af-wt-1",
+    "title": "Changes",
+    "kind": "diff",
+    "order_idx": 2,
+    "is_active": 1,
+    "agent_id": null
+  }
+]
+
+[tab_state] rows=3
+[
+  {
+    "cid": 0,
+    "name": "tab_id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "state",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[
+  {
+    "tab_id": "default-chat",
+    "state": "{\"root_id\":null,\"pane_events\":[],\"scrollback\":{}}"
+  },
+  {
+    "tab_id": "default-terminal",
+    "state": "{\"root_id\":null,\"pane_events\":[],\"scrollback\":{\"1\":[]}}"
+  },
+  {
+    "tab_id": "p-c1fd7a5bbfd541af-wt-1-tab-18cbb63217f8b7a7-2",
+    "state": "{\"root_id\":2,\"pane_events\":[],\"scrollback\":{}}"
+  }
+]
+
+[worktree] rows=4
+[
+  {
+    "cid": 0,
+    "name": "id",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 1
+  },
+  {
+    "cid": 1,
+    "name": "project_id",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 2,
+    "name": "branch",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 3,
+    "name": "path",
+    "type": "TEXT",
+    "notnull": 1,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 4,
+    "name": "is_primary",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": "0",
+    "pk": 0
+  },
+  {
+    "cid": 5,
+    "name": "order_idx",
+    "type": "INTEGER",
+    "notnull": 1,
+    "dflt_value": "0",
+    "pk": 0
+  },
+  {
+    "cid": 6,
+    "name": "comment",
+    "type": "TEXT",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 7,
+    "name": "created_at",
+    "type": "INTEGER",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  },
+  {
+    "cid": 8,
+    "name": "updated_at",
+    "type": "INTEGER",
+    "notnull": 0,
+    "dflt_value": null,
+    "pk": 0
+  }
+]
+[
+  {
+    "id": "p-c1fd7a5bbfd541af-wt-1",
+    "project_id": "p-c1fd7a5bbfd541af",
+    "branch": "linux/gpui-waku",
+    "path": "/home/enzopalmisano/Scrivania/Progetti/tiller-linux",
+    "is_primary": 0,
+    "order_idx": 0,
+    "comment": null,
+    "created_at": null,
+    "updated_at": null
+  },
+  {
+    "id": "p-c1fd7a5bbfd541af-wt-0",
+    "project_id": "p-c1fd7a5bbfd541af",
+    "branch": "rust/gpui-rewrite",
+    "path": "/home/enzopalmisano/Scrivania/Progetti/tiller",
+    "is_primary": 1,
+    "order_idx": 0,
+    "comment": null,
+    "created_at": null,
+    "updated_at": null
+  },
+  {
+    "id": "p-bdcd4c1e4b1614f9-wt-0",
+    "project_id": "p-bdcd4c1e4b1614f9",
+    "branch": "master",
+    "path": "/tmp/p116-git",
+    "is_primary": 1,
+    "order_idx": 0,
+    "comment": null,
+    "created_at": null,
+    "updated_at": null
+  },
+  {
+    "id": "p-bdcd4c1e4b1614f9-wt-1",
+    "project_id": "p-bdcd4c1e4b1614f9",
+    "branch": "wt-1786722152",
+    "path": "/tmp/.ctx-mode-GYdXpI/tiller-worktrees/p116-git-wt-1786722152-2204179",
+    "is_primary": 0,
+    "order_idx": 1,
+    "comment": null,
+    "created_at": null,
+    "updated_at": null
+  }
+]

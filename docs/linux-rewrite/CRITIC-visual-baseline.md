@@ -216,3 +216,57 @@ async load arrived. Whether that is one root cause or two is exactly the questio
 
 Light mode. `theme` reads `system` in `surface.settings.read` and resolves dark here; there is no
 control method that sets a settings value, so light needs the Appearance control clicked.
+
+---
+
+# 2026-08-14 17:55 — light mode, judged by measurement after my eye got it wrong
+
+**Light mode is sound.** It is also the first surface closed by an orchestrator-driven synthetic
+click, which is worth recording on its own.
+
+## The click
+
+```
+click 1062 141        # the "Light" segment, at 1400x900
+```
+
+`surface.settings.read` before: `theme = system`. After: `theme = light`. The cursor is visible at
+the click point in the capture. `P112`'s pointer works on a control I picked myself, not only on the
+one it was demonstrated with.
+
+Capture: `reference/linux-progress/2026-08-14-light-settings-appearance.png`.
+
+## What I got wrong
+
+My first read of the frame was that the settings nav column — AI Providers, Agents, General,
+Permissions — was **washed out to the point of a light-mode contrast bug**, while the content column
+beside it stayed crisp. It genuinely looks that way.
+
+So I measured instead of reporting it. Darkest glyph pixel against local background, converted to a
+WCAG ratio:
+
+| region | dark | light |
+|---|---|---|
+| settings nav labels | **6.65:1** | **5.11:1** |
+| content labels (Theme, Interface) | **12.58:1** | **12.63:1** |
+
+**The nav is deliberately de-emphasised in both themes.** It is roughly half the content column's
+contrast in dark too, so light did not regress it — light is modestly lower (6.65 → 5.11) and still
+clears the 4.5:1 AA floor for normal text. There is no defect here.
+
+The one thing worth watching: at 5.11:1 the light-mode nav is the **lowest-contrast text in the
+app** and the closest to the floor. It is a fine place to stop, not a fine place to go lower.
+
+## Why this entry exists in this shape
+
+A washed-out impression was about to become a reported defect, on the strength of the same kind of
+looks-right/looks-wrong judgement this project already pays for elsewhere. Two `convert` crops
+settled it in under a minute. **When a visual claim can be measured, measure it** — the tooling is
+`convert <png> -crop WxH+X+Y +repage -colorspace Gray -format "%[fx:minima*255] %[fx:maxima*255]"`,
+and it is available on this machine.
+
+## Evidence now committed rather than left in /tmp
+
+- `reference/linux-progress/2026-08-14-light-settings-appearance.png`
+- `reference/linux-progress/2026-08-14-chat-completed-turn-empty.png` — the 17:40 finding
+- `reference/linux-progress/2026-08-14-changes-list-clipped.png` — the clipped Changes list
