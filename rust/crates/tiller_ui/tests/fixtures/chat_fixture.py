@@ -12,6 +12,14 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    options, read whichever answer the client sends, and end
                    the turn. One process handles several prompts, so both
                    answers can be exercised against one connection.
+  question         On every prompt, ask a structured question with no wire
+                   options (F-CHAT-25 text answers), read the answer, echo
+                   it back as an assistant chunk, and end the turn.
+  question-expire  Ask a question and end the turn without reading an
+                   answer: the client must expire the card (F-CHAT-27).
+  plan             Publish a plan, request approval with Approve/Keep
+                   options, read the answer, advance the plan entries, and
+                   end the turn (F-CHAT-24).
   cancel           The first prompt streams a partial reply then waits for a
                    session/cancel notification and answers the prompt with
                    stopReason "cancelled". Later prompts complete normally.
@@ -94,6 +102,52 @@ def usage_update(used, size):
     notification({"sessionUpdate": "usage_update", "used": used, "size": size})
 
 
+def advertise():
+    """Advertise slash commands, model/effort config options, and an 85%
+    context fill, the way a real agent announces its composer affordances."""
+    notification(
+        {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                {"name": "cr", "description": "Code review the diff"},
+                {"name": "create-plan", "description": "Draft an implementation plan"},
+                {"name": "research", "description": "Research a topic"},
+            ],
+        }
+    )
+    notification(
+        {
+            "sessionUpdate": "config_option_update",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "sonnet",
+                    "options": [
+                        {"value": "sonnet", "name": "Sonnet"},
+                        {"value": "opus", "name": "Opus"},
+                    ],
+                },
+                {
+                    "id": "effort",
+                    "name": "Reasoning effort",
+                    "category": "effort",
+                    "type": "select",
+                    "currentValue": "medium",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "medium", "name": "Medium"},
+                        {"value": "high", "name": "High"},
+                    ],
+                },
+            ],
+        }
+    )
+    usage_update(170000, 200000)
+
+
 def rich_turn(request):
     """The full anatomy of one streamed turn."""
     message_chunk("first ")
@@ -129,6 +183,56 @@ def request_permission():
     )
 
 
+def plan_update(entries):
+    notification(
+        {
+            "sessionUpdate": "plan",
+            "entries": [
+                {"content": content, "status": status, "priority": "medium"}
+                for content, status in entries
+            ],
+        }
+    )
+
+
+def request_question():
+    """A structured question with no wire options: the client must offer a
+    free-text answer field (F-CHAT-25) and the answer travels back as the
+    selected option id."""
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 9001,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId": "tool-q",
+                    "title": "Ask user question",
+                    "status": "pending",
+                    "rawInput": {
+                        "questions": [
+                            {
+                                "header": "Which color?",
+                                "question": "Which color should the button be?",
+                                "options": [
+                                    {"label": "Blue", "description": "The ocean"},
+                                    {"label": "Green", "description": "The grass"},
+                                ],
+                            }
+                        ],
+                        "_tillerTextInput": {
+                            "placeholder": "Type a color",
+                            "prefill": "",
+                        },
+                    },
+                },
+                "options": [],
+            },
+        }
+    )
+
+
 def wait_for_go(dir_path):
     deadline = time.time() + 120
     while time.time() < deadline:
@@ -155,16 +259,120 @@ def main():
             response(request["id"], {"protocolVersion": 1, "agentCapabilities": {}})
         elif method == "session/new":
             response(request["id"], {"sessionId": SESSION_ID})
+            if mode == "composer":
+                advertise()
         elif method == "session/prompt":
             if mode == "staged":
-                rich_turn(request)
-                return
+                # The first prompt is the go-gated rich turn; any later
+                # prompt (e.g. a queued item draining at turn end) is
+                # answered like `plain` so a queue test can watch the
+                # whole completion path.
+                if first_prompt:
+                    first_prompt = False
+                    rich_turn(request)
+                else:
+                    message_chunk("reply ")
+                    response(request["id"], {"stopReason": "end_turn"})
             if mode == "plain":
+                message_chunk("reply ")
+                response(request["id"], {"stopReason": "end_turn"})
+            if mode == "composer":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "permission":
                 request_permission()
                 sys.stdin.readline()  # the client's answer to the permission
+                response(request["id"], {"stopReason": "end_turn"})
+            elif mode == "question":
+                # A structured question with no wire options: the client
+                # must offer a free-text answer, and the answer comes back
+                # as the selected option id. Echo the answer so the test
+                # can assert the round trip end to end. A cancelled
+                # question (F-CHAT-25 Cancel) is also a valid outcome.
+                request_question()
+                answer_line = sys.stdin.readline()
+                if not answer_line:
+                    return
+                answer = json.loads(answer_line)
+                outcome = answer.get("result", {}).get("outcome", {})
+                if outcome.get("outcome") == "cancelled":
+                    response(request["id"], {"stopReason": "end_turn"})
+                    return
+                if outcome.get("outcome") != "selected":
+                    error(request["id"], message="expected selected answer")
+                    return
+                message_chunk("You chose: " + outcome.get("optionId", ""))
+                response(request["id"], {"stopReason": "end_turn"})
+            elif mode == "question-expire":
+                # First prompt: ask a question, then wait for the client to
+                # withdraw it — Escape cancels the turn, which answers the
+                # pending permission with `cancelled` (the protocol requires
+                # it) and ends the turn. The client must expire the card
+                # instead of waiting forever (F-CHAT-27). Later prompts
+                # complete normally so a follow-up turn can be exercised.
+                if first_prompt:
+                    first_prompt = False
+                    request_question()
+                    permission_was_cancelled = False
+                    cancel_was_received = False
+                    while not (permission_was_cancelled and cancel_was_received):
+                        line = sys.stdin.readline()
+                        if not line:
+                            return
+                        message = json.loads(line)
+                        if message.get("id") == 9001:
+                            outcome = message.get("result", {}).get("outcome", {})
+                            permission_was_cancelled = outcome.get("outcome") == "cancelled"
+                        elif message.get("method") == "session/cancel":
+                            cancel_was_received = True
+                    response(request["id"], {"stopReason": "cancelled"})
+                else:
+                    message_chunk("reply ")
+                    response(request["id"], {"stopReason": "end_turn"})
+            elif mode == "plan":
+                # A plan that advances, then asks for approval: the Plan
+                # card must show the entries, attach the approval buttons,
+                # and reflect the entries advancing (F-CHAT-24).
+                plan_update([("Read the design", "pending"), ("Implement it", "pending")])
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 9001,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": SESSION_ID,
+                            "toolCall": {
+                                "toolCallId": "tool-plan",
+                                "title": "Exit plan mode",
+                                "status": "pending",
+                            },
+                            "options": [
+                                {
+                                    "optionId": "approve",
+                                    "name": "Approve plan",
+                                    "kind": "allow_once",
+                                },
+                                {
+                                    "optionId": "keep",
+                                    "name": "Keep planning",
+                                    "kind": "reject_once",
+                                },
+                            ],
+                        },
+                    }
+                )
+                answer_line = sys.stdin.readline()
+                if not answer_line:
+                    return
+                answer = json.loads(answer_line)
+                outcome = answer.get("result", {}).get("outcome", {})
+                if outcome.get("outcome") != "selected" or outcome.get("optionId") != "approve":
+                    error(request["id"], message="expected approve selection")
+                    return
+                plan_update(
+                    [("Read the design", "completed"), ("Implement it", "in_progress")]
+                )
+                message_chunk("approved")
                 response(request["id"], {"stopReason": "end_turn"})
             elif mode == "cancel":
                 if first_prompt:
