@@ -317,7 +317,7 @@ touched the entry — those rows do **not** count toward done.
 | id | verdict | evidence | judged |
 |---|---|---|---|
 | `F-TERM-01` | PASSED | real login shell on pts, breadcrumb | pass 1 |
-| `F-TERM-02` | FAILED — absent | no empty-pane prompt | pass 7 |
+| `F-TERM-02` | FAILED — defective | pass 7's "no empty-pane prompt" is **stale, and the correction changes the work**. The surface is complete at tiller_terminal/src/lib.rs:1379-1433: the explanatory text "No terminal in this pane" plus both actions the clause names — "New Terminal" (id `terminal-new`) and "New…" (id `terminal-new-command`) — each with a real `on_click`. **But it is unreachable**: it renders only when `empty_prompt` is true, that field defaults to false (`:624`, `:684`), and its only enabling constructor `TerminalView::empty_prompt` (`:637-645`) has **zero callers in the workspace** — not in main.rs, not in tests. Built and never constructed, so no user can reach it. This is a call site to add, not a surface to build. Distinct from F-SID-18, which is the worktree-level "No Terminals" state (`EmptyWorktreeView`) and is correctly absent | orchestrator audit, 2026-08-14 |
 | `F-TERM-03` | FAILED — absent | exit-status data real via panel.state (0/3/137); no surface renders exit/signal status — the strip shows only activity-layer Done ✓ | pass 11 |
 | `F-TERM-04` | NOT EXERCISED | pass 12: the terminal context menu now exists (10 items, drawn test green, tiller_terminal lib.rs:1751); Copy/Paste handlers real (lib.rs:718-750: selection/scrollback → clipboard; clipboard → input) — per-action clipboard effects not drawn-tested | pass 12 |
 | `F-TERM-05` | PASSED | pass 12: drawn `right_click_resolves_this_terminal_and_draws_all_context_actions` green (tiller_terminal lib.rs:1751) proves delegated typed events; mapping test `terminal_context_app_actions_have_workspace_routes` covers SetTitle; shell routes SetTitle → `set_terminal_title` → `tab.title = "Terminal {id}"` (main.rs:2436-2451); copy-context/clear are terminal-local handlers (lib.rs:718-750) | pass 12 |
@@ -569,8 +569,8 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 |---|---|
 | PASSED | **205** |
 | half-proven | **18** |
-| FAILED — absent | **97** |
-| FAILED — defective | **30** |
+| FAILED — absent | **96** |
+| FAILED — defective | **31** |
 | UNREACHABLE | **3** |
 | N/A — platform | **12** |
 | NOT EXERCISED | **23** |
