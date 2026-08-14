@@ -21,6 +21,9 @@
 #   move <x> <y>             move to absolute nested-output coordinates
 #   type <text>              type text through wtype (click a text target first)
 #   key <name>               type a named key through wtype, e.g. key Tab
+#   title <text>             set the focused terminal pane's title via OSC 0 (click the pane
+#                            first). Use this rather than writing the escape sequence inline —
+#                            its bare `;` splits the eval'd action block in half.
 #   shot <name>              force a repaint, capture <outdir>/NN-<name>.png, print its colour count
 #   $SOCK $WD $APP_LOG       socket path, wayland display, the app's stdout+stderr
 #
@@ -191,7 +194,7 @@ start_virtual_keyboard() {
 if grep -Eq '(^|[;[:space:]])(click|move)([;[:space:]]|$)' <<<"$ACTIONS"; then
   start_virtual_pointer || exit 3
 fi
-if grep -Eq '(^|[;[:space:]])(type|key)([;[:space:]]|$)' <<<"$ACTIONS"; then
+if grep -Eq '(^|[;[:space:]])(type|key|title)([;[:space:]]|$)' <<<"$ACTIONS"; then
   start_virtual_keyboard || exit 3
 fi
 
@@ -280,6 +283,28 @@ key() {
   verify_nested_sway || return 1
   command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
   wtype -k "$1"
+}
+
+# Set the FOCUSED TERMINAL PANE's title, by typing a printf that emits OSC 0 into its shell.
+#
+# This exists because writing the escape sequence inline does not work and fails in a way that
+# looks like the app ignoring it. The whole action block reaches `eval` (see the bottom of this
+# file), and an OSC sequence carries a bare `;` — `type printf '\033]0;X\007'` therefore parses
+# as two commands, types half a sequence, and leaves the title untouched. Four F-CORE-ACT rows
+# (02, 06, 07, 11) sat unexercised on exactly that mistake.
+#
+# Click a terminal pane first so the shell has focus; this types a real command a user could
+# have typed, which is the input path those rows are supposed to be verified through.
+title() {
+  [ "$#" -ge 1 ] || { echo "usage: title <text>" >&2; return 2; }
+  verify_nested_sway || return 1
+  command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
+  local text="$*"
+  case "$text" in
+    *"'"*) echo "FAIL: title text may not contain a single quote" >&2; return 2 ;;
+  esac
+  wtype "printf '\\033]0;${text}\\007'" || return 1
+  wtype -k Return
 }
 
 # Repaint is lazy. After the first frame the app sits still and grim keeps returning that frame
