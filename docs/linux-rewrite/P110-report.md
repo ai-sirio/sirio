@@ -62,3 +62,12 @@
   to Current Terminal**, then right-click the current terminal and confirm
   the action is disabled. The state transition and both enabled/disabled
   drawn surfaces are covered by the two UI tests above.
+
+## Verification
+
+- Fresh drawn-test runs passed for every P110 state, including both F-TAB-25
+  enabled and disabled cases.
+- `cargo check -p tiller` passed.
+- `Scripts/ci.sh` was invoked but cannot begin in this Linux checkout because
+  its first command requires the macOS-only `xcodegen` executable, which is
+  not installed here. The command stopped with `xcodegen: command not found`.
