@@ -35,6 +35,19 @@ LEDGER = Path(__file__).resolve().parent.parent / "docs" / "linux-rewrite" / "IN
 # A row looks like:  | `F-CHAT-08` | FAILED — absent | evidence… | pass 12 |
 ROW = re.compile(r"^\|\s*`(F-[A-Z0-9-]+)`\s*\|")
 
+# Which `judged` values count as an independent critic pass.
+#
+# The criterion is structural, not reputational: the agent that set the verdict neither built
+# the row nor produced the evidence it rests on. Two source shapes satisfy that by
+# construction and nothing else is admitted here — a source naming the orchestrator, or a
+# builder's own report, stays in the "never judged" column on purpose.
+#
+#   pass 12                 — a numbered critic pass
+#   sweep A1-P109, 2026-08-14  — an exercise-sweep slice, where the workflow guarantees the
+#                                adjudicating agent is not the one that drove or built it
+#                                (docs/linux-rewrite/sweep/PLAN.md)
+CRITIC_PASS = re.compile(r"pass \d+|sweep \S+, \d{4}-\d{2}-\d{2}")
+
 # Verdicts that carry a free-text tail we fold into one bucket for counting.
 PREFIX_BUCKETS = ("UNREACHABLE", "NOT EXERCISED — blocked on display", "half-proven")
 
@@ -148,7 +161,7 @@ def main() -> int:
                 continue
             cells = split_cells(line)
             j = cells[3] if len(cells) > 3 else ""
-            judged["critic pass" if re.fullmatch(r"pass \d+", j) else j or "<empty>"] += 1
+            judged["critic pass" if CRITIC_PASS.fullmatch(j) else j or "<empty>"] += 1
         never = sum(v for k, v in judged.items() if k != "critic pass")
         print(f"\nnever independently judged by a critic pass: {never}")
         for key, n in judged.most_common():
