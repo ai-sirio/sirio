@@ -44,8 +44,8 @@ use tiller_ui::{
     row_reorder::{ReorderScope, RowDrag},
     settings::{Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
-        Sidebar, SidebarContextAction, SidebarContextTarget, SidebarEvent, SidebarProject,
-        SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
+        ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget, SidebarEvent,
+        SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement},
     },
     status_bar::{StatusBar, UsageBarData},
@@ -71,8 +71,8 @@ use panes::{
     SplitPaneRight, SplitPlacement, TabSelection,
 };
 use session::{
-    PaneEvent, ProjectCatalog, RestoredSession, SessionLayout, SessionStore, SessionTab,
-    SessionTabState,
+    CatalogProjectSettings, PaneEvent, ProjectCatalog, RestoredSession, SessionLayout,
+    SessionStore, SessionTab, SessionTabState,
 };
 use tab_machinery::{MoveDirection, MoveTarget, TabGroup, TabMachinery, visible_tab_count};
 
@@ -325,6 +325,8 @@ enum ControlAction {
 }
 struct OpenTab {
     id: usize,
+    /// Stable database identity, independent of the tab's visible position.
+    persistence_id: String,
     group_id: usize,
     title: String,
     kind: TabKind,
@@ -2761,6 +2763,9 @@ impl TillerWorkspace {
                         .sidebar
                         .update(cx, |sidebar, cx| sidebar.open_project_settings(id, cx));
                 }
+                SidebarEvent::ProjectSettingsChanged(update) => {
+                    workspace.update_project_settings(update, cx)
+                }
                 SidebarEvent::Reorder {
                     drag,
                     target_id,
@@ -2882,6 +2887,7 @@ impl TillerWorkspace {
                 .iter()
                 .enumerate()
                 .map(|(index, tab)| SessionTab {
+                    id: tab.persistence_id.clone(),
                     title: tab.title.clone(),
                     kind: match tab.kind {
                         TabKind::Editor => "file",
@@ -2944,8 +2950,12 @@ impl TillerWorkspace {
 
     fn refresh_sidebar(&self, cx: &mut Context<Self>) {
         let projects = self.sidebar_projects();
+        let identities = sidebar_project_identities(&self.project_catalog);
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_projects(projects, cx);
+            for (id, display_name, icon) in identities {
+                sidebar.set_project_identity(&id, display_name, icon, cx);
+            }
         });
     }
 
@@ -3205,6 +3215,28 @@ impl TillerWorkspace {
                     .update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
                 cx.notify();
             }
+        }
+    }
+
+    fn update_project_settings(&mut self, update: &ProjectSettingsUpdate, cx: &mut Context<Self>) {
+        let (icon_kind, icon_value) = update.icon.persisted_parts();
+        let settings = CatalogProjectSettings {
+            color_hex: Some(update.icon.tint.id().to_string()),
+            display_name: update.display_name.clone(),
+            icon_kind,
+            icon_value,
+        };
+        match self
+            .project_catalog
+            .update_project_settings(&update.id, settings)
+        {
+            Ok(()) => {
+                self.session.schedule_catalog(&self.project_catalog);
+                self.refresh_sidebar(cx);
+            }
+            Err(error) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.set_notice(error, cx)),
         }
     }
 
@@ -3785,7 +3817,7 @@ impl TillerWorkspace {
                 path: path.clone(),
                 is_primary: false,
             });
-        self.project_catalog = ProjectCatalog::from_projects(projects);
+        self.project_catalog.replace_projects(projects);
         self.session.schedule_catalog(&self.project_catalog);
 
         let current_path = self
@@ -4366,6 +4398,7 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let (title, agent_icon, agent_id) = chat_tab_identity(adapter);
+        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         let chat = match adapter {
             Some(adapter) => {
                 let Some(program) = adapter.acp_program() else {
@@ -4384,6 +4417,7 @@ impl TillerWorkspace {
         let composer_focus = chat.focus_handle(cx);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
+            persistence_id,
             group_id: self.tab_machinery.active_group(),
             title,
             kind: TabKind::AgentChat,
@@ -4426,6 +4460,7 @@ impl TillerWorkspace {
         let (command, agent_icon, agent_id) = restored_chat_spec(retained.agent_id.as_deref());
         let cwd = self.working_directory.clone();
         let pane_id = self.next_pane_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         let chat = cx.new(|cx| {
             let mut chat = Chat::launch_with_command(command, cwd, cx);
             chat.restore_transcript(&transcript, cx);
@@ -4434,6 +4469,7 @@ impl TillerWorkspace {
         let composer_focus = chat.focus_handle(cx);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
+            persistence_id,
             group_id: self.tab_machinery.active_group(),
             title,
             kind: TabKind::AgentChat,
@@ -4492,9 +4528,11 @@ impl TillerWorkspace {
     ) {
         let tab_id = self.next_tab_id;
         let pane_id = self.next_pane_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
+            persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: title.into(),
             kind: TabKind::Terminal,
@@ -4567,8 +4605,10 @@ impl TillerWorkspace {
             |name| name.to_string_lossy().into_owned(),
         );
         let view = cx.new(|cx| FileView::new(path, cx));
+        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
+            persistence_id,
             group_id: self.tab_machinery.active_group(),
             title,
             // The existing UI tab model has only chat/terminal kinds. File
@@ -4593,8 +4633,10 @@ impl TillerWorkspace {
     fn add_changes_tab(&mut self, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| ChangesTab::new(self.working_directory.clone(), cx));
         Self::subscribe_changes_tab(&changes, cx);
+        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
+            persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: "Changes".to_string(),
             kind: TabKind::Diff,
@@ -4625,8 +4667,10 @@ impl TillerWorkspace {
         let browser = cx.new(|cx| BrowserSurface::new(&initial_url, window, cx));
         let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
         browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
+        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
+            persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: "Browser".to_string(),
             kind: TabKind::Browser,
@@ -7340,6 +7384,28 @@ fn sidebar_projects(catalog: &ProjectCatalog) -> Vec<SidebarProject> {
         .collect()
 }
 
+fn sidebar_project_identities(
+    catalog: &ProjectCatalog,
+) -> Vec<(
+    String,
+    Option<String>,
+    tiller_ui::project_identity::ProjectIcon,
+)> {
+    catalog
+        .projects()
+        .iter()
+        .map(|project| {
+            let settings = catalog.project_settings(&project.id);
+            let icon = tiller_ui::project_identity::ProjectIcon::from_persisted_parts(
+                &settings.icon_kind,
+                settings.icon_value.as_deref(),
+                settings.color_hex.as_deref(),
+            );
+            (project.id.clone(), settings.display_name, icon)
+        })
+        .collect()
+}
+
 /// Starts in the nearest repository when launched from one of its subdirectories.
 fn initial_working_directory() -> PathBuf {
     let current = std::env::current_dir().unwrap_or_else(|error| {
@@ -7498,6 +7564,7 @@ fn restore_tabs(
         };
         tabs.push(OpenTab {
             id,
+            persistence_id: tab.id.clone(),
             group_id: 0,
             title: tab.title.clone(),
             kind: match tab.kind.as_str() {
@@ -7588,6 +7655,7 @@ fn restore_tabs_in_workspace(
         });
         tabs.push(OpenTab {
             id,
+            persistence_id: tab.id.clone(),
             group_id: 0,
             title: tab.title.clone(),
             kind: if tab.kind == "chat" {
@@ -7621,7 +7689,12 @@ fn merge_launch_snapshot_tabs(snapshot: &[SessionTab], current: &[SessionTab]) -
     for tab in snapshot {
         if current
             .iter()
-            .any(|current| current.title == tab.title && current.kind == tab.kind)
+            .any(|current| {
+                (!tab.id.is_empty() && current.id == tab.id)
+                    || (tab.id.is_empty()
+                        && current.title == tab.title
+                        && current.kind == tab.kind)
+            })
         {
             continue;
         }
@@ -7911,7 +7984,8 @@ fn main() {
         for diagnostic in &restored_catalog.diagnostics {
             eprintln!("[session] {diagnostic}");
         }
-        let project_catalog = ProjectCatalog::from_projects(restored_catalog.projects);
+        let project_catalog =
+            ProjectCatalog::from_restored(restored_catalog.projects, restored_catalog.settings);
         let session_store = SessionStore::open(&database_path);
         // Restore is tolerant of old path-based project ids; rewrite the
         // canonical catalog immediately so every later layout save sees one
@@ -8003,6 +8077,7 @@ fn main() {
                     })
                     .collect();
                 let catalog_for_sidebar = sidebar_projects(&project_catalog);
+                let identities_for_sidebar = sidebar_project_identities(&project_catalog);
                 let pending_for_chat_agent = pending_for_tab_bar.clone();
                 let tab_bar = cx.new(|cx| {
                     TabBar::new(cx)
@@ -8060,9 +8135,16 @@ fn main() {
                         })
                 });
                 let workspace = cx.new(|cx| {
+                    let sidebar = cx.new(|cx| {
+                        let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);
+                        for (id, display_name, icon) in identities_for_sidebar {
+                            sidebar.set_project_identity(&id, display_name, icon, cx);
+                        }
+                        sidebar
+                    });
                     TillerWorkspace::new(
                         cx.new(Titlebar::new),
-                        cx.new(|cx| Sidebar::from_projects(catalog_for_sidebar, cx)),
+                        sidebar,
                         tab_bar,
                         status_bar,
                         settings,
@@ -8376,6 +8458,7 @@ mod tests {
         let tabs = (0..tab_count)
             .map(|id| OpenTab {
                 id,
+                persistence_id: format!("test-tab-{id}"),
                 group_id: 0,
                 title: if id == 0 {
                     "Terminal".into()
@@ -8491,6 +8574,7 @@ mod tests {
         }]);
         let tabs = vec![OpenTab {
             id: 0,
+            persistence_id: "activity-terminal".into(),
             group_id: 0,
             title: "Terminal".into(),
             kind: TabKind::Terminal,
@@ -9234,6 +9318,7 @@ mod tests {
         workspace.update(&mut cx, |workspace, cx| {
             workspace.tabs.push(OpenTab {
                 id: 1,
+                persistence_id: "resumed-chat".into(),
                 group_id: 0,
                 title: "Resumed chat".into(),
                 kind: TabKind::AgentChat,
@@ -10017,12 +10102,14 @@ mod tests {
     fn restoring_launch_snapshot_adds_missing_tabs_without_replacing_current_tabs() {
         let snapshot = vec![
             SessionTab {
+                id: "snapshot-chat".into(),
                 title: "Chat".into(),
                 kind: "chat".into(),
                 agent_id: None,
                 active: false,
             },
             SessionTab {
+                id: "snapshot-terminal".into(),
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
@@ -10030,6 +10117,7 @@ mod tests {
             },
         ];
         let current = vec![SessionTab {
+            id: "current-changes".into(),
             title: "Changes".into(),
             kind: "diff".into(),
             agent_id: None,
@@ -10053,6 +10141,26 @@ mod tests {
             ],
             "restore must append closed launch tabs while preserving the current tab"
         );
+    }
+
+    #[test]
+    fn launch_snapshot_matches_a_tab_by_stable_id_after_rename() {
+        let snapshot = vec![SessionTab {
+            id: "chat-stable".into(),
+            title: "Old title".into(),
+            kind: "chat".into(),
+            agent_id: None,
+            active: false,
+        }];
+        let current = vec![SessionTab {
+            id: "chat-stable".into(),
+            title: "Renamed chat".into(),
+            kind: "chat".into(),
+            agent_id: None,
+            active: true,
+        }];
+
+        assert_eq!(merge_launch_snapshot_tabs(&snapshot, &current), current);
     }
 
     #[test]
@@ -11195,12 +11303,14 @@ mod tests {
             working_directory: working_directory.clone(),
             tabs: vec![
                 session::SessionTab {
+                    id: "test-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
                     agent_id: None,
                     active: false,
                 },
                 session::SessionTab {
+                    id: "test-terminal".into(),
                     title: "Terminal".into(),
                     kind: "terminal".into(),
                     agent_id: None,
@@ -11270,6 +11380,7 @@ mod tests {
             working_directory: working_directory.clone(),
             branch: "main".into(),
             tabs: vec![SessionTab {
+                id: "codex-chat".into(),
                 title: "Codex".into(),
                 kind: "chat".into(),
                 agent_id: Some("codex".into()),
@@ -11441,6 +11552,7 @@ mod tests {
         let restored = session::RestoredSession {
             working_directory: working_directory.clone(),
             tabs: vec![session::SessionTab {
+                id: "missing-terminal".into(),
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
@@ -11499,6 +11611,7 @@ mod tests {
         let restored = session::RestoredSession {
             working_directory: working_directory.clone(),
             tabs: vec![session::SessionTab {
+                id: "changes-tab".into(),
                 title: "Changes".into(),
                 kind: "diff".into(),
                 agent_id: None,

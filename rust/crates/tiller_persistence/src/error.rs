@@ -44,6 +44,8 @@ pub enum PersistenceError {
     Sqlite(rusqlite::Error),
     /// A filesystem operation failed.
     Io(std::io::Error),
+    /// A rendered transcript payload could not be encoded or decoded.
+    Json(serde_json::Error),
 }
 
 impl fmt::Display for PersistenceError {
@@ -67,6 +69,7 @@ impl fmt::Display for PersistenceError {
             ),
             PersistenceError::Sqlite(error) => write!(f, "sqlite error: {error}"),
             PersistenceError::Io(error) => write!(f, "io error: {error}"),
+            PersistenceError::Json(error) => write!(f, "transcript json error: {error}"),
         }
     }
 }
@@ -82,5 +85,11 @@ impl From<rusqlite::Error> for PersistenceError {
 impl From<std::io::Error> for PersistenceError {
     fn from(error: std::io::Error) -> Self {
         PersistenceError::Io(error)
+    }
+}
+
+impl From<serde_json::Error> for PersistenceError {
+    fn from(error: serde_json::Error) -> Self {
+        PersistenceError::Json(error)
     }
 }

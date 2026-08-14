@@ -967,6 +967,11 @@ mod tests {
         let (terminal, cx) = cx.add_window_view(|_, cx| {
             TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
         });
+        // The PTY supplies the real event ordering, but the debounce assertion
+        // must not depend on how long a loaded test process takes to deliver a
+        // callback. Keep the logical evidence clock deterministic while still
+        // exercising the real terminal boundary.
+        let evidence_start = Instant::now();
         let observed = Arc::new(Mutex::new((AgentActivityModel::new(), Vec::new())));
         let state = observed.clone();
         let _subscription = cx.update(|_, app| {
@@ -978,19 +983,25 @@ mod tests {
                             &mut state.0,
                             "pane-debounce-pty",
                             event,
-                            Instant::now(),
+                            evidence_start,
                         );
                         state
                             .0
-                            .notify("pane-debounce-pty", AgentStatus::Running, Instant::now());
+                            .notify("pane-debounce-pty", AgentStatus::Running, evidence_start);
                     } else if title == "✳ idle" {
                         let status_before = state.0.status("pane-debounce-pty");
-                        state.1.push((Instant::now(), status_before));
+                        let evidence_time = evidence_start
+                            + if state.1.is_empty() {
+                                Duration::from_millis(100)
+                            } else {
+                                Duration::from_millis(1600)
+                            };
+                        state.1.push((evidence_time, status_before));
                         let _ = apply_terminal_activity_event(
                             &mut state.0,
                             "pane-debounce-pty",
                             event,
-                            Instant::now(),
+                            evidence_time,
                         );
                     }
                 }

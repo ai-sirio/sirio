@@ -284,6 +284,9 @@ fn sanitize_filename_component(name: &str) -> String {
 /// One persisted tab of the shell layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionTab {
+    /// Stable database identity. Unlike the tab's array position, this does
+    /// not change when the user reorders tabs.
+    pub id: String,
     /// Tab title.
     pub title: String,
     /// Surface kind: "chat", "terminal", or "diff" (the shell's `TabKind`).
@@ -316,12 +319,14 @@ impl SessionLayout {
             branch: String::new(),
             tabs: vec![
                 SessionTab {
+                    id: "default-chat".into(),
                     title: "Chat".into(),
                     kind: "chat".into(),
                     agent_id: None,
                     active: false,
                 },
                 SessionTab {
+                    id: "default-terminal".into(),
                     title: "Terminal".into(),
                     kind: "terminal".into(),
                     agent_id: None,
@@ -363,24 +368,99 @@ pub struct CatalogWorktree {
     pub is_primary: bool,
 }
 
+/// Project-level settings that are not derived from the filesystem. Kept
+/// separate from [`CatalogProject`] so discovery can rebuild worktrees
+/// without losing user-authored identity settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogProjectSettings {
+    pub color_hex: Option<String>,
+    pub display_name: Option<String>,
+    pub icon_kind: String,
+    pub icon_value: Option<String>,
+}
+
+impl Default for CatalogProjectSettings {
+    fn default() -> Self {
+        Self {
+            color_hex: None,
+            display_name: None,
+            icon_kind: "icon".to_string(),
+            icon_value: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectCatalog {
     projects: Vec<CatalogProject>,
+    settings: BTreeMap<String, CatalogProjectSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoredCatalog {
     pub projects: Vec<CatalogProject>,
+    pub settings: BTreeMap<String, CatalogProjectSettings>,
     pub diagnostics: Vec<String>,
 }
 
 impl ProjectCatalog {
     pub fn from_projects(projects: Vec<CatalogProject>) -> Self {
-        Self { projects }
+        let settings = projects
+            .iter()
+            .map(|project| (project.id.clone(), CatalogProjectSettings::default()))
+            .collect();
+        Self { projects, settings }
+    }
+
+    pub fn from_restored(
+        projects: Vec<CatalogProject>,
+        settings: BTreeMap<String, CatalogProjectSettings>,
+    ) -> Self {
+        let mut catalog = Self::from_projects(projects);
+        for (id, settings) in settings {
+            if catalog.projects.iter().any(|project| project.id == id) {
+                catalog.settings.insert(id, settings);
+            }
+        }
+        catalog
     }
 
     pub fn projects(&self) -> &[CatalogProject] {
         &self.projects
+    }
+
+    pub fn project_settings(&self, id: &str) -> CatalogProjectSettings {
+        self.settings.get(id).cloned().unwrap_or_default()
+    }
+
+    pub fn update_project_settings(
+        &mut self,
+        id: &str,
+        settings: CatalogProjectSettings,
+    ) -> Result<(), String> {
+        if !self.projects.iter().any(|project| project.id == id) {
+            return Err(format!("unknown project: {id}"));
+        }
+        self.settings.insert(id.to_string(), settings);
+        Ok(())
+    }
+
+    /// Replaces discovered projects while retaining identity settings for
+    /// stable ids. New projects receive defaults; removed projects release
+    /// their settings entry.
+    pub fn replace_projects(&mut self, projects: Vec<CatalogProject>) {
+        let old_settings = std::mem::take(&mut self.settings);
+        self.projects = projects;
+        self.settings = self
+            .projects
+            .iter()
+            .map(|project| {
+                (
+                    project.id.clone(),
+                    old_settings.get(&project.id).cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
     }
 
     /// Moves a project in catalog order. The sidebar keeps each project's
@@ -421,7 +501,10 @@ impl ProjectCatalog {
             return Ok(false);
         }
 
-        self.projects.push(catalog_project(&root_path, discovered));
+        let project = catalog_project(&root_path, discovered);
+        self.settings
+            .insert(project.id.clone(), CatalogProjectSettings::default());
+        self.projects.push(project);
         Ok(true)
     }
 
@@ -430,6 +513,7 @@ impl ProjectCatalog {
             return false;
         };
         self.projects.remove(index);
+        self.settings.remove(id);
         true
     }
 
@@ -592,6 +676,24 @@ fn catalog_ids_for_path(working_directory: &Path) -> (PathBuf, String, String) {
     )
 }
 
+/// The stable persisted worktree identity used by tab and chat records.
+pub fn persisted_worktree_id(working_directory: &Path) -> String {
+    catalog_ids_for_path(working_directory).2
+}
+
+/// Allocates a new tab identity. The timestamp prevents reuse after a tab is
+/// closed while the counter keeps same-millisecond allocations distinct.
+pub fn new_tab_id(working_directory: &Path, counter: usize) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}-tab-{timestamp:x}-{counter}",
+        persisted_worktree_id(working_directory)
+    )
+}
+
 /// Writes one layout to the database: the project and worktree records
 /// (upserted), the worktree's tabs (replaced atomically, with the active
 /// flag normalized), and the sidebar selection (read-modify-write so other
@@ -610,7 +712,14 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
         layout.branch.clone()
     };
 
-    db.save_project(&ProjectRecord::new(&project_id, &name, &project_path))?;
+    let mut project = db
+        .projects()?
+        .into_iter()
+        .find(|project| project.id == project_id)
+        .unwrap_or_else(|| ProjectRecord::new(&project_id, &name, &project_path));
+    project.name = name;
+    project.root_path = project_path;
+    db.save_project(&project)?;
     db.save_worktree(&WorktreeRecord::new(
         &worktree_id,
         &project_id,
@@ -623,7 +732,11 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
         .iter()
         .enumerate()
         .map(|(index, tab)| TabRecord {
-            id: format!("{worktree_id}-tab-{index}"),
+            id: if tab.id.is_empty() {
+                format!("{worktree_id}-tab-{index}")
+            } else {
+                tab.id.clone()
+            },
             worktree_id: worktree_id.clone(),
             title: tab.title.clone(),
             kind: tab.kind.clone(),
@@ -639,7 +752,20 @@ fn write_layout(db: &AppDatabase, layout: &SessionLayout) -> Result<(), Persiste
         .enumerate()
         .take(layout.tabs.len())
         .map(|(index, state)| {
-            TabStateRecord::new(format!("{worktree_id}-tab-{index}"), state.encode())
+            TabStateRecord::new(
+                layout
+                    .tabs
+                    .get(index)
+                    .map(|tab| {
+                        if tab.id.is_empty() {
+                            format!("{worktree_id}-tab-{index}")
+                        } else {
+                            tab.id.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{worktree_id}-tab-{index}")),
+                state.encode(),
+            )
         })
         .collect();
     db.save_tab_states(&worktree_id, &states)?;
@@ -677,6 +803,11 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
             project.root_path.to_string_lossy(),
         );
         record.order_idx = project_index as i64;
+        let settings = catalog.project_settings(&project.id);
+        record.color_hex = settings.color_hex;
+        record.display_name = settings.display_name;
+        record.icon_kind = settings.icon_kind;
+        record.icon_value = settings.icon_value;
         db.save_project(&record)?;
 
         let desired_worktree_ids: std::collections::HashSet<String> = project
@@ -713,11 +844,13 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
         Err(error) => {
             return RestoredCatalog {
                 projects: Vec::new(),
+                settings: BTreeMap::new(),
                 diagnostics: vec![format!("project database unavailable: {error}")],
             };
         }
     };
     let mut projects = Vec::new();
+    let mut settings = BTreeMap::new();
     let mut diagnostics = Vec::new();
     let mut seen_project_ids = HashSet::new();
     for record in db.projects().unwrap_or_default() {
@@ -734,6 +867,15 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
             Ok(discovered) => {
                 let project = catalog_project(&root, discovered);
                 if seen_project_ids.insert(project.id.clone()) {
+                    settings.insert(
+                        project.id.clone(),
+                        CatalogProjectSettings {
+                            color_hex: record.color_hex.clone(),
+                            display_name: record.display_name.clone(),
+                            icon_kind: record.icon_kind.clone(),
+                            icon_value: record.icon_value.clone(),
+                        },
+                    );
                     projects.push(project);
                 } else {
                     diagnostics.push(format!(
@@ -750,6 +892,7 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
     }
     RestoredCatalog {
         projects,
+        settings,
         diagnostics,
     }
 }
@@ -841,16 +984,15 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
             continue;
         }
         tabs.push(SessionTab {
+            id: record.id,
             title: record.title,
             kind: record.kind,
             agent_id: record.agent_id,
             active: record.is_active,
         });
-        let tab_title = tabs
-            .last()
-            .map(|tab| tab.title.as_str())
-            .unwrap_or("unknown");
-        let tab_state = match state_records.get(&record.id) {
+        let last_tab = tabs.last().expect("just pushed");
+        let tab_title = last_tab.title.as_str();
+        let tab_state = match state_records.get(&last_tab.id) {
             Some(raw) => match SessionTabState::decode(raw) {
                 Ok(state) => state,
                 Err(error) => {
@@ -1027,7 +1169,6 @@ impl SessionStore {
     ///
     /// Persistence failures are logged and do not make the UI fail. This
     /// matches the session layout's best-effort failure policy.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn save_settings(&self, settings: &AppSettings) {
         let mut db = self
             .inner
@@ -1124,6 +1265,48 @@ impl SessionStore {
             }
             Err(error) => {
                 eprintln!("[session] failed to persist browser origin grant: {error}");
+            }
+        }
+    }
+
+    /// Revokes one browser-origin grant from durable session state.
+    pub fn revoke_browser_origin(&self, origin: &str) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match db.revoke_browser_origin(origin) {
+            Ok(true) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("[session] failed to revoke browser origin grant: {error}");
+            }
+        }
+    }
+
+    /// Revokes all browser-origin grants from durable session state.
+    pub fn revoke_all_browser_origins(&self) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match db.revoke_all_browser_origins() {
+            Ok(count) if count > 0 => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("[session] failed to revoke all browser origin grants: {error}");
             }
         }
     }
@@ -1256,18 +1439,21 @@ mod tests {
     fn three_tabs() -> Vec<SessionTab> {
         vec![
             SessionTab {
+                id: "chat".into(),
                 title: "Chat".into(),
                 kind: "chat".into(),
                 agent_id: None,
                 active: false,
             },
             SessionTab {
+                id: "terminal-1".into(),
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
                 active: false,
             },
             SessionTab {
+                id: "terminal-2".into(),
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
@@ -1283,6 +1469,7 @@ mod tests {
         let working_directory = dir.0.join("checkout");
         std::fs::create_dir_all(&working_directory).expect("checkout dir");
         let tabs = vec![SessionTab {
+            id: "codex".into(),
             title: "Codex".into(),
             kind: "chat".into(),
             active: true,
@@ -1344,6 +1531,7 @@ mod tests {
             working_directory: working_directory.clone(),
             branch: "main".into(),
             tabs: vec![SessionTab {
+                id: "terminal".into(),
                 title: "Terminal".into(),
                 kind: "terminal".into(),
                 agent_id: None,
@@ -1378,6 +1566,7 @@ mod tests {
         tabs.insert(
             1,
             SessionTab {
+                id: "changes".into(),
                 title: "Changes".into(),
                 kind: "diff".into(),
                 agent_id: None,
@@ -1403,6 +1592,7 @@ mod tests {
         tabs.insert(
             1,
             SessionTab {
+                id: "browser".into(),
                 title: "Browser".into(),
                 kind: "browser".into(),
                 agent_id: None,
@@ -1428,7 +1618,17 @@ mod tests {
             terminal_font_size: 19,
             file_icon_theme: FileIconTheme::Material,
             control_socket_enabled: false,
-            ..AppSettings::default()
+            resume_agent_sessions: false,
+            auto_naming: true,
+            limit_chat_history: false,
+            chat_retention: 37,
+            limit_mounted_worktrees: true,
+            mounted_worktrees: 17,
+            summarizer_agent: "codex".into(),
+            claude_show_in_bar: false,
+            codex_show_in_bar: false,
+            opencode_show_in_bar: true,
+            refresh_interval_min: 11,
         };
 
         {
@@ -1452,18 +1652,18 @@ mod tests {
                 ("appearance.terminalFontSize".into(), "19".into()),
                 ("appearance.theme".into(), "dark".into()),
                 ("appearance.uiFontSize".into(), "17".into()),
-                ("chat.limitHistory".into(), "true".into()),
-                ("chat.retentionCount".into(), "100".into()),
+                ("chat.limitHistory".into(), "false".into()),
+                ("chat.retentionCount".into(), "37".into()),
                 ("controlSocket.enabled".into(), "false".into()),
-                ("general.autoNaming".into(), "false".into()),
-                ("general.summarizerAgent".into(), "claude".into()),
-                ("session.resumeAgentSessions".into(), "true".into()),
-                ("usage.claudeVisible".into(), "true".into()),
-                ("usage.codexVisible".into(), "true".into()),
-                ("usage.opencodeVisible".into(), "false".into()),
-                ("usage.refreshIntervalMin".into(), "5".into()),
-                ("worktrees.limitMounted".into(), "false".into()),
-                ("worktrees.mountedCount".into(), "6".into()),
+                ("general.autoNaming".into(), "true".into()),
+                ("general.summarizerAgent".into(), "codex".into()),
+                ("session.resumeAgentSessions".into(), "false".into()),
+                ("usage.claudeVisible".into(), "false".into()),
+                ("usage.codexVisible".into(), "false".into()),
+                ("usage.opencodeVisible".into(), "true".into()),
+                ("usage.refreshIntervalMin".into(), "11".into()),
+                ("worktrees.limitMounted".into(), "true".into()),
+                ("worktrees.mountedCount".into(), "17".into()),
             ]
         );
         println!("sqlite setting rows: {rows:?}");
@@ -1592,6 +1792,27 @@ mod tests {
         // And the last scheduled layout is the one that landed.
         let restored = restore(&db_path, Path::new("/tmp"));
         assert_eq!(restored.tabs, three_tabs());
+    }
+
+    #[test]
+    fn a_layout_preserves_stable_tab_ids() {
+        let dir = TempDir::new();
+        let checkout = dir.0.join("checkout");
+        std::fs::create_dir_all(&checkout).expect("checkout");
+        let tabs = vec![SessionTab {
+            id: "chat-stable".into(),
+            title: "Chat".into(),
+            kind: "chat".into(),
+            agent_id: None,
+            active: true,
+        }];
+        let store = SessionStore::open(&dir.db_path("stable-ids"));
+        store.schedule(layout(&checkout, tabs.clone()));
+        store.flush_now();
+        assert_eq!(
+            restore(&dir.db_path("stable-ids"), Path::new("/tmp")).tabs,
+            tabs
+        );
     }
 
     #[test]
@@ -1790,27 +2011,42 @@ mod tests {
 
         let database = dir.db_path("legacy-catalog");
         let db = AppDatabase::open(&database).expect("open database");
-        db.save_project(&ProjectRecord::new(
-            "legacy-primary",
-            "repo",
-            primary.to_string_lossy(),
-        ))
-        .expect("save primary project");
-        db.save_project(&ProjectRecord::new(
-            "legacy-linked",
-            "repo-linked",
-            linked.to_string_lossy(),
-        ))
-        .expect("save linked project");
+        let mut primary_record =
+            ProjectRecord::new("legacy-primary", "repo", primary.to_string_lossy());
+        primary_record.display_name = Some("A renamed repo".into());
+        primary_record.color_hex = Some("green".into());
+        primary_record.icon_kind = "icon".into();
+        primary_record.icon_value = Some("git-branch".into());
+        primary_record.order_idx = 0;
+        db.save_project(&primary_record)
+            .expect("save primary project");
+        let mut linked_record =
+            ProjectRecord::new("legacy-linked", "repo-linked", linked.to_string_lossy());
+        linked_record.order_idx = 1;
+        db.save_project(&linked_record)
+            .expect("save linked project");
         drop(db);
 
         let restored = restore_catalog(&database);
         assert_eq!(restored.projects.len(), 1);
         assert_eq!(restored.projects[0].root_path, primary);
         assert_eq!(restored.projects[0].worktrees.len(), 2);
+        let restored_settings = restored
+            .settings
+            .get(&restored.projects[0].id)
+            .expect("project identity settings restore with canonical id");
+        assert_eq!(
+            restored_settings.display_name.as_deref(),
+            Some("A renamed repo")
+        );
+        assert_eq!(restored_settings.color_hex.as_deref(), Some("green"));
+        assert_eq!(restored_settings.icon_value.as_deref(), Some("git-branch"));
 
         let store = SessionStore::open(&database);
-        store.schedule_catalog(&ProjectCatalog::from_projects(restored.projects.clone()));
+        store.schedule_catalog(&ProjectCatalog::from_restored(
+            restored.projects.clone(),
+            restored.settings.clone(),
+        ));
         let normalized = AppDatabase::open(&database).expect("reopen normalized database");
         let projects = normalized.projects().expect("read normalized projects");
         assert_eq!(projects.len(), 1);

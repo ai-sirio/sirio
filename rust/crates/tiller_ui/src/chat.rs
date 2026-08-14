@@ -23,6 +23,10 @@ use tiller_acp::{
     ToolCallLocationInfo,
 };
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
+use tiller_persistence::{
+    AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
+    ChatTranscript, ChatTurn,
+};
 use tiller_theme::Theme;
 
 use crate::composer::{Composer, ComposerChip, ComposerPart};
@@ -244,11 +248,162 @@ impl Entry {
     }
 }
 
+fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
+    match entry {
+        Entry::User(text) => Some(ChatEntry::UserMessage { text: text.clone() }),
+        Entry::Assistant { text, .. } => Some(ChatEntry::AssistantMessage { text: text.clone() }),
+        Entry::Thought { text, .. } => Some(ChatEntry::Thought { text: text.clone() }),
+        Entry::ToolCall {
+            id, title, status, ..
+        } => Some(ChatEntry::ToolCall {
+            id: id.clone(),
+            title: title.clone(),
+            status: status.clone(),
+        }),
+        Entry::Permission {
+            request_id,
+            title,
+            options,
+            resolved,
+            expired,
+            ..
+        } => {
+            let options = options
+                .iter()
+                .map(|option| ChatPermissionOption {
+                    id: option.id.clone(),
+                    name: option.label.clone(),
+                    kind: if option.is_rejection {
+                        "reject".into()
+                    } else {
+                        "allow".into()
+                    },
+                })
+                .collect::<Vec<_>>();
+            let outcome = match (resolved, expired) {
+                (Some(label), _) => ChatPermissionOutcome::Selected {
+                    option_id: options
+                        .iter()
+                        .find(|option| option.name == *label)
+                        .map(|option| option.id.clone())
+                        .unwrap_or_default(),
+                    label: label.clone(),
+                },
+                (None, true) => ChatPermissionOutcome::Expired,
+                (None, false) => ChatPermissionOutcome::Pending,
+            };
+            Some(ChatEntry::Permission {
+                request_id: *request_id,
+                title: title.clone(),
+                options,
+                outcome,
+            })
+        }
+        Entry::Plan { entries, .. } => Some(ChatEntry::Plan {
+            entries: entries
+                .iter()
+                .map(|entry| ChatPlanEntry {
+                    content: entry.content.clone(),
+                    status: entry.status.clone(),
+                })
+                .collect(),
+        }),
+        Entry::TurnFooter(text) => Some(ChatEntry::TurnFooter { text: text.clone() }),
+        Entry::Error { message, retryable, .. } => Some(ChatEntry::Error {
+            message: message.clone(),
+            retryable: *retryable,
+        }),
+    }
+}
+
+fn restored_entry(entry: ChatEntry) -> Entry {
+    match entry {
+        ChatEntry::UserMessage { text } => Entry::User(text),
+        ChatEntry::AssistantMessage { text } => Entry::Assistant {
+            document: parse(&text),
+            text,
+        },
+        ChatEntry::Thought { text } => Entry::Thought {
+            text,
+            expanded: false,
+        },
+        ChatEntry::ToolCall { id, title, status } => Entry::ToolCall {
+            id,
+            title,
+            status,
+            kind: "tool".into(),
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+            expanded: false,
+            group_expanded: false,
+        },
+        ChatEntry::Permission {
+            request_id,
+            title,
+            options,
+            outcome,
+        } => {
+            let expired = matches!(
+                &outcome,
+                ChatPermissionOutcome::Cancelled
+                    | ChatPermissionOutcome::TimedOut
+                    | ChatPermissionOutcome::Expired
+            );
+            let resolved = match outcome {
+                ChatPermissionOutcome::Selected { label, .. } => Some(label),
+                ChatPermissionOutcome::Cancelled => Some("Cancelled".into()),
+                ChatPermissionOutcome::TimedOut => Some("Timed out".into()),
+                ChatPermissionOutcome::Expired => Some("Expired".into()),
+                ChatPermissionOutcome::Pending => None,
+            };
+            Entry::Permission {
+                request_id,
+                title,
+                prompt: String::new(),
+                options: options
+                    .into_iter()
+                    .map(|option| AnswerOption {
+                        is_rejection: option.kind == "reject",
+                        id: option.id,
+                        label: option.name,
+                    })
+                    .collect(),
+                text_input: None,
+                resolved,
+                expired,
+            }
+        }
+        ChatEntry::Plan { entries } => Entry::Plan {
+            entries: entries
+                .into_iter()
+                .map(|entry| PlanEntryRow {
+                    content: entry.content,
+                    status: entry.status,
+                })
+                .collect(),
+            approval: None,
+        },
+        ChatEntry::TurnFooter { text } => Entry::TurnFooter(text),
+        ChatEntry::Error { message, retryable } => Entry::Error {
+            message,
+            retryable,
+            kind: ErrorKind::Connection,
+        },
+    }
+}
+
 /// Whether an error describes the live connection or belongs permanently in
 /// the transcript. Connection errors are removed when a later retry recovers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ErrorKind {
     Connection,
+}
+
+struct ChatPersistence {
+    database_path: PathBuf,
+    tab_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -546,6 +701,7 @@ pub struct Chat {
     list_state: ListState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
+    persistence: Option<ChatPersistence>,
     _event_task: Option<Task<()>>,
     // --- Composer popups and attachments (F-CHAT-09/10/11/12/14/17/19) ---
     /// Slash commands advertised by the agent over ACP.
@@ -617,6 +773,25 @@ impl Chat {
         chat
     }
 
+    /// Launches an ACP chat whose completed turns are restored and saved in
+    /// the durable transcript owned by its shell tab.
+    pub fn launch_with_command_and_persistence(
+        command: AgentCommand,
+        cwd: PathBuf,
+        database_path: PathBuf,
+        tab_id: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut chat = Self::new(command, cwd, cx);
+        chat.persistence = Some(ChatPersistence {
+            database_path,
+            tab_id,
+        });
+        chat.restore_persisted_transcript();
+        chat.start_connection(cx, false);
+        chat
+    }
+
     fn new(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         Self::bind_keys(cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(2048.0));
@@ -652,6 +827,7 @@ impl Chat {
             list_state,
             transcript_selection: None,
             transcript_dragging: false,
+            persistence: None,
             _event_task: None,
             available_commands: Vec::new(),
             slash_dismissed: false,
@@ -1016,6 +1192,7 @@ impl Chat {
                 self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
                 self.has_completed_turn = true;
+                self.persist_settled_transcript();
                 // D-CHAT-03: a turn ended — completed or cancelled alike,
                 // one rule — drains the queued item as the next turn,
                 // exactly once. The footer lands before the queued turn so
@@ -1080,6 +1257,102 @@ impl Chat {
             .map(Entry::plain_text)
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    /// Converts rendered entries into the durable format, retaining only
+    /// turns closed by a footer. A partially streamed tail is deliberately
+    /// omitted so a relaunch never presents an unfinished answer as settled.
+    pub(crate) fn transcript_from_entries(
+        tab_id: &str,
+        entries: &[Entry],
+    ) -> ChatTranscript {
+        let mut turns = Vec::new();
+        let mut current = Vec::new();
+        for entry in entries {
+            if let Some(entry) = persisted_entry(entry) {
+                let is_footer = matches!(entry, ChatEntry::TurnFooter { .. });
+                current.push(entry);
+                if is_footer {
+                    turns.push(ChatTurn { entries: current });
+                    current = Vec::new();
+                }
+            }
+        }
+        ChatTranscript {
+            tab_id: tab_id.to_string(),
+            turns,
+        }
+    }
+
+    /// Returns the settled transcript for callers that need to inspect the
+    /// persistence seam without exposing the internal Entry model.
+    pub fn persisted_transcript(&self) -> Option<ChatTranscript> {
+        let persistence = self.persistence.as_ref()?;
+        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries);
+        (!transcript.turns.is_empty()).then_some(transcript)
+    }
+
+    fn restore_persisted_transcript(&mut self) {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!(
+                    "[chat] failed to open transcript database {}: {error}",
+                    persistence.database_path.display()
+                );
+                return;
+            }
+        };
+        let transcript = match database.load_chat_transcript(&persistence.tab_id) {
+            Ok(Some(transcript)) => transcript,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("[chat] failed to load transcript: {error}");
+                return;
+            }
+        };
+        for turn in transcript.turns {
+            for entry in turn.entries {
+                self.push_entry(restored_entry(entry));
+            }
+        }
+        self.has_completed_turn = !self.entries.is_empty();
+    }
+
+    fn persist_settled_transcript(&self) {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!("[chat] failed to open transcript database: {error}");
+                return;
+            }
+        };
+        let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries);
+        if let Err(error) = database.save_chat_transcript(&transcript) {
+            eprintln!("[chat] failed to save transcript: {error}");
+        }
+    }
+
+    fn clear_persisted_transcript(&self) {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        let Ok(database) = AppDatabase::open(&persistence.database_path) else {
+            return;
+        };
+        let empty = ChatTranscript {
+            tab_id: persistence.tab_id.clone(),
+            turns: Vec::new(),
+        };
+        if let Err(error) = database.save_chat_transcript(&empty) {
+            eprintln!("[chat] failed to clear transcript: {error}");
+        }
     }
 
     /// Returns the plain transcript retained by the shell when a chat tab is
@@ -1367,6 +1640,7 @@ impl Chat {
         self.streaming = false;
         self.has_completed_turn = false;
         self.transcript_selection = None;
+        self.clear_persisted_transcript();
         self.start_connection(cx, false);
         cx.notify();
     }
@@ -4807,6 +5081,22 @@ mod tests {
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         cx.simulate_input(text);
+    }
+
+    #[test]
+    fn persisted_transcript_contains_only_completed_turns() {
+        let entries = vec![
+            Entry::User("inspect".into()),
+            Entry::Assistant {
+                text: "done".into(),
+                document: parse("done"),
+            },
+            Entry::TurnFooter("12:00".into()),
+            Entry::User("still streaming".into()),
+        ];
+        let transcript = Chat::transcript_from_entries("tab-chat", &entries);
+        assert_eq!(transcript.turns.len(), 1);
+        assert_eq!(transcript.turns[0].entries.len(), 3);
     }
 
     /// F-CHAT-37: a fresh chat shows an empty transcript with the composer
