@@ -310,3 +310,153 @@ flagging the dependency rather than claiming it here.
   :2738), `rust/crates/tiller_ui/src/right_panel.rs` (`open_file` :335-336, the double-click
   gate at :500-512), `rust/crates/tiller_ui/src/editor.rs` (`FileView::is_dirty`).
 - **size**: M
+
+---
+
+## `F-TAB-17` — FAILED — defective
+
+**Needs: build.** Part of the shared cause above. Close Others and Close Tabs to the Right are
+both already correctly modelled with per-position enablement in `tab_context_items()`
+(`rust/crates/tiller/src/main.rs:5767-5794`: Close Others disabled with "no other tab is
+available" when `group.tabs.len() <= 1`, Close Tabs to the Right disabled with "already the last
+tab" when there's nothing after `position`). Same fix, same file.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`render_tab_context_menu` :5900-5923, mount site
+  :6451-6453).
+- **size**: S (once the shared popover fix lands)
+
+---
+
+## `F-TAB-21` — FAILED — defective
+
+**Needs: build.** Part of the shared cause above, and the row that names it most directly — its
+own evidence contrasts a verified-working terminal-body right-click against a tab-strip
+right-click that never draws anything, which is the exact discriminator the shared-cause section
+above is built on. `open_tab_menu` (`rust/crates/tiller/src/main.rs:5738-5743`) correctly flips
+`tab_menu_open`/`tab_menu_tab` on every right-click; the state is right, the paint order is not.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`render_tab_context_menu` :5900-5923, mount site
+  :6451-6453).
+- **size**: S (once the shared popover fix lands)
+
+---
+
+## `F-TAB-23` — FAILED — defective
+
+**Needs: both.** This is fully diagnosed, and the bug is precise and narrow — it is **not** the
+tab-strip popover issue. Tracing `direction=left` through the control-socket route P106's fable
+actually drove (`pane.split`):
+
+1. The socket handler collapses the distinction it's supposed to preserve —
+   `rust/crates/tiller/src/main.rs:1292-1310`: `"right" | "left" => SplitDirection::Horizontal`.
+   Both strings produce the *same* value; "left" and "right" are indistinguishable from here on.
+2. `ControlAction::SplitPane { direction, reply }` (:302, handled :2446-2449) carries only that
+   axis — there is no placement field to carry the lost information even if step 1 were fixed.
+3. The handler calls `workspace.split_focused_terminal(direction, None, cx)` (:4956-4970), which
+   calls `self.split_terminal_at(...)` (:4972) — **not** `split_terminal_at_with_placement`.
+4. `split_terminal_at` (:4972-4988) hardcodes `SplitPlacement::After` for every caller,
+   regardless of direction. `After` is "right"/"down" in `split_focused_inner`'s placement match
+   (`rust/crates/tiller/src/panes.rs:344-365`). So a horizontal split is *always* placed after —
+   i.e. always on the right — no matter what direction the socket was asked for. This is the bug,
+   completely: not a rendering issue, not a geometry issue, a placement-argument that never gets
+   threaded through this one call path.
+
+The **terminal-body context menu** route (right-click → Split Left/Right/Above/Down) is a
+*different*, already-correct path: `delegated_terminal_context_action`
+(`rust/crates/tiller/src/main.rs:2186-2215`) maps `SplitLeft → placement: Before` and
+`SplitRight → placement: After` correctly, and its handler
+(:2811-2815 — search for the `TerminalContextCommand::Split` match arm) calls
+`split_terminal_at_with_placement` directly, which respects `SplitPlacement::Before` correctly
+(`panes.rs:344-354`). Reading the code, that route should already place a left split on the
+left. Nobody has live-driven it yet ("Menu-route exercise remains owed" in the manifest's own
+evidence) — that's the "exercise" half of this row, to be done *after* the socket fix, both to
+confirm the menu route independently works and to confirm the socket fix didn't regress it.
+
+- **files**: `rust/crates/tiller/src/main.rs` — the `"pane.split"` socket handler (:1292-1310,
+  needs to preserve "left" vs "right"/"up" vs "down", not just the axis), `ControlAction::SplitPane`
+  (:302, needs a placement field), its handler (:2446-2449), `split_focused_terminal` (:4956-4970,
+  needs to accept/forward placement), `split_terminal_at` (:4972-4988, currently hardcodes
+  `SplitPlacement::After`). No change needed in `rust/crates/tiller/src/panes.rs` — its
+  `SplitPlacement`/`split_focused_with_placement` machinery is already correct.
+- **size**: S (precisely diagnosed; touches one call chain in one file)
+
+*Cross-reference*: `F-TERM-SPLIT-01` (a different triage group) names the same left-placement
+symptom plus an unrelated `TerminalPaneCache` lifecycle gap — the two rows share this fix but are
+not the same defect; don't let one row's completion mark the other's cache-lifecycle half done.
+
+---
+
+## `F-TAB-25` — needs: reclassify
+
+**The current verdict ("FAILED — absent... still no attach-to-terminal code... pass 14") is
+stale and wrong on the evidence in the tree today.** The feature is built: `Attach to Current
+Terminal` is a real, wired entry in the tab context menu
+(`rust/crates/tiller/src/main.rs:5823-5836`), backed by `can_attach_tab_to_current_terminal`
+(:5988-5999, mirroring the Swift `workspaceCanAdoptPane` contract per its own doc comment) and
+`attach_tab_to_current_terminal` (:6005+, moves the terminal pane into a horizontal split beside
+the active terminal without restarting the PTY), dispatched from
+`TabContextAction::AttachToCurrentTerminal` (:5977-5981). Two drawn tests exist and are named in
+`docs/linux-rewrite/P110-report.md` (`§F-TAB-25`):
+`drawn_terminal_menu_attaches_an_eligible_terminal_to_the_current_tab` and
+`drawn_terminal_attach_command_is_disabled_for_the_current_terminal` — both confirmed present at
+`rust/crates/tiller/src/main.rs:11973` and `:12012`.
+
+Why the ledger still says "absent": `git log -S` on the function name shows it landed in commit
+`7289c84` (2026-08-14 17:32, "feat: add no-terminals worktree state" — P110/`codex12`'s session),
+and `P110-report.md`'s own commits (17:35-17:39) document exactly this build. The ledger's
+`F-TAB-25` row, by contrast, has been byte-for-byte unchanged since "pass 14" across every ledger
+snapshot since, **including the 22:39 sweep-verdict commit that produced the copy this triage
+manifest was generated from** (`git log -p` on `INVENTORY-LEDGER.md` shows the identical line at
+every revision after pass 14). Nobody re-checked this row after P110 built the feature; the
+"still absent" text is simply stale, carried forward unread.
+
+That said, this is not a clean PASSED either: P110's own report says the gesture "cannot show the
+context menu because this lane has no input devices" and explicitly lists it as an **owed
+gesture** — right-click an eligible source tab, choose Attach to Current Terminal, confirm the
+transition; then confirm it's disabled on the current terminal itself. And because this feature
+lives inside the *same* tab-strip popover as F-TAB-12/13/14/15/17/21, proving it live is blocked
+on the identical shared-cause fix above — reclassifying this row without also fixing the popover
+still leaves it unprovable by real click.
+
+- **files**: none for a code fix — this is a verdict-only correction. Once reclassified, the
+  live-exercise dependency is `rust/crates/tiller/src/main.rs` (`render_tab_context_menu`
+  :5900-5923, mount site :6451-6453 — the shared cause above).
+- **size**: — (reclassify only; the residual gesture is S once the popover is visible)
+
+---
+
+## `F-TAB-28` — FAILED — defective
+
+**Needs: both.** The binding is genuinely present, twice: `panes::bind_keys(cx)`
+(`rust/crates/tiller/src/panes.rs:113-134`, called from `TillerWorkspace::new` at
+`rust/crates/tiller/src/main.rs:2302`) registers `KeyBinding::new("ctrl-w", CloseTab, None)` at
+`panes.rs:133`, and the very next lines in `main.rs` register it *again*:
+`cx.bind_keys([KeyBinding::new("cmd-w", CloseTab, None), KeyBinding::new("ctrl-w", CloseTab,
+None)])` (`main.rs:2303-2306`). Both point at the same `CloseTab` action with no context
+predicate (`None`), so this redundancy is unlikely to be the actual bug by itself, but it is a
+real, confirmed duplication worth resolving in the same pass — two hands have touched this chord
+and left it registered twice. `handle_close_tab` (`main.rs:6724`) and `request_close_tab_by_id`
+(`main.rs:5709-5735`, the same dirty-aware prompt path used by the strip's `×` control) both look
+correct on read.
+
+Live evidence shows **zero** effect on both a clean tab (Chat, three isolated presses, once with
+explicit refocus) and a dirty tab (Terminal, no confirm dialog, no close) — not a partial or
+flaky result, a total one on both paths. The leading candidate is key-event consumption by
+whatever currently holds focus before the bound action ever fires: `ctrl-w` is also the
+long-standing readline/terminal chord for "delete previous word," and the terminal view's own raw
+key handler (`TerminalView::on_key_down`, `rust/crates/tiller_terminal/src/lib.rs:1081-1095`)
+forwards *any* unmatched key straight to the PTY via `key_bytes(event)` with no allowlist — if a
+focused terminal's raw handler or the chat composer's own key handler
+(`Chat::on_composer_key`, `rust/crates/tiller_ui/src/chat.rs:2630+`) intercepts the chord before
+GPUI's action-dispatch phase resolves it, the bound `CloseTab` action would never fire. Chat's own
+`on_composer_key` comment (:2663-2665) documents the *intended* precedence — "gpui stops
+propagation once an action listener fires" — which suggests this shouldn't happen, so the
+contradiction between that comment and the live "zero effect" result needs an instrumented
+repro (log which handler receives the ctrl-w keystroke first) to resolve, not a source-only read.
+
+- **files**: `rust/crates/tiller/src/panes.rs` (`bind_keys` :113-134, duplicate `ctrl-w`
+  registration at :133), `rust/crates/tiller/src/main.rs` (`KeyBinding` registration
+  :2303-2306, `handle_close_tab` :6724, `request_close_tab_by_id` :5709-5735),
+  `rust/crates/tiller_terminal/src/lib.rs` (`on_key_down` :1081-1095, candidate consumer),
+  `rust/crates/tiller_ui/src/chat.rs` (`on_composer_key` :2630+, candidate consumer).
+- **size**: M
