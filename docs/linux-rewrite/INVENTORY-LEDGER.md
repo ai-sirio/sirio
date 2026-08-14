@@ -134,7 +134,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-TAB-18` | NOT EXERCISED | RECENSUS Slice B BUILT: TillerWorkspace::render_open_tab at rust/crates/tiller/src/main.rs:5565 — production .on_drag at :5629 previews tab reordering through preview_tab_reorder at :5634. No source report exercised the clause’s user-visible/live result; census evidence cannot produce PASSED. | P108 critic, 2026-08-14; RECENSUS Slice B |
 | `F-TAB-19` | PASSED | ctrl-tab/ctrl-shift-tab bound; handler = live tab.cycle; chord fixture green | pass 8 |
 | `F-TAB-20` | PASSED | ctrl-1..9 bound; handler = live tab.select; chord fixture green | pass 8 |
-| `F-TAB-21` | FAILED — absent | no Tab menu — **do not rebuild: `FABLE-08` census cites this as already built (`tiller/src/main.rs:4879` (`open_tab_menu`) — the Tab menu exists and renders), and its needle re-verified against today's tree on 2026-08-14. Four of these twelve were independently spot-checked by the orchestrator (`F-SID-07` `F-TAB-14` `F-CHG-18` `F-CHG-22`) and all four hold in production regions. What these rows need is *exercising*, not construction — queued as `P94`** | pass 8 |
+| `F-TAB-21` | FAILED — defective | P104 §Group 1: repeated tab-strip right-clicks produced no Tab menu despite a verified working terminal-body right-click; no move action was available. | P108 critic, 2026-08-14; P104-report |
 | `F-TAB-22` | PASSED | ctrl-alt-arrows bound; live pane.focus moved focus | pass 8 |
 | `F-TAB-23` | FAILED — defective | P106 fable §F-TAB-23: live pane.split created all directions, but direction=left placed the new terminal on the right exactly like right; the required corresponding left placement is wrong. Menu-route exercise remains owed. | P108 critic, 2026-08-14; P106-report §F-TAB-23 |
 | `F-TAB-24` | NOT EXERCISED | RECENSUS Slice B PARTIAL: tab drag is production-wired by render_open_tab at rust/crates/tiller/src/main.rs:5629; no Escape cancellation handler or drag-cancel state exists. No source report exercised the clause’s user-visible/live result; census evidence cannot produce PASSED. | P108 critic, 2026-08-14; RECENSUS Slice B |
@@ -569,8 +569,8 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 |---|---|
 | PASSED | **190** |
 | half-proven | **34** |
-| FAILED — absent | **15** |
-| FAILED — defective | **46** |
+| FAILED — absent | **14** |
+| FAILED — defective | **47** |
 | UNREACHABLE | **12** |
 | N/A — platform | **12** |
 | NOT EXERCISED | **79** |
