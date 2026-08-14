@@ -160,15 +160,27 @@ state ACCUMULATES across drives (each run's tabs/worktree selection persist into
 restore, shifting sidebar geometry under previously-valid coordinates), and reading the fixture
 mid-run needs the same WAL-aware read-only open as the real DB (section below).
 
-## There is no headless critic
+## Headless rendering: closed on X11, open on Wayland
 
 Running the app under **Xvfb and Xephyr both produce a window that paints nothing** — a single
 unique colour in the capture. GPUI's blade renderer reports
 `vulkan: No DRI3 support detected - required for presentation`. Forcing lavapipe
 (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`) clears the fatal error but not the
-blankness.
+blankness. **On X11 this is a closed avenue** — do not reopen it.
 
-**A closed avenue, documented so it is not reopened.** Verification is tied to a real display.
+**On Wayland it works.** Verified 2026-08-14: under a nested headless `sway`, the app renders the
+complete UI and `grim` captures real pixels. X11 fails because GPUI must present into an X drawable
+through DRI3; Wayland succeeds because the client hands a `wl_buffer` to the compositor, which
+composites it in software. Same lavapipe, same absent GPU, opposite outcome.
+
+This retires the old claim that "verification is tied to a real display". It is not — **input** is.
+The Wayland lane renders and captures but cannot deliver a click or a keystroke, so gestures still
+need `DISPLAY=:1` and the drive lock, while everything visual that can be driven over the control
+socket now runs in parallel without it.
+
+**Setup, limits and the four traps: `WAYLAND-LANE.md`.** Read it before using the lane — two of the
+traps (lazy repaint, and input tools that report success while doing nothing) manufacture false
+verdicts in both directions.
 
 ## Agent CLIs actually installed
 
