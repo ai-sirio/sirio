@@ -2212,3 +2212,61 @@ re-checks a row that already reads `FAILED`, and the first person to fix it woul
 migration for a column that is already there. Whoever takes it now also has to settle a question
 pass 6 could not see — the code states non-persistence as *intent*, so this may be a contract
 disagreement rather than a bug.
+
+## The fourteen rows were one rule — 2026-08-14, 09:15
+
+Correcting my own 07:50 entry, which framed the overturns as fourteen independent bad
+verdicts. They were not. `DEAD-MODELS.md` records the origin in a single sentence:
+
+> *pass 12 set a precedent in F-GIT (RUN-02, BRANCH-01, CLONE-01, REMOTE-01, STATUS-02,
+> DIFF-03) — package rows may stay PASSED **with "zero app callers — wiring owed"
+> disclosed in evidence**.*
+
+**One rule, adopted once and applied faithfully.** Pass 12 wrote it into six F-GIT rows,
+pass 14 extended it to seven more, and fable's census then noticed the newer seven carried
+no disclosure and asked for them to be annotated — which made them *consistent with* the
+precedent instead of challenging it. Every agent downstream behaved correctly given the
+rule. Hunting fourteen careless judgements would have found none.
+
+**The rule is seductive because it is honest.** It discloses the gap in plain words; nothing
+is hidden. Its flaw is narrower and easier to miss: this ledger's totals are computed from
+the *verdict column*, so an annotated false `PASSED` spends exactly as much credit as an
+unannotated one. The census's "re-mark **or** annotate — either restores honesty" is the
+load-bearing error — annotation restores the honesty of the sentence and not of the count.
+
+**Look for the rule, not the instances.** When several rows share a defect *and* a phrasing,
+the phrasing is a quotation from somewhere. Find where it was first written down and decide
+whether that document is right, before touching any row. Grepping the exact shared phrase
+across `docs/` is a five-second check that turns a fourteen-row cleanup into a one-line
+policy decision — and, in this case, also produced the replacement rule.
+
+### The second unapplied artefact tonight
+
+`DEAD-MODELS.md` was written at 20:05 on 2026-08-13 and is **correct**: every `↓ new` in it
+names a row that was still counted as delivered twelve hours later. Like
+`p17-rclick-term.png` (08:20 above), the evidence existed, was accurate, was committed, and
+nobody connected it to the ledger.
+
+Both documents say so themselves — the census opens with *"This document changes no verdict
+— only the critic edits INVENTORY-LEDGER.md."* That is the correct division of labour and it
+has no completion step. **An artefact that defers its own application needs a named owner
+for the application**, or it becomes a permanent record of work that was done and not
+counted. Two of the last three findings came out of files already in the repo, which is a
+statement about the queue, not about the files.
+
+### And the mask that became a fact
+
+The census's two "partial — stays with the critic" items were open questions caused by its
+own documented blindness (common-word names like `sorted` never appear; *"absence from the
+list proves nothing"*). Both reached the ledger as **findings**: "the sorted half stays
+live", "the merge-save half stays live". Both false.
+
+**A limitation stated in a document's preamble does not travel with its rows.** The census
+said absence proves nothing, on page one; the rows it fed said absence proves the half is
+alive. If a scan cannot see something, write *that* into the row, not a conclusion drawn
+from not seeing it.
+
+The technique that resolves it, now in `DEAD-MODELS.md`: when a symbol's name is too common
+to grep, **enumerate the module's exports instead** — `sort.rs` exports only `AttentionSort`
+(0 refs), and every export of `tiller_usage/src/codex.rs` is 0. Export lists are short,
+unambiguous and always greppable.

@@ -128,6 +128,49 @@ wiring owed" disclosed in evidence**. The seven above have no such disclosure; t
 they are indistinguishable from delivered rows, which is the defect class FABLE-04
 measured at 21% on UI rows. Re-mark or annotate — either restores honesty.
 
+---
+
+## Resolution, orchestrator, 2026-08-14 08:00 — the precedent was the defect
+
+**This census was right and went unapplied for twelve hours.** Every `↓ new` above named a
+row that was still counted as delivered this morning. Applied now: fourteen rows
+overturned, `PASSED` 210 → 196.
+
+**The pass-12 precedent quoted above is rejected.** "Package rows may stay PASSED with the
+gap disclosed" is a category error in *this* ledger, which counts app behaviour and not
+library coverage. Disclosure makes the evidence honest and leaves the verdict wrong — and
+the verdict is what the totals are computed from, so an annotated false PASSED still spends
+the same credit as an unannotated one. The disposition note's "re-mark **or** annotate —
+either restores honesty" is the one line to discard: annotating restored the honesty of the
+*sentence* and not of the *count*.
+
+The replacement rule, now in the ledger: **a row whose evidence names a gap cannot hold a
+verdict that denies it.** Zero app callers ⇒ `UNREACHABLE`, and the wiring becomes queue
+work. Same disposition critic2 reached independently on `F-TERM-02` and `F-TERM-PTY-06`
+("complete-and-unreachable is not PASSED").
+
+### The two partials are resolved — and the technique generalises
+
+Both were handed to the critic as unresolvable because of the name-masking limitation this
+document declares up front ("common-word names never appear… absence from the list proves
+nothing"). **Read them as open questions; the ledger rows had read them as findings** —
+`F-CORE-ACT-22` said "the sorted half stays live" and `F-CORE-USG-05` said "the merge-save
+half stays live". Neither was true.
+
+The way past the mask is to stop grepping the common word and **check the module's export
+surface instead**:
+
+- **`F-CORE-ACT-22`** — never grep `sorted`. `sort.rs` exports exactly one name,
+  `AttentionSort`, which has **0 app references**. The whole module is dead; there is no
+  live half.
+- **`F-CORE-USG-05`** — never grep merge-save. Enumerate `tiller_usage/src/codex.rs`'s
+  exports and check each: `needs_refresh`, `classify_token_refresh_failure`,
+  `codex_auth_file_path`, `codex_has_credentials_at`, `load_codex_credentials`,
+  `CodexOAuthCredentials` — **all 0**. No live half either.
+
+A module's export list is short, unambiguous and always greppable, whatever its function
+names are called. Where the scan says "masked", enumerate the exports.
+
 ## Upward — the FAILED side
 
 **The two named candidates: both confirmed.**
