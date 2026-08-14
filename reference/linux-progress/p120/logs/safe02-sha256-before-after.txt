@@ -1,0 +1,21 @@
+F-AGENT-SAFE-02 -- user-global config hash comparison around a real Claude Code launch
+instrument: real agent in a real pane (tab-bar "+" -> "Claude Code", pane-3)
+
+BEFORE (captured immediately before clicking "Claude Code" in the new-tab menu, 2026-08-14T18:49:58+02:00):
+b6196e4ced65a12a9362e4bfd7c258498ebeb25b56985850ce2e83fb723195c3  /home/enzopalmisano/.claude/settings.json
+e43c150bd0563862b2af661f3805a10241a64bfbca0d6e45ad7c2d71bb1fb618  /home/enzopalmisano/.codex/config.toml
+
+AFTER (captured after the real `claude` CLI process tree was confirmed live via /proc/<pid>/environ,
+pid 3054288 -- .../claude-agent-sdk-linux-x64/claude --output-format stream-json ...):
+b6196e4ced65a12a9362e4bfd7c258498ebeb25b56985850ce2e83fb723195c3  /home/enzopalmisano/.claude/settings.json
+e43c150bd0563862b2af661f3805a10241a64bfbca0d6e45ad7c2d71bb1fb618  /home/enzopalmisano/.codex/config.toml
+
+Identical. prepare() did not touch user-global config.
+
+What prepare() DID write (worktree-local, confirming prepare() actually ran and was not a no-op):
+  /home/enzopalmisano/Scrivania/Progetti/tiller-linux/.claude/settings.local.json
+    -- hook config referencing this exact pane: `tillerctl notify --session pane-3 --status ... --stdin-json`
+       for Stop/Notification/SessionStart/UserPromptSubmit/SessionEnd (see safe02-worktree-local-hooks.json,
+       copied verbatim in this directory)
+  /home/enzopalmisano/Scrivania/Progetti/tiller-linux/.tiller/omp-hook.ts
+    -- pre-existing omp hook script (unrelated to this claude launch, left untouched)
