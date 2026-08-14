@@ -12,7 +12,7 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
     SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigOptionValue, SessionConfigSelectOptions, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, TextContent, ToolCallStatus,
+    SetSessionConfigOptionRequest, TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus,
 };
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Lines};
 use anyhow::{Result, anyhow};
@@ -253,6 +253,42 @@ pub struct PlanEntryInfo {
     pub status: String,
 }
 
+/// A file diff a tool call produced (F-CHAT-31/32).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCallDiff {
+    /// The file path being modified.
+    pub path: PathBuf,
+    /// The original content; `None` for a newly created file.
+    pub old_text: Option<String>,
+    /// The content after modification.
+    pub new_text: String,
+}
+
+/// One piece of content a tool call produced (F-CHAT-23).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToolCallContentInfo {
+    /// Plain text content — the common case for command output, search
+    /// results, or file contents.
+    Text(String),
+    /// A file modification, shown as a diff.
+    Diff(ToolCallDiff),
+    /// Content the protocol carries in a shape this client does not render
+    /// (an embedded terminal, image, or audio block) — named so a caller
+    /// can show that *something* arrived without inventing detail the
+    /// protocol did not provide as text or diff.
+    Other,
+}
+
+/// A file location a tool call read or touched (F-CHAT-32), enabling
+/// "follow-along" treatment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCallLocationInfo {
+    /// The absolute file path being accessed or modified.
+    pub path: PathBuf,
+    /// Optional line number within the file.
+    pub line: Option<u32>,
+}
+
 /// Typed events emitted by one ACP session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AcpEvent {
@@ -268,6 +304,16 @@ pub enum AcpEvent {
         title: String,
         /// Initial protocol status.
         status: String,
+        /// Tool category (`Read`, `Edit`, `Execute`, ...), for icon and
+        /// detail treatment (F-CHAT-23). Formatted from the protocol's
+        /// `ToolKind` — `"Other"` when the agent did not report one.
+        kind: String,
+        /// Content produced by the call so far — text output or diffs.
+        content: Vec<ToolCallContentInfo>,
+        /// File locations this call touches (F-CHAT-32).
+        locations: Vec<ToolCallLocationInfo>,
+        /// Raw input sent to the tool, pretty-printed JSON, when present.
+        raw_input: Option<String>,
     },
     /// A non-terminal tool call update.
     ToolCallUpdated {
@@ -277,6 +323,15 @@ pub enum AcpEvent {
         title: Option<String>,
         /// Updated status, when present.
         status: Option<String>,
+        /// Updated tool category, when present.
+        kind: Option<String>,
+        /// Replacement content collection, when the update carries one —
+        /// the protocol overwrites rather than extends (F-CHAT-23/31).
+        content: Option<Vec<ToolCallContentInfo>>,
+        /// Replacement locations collection, when the update carries one.
+        locations: Option<Vec<ToolCallLocationInfo>>,
+        /// Updated raw input, pretty-printed JSON, when present.
+        raw_input: Option<String>,
     },
     /// A tool call reached a terminal status.
     ToolCallCompleted {
@@ -284,6 +339,16 @@ pub enum AcpEvent {
         id: String,
         /// Terminal protocol status.
         status: String,
+        /// Updated tool category, when the completing update carries one.
+        kind: Option<String>,
+        /// Replacement content collection, when the completing update
+        /// carries one — the final diff/output commonly arrives here.
+        content: Option<Vec<ToolCallContentInfo>>,
+        /// Replacement locations collection, when the completing update
+        /// carries one.
+        locations: Option<Vec<ToolCallLocationInfo>>,
+        /// Updated raw input, pretty-printed JSON, when present.
+        raw_input: Option<String>,
     },
     /// The model selector changed or became available.
     ModelCatalog(ModelCatalog),
@@ -1179,6 +1244,46 @@ fn content_text(content: ContentChunk) -> Option<String> {
     }
 }
 
+/// Converts the protocol's tool-call content collection to the app-facing
+/// shape (F-CHAT-23/31): text stays text, a diff stays a diff, and anything
+/// else (embedded terminal, image, audio) becomes `Other` rather than being
+/// silently dropped.
+fn tool_call_content_info(content: Vec<ToolCallContent>) -> Vec<ToolCallContentInfo> {
+    content
+        .into_iter()
+        .map(|item| match item {
+            ToolCallContent::Content(content) => match content.content {
+                ContentBlock::Text(text) => ToolCallContentInfo::Text(text.text),
+                _ => ToolCallContentInfo::Other,
+            },
+            ToolCallContent::Diff(diff) => ToolCallContentInfo::Diff(ToolCallDiff {
+                path: diff.path,
+                old_text: diff.old_text,
+                new_text: diff.new_text,
+            }),
+            ToolCallContent::Terminal(_) => ToolCallContentInfo::Other,
+            _ => ToolCallContentInfo::Other,
+        })
+        .collect()
+}
+
+fn tool_call_location_info(locations: Vec<ToolCallLocation>) -> Vec<ToolCallLocationInfo> {
+    locations
+        .into_iter()
+        .map(|location| ToolCallLocationInfo {
+            path: location.path,
+            line: location.line,
+        })
+        .collect()
+}
+
+/// Pretty-prints raw tool input/output for display; falls back to the
+/// value's default `Display` on the (unreachable in practice) case that
+/// re-serializing an already-deserialized `Value` fails.
+fn tool_call_raw_json(value: Option<serde_json::Value>) -> Option<String> {
+    value.map(|value| serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+}
+
 fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
     match notification.update {
         SessionUpdate::AgentMessageChunk(content) => vec![
@@ -1199,9 +1304,17 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
             id: tool.tool_call_id.to_string(),
             title: tool.title,
             status: format!("{:?}", tool.status),
+            kind: format!("{:?}", tool.kind),
+            content: tool_call_content_info(tool.content),
+            locations: tool_call_location_info(tool.locations),
+            raw_input: tool_call_raw_json(tool.raw_input),
         }],
         SessionUpdate::ToolCallUpdate(update) => {
             let status = update.fields.status.map(|status| format!("{:?}", status));
+            let kind = update.fields.kind.map(|kind| format!("{:?}", kind));
+            let content = update.fields.content.map(tool_call_content_info);
+            let locations = update.fields.locations.map(tool_call_location_info);
+            let raw_input = tool_call_raw_json(update.fields.raw_input);
             vec![if matches!(
                 update.fields.status,
                 Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
@@ -1209,12 +1322,20 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                 AcpEvent::ToolCallCompleted {
                     id: update.tool_call_id.to_string(),
                     status: status.unwrap_or_else(|| "Unknown".into()),
+                    kind,
+                    content,
+                    locations,
+                    raw_input,
                 }
             } else {
                 AcpEvent::ToolCallUpdated {
                     id: update.tool_call_id.to_string(),
                     title: update.fields.title,
                     status,
+                    kind,
+                    content,
+                    locations,
+                    raw_input,
                 }
             }]
         }
@@ -1370,7 +1491,9 @@ fn prompt_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ToolCall, ToolCallUpdate, ToolCallUpdateFields};
+    use agent_client_protocol::schema::v1::{
+        Diff, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    };
 
     #[test]
     fn maps_text_updates_to_typed_events() {
@@ -1400,6 +1523,10 @@ mod tests {
             vec![AcpEvent::ToolCallCompleted {
                 id: "tool".into(),
                 status: "Completed".into(),
+                kind: None,
+                content: None,
+                locations: None,
+                raw_input: None,
             }]
         );
     }
@@ -1414,6 +1541,85 @@ mod tests {
             notification_to_events(update).as_slice(),
             [AcpEvent::ToolCallStarted { id, title, .. }] if id == "tool" && title == "Read file"
         ));
+    }
+
+    /// P91 part 2: the widened seam. A tool call whose content is a diff
+    /// and whose input is raw JSON must carry `kind`, the diff, the
+    /// location, and the input all the way to the typed event — not just
+    /// `{id, title, status}`.
+    #[test]
+    fn started_tool_call_carries_kind_content_locations_and_raw_input() {
+        let tool = ToolCall::new("tool-1", "Edit file")
+            .kind(ToolKind::Edit)
+            .content(vec![ToolCallContent::Diff(Diff::new(
+                "/tmp/example.rs",
+                "new contents\n",
+            ))])
+            .locations(vec![ToolCallLocation::new("/tmp/example.rs").line(3)])
+            .raw_input(serde_json::json!({"path": "/tmp/example.rs"}));
+        let update = SessionNotification::new("session", SessionUpdate::ToolCall(tool));
+
+        let events = notification_to_events(update);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AcpEvent::ToolCallStarted {
+                id,
+                title,
+                kind,
+                content,
+                locations,
+                raw_input,
+                ..
+            } => {
+                assert_eq!(id, "tool-1");
+                assert_eq!(title, "Edit file");
+                assert_eq!(kind, "Edit");
+                assert_eq!(
+                    content,
+                    &vec![ToolCallContentInfo::Diff(ToolCallDiff {
+                        path: PathBuf::from("/tmp/example.rs"),
+                        old_text: None,
+                        new_text: "new contents\n".into(),
+                    })]
+                );
+                assert_eq!(
+                    locations,
+                    &vec![ToolCallLocationInfo {
+                        path: PathBuf::from("/tmp/example.rs"),
+                        line: Some(3),
+                    }]
+                );
+                let raw_input = raw_input.as_ref().expect("raw input was set");
+                assert!(raw_input.contains("/tmp/example.rs"));
+            }
+            other => panic!("expected ToolCallStarted, got {other:?}"),
+        }
+    }
+
+    /// The status-only path (widget/spinner updates with no new content)
+    /// must not manufacture kind/content/locations/input the agent never
+    /// sent — `None` all the way through, not `Some(default)`.
+    #[test]
+    fn status_only_update_leaves_the_widened_fields_unset() {
+        let update = SessionNotification::new(
+            "session",
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "tool-1",
+                ToolCallUpdateFields::default().status(ToolCallStatus::InProgress),
+            )),
+        );
+        assert_eq!(
+            notification_to_events(update),
+            vec![AcpEvent::ToolCallUpdated {
+                id: "tool-1".into(),
+                title: None,
+                status: Some("InProgress".into()),
+                kind: None,
+                content: None,
+                locations: None,
+                raw_input: None,
+            }]
+        );
     }
 
     #[test]
