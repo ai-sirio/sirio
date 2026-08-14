@@ -831,6 +831,11 @@ pub struct Chat {
     model_config_id: Option<String>,
     selected_model: Option<String>,
     model_picker_open: bool,
+    /// F-CHAT-16: the model picker's own search query, reset each time the
+    /// picker opens. Matches `ModelPickerFilter`'s Swift semantics — trimmed,
+    /// case-insensitive substring match against name/id/description, order
+    /// preserved, empty query keeps every model.
+    model_search: String,
     context_popover_open: bool,
     model_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
@@ -968,6 +973,7 @@ impl Chat {
             model_config_id: None,
             selected_model: None,
             model_picker_open: false,
+            model_search: String::new(),
             context_popover_open: false,
             context_usage: None,
             list_state,
@@ -1867,6 +1873,10 @@ impl Chat {
         self.context_popover_open = false;
         self.model_picker_open = !self.model_picker_open;
         if self.model_picker_open {
+            // F-CHAT-16: a fresh search every time the picker opens, same as
+            // Swift's `@State private var query` starting blank each time
+            // the popover view is recreated.
+            self.model_search.clear();
             let focus = self.model_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
@@ -2565,6 +2575,13 @@ impl Chat {
         if self.pending_question().is_some() {
             return;
         }
+        // F-CHAT-16: the only remaining path into the composer while the
+        // model picker is open is Shift+Enter's bound `Newline` action
+        // (plain typing is already redirected to `model_search` in
+        // `on_composer_key`, before it ever reaches here).
+        if self.model_picker_open {
+            return;
+        }
         self.composer.insert_text(text);
         self.refresh_token_popups(cx);
     }
@@ -2588,6 +2605,14 @@ impl Chat {
     }
 
     fn send_action(&mut self, _: &Send, _: &mut Window, cx: &mut Context<Self>) {
+        // F-CHAT-16: Enter is bound to `Send` for the whole "ChatComposer"
+        // context, which the model picker's search field inherits (it has
+        // no keybinding of its own to shadow it) — without this, pressing
+        // Enter while typing a search would actually send the composer's
+        // draft.
+        if self.model_picker_open {
+            return;
+        }
         if self.slash_popup_visible() {
             self.accept_slash_selection(cx);
             cx.notify();
@@ -2733,6 +2758,16 @@ impl Chat {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        // F-CHAT-16: Backspace is a bound action (chat-root's own
+        // `.on_action(Backspace)`), not a raw key `on_composer_key` ever
+        // sees, so its model-picker redirect has to live here instead —
+        // otherwise it would silently eat a character from the composer's
+        // draft while the user thinks they're correcting a search typo.
+        if self.model_picker_open {
+            self.model_search.pop();
+            cx.notify();
+            return;
+        }
         // F-CHAT-05: see `insert_text` — the editor is fully disabled while
         // a permission/plan question is unanswered.
         if self.pending_question().is_some() {
@@ -2811,6 +2846,25 @@ impl Chat {
                 && character != "\n"
             {
                 self.question_answer.draft.push_str(character);
+                cx.notify();
+            }
+            return;
+        }
+        // F-CHAT-16: while the model picker is open, every key belongs to
+        // its search field, not the composer — printable characters type
+        // (Backspace has its own guard, since it's a bound action rather
+        // than a raw key this handler ever sees), Escape closes the picker
+        // the same way its own `Cancel` action binding does.
+        if self.model_picker_open {
+            if event.keystroke.key == "escape" {
+                self.model_picker_open = false;
+                cx.notify();
+            } else if let Some(character) = event.keystroke.key_char.as_deref()
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.control
+                && character != "\n"
+            {
+                self.model_search.push_str(character);
                 cx.notify();
             }
             return;
@@ -4783,6 +4837,21 @@ impl Chat {
 
         let model_picker = if self.model_picker_open {
             let picker_entity = model_entity.clone();
+            // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
+            // has none, and the ACP layer never carries one — it is purely
+            // the driver's own first-listed choice, matching Swift's
+            // `recommendedId = models.first?.modelId` exactly. The search
+            // filter runs over the full, unfiltered list order (`filter`,
+            // not `sort`) so a query never reorders results.
+            let recommended_id = self.available_models.first().map(|option| option.id.clone());
+            let filtered_models: Vec<ModelOption> = self
+                .available_models
+                .iter()
+                .filter(|option| model_query_matches(option, &self.model_search))
+                .cloned()
+                .collect();
+            let search_placeholder = self.model_search.is_empty();
+            let search_text = self.model_search.clone();
             Some(
                 div()
                     .id("model-picker")
@@ -4804,6 +4873,33 @@ impl Chat {
                         this.model_picker_open = false;
                         cx.notify();
                     }))
+                    .when(!self.available_models.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .id("model-search-input")
+                                .debug_selector(|| "model-search-input".into())
+                                .w_full()
+                                .mb(px(6.0))
+                                .px(px(8.0))
+                                .py(px(5.0))
+                                .rounded(theme.radii.control)
+                                .bg(colors.raised)
+                                .border_1()
+                                .border_color(colors.hairline)
+                                .text_size(typography.footnote)
+                                .child(if search_placeholder {
+                                    div()
+                                        .text_color(colors.meta)
+                                        .child("Search models…")
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .text_color(colors.title)
+                                        .child(search_text)
+                                        .into_any_element()
+                                }),
+                        )
+                    })
                     .when(self.available_models.is_empty(), |this| {
                         this.child(
                             div()
@@ -4813,14 +4909,32 @@ impl Chat {
                                 .child("The connected agent did not report any models."),
                         )
                     })
-                    .children(self.available_models.iter().cloned().map(|option| {
+                    .when(
+                        !self.available_models.is_empty() && filtered_models.is_empty(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("model-picker-no-match")
+                                    .debug_selector(|| "model-picker-no-match".into())
+                                    .p(px(8.0))
+                                    .text_size(typography.footnote)
+                                    .text_color(colors.meta)
+                                    .child("No models match"),
+                            )
+                        },
+                    )
+                    .children(filtered_models.iter().cloned().map(|option| {
                         let option_id = option.id.clone();
                         let option_name = option.name.clone();
                         let option_entity = picker_entity.clone();
+                        let is_recommended = recommended_id.as_deref() == Some(option_id.as_str());
                         div()
                             .id(format!("model-option-{option_id}"))
                             .debug_selector(move || format!("model-option-{option_id}"))
                             .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
                             .px(px(8.0))
                             .py(px(7.0))
                             .rounded(theme.radii.control)
@@ -4831,7 +4945,20 @@ impl Chat {
                                 option_entity
                                     .update(cx, |chat, cx| chat.select_model(option.clone(), cx));
                             })
-                            .child(option_name)
+                            .child(div().flex_1().child(option_name))
+                            .when(is_recommended, |this| {
+                                this.child(
+                                    div()
+                                        .id("model-option-recommended")
+                                        .debug_selector(|| "model-option-recommended".into())
+                                        .px(px(5.0))
+                                        .rounded(px(4.0))
+                                        .text_size(typography.caption2)
+                                        .text_color(colors.accent)
+                                        .bg(colors.accent.opacity(0.15))
+                                        .child("Recommended"),
+                                )
+                            })
                     }))
                     .when_some(self.effort.clone(), |this, effort| {
                         if effort.choices.is_empty() {
@@ -5933,6 +6060,23 @@ impl Render for Chat {
 
 fn now_hhmm() -> String {
     chrono::Local::now().format("%H:%M").to_string()
+}
+
+/// F-CHAT-16: the model picker's search predicate — trimmed, lowercased,
+/// substring match against name/id/description; matches Swift's
+/// `ModelPickerFilter.filter` exactly (order-preserving, pure, an empty
+/// query keeps every model).
+fn model_query_matches(option: &ModelOption, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    option.name.to_lowercase().contains(&query)
+        || option.id.to_lowercase().contains(&query)
+        || option
+            .description
+            .as_deref()
+            .is_some_and(|description| description.to_lowercase().contains(&query))
 }
 
 /// Human label for a non-`EndTurn` stop reason, stated in the turn footer so
@@ -8107,6 +8251,104 @@ mod tests {
         cx.simulate_click(point(px(10.0), px(10.0)), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("model-picker").is_none());
+    }
+
+    /// F-CHAT-16: the model picker's search field filters the driver's own
+    /// list (order preserved, case-insensitive substring match), the
+    /// driver's first-listed model carries the "Recommended" badge exactly
+    /// while it's in the filtered results, and a query with no matches
+    /// shows "No models match" instead of an empty list. Backspace is a
+    /// bound action, not a raw key — it has to reach the search field
+    /// through its own guard, not the composer's.
+    #[gpui::test]
+    async fn model_picker_search_filters_and_badges_the_recommended_model(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.has_completed_turn = true;
+            chat.available_models = vec![
+                ModelOption {
+                    id: "opus".into(),
+                    name: "Opus".into(),
+                    description: None,
+                },
+                ModelOption {
+                    id: "sonnet".into(),
+                    name: "Sonnet".into(),
+                    description: None,
+                },
+                ModelOption {
+                    id: "haiku".into(),
+                    name: "Haiku".into(),
+                    description: None,
+                },
+            ];
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let chip = cx
+            .debug_bounds("model-chip")
+            .expect("model chip is rendered");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        assert!(cx.debug_bounds("model-search-input").is_some());
+        assert!(
+            cx.debug_bounds("model-option-recommended").is_some(),
+            "the driver's first-listed model (opus) is badged Recommended"
+        );
+        assert!(cx.debug_bounds("model-option-opus").is_some());
+        assert!(cx.debug_bounds("model-option-sonnet").is_some());
+        assert!(cx.debug_bounds("model-option-haiku").is_some());
+
+        // Typing routes to the search field, not the composer.
+        cx.simulate_input("son");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("model-option-sonnet").is_some());
+        assert!(
+            cx.debug_bounds("model-option-opus").is_none(),
+            "opus no longer matches \"son\""
+        );
+        assert!(cx.debug_bounds("model-option-haiku").is_none());
+        assert!(
+            cx.debug_bounds("model-option-recommended").is_none(),
+            "the recommended model is filtered out, so its badge is gone too"
+        );
+        assert!(cx.debug_bounds("model-picker-no-match").is_none());
+
+        // A query with no matches shows the empty state, not an empty list.
+        cx.simulate_input("zzz");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("model-option-sonnet").is_none());
+        assert!(cx.debug_bounds("model-picker-no-match").is_some());
+
+        // Backspace is a bound action — it must still reach the search
+        // field, not silently corrupt the composer's own draft.
+        cx.simulate_keystrokes(
+            "backspace backspace backspace backspace backspace backspace",
+        );
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("model-option-opus").is_some(),
+            "clearing the query back to \"son\" then to empty restores every model"
+        );
+        assert!(cx.debug_bounds("model-option-sonnet").is_some());
+        assert!(cx.debug_bounds("model-option-haiku").is_some());
+        assert!(cx.debug_bounds("model-picker-no-match").is_none());
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            "backspace inside the search field must not have eaten composer text"
+        );
     }
 
     #[gpui::test]
