@@ -852,3 +852,31 @@ critic.
 12. F-CHG-20 — click the Activity header with nothing running ("No activity" row).
 13. F-PER-07 — Project Settings sheet: change name/icon, relaunch, verify; note absence
     of worktree-location fields.
+
+---
+
+## Orchestrator correction — the chat rows driven over the socket do not count
+
+Added 2026-08-14 after the slices closed. **This corrects my own instruction, not anyone's work.**
+
+`P106` told all three of you to reach chat over the control socket. That route does not drive the
+chat you can see. `surface.chat.*` operates on a `chat_sessions` map owned by the control handler
+(`tiller/src/main.rs:650`), which is disjoint from the rendered chat view — it even spawns its own
+ACP agent against its own database. Verified four ways on the Wayland lane: a completed `pwd` turn
+with a real assistant answer left the rendered transcript empty; `compose text=MARKER_ZZ9` left the
+visible composer showing its placeholder; `compose surfaceId=pane-0` was refused with `chat surface
+is not open: pane-0`; and `panel.list` reports the visible tabs as `pane-0`/`pane-1`, an id space
+the chat API does not accept.
+
+`surface.chat.open` returns `surfaceId: "default-chat"`, which *is* the persisted id of the visible
+Chat tab (`session.rs:322`) — so the socket answers with the right name for the wrong object. That
+is why this looked like it was working.
+
+**Consequence for this report:** every observation here whose only route was `surface.chat.*`
+evidences the control API, not the UI, and cannot settle its row. `codex12`'s `F-CHAT-21` and
+`F-CHAT-22` entries already say the rendered transcript stayed empty — that reading was correct and
+the cause is now known. Treat the whole `F-CHAT` group in this report as **owed: gesture on
+`DISPLAY=:1`** until `P107` lands.
+
+Nothing else in the report is affected: the settings, project, sidebar, tab, usage, core and
+control rows were driven through routes that do render.
