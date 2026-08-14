@@ -20,6 +20,7 @@ one cannot work — it is verified working, with screenshots in `reference/linux
 | ✅ **Socket-driven state is visible** | drive a change over the control socket, force a repaint, and see it — e.g. `project.add` populated the sidebar with `tiller`, its two worktrees, and the `Primary` badge |
 | ✅ **Layout at any size** | change the output resolution and capture the reflow |
 | ✅ **Surfaces open and navigate over the socket** | `surface.settings.open`/`.select`, `surface.changes.open`, `browser.open`, `project.add`, `panel.*`, `tab.*`, `pane.*` — see "Driving without a pointer" below |
+| ✅ **Chat turns, in the visible transcript** | since `P107` (2026-08-14) `surface.chat.compose`/`.send` drive the rendered chat, so a real ACP turn can be photographed here. Socket-sourced `F-CHAT` evidence dated **before** that commit proves the old invisible replica and must be re-driven |
 | ❌ **No synthetic input** | clicks and keystrokes **do not reach the client** — see trap 3. Anything gated on a pointer or keyboard gesture (context menus, drag-and-drop, typing) still needs `DISPLAY=:1` |
 | ❌ **No webview content** | the embedded browser needs an X11 window handle and gets a Wayland one; its chrome renders, the page does not. Every `F-BRW` row belongs on `DISPLAY=:1` |
 
@@ -70,21 +71,25 @@ with `invalid type: integer 0, expected a string`. Note that the Rust builder
 `request::tab_select(position: usize)` documents no such base, so `tab_select(0)` always fails at
 runtime.
 
-### `surface.chat.*` does not drive the chat you can see
+### `surface.chat.*` drives the rendered chat — fixed 2026-08-14, was not always true
 
-**Do not use this lane to judge any `F-CHAT` row until `P107` lands.** The chat control API operates
-on a `chat_sessions` map owned by the control handler (`tiller/src/main.rs:650`) that is disjoint
-from the rendered chat view — separate ACP agent, separate database. A completed turn with a real
-assistant answer leaves the rendered transcript empty; `surface.chat.compose` leaves the visible
-composer showing its placeholder.
+**This lane can now judge `F-CHAT` content.** `P107` (commit `6a6f558`) routes chat control requests
+onto GPUI and mutates the mounted `Chat` entity; the invisible replica is gone. Verified by capture,
+not by test: `reference/linux-progress/p107-rendered-transcript.png` shows a socket-driven turn
+appearing in the visible transcript — the user message, the `Execute pwd` tool call marked
+`Completed`, its output, and the assistant's reply — and `p107-composer-marker.png` shows
+`surface.chat.compose` text in the visible composer.
 
-It is convincing because the id is right: `surface.chat.open` returns `surfaceId: "default-chat"`,
-which really is the persisted id of the visible Chat tab (`session.rs:322`). The socket answers with
-the right name for the wrong object. `panel.list` calls that same tab `pane-0`, and the chat API
-refuses that id — two id spaces that do not interoperate.
+**Evidence recorded before that commit is not retroactively valid.** Until `P107`, the chat API
+operated on a `chat_sessions` map owned by the control handler (`tiller/src/main.rs:650`), disjoint
+from the rendered view — its own ACP agent, its own database. A completed turn with a real assistant
+answer left the rendered transcript empty. It was convincing because the id was right:
+`surface.chat.open` returned `surfaceId: "default-chat"`, genuinely the persisted id of the visible
+Chat tab (`session.rs:322`), so the socket answered with the right name for the wrong object. Any
+`F-CHAT` verdict sourced from a socket drive dated before 2026-08-14 evidences the old replica and
+must be re-driven — that is why the whole family is marked owed in `P106-report.md`.
 
-`tab.select` genuinely brings the Chat tab forward, so the chat surface's **chrome** (composer,
-status dot, mode label, context ring) is judgeable here. Its **content** is not.
+`tab.select` is still what brings the Chat tab forward; `surface.chat.open` does not focus.
 
 ### The embedded browser does not work on this lane
 
