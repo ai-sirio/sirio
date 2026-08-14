@@ -344,12 +344,46 @@ Cleanup: both scratch worktrees closed via `ctl workspace.close`, then fully rem
 shared repo (`git worktree remove --force` × 2, `git branch -D` × 2, verified via `git worktree
 list` showing only the two pre-existing worktrees afterward) — no debris left in shared git state.
 
+## Instrument 1c — synthetic Codex credentials via `$CODEX_HOME`
+
+### F-CORE-USG-05 / F-CORE-USG-06 / F-CORE-USG-07
+
+I'd deferred these earlier this pass over real-credential risk, but `codex_auth_file_path()`
+(`tiller_usage/src/codex.rs:84`) resolves `$CODEX_HOME/auth.json` in preference to the real
+`~/.codex/auth.json` — the same precedence the real `codex` CLI itself uses — which makes the whole
+fetch/refresh/classify path testable with entirely synthetic, harmless credentials. A garbage bearer
+token against the real `chatgpt.com` usage API and a garbage refresh token against the real
+`auth.openai.com` token endpoint behave exactly like "wrong password": rejected safely, no real
+account touched, nothing to clean up.
+
+Wrote a well-formed but bogus `auth.json` to `/tmp/p120-fake-codex-home/` (valid JSON shape, so
+credential *loading* succeeds — ruling out the "no credentials" `LoggedOut` case by construction),
+relaunched `p120a` with `CODEX_HOME` pointed at it. Before this swap, the status bar had shown real
+live Codex usage data ("Codex 100% 5h") throughout the entire session under the real `~/.codex`
+credentials. Within ~3s of the swap, it changed to **"Codex logged out"**. Capture:
+`1786728406096566027-usg-fake-codex-statusbar.png`.
+
+That specific wording is the proof, not just a vague failure: `status_bar.rs:284` maps
+`UsageReason::LoggedOut` to "logged out" and `UsageReason::Error` to the distinct string "error".
+Tracing `CodexUsageFetcher::fetch()`, the only way to reach "logged out" (given credential loading
+already succeeded) is `fetch_usage()` returning `Unauthorized` (a real 401 from the real wham API)
+followed by `refresh_token()` failing (a real non-200 from the real OpenAI token endpoint) — which
+means `fetch_usage`'s 401 branch, `refresh_token()`, `TOKEN_URL`, and `classify_token_refresh_failure()`
+(called inside `refresh_token()` to build the error it returns) all executed for real, live, against
+real endpoints. Full reasoning and transcript:
+`reference/linux-progress/p120/logs/usg05-06-07-synthetic-credentials.txt`.
+
+Nuance for F-CORE-USG-05: `classify_token_refresh_failure()`'s specific return variant
+(Reused/Revoked/Expired/Other) is computed for real but then immediately discarded by its caller —
+every variant maps identically to `LoggedOut`, so the classification *runs* but currently has no
+observable effect on user-visible behavior beyond "refresh failed → logged out, however it failed."
+`needs_refresh()` was re-grepped and still has zero non-test callers — the time-based refresh gate
+didn't trigger this; a real 401 did. Not exercised: the successful-refresh-and-merge-save path
+(`save_credentials`), which needs a real 200 from the token endpoint — out of proportion to
+manufacture safely, same reasoning as F-CORE-AUTH-01 above.
+
+Cleanup: relaunched `p120a` once more without `CODEX_HOME` to restore real-credential behavior.
+
 ## Remaining rows — not yet driven this pass
 
-The following rows from the assigned 21 have not been driven yet in this pass and are **not being
-reported as `UNREACHABLE`** — they simply have not been attempted:
-
-`F-CORE-USG-05`, `F-CORE-USG-06`, `F-CORE-USG-07` (instrument: Codex token-refresh path — needs a
-safe way to force a refresh/failure scenario without mutating real credentials).
-
-This report will be updated in place as the remaining rows are driven.
+None. All 21 rows assigned to this pass have been driven this session.
