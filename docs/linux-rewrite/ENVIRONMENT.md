@@ -290,3 +290,29 @@ The protocol:
    fields in `chat.rs`/`tiller_acp`, files it had not opened.
 
 Never `git add -A`. Never commit another agent's work under a message describing only your own.
+
+## `oh-my-pi` cannot start on this machine, and it is not our bug
+
+Every `F-AGENT-OMP-*` row is blocked upstream of Tiller. Verified 2026-08-14 while judging `P96`:
+
+```
+$ oh-my-pi …
+SyntaxError: Unexpected token ':'
+```
+
+`oh-my-pi@0.2.0` ships **un-transpiled TypeScript in a file Node is told to execute**:
+`bin/oh-my-pi.js:176` is `function checkFile(path: string, label: string) {`, and the file opens with
+`#!/usr/bin/env node`. Node cannot parse it, so the process dies before any session starts.
+
+**Tiller is invoking the correct name.** The package manifest declares exactly one binary —
+`"bin": { "oh-my-pi": "./bin/oh-my-pi.js" }` — which is precisely what the adapter's
+`executable_name()` returns. There is nothing to fix on our side, and the earlier
+distribution-name/executable-name conflation is genuinely fixed.
+
+So `F-AGENT-OMP-01` and `-02` are `NOT EXERCISED` **with an instrument reason**, not `FAILED`. Do not
+re-drive them, and do not "fix" the adapter to work around a broken third-party package — that would
+make our code wrong in order to make a bad build run.
+
+**For the user, when you are awake:** this needs `oh-my-pi` reinstalled or pinned to a version whose
+published `bin` is actually JavaScript. It was deliberately left alone rather than downgrading a
+global npm package unattended.
