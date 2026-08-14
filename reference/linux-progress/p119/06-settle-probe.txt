@@ -1,0 +1,38 @@
+pid=2476348 socket=ready
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl ping
+pong
+
+[exit=0]
+immediate panels:
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+
+
+[exit=0]
+after 3 seconds panels:
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+pane-0	Chat	Chat		false
+pane-1	Terminal	Terminal		false
+pane-2	Changes	Changes		true
+
+[exit=0]
+after 3 seconds settings:
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings read
+
+tillerctl: Settings surface is not open
+[exit=1]
+restore-session then panels:
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl restore-session
+
+
+[exit=0]
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+pane-0	Chat	Chat		false
+pane-1	Terminal	Terminal		false
+pane-2	Changes	Changes		true
+
+[exit=0]
+$ TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl quit
+
+
+[exit=0]
+socket-after-quit=absent
