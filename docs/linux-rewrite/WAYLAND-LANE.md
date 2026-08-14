@@ -21,6 +21,7 @@ one cannot work — it is verified working, with screenshots in `reference/linux
 | ✅ **Layout at any size** | change the output resolution and capture the reflow |
 | ✅ **Surfaces open and navigate over the socket** | `surface.settings.open`/`.select`, `surface.changes.open`, `browser.open`, `project.add`, `panel.*`, `tab.*`, `pane.*` — see "Driving without a pointer" below |
 | ❌ **No synthetic input** | clicks and keystrokes **do not reach the client** — see trap 3. Anything gated on a pointer or keyboard gesture (context menus, drag-and-drop, typing) still needs `DISPLAY=:1` |
+| ❌ **No webview content** | the embedded browser needs an X11 window handle and gets a Wayland one; its chrome renders, the page does not. Every `F-BRW` row belongs on `DISPLAY=:1` |
 
 **A row whose `VERIFY` line names a click, a right-click, a drag or typed text cannot be closed
 here.** Use the drive lock for those. A screenshot that merely *contains* a control is not proof the
@@ -51,15 +52,39 @@ segment* is not closed by a socket call that switches the theme — that is prec
 Socket-driving closes a row's **state half**; the gesture half stays owed and stays `half-proven`.
 Say which half you drove, every time.
 
-Two observations handed off rather than concluded, because one launch is not a verdict:
+### `open` does not focus — `tab.select` does
 
-- `surface.chat.open` returns `error: "no current workspace"` on an instance whose UI is showing a
-  restored terminal tab. The socket's workspace notion and the restored UI disagree about whether a
-  workspace exists — related to `P100`'s defect 2, where restore also fails to tell a model something
-  it needs.
-- `browser.open` returned `ok` with `surface:3`, and the visible surface **stayed on Settings**. It
-  may create without focusing; it may be `P90`'s "socket that says yes" again. Do not record it
-  either way without driving it properly.
+Both observations this document previously handed off are settled, and they were the same thing:
+
+- `surface.chat.open` returned `error: "no current workspace"` only because the instance had no
+  project. `project.add path=<abs>` creates and selects one (`workspace.current` then answers), and
+  `surface.chat.open` succeeds. Not a defect.
+- `surface.chat.open` and `browser.open` both return `ok` with full surface state while **the
+  visible tab does not change**. That is not a "socket that says yes": the surface really is
+  created, it is placed in the tab strip, and it simply is not brought forward. `tab.select`
+  brings it forward and the capture then shows it.
+
+**`tab.select` is 1-based.** `index=0` is refused with `tab.select index must be a positive
+integer`, and every param is a string — `index=0` sent as a JSON integer is rejected earlier still
+with `invalid type: integer 0, expected a string`. Note that the Rust builder
+`request::tab_select(position: usize)` documents no such base, so `tab_select(0)` always fails at
+runtime.
+
+### The embedded browser does not work on this lane
+
+`browser.open` + `tab.select` reaches the Browser surface, and its chrome renders — address bar,
+back/forward/stop, the title readout. The **page** does not. The webview needs an X11 window handle
+and GPUI hands it a Wayland one, so the content area shows:
+
+```
+Direct XCB build failed: the window handle kind is not supported; XCB->Xlib adapter failed:
+GPUI returned unsupported handle: Wayland(WaylandWindowHandle { surface: 0x... })
+```
+
+This is a property of the lane, not a defect in the browser: the same URL renders its real content
+on `DISPLAY=:1` (`reference/linux-progress/p86-post-browser.png` shows example.com's actual page).
+**Route every `F-BRW` row to the X lane.** Browser *chrome* can be judged here; browser *content*
+cannot.
 
 ## Setup
 
