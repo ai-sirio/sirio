@@ -4,7 +4,11 @@ Written by the orchestrator so this work survives losing any single session. Any
 should be able to read this file and continue without re-deriving anything.
 
 Branch `linux/gpui-waku`, worktree `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`.
-Nothing is committed yet — the whole state below lives in the working tree.
+Everything is committed — the working tree is no longer the state.
+
+> **Head refreshed 2026-08-14 17:30.** Everything from "## Closed" down is kept as history and
+> parts of it are superseded — in particular **the display crisis is over**; see
+> "2026-08-14 — both lanes work" below before believing anything about `:1`, `:2` or blank frames.
 
 ---
 
@@ -14,15 +18,33 @@ Tiller rebuilt in Rust on native GPUI, now targeting Linux as well as macOS. No 
 Features stay Tiller's; the UI is redrawn taking inspiration — never code — from waku.
 **Done means:** a critic that did not build a piece exercises every inventory entry live and ticks it.
 
-## How far along — read `INVENTORY-STATUS.md`
+## How far along — read `INVENTORY-LEDGER.md`
 
-The two inventory files still hold 388 unticked boxes; verdicts accumulated in the critic's report
-and in pane replies for thirteen hours with nothing consolidating them.
-`docs/linux-rewrite/INVENTORY-STATUS.md` now does, and it keeps the one distinction the goal turns
-on: **critic-confirmed** (≈50 — the only ticks that count toward done) versus **builder-claimed**
-(≈38, awaiting an independent pass). Roughly 250 entries are still untouched, most of them domain
-logic in `02-inventory-packages.md`, which is headless by construction and therefore the largest
-reachable work while no display exists.
+`INVENTORY-STATUS.md`'s critic-confirmed/builder-claimed split is superseded.
+**`INVENTORY-LEDGER.md` is the single source of truth**, one row per entry, and
+`python3 Scripts/ledger-totals.py` is its gate — it recomputes from the body and asserts the totals
+block matches. Run the gate rather than counting yourself; a paraphrased count has already produced
+a phantom discrepancy here.
+
+As of 2026-08-14 17:20 (389 rows, denominator frozen):
+
+```
+PASSED 190 · half-proven 34 · FAILED — absent 14 · FAILED — defective 47
+UNREACHABLE 12 · N/A — platform 12 · NOT EXERCISED 79 · builder-claimed 1     (389)
+```
+
+Two things to read correctly:
+
+- **`FAILED — absent` fell from 82 to 14 today** and that is the day's biggest correction. `P105`
+  re-censused the bucket and found 20 rows built and 36 partial; the ledger had been asserting that
+  features which exist do not. Only **14** are genuinely absent, and all 14 are dispatched.
+- **`PASSED` did not move.** Removing unearned "absent" claims must never manufacture passes.
+  Census evidence — a symbol and a line number — makes a row `NOT EXERCISED`, never `PASSED`.
+  That substitution is the mechanism that produced this project's false passes.
+
+`NOT EXERCISED` at 79 is now the real backlog, and `FAILED — defective` at 47 is the largest
+actionable one. `P113-triage.md` groups those 47 by root cause and ranks them by rows-unblocked —
+they are far fewer than 47 bugs.
 
 ## The four references, frozen
 
@@ -34,31 +56,63 @@ reachable work while no display exists.
 | `00-ui-observed-from-screenshots.md` | the old macOS UI read from `reference/shots/*.png` |
 | `04-ux-patterns-waku-does-not-cover.md` | orca/t3code, for diff and surfaces waku lacks |
 
-388 inventory entries total. That checklist is the contract.
+**389** inventory entries total, denominator frozen. That checklist is the contract. The 9 `F-BRW`
+rows are in scope. COSMIC (Pop!_OS) supersedes waku as the general visual bar; the titlebar follows
+the comet reference.
 
 Reference checkouts (read-only, never copy code): `../\_tiller-refs/{waku,zed,orca,t3code}`.
 
-## Who owns what right now
+## 2026-08-14 — both lanes work, and that changes the shape of the work
 
-| Pane | Piece (as of 14:30) | Files it owns |
+**The display crisis below is over.** There are now two ways to run the app, and the important
+difference is not resolution but who may use them at once:
+
+| lane | script | lock | input |
+|---|---|---|---|
+| **`DISPLAY=:1`** | `Scripts/linux-drive.sh` | **one holder at a time** (`mkdir /tmp/tiller-drive-1.lockd`) | real clicks and keys |
+| **nested Wayland** | `Scripts/wayland-drive.sh` | **none — any number in parallel** | socket only (as of 17:30; `P112` is testing whether this can change) |
+
+Read `ENVIRONMENT.md` and `WAYLAND-LANE.md` before either. The Wayland lane has five traps that have
+each cost someone a false result.
+
+**The single-holder X lock is the project's throughput ceiling.** Everything needing a gesture queues
+behind one agent. That is why `P112` — can the Wayland lane be given synthetic input — is worth more
+than the row it would close.
+
+## Who owns what right now (17:30)
+
+| Pane | Piece | Territory |
 |---|---|---|
-| `pi` (w1:p4) | P44 — the chat surface, unexercised since 01:00 | `tiller_ui/**`, `tiller_theme/**` |
-| `codex11` (w1:p2) | P45 — get the verification gate green again | everything not listed for the others: `tiller_terminal`, `panes.rs`, `tiller_activity`, `tiller_persistence`, `tiller_project`, `tiller_usage`, `tiller_markdown`, `tiller_acp`, `tiller_agents`, its `Scripts/*` |
-| `codex12` (w1:p3) | P43 — the shell command layer, then the absent tab operations | `tiller_control/**`, `tiller/src/main.rs`, project discovery, `tiller_git/**` |
-| `pireview` (w1:p6) | critic pass 9 — building `INVENTORY-LEDGER.md`, one row per entry | writes `CRITIC-baseline.md`, append-only |
+| `sonnet` (w1:p5) | `P109` — the 34 gestures `P106` could not reach; **holds the `:1` drive lock** | critic, drives only |
+| `codex11` (w1:p2) | `P114` — the four chat rows the census found absent | `chat.rs`, `composer.rs` |
+| `codex12` (w1:p3) | `P110` — four empty states nobody built, incl. the stale-data `F-CHG-02` | `sidebar.rs`, terminal + changes surfaces |
+| `fable` (w1:pD) | `P111` — settings + adapter absent rows, two of which may be `N/A — platform` | `settings.rs`, `status_bar.rs`, `tiller_agents`, `tiller_usage` |
+| `pi` (w1:p4) | `P112` — can the Wayland lane take synthetic input | `Scripts/` only |
+| `pireview` (w1:p6) | `P115` — are the three cited tests actually red | critic; **sole owner of `INVENTORY-LEDGER.md`** |
 
-**The single biggest gap that is not the display (critic, pass 8):** the shell has **no menu bar and
-no command layer at all**, and that one absence explains **19 of the 29 absent non-browser
-features**. The only shell interaction surface is the tab strip plus the `+` menu. Nineteen entries
-had been counted as nineteen gaps; they are one gap counted nineteen times.
+**Ownership is by file, not by feature.** Two agents in one worktree otherwise overwrite each other
+silently — not as a git conflict, but as one agent reading a file, thinking, and writing over
+another's work. Commit path-scoped, never `git add -A`, and `grep '??'` before calling a piece done:
+the rule that prevents collisions never catches a file nobody is thinking about.
 
-**Two things belong to the operator and nobody else can do them:** restart the compositor (which now
-unblocks only *appearance*, since interaction was recovered via GPUI's test harness), and decide
-whether to commit — 6600+ lines and the whole of `docs/linux-rewrite/` are still outside git.
+Expect `index.lock` contention with six panes committing. **Retry; never delete the lock.**
 
-Unowned and claimable: `tiller_usage/**`, `tiller_project/**`, `tiller_persistence/**`,
-`tiller_git/**`, `tiller_acp/**`, `tiller_markdown/**`. An agent that claims one should say so in
-its reply so this table stays true.
+### Standing rules that cost something to relearn
+
+- **The critic must never be the agent that built the piece.** Rotate.
+- **A feature the critic has not successfully tried does not exist.** Code plus a green test is
+  `NOT EXERCISED`, never `PASSED`.
+- **Reset context before every piece** — `/clear` for `codex` and Claude panes, `/new` for `pi`
+  panes. **Check the model after `/new`**: it resets a pi pane to the global default and the critic
+  silently loses its stronger model. Order is always read → reset → dispatch, and the brief must
+  carry its own context.
+- **Reproduce a gate with the gate's own command.** A paraphrase returned "clean" while the gate was
+  red and overruled three correct agents.
+- **`herdr pane send-text` replaces the buffer** rather than appending; `herdr pane run` sends text
+  and Enter together and is what you want. `shift+tab` and bare `Enter` via `pane key` report
+  success and do nothing.
+- Every agent here is **text-only**. Visual judgement is the orchestrator's alone —
+  see `CRITIC-visual-baseline.md`.
 
 Briefs live in `docs/linux-rewrite/tasks/`. They are written to be **self-contained**, because
 every agent's context is reset before it is given one (see Method).
@@ -322,6 +376,14 @@ are errors, not warnings.
   the code exists to receive a call; only exercising it shows the call does anything (see F-009).
 
 ---
+
+## HISTORICAL — 2026-08-13's display crisis (superseded 2026-08-14)
+
+Everything from here down was written while no display presented. **It no longer describes reality:
+`DISPLAY=:1` works and a nested-Wayland lane exists.** It is kept because the measurements are real
+and expensive — the DRI3 table, the dmabuf-modifier diagnosis, the blank-frame failure modes — and
+because the reasoning is worth reading. Do not act on its recipes; use `ENVIRONMENT.md` and
+`WAYLAND-LANE.md`.
 
 ## 10:35 — every display is gone, and the headless route that keeps work moving
 
