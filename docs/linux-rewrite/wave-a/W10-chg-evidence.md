@@ -120,3 +120,29 @@ does not self-heal (byte-identical control), then recovered it with a real click
 (large diff back toward OK, both by full-frame comparison and colour count). The one owed piece
 is the transient Loading flash, which is a code-verified but not live-captured detail, not a
 defect in the Retry mechanic this row is actually about.
+
+## F-CHG-18 (ledger line 209, currently NOT EXERCISED)
+
+Manifest says: exercise — drag source (`changes.rs:993`, real `(PathBuf,String)` `on_drag`
+payload) and drop target (`tiller_terminal/src/lib.rs:1448`, production `on_drop` wired to
+`receive_diff_drop`) are both real, non-test code; prove via a real-mouse-event recipe or route
+to `DISPLAY=:1`, which this slice is barred from.
+
+- Re-read `changes.rs:993` directly: `on_drag(payload, move |_, _, _, cx| cx.new(|_| ...))` sits
+  in the production row-render closure (not behind `#[cfg(test)]`), confirming the manifest's
+  premise that this is real drag-source code, not test-only scaffolding.
+- Re-read `Scripts/wayland-drive.sh`'s exported action functions
+  (`ctl pointer_command move click type key shot title`, line 338 of the current file): `click`
+  and `move` (lines ~272-273) each issue one atomic pointer op over the persistent virtual-pointer
+  FIFO. There is no press-hold, motion-while-held, or release primitive — nothing composes a
+  drag. `system.capabilities` (54 methods, confirmed live this session) has no drag-shaped
+  control method either — every method there is click/select-shaped.
+- `WAYLAND-LANE.md` states outright: "Pointer drags, right-click, modifiers/chords and
+  IME/non-ASCII text are not yet exercised," and routes drag rows to `DISPLAY=:1` + the drive
+  lock. This manifest and orchestrator instructions explicitly forbid `DISPLAY=:1` and
+  `linux-drive.sh` for this slice.
+
+Claim: `could-not-reach` — same conclusion as the E08 sweep's independent re-confirmation: the
+gesture this row requires (press-hold-drag) has no primitive anywhere on the Wayland lane, and
+the one route that has one is barred to this slice. This is an environmental block, not a
+platform-impossible claim — the production drag/drop code itself reads as real on both ends.
