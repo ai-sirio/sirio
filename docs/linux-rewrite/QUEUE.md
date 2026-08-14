@@ -2270,3 +2270,49 @@ The technique that resolves it, now in `DEAD-MODELS.md`: when a symbol's name is
 to grep, **enumerate the module's exports instead** — `sort.rs` exports only `AttentionSort`
 (0 refs), and every export of `tiller_usage/src/codex.rs` is 0. Export lists are short,
 unambiguous and always greppable.
+
+## The Files context menu cannot follow the pointer — 2026-08-14, 09:40
+
+Observed live by fable at the tail of `ADJUDICATION-BACKLOG.md` ("a defect worth its own row":
+the file context menu renders at y≈149 when the click was at y≈841) and noted in passing on
+`F-EDIT-10`'s evidence. It has no row, no owner and no queue item — and it needs no drive to
+confirm, because the cause is structural in three places at once
+(`tiller_ui/src/right_panel.rs`):
+
+```rust
+struct FileContextMenu { path: PathBuf }                              // :113 — no position field
+fn open_file_context_menu(&mut self, path: PathBuf, cx)               // :315 — click point never passed
+    .left(theme.spacing.titlebar_control_spacing)                     // :336 — hardcoded
+    .top(px(HEADER_HEIGHT + TOOLBAR_HEIGHT))                          // :337 — hardcoded
+```
+
+The position is never captured, never threaded and never used. The menu renders in the panel's
+top-left corner **by construction**, for every right-click, which is exactly the y≈149 observed.
+
+### Do not invent a positioning scheme — we already have one
+
+Our own terminal pane does this correctly, in three lines
+(`tiller_terminal/src/lib.rs`):
+
+```rust
+self.context_menu = Some(event.position);   // :977  — capture the click point
+.left(position.x).top(position.y)           // :1335 — render there
+```
+
+The tab bar sits in between: `tab_context_menu_left()` (`main.rs:5806`, used at :5835) computes a
+horizontal offset, so it is positioned but only on one axis.
+
+**Three context menus, three different positioning strategies, one of them absent.** Copy the
+terminal's shape into `right_panel.rs`; it is our code, so no inspiration rule applies. Whoever
+takes it should decide whether the three should share one helper — that is a real design question
+and worth asking, but the one-file fix stands on its own and should not wait for it.
+
+### Two frames, two distinct menu defects — do not merge them
+
+- **P17, terminal menu** — the Files panel paints *over* an otherwise correctly-placed menu
+  (z-order; both are GPUI elements so paint order is ours). Recorded on `F-TERM-UI-01`.
+- **This one, file menu** — the menu is in the wrong *place*. Different file, different cause,
+  different fix.
+
+Both are "the context menu looks wrong in a screenshot", which is exactly why they need to stay
+separate: a driver who reads one and sees the other will report a fix that is not there.
