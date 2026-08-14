@@ -37,3 +37,26 @@ and request an explicit permission option card instead of auto-editing-with-reve
 
 Captures: `reference/linux-progress/drive-E03-chat/02-f05-connecting-send.png`,
 `02-f05-mid.png`, `02-f05-write-mid.png`.
+
+## F-CHAT-20 (ledger line 169, half-proven going in)
+
+Follow half already proven live (pass 17). Attempted the missing half: manual-scroll-ownership
+(scroll away mid-stream stops follow until re-pinned).
+
+Reproduced a long stream live: sent "Write a numbered list from 1 to 80…" to the same live
+Claude Code agent and captured mid-stream (`02-f20-mid-stream.png`, transcript visibly filling
+with numbered lines, viewport pinned to the growing tail — consistent with the already-proven
+follow half).
+
+**Claim: could-not-reach the manual-scroll half on this lane.** The follow implementation is
+GPUI `ListState`/`FollowMode::Tail`, which only leaves tail-follow on a real scroll-wheel/axis
+event. `Scripts/wayland-drive.sh`'s DSL exposes only `click`/`move`/`type`/`key` — its virtual
+pointer (`Scripts/wayland-virtual-pointer.c`) implements `motion_absolute`/`button`/`frame` only,
+no `axis`/scroll event, confirmed by reading the source (not run — no compiling, per lane
+rules). `key`-based Page Up/Down goes through `wtype` as keyboard input, not a wheel event, and
+does not exercise the same code path the row's clause describes ("scroll up mid-stream"). No
+gesture available on this lane reaches the discriminating input; this half needs the
+`DISPLAY=:1` lane's real pointer-wheel support or a scroll-capable virtual pointer, neither of
+which this slice may invoke/build.
+
+Capture: `reference/linux-progress/drive-E03-chat/02-f20-mid-stream.png`.
