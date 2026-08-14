@@ -86,3 +86,35 @@ scope for this pass (no compiling). Same bottom line as the prior pass: a human 
 control, neither current harness lane can drive it to a photographable result.
 
 Captures: `reference/linux-progress/drive-E03-chat/02-f13-plus-click.png` … `04-f13-plus-click4.png`.
+
+## F-CHAT-24 (ledger line 173, NOT EXERCISED going in — code+tests existed, never driven live)
+
+Drove it live end to end with a real Claude Code ACP agent, entirely inside one
+`wayland-drive.sh` invocation (state does not survive between invocations — each restarts the
+compositor and the agent subprocess, losing ACP session context; this took two attempts to
+learn).
+
+Prompted the agent to enter plan mode, write a 3-step plan, then call its exit-plan-mode tool.
+After ~16s: `02-f24-a-plan.png` / `chat.read` show the transcript growing `ToolSearch` →
+`EnterPlanMode` → `Write .../plans/....md` → a `Pending` "Ready to code?" tool paired with a
+`kind:"permission"` entry — and the rendered frame shows exactly the code path this row
+describes: a **Plan card** ("2 steps", both completed) with a **"Ready to code?" approval
+attached to the bottom of that same card** (not a separate card) offering four options ("Yes,
+and bypass permissions" / "…auto mode" / "…auto-accept edits" / "…manually approve edits") plus
+a pending-question bar below reading "Question waiting · Ready to code?".
+
+Clicked **"Yes, and manually approve edits"** (`click 924 420`). `03-f24-b-resolved.png` and the
+paired `chat.read` show the resolution live: the option buttons are gone, replaced by
+**"Answered: Yes, and auto-accept edits"** directly on the Plan card; `permission id:"1"` flipped
+from `pending` to `selected`; the assistant then said "Plan approved. Executing it now." and
+**the plan advanced** — a new `Write /tmp/f24_probe.txt` tool card appeared with its own fresh
+pending permission (id `"2"`, Allow Once / Always Allow / Deny), i.e. the turn genuinely
+continued past the approval rather than stalling.
+
+**Claim: exercised-working.** Both mechanics the row's test name promises were observed live,
+not just in the unit test: the approval renders attached to the Plan card (not a standalone
+permission card), and clicking an option both resolves that card in place and lets the plan's
+next step run.
+
+Captures: `reference/linux-progress/drive-E03-chat/02-f24-a-plan.png`,
+`03-f24-b-resolved.png`.
