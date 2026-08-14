@@ -94,3 +94,84 @@ Captures: `reference/linux-progress/drive-E10-persist+sid+agent+per/02-migration
 recorded above are reproducible with the `python3`/`sqlite3` snippet in this session's shell
 history; not re-saved as a script file since it is three inline `CREATE TABLE` statements
 copied from `migrate_v1`.
+
+## F-PER-08 (ledger line 244)
+
+**Ledger note's gap**: "the settings socket can read General/Permissions but exposes no
+mutation path for the required setting + browser grant. Restart was exercised; the
+persistence roundtrip was not." VERIFY is a conjunction: change a general setting **and**
+grant a browser origin, quit/relaunch, confirm **both** survive.
+
+**General-setting half — driven live, survives restart.** The socket indeed has no mutation
+method (confirmed again: `system.capabilities` lists no `settings.set`), but the row's own
+VERIFY only requires the setting to change, not by which route — the General panel's
+"Auto-rename tabs and agents" toggle is a real, on-screen, mouse-driven control, so that is
+the correct instrument, not a socket workaround. Opened Settings → General
+(`surface.settings.open` + `tab.select` + `surface.settings.select section=general` — all
+state/navigation, not the gesture under test), then **clicked the toggle by mouse**
+(`click 1288 356`, matching the resolution of the immediately preceding capture — the two
+must be taken with no intervening `shot` between them, since `shot` changes the output
+resolution and stale coordinates silently miss the target, which is what produced several
+false negatives before landing this one). Confirmed on-screen the switch turned on
+(`reference/linux-progress/drive-E10-persist+sid+agent+per/03-post-click-1715.png`) and via
+`ctl surface.settings.select section=general` reading `"autoNaming":"true"`. Killed and
+relaunched the app (a fresh `wayland-drive.sh` invocation — full process exit, not a
+soft reset) and reopened Settings → General: `"autoNaming":"true"` again, and the same toggle
+renders **on** in the fresh process
+(`reference/linux-progress/drive-E10-persist+sid+agent+per/02-after-relaunch-general.png`).
+Genuine roundtrip: changed, process killed, relaunched, still changed.
+
+**Browser-origin half — could not reach on this lane.** `save_browser_origin_grant`
+(`main.rs:4578`) fires only from `BrowserEvent`s the embedded webview surface emits when a
+page requests permission (`surface.for_each` over `TabContent::Browser`); there is no socket
+method that grants an origin directly. Per `WAYLAND-LANE.md`, the embedded browser's chrome
+renders here but its content does not (`Wayland(...)` handle rejected, needs an X11 window
+handle), so no page can ever run the JS that requests a grant, and the "Permissions" panel
+correctly reads `"No browser origins have been granted."` throughout — not a defect, just the
+half of this row that belongs on the X11 lane, which this slice does not use.
+
+**Also recorded, unrelated to this row but observed while driving it**: launching against a
+completely empty catalog self-seeds a project for the running binary's own git checkout (seen
+as `tiller` / `rust/gpui-rewrite` (Primary) / `linux/gpui-waku`, this exact worktree) rather
+than starting with zero projects — worth a routing note for any future row whose precondition
+is "no projects at all".
+
+Captures: `reference/linux-progress/drive-E10-persist+sid+agent+per/03-post-click-1715.png`,
+`reference/linux-progress/drive-E10-persist+sid+agent+per/02-after-relaunch-general.png`,
+`reference/linux-progress/drive-E10-persist+sid+agent+per/02-after-click-permissions-nav.png`
+(Permissions panel, confirming the browser-grant list stays empty).
+
+## F-SID-12 (ledger line 81) — could-not-reach
+
+Missing half per `UNPROVEN-ROWS-RECIPES.md`: right-click a worktree row → Set as Primary →
+report the row and the palette's Set/Unset Primary offer → relaunch → report which worktree
+carries the marker. `wayland-drive.sh`'s `click` action is hard-wired to `BTN_LEFT`
+(`Scripts/wayland-virtual-pointer.c:132,137` — literal `0x110`, no button parameter), and
+`WAYLAND-LANE.md` states right-click is not yet exercised on this lane and routes it to
+`DISPLAY=:1`, which this slice is barred from using. No amount of retrying closes this from
+Wayland; the catalog half (`set_primary_flips_the_application_level_marker`) already stands
+per the existing ledger note and was not re-driven, since re-driving a test is not a
+live-drive advance. `could-not-reach`: right-click is not an available gesture on this lane.
+
+## F-AGENT-SAFE-01 (ledger line 472) — could-not-reach
+
+Missing half: skill-provisioning management-marker/overwrite-refusal logic. Re-confirmed by
+grep (read-only, no `rust/` edits) immediately before driving: no hits for
+`management.marker`, `managed_by_tiller`, `overwrite.*refus`, or `skill.*provision` anywhere
+under `tiller_agents/src` or `tiller_project/src`. There is no code path to drive — the
+feature does not exist in this build, so no live gesture can exercise it. `could-not-reach`:
+absent code, not a reachability problem with the lane.
+
+## F-PERSIST-DB-06 (ledger line 509) — could-not-reach
+
+Missing half: agent-account persistence and lookup (the harder conjunct; the session-ref half
+already stands). Checked whether `P93` (named in the existing note as the crate that would
+close this) has landed: `tiller_usage/src/account.rs` now exists with
+`AgentAccountIdentity::parse_claude_json` and does have one production caller
+(`tiller_ui/src/settings.rs:548`) — a change since the note was written, worth flagging. But
+that caller is `discover_claude_identity`, a **live shell-out** (`claude auth status`) used
+only to render the Settings → AI Providers account line; it reads nothing from and writes
+nothing to the database. No `INSERT`/`SELECT` against any account-shaped table exists in
+`tiller_persistence`, so there is still no persisted account record for the app to look up on
+restore. `could-not-reach`: the gap is a missing store, not a missing gesture — nothing to
+drive live until a persistence path is built.
