@@ -160,3 +160,43 @@ and negative control); the "real agent browser action" half of the clause has no
 trigger anywhere in the codebase to drive.
 
 ---
+
+## F-BRW-09 (ledger line 258) — exercised-broken
+
+**Clause** (`docs/linux-rewrite/01-inventory-app.md:130`): "Open an HTTP link in Tiller's
+internal browser and bypass it to the system browser with the documented modifier — VERIFY:
+Click an HTTP link in chat, confirm an internal browser tab opens, then use the human
+Cmd+Shift gesture on another link and confirm the system browser opens."
+
+**Drove:** `ctl surface.chat.open` → `tab.select index=1` → composed and sent a **user** chat
+message containing markdown link syntax `[open-example-link](https://example.com)` via
+`surface.chat.compose`/`surface.chat.send` (surfaceId `default-chat`) — a real ACP turn, agent
+began "working"/streaming (`f-brw-09-chat-link-rendered` screenshot, `Opus Plan Mode`, `working`
+status visible).
+
+**Observed live:** the sent user message rendered in the transcript bubble as the **literal raw
+text** `[open-example-link](https://example.com)` — not as a clickable link. No blue/accent
+styling, no hand cursor affordance visible in the capture.
+
+**Confirmed by source why:** `Entry::User(text)` (`rust/crates/tiller_ui/src/chat.rs:3606`)
+renders through `Self::render_plain_text(...)`, which does **not** parse markdown or register
+any `links` entries — only `Entry::Assistant`/response entries go through
+`Self::render_markdown` (`:3672`), which is the sole path that populates the clickable `links`
+list consumed by the mouse-up handler at `:769`. So a link typed or pasted by the human into
+chat is never clickable at all — only a link the *agent* echoes back in its own reply can be.
+
+**Further confirmed by source, the second half of the clause:** the one click handler that does
+exist for a chat link (`rust/crates/tiller_ui/src/chat.rs:777`, on `MouseUpEvent`) unconditionally
+calls `cx.open_url(target)` — GPUI's system-open call — with **no modifier check** and **no
+reference to `BrowserLinkTarget`/`open_link`/`Browser` internal-tab routing anywhere in
+`chat.rs`** (confirmed by `grep -rn "BrowserLinkTarget\|open_link" chat.rs` → no matches). Every
+chat link, clicked with or without a modifier, always opens the system browser; no path ever
+opens Tiller's own internal Browser tab from chat.
+
+Capture: `reference/linux-progress/drive-E06-brw/02-f-brw-09-chat-link-rendered.png` (raw
+markdown text visible, unclickable, in the sent user bubble).
+
+`claim`: exercised-broken. A live drive shows a chat-typed HTTP link is not even rendered as a
+link (only agent-authored links are), and the code for the one link-click path that does exist
+always opens the system browser regardless of modifier — the internal-tab default and the
+modifier-bypass distinction the clause describes do not exist in this build.
