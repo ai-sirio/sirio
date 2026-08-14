@@ -89,9 +89,7 @@ impl Composer {
     }
 
     /// The plain text runs, chips omitted — what a placeholder check or a
-    /// text-only consumer sees. Test-only today: production reads `parts()`
-    /// and `is_empty()` directly.
-    #[cfg(test)]
+    /// text-only consumer sees.
     pub(crate) fn text(&self) -> String {
         let mut text = String::new();
         for part in &self.parts {
