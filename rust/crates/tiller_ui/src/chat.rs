@@ -6,12 +6,12 @@
 
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    Edges, Element, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FollowMode, FontStyle, FontWeight,
-    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText,
-    KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString,
-    StyledText, Task, UnderlineStyle, Window, actions, canvas, div, list, point, prelude::*, px,
-    quad, rgb, transparent_black,
+    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    FollowMode, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
+    InspectorElementId, InteractiveText, KeyBinding, KeyDownEvent, LayoutId, ListAlignment,
+    ListSizingBehavior, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathBuilder, Pixels, Rgba, SharedString, StyledText, Task, UnderlineStyle, Window, actions,
+    canvas, div, list, point, prelude::*, px, quad, rgb, transparent_black,
 };
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -868,6 +868,10 @@ pub struct Chat {
     overflow_focus: FocusHandle,
     /// Follow Edited Files toggle state.
     following_edited_files: bool,
+    /// F-CHAT-14: throttles `maybe_follow_location` the same 500ms window
+    /// as the Swift original's `followThrottle`, so a burst of location
+    /// patches on one tool call doesn't open the same file repeatedly.
+    last_follow_at: Option<std::time::Instant>,
     /// Effort-level selector advertised by the session.
     effort: Option<EffortOption>,
     /// Test seam: paths handed to the attach control instead of the native
@@ -984,6 +988,7 @@ impl Chat {
             attach_task: None,
             overflow_open: false,
             following_edited_files: false,
+            last_follow_at: None,
             effort: None,
             #[cfg(test)]
             attach_test_paths: Vec::new(),
@@ -1156,6 +1161,7 @@ impl Chat {
                 raw_input,
                 raw_output,
             } => {
+                self.maybe_follow_location(&locations, cx);
                 if is_subagent_tool_call(&title, raw_input.as_deref()) {
                     self.push_entry(Entry::SubagentTask {
                         id,
@@ -1210,6 +1216,9 @@ impl Chat {
                 raw_input,
                 raw_output,
             } => {
+                if let Some(locations) = &locations {
+                    self.maybe_follow_location(locations, cx);
+                }
                 if let Some(task_index) = self.subagent_task_position(&id) {
                     if let Some(Entry::SubagentTask {
                         title: existing_title,
@@ -1296,6 +1305,9 @@ impl Chat {
                 raw_input,
                 raw_output,
             } => {
+                if let Some(locations) = &locations {
+                    self.maybe_follow_location(locations, cx);
+                }
                 if let Some(task_index) = self.subagent_task_position(&id) {
                     if let Some(Entry::SubagentTask { status: existing_status, .. }) =
                         self.entries.get_mut(task_index)
@@ -2041,6 +2053,100 @@ impl Chat {
         cx.notify();
     }
 
+    // --- File drop (F-CHAT-13) ---
+
+    /// Mirrors F-CHAT-05's rule for typed input: a composer that cannot
+    /// accept a keystroke must not quietly accumulate chips from a drop
+    /// either. Matches Swift's `ChatPaneView.canAcceptDrop`.
+    fn can_accept_drop(&self) -> bool {
+        self.pending_question().is_none()
+    }
+
+    /// The whole chat pane is the drop target for files dragged in from
+    /// outside the app (the desktop file manager), matching the Swift
+    /// original's `.onDrop(of: [.fileURL])` on `ChatPaneView` + `FileDrop`.
+    /// A recognized image extension becomes an attachment chip exactly like
+    /// the "+" picker, just with the drop path's wider format list; anything
+    /// else becomes a `@`-style file chip; anything unreadable or oversized
+    /// is rejected through the same transient-message path as
+    /// `apply_attached_paths`, one message per rejected item.
+    fn drop_external_paths(
+        &mut self,
+        paths: &ExternalPaths,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_accept_drop() {
+            return;
+        }
+        let paths = paths.paths().to_vec();
+        if paths.is_empty() {
+            return;
+        }
+        // Ten megabytes: past this point a stray drop would stall a turn
+        // (base64 costs about a third more than the file) instead of
+        // enriching it — the same cap as the Swift original's `FileDrop`.
+        const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+        fn image_mime(path: &Path) -> Option<&'static str> {
+            let extension = path
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            match extension.as_str() {
+                "png" => Some("image/png"),
+                "jpg" | "jpeg" => Some("image/jpeg"),
+                "gif" => Some("image/gif"),
+                "webp" => Some("image/webp"),
+                _ => None,
+            }
+        }
+        let mut rejections: Vec<String> = Vec::new();
+        for path in &paths {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            if let Some(mime) = image_mime(path) {
+                match std::fs::metadata(path) {
+                    Ok(meta) if meta.len() > MAX_IMAGE_BYTES => {
+                        rejections.push(format!("{name} is too large (max 10 MB)"));
+                        continue;
+                    }
+                    Err(_) => {
+                        rejections.push(format!("Couldn't read {name}"));
+                        continue;
+                    }
+                    _ => {}
+                }
+                let Ok(bytes) = std::fs::read(path) else {
+                    rejections.push(format!("Couldn't read {name}"));
+                    continue;
+                };
+                use base64::Engine as _;
+                let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+                self.composer.insert_chip_at_cursor(ComposerChip::Image {
+                    mime: mime.to_string(),
+                    base64,
+                });
+            } else {
+                // Relative to the worktree when the file lives inside it
+                // (matching the `@`-mention chip's own path convention),
+                // absolute otherwise.
+                let chip_path = path
+                    .strip_prefix(&self.agent_cwd)
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.display().to_string());
+                self.composer
+                    .insert_chip_at_cursor(ComposerChip::File { path: chip_path });
+            }
+        }
+        self.refresh_token_popups(cx);
+        if !rejections.is_empty() {
+            self.show_attach_error(rejections.join("; "), cx);
+        }
+        cx.notify();
+    }
+
     /// Removes one chip at the given part index (its × control).
     fn remove_composer_chip(&mut self, part_index: usize, cx: &mut Context<Self>) {
         self.composer.remove_chip(part_index);
@@ -2049,6 +2155,32 @@ impl Chat {
     }
 
     // --- Overflow menu (F-CHAT-14) ---
+
+    /// The toggle's other half: while Follow Edited Files is on, the most
+    /// recent location a tool call reports is opened the same way an
+    /// edit-summary card's own "open" link does — `ChatEvent::OpenFile`,
+    /// which the host already routes to a file tab (`Workspace::bind_chat`).
+    /// Reusing that event means Follow needs no new host-side wiring: it
+    /// rides the same seam F-CHAT-32 already built. Throttled 500ms, same
+    /// as the Swift original's `followThrottle`, so a burst of location
+    /// patches on one tool call doesn't reopen the same file repeatedly.
+    fn maybe_follow_location(&mut self, locations: &[ToolCallLocationInfo], cx: &mut Context<Self>) {
+        if !self.following_edited_files {
+            return;
+        }
+        let Some(location) = locations.last() else {
+            return;
+        };
+        const FOLLOW_THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_follow_at
+            && now.duration_since(last) < FOLLOW_THROTTLE
+        {
+            return;
+        }
+        self.last_follow_at = Some(now);
+        cx.emit(ChatEvent::OpenFile(location.path.clone()));
+    }
 
     fn toggle_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.overflow_open = !self.overflow_open;
@@ -5250,9 +5382,21 @@ impl Chat {
                                     .text_size(typography.caption2)
                                     .text_color(colors.meta)
                                     .hover(|style| style.bg(colors.chat_row_hover))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
+                                        // F-CHAT-12: the × removes the chip
+                                        // from the model correctly on its
+                                        // own, but nothing else in the click
+                                        // path re-requests composer focus —
+                                        // the ancestor container only grabs
+                                        // it on its own on_mouse_down, which
+                                        // this click never reaches (the chip
+                                        // stops propagation). Without this,
+                                        // the composer is left keyboard-dead
+                                        // until the user clicks the text
+                                        // area again.
                                         remove_entity.update(cx, |chat, cx| {
                                             chat.remove_composer_chip(index, cx);
+                                            chat.composer_focus.focus(window, cx);
                                         });
                                     })
                                     .child("×"),
@@ -5555,10 +5699,16 @@ impl Render for Chat {
         let transcript_ranges = self.transcript_entry_ranges();
         let transcript_focus = self.transcript_focus.clone();
         let question_answer = self.question_answer.clone();
+        // F-CHAT-13: captured once per render, same as Swift's `canAcceptDrop`
+        // — a permission-wait that starts mid-drag simply means the next
+        // render (the composer disabling itself already forces one) stops
+        // offering the drop target.
+        let can_accept_drop = self.can_accept_drop();
 
         div()
             .id("chat-root")
             .debug_selector(|| "chat-root".into())
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -5582,6 +5732,9 @@ impl Render for Chat {
             .on_action(cx.listener(Self::send_answer_action))
             .on_action(cx.listener(Self::cancel_answer_action))
             .on_key_down(cx.listener(Self::on_composer_key))
+            .when(can_accept_drop, |this| {
+                this.on_drop(cx.listener(Self::drop_external_paths))
+            })
             .child(
                 div()
                     .id("chat-transcript")
@@ -5741,6 +5894,40 @@ impl Render for Chat {
                             .child(self.agent_cwd.display().to_string()),
                     ),
             )
+            .child({
+                // F-CHAT-13: the "Drop files to attach" overlay, matching
+                // Swift's `ChatPaneView` — invisible by default, revealed by
+                // gpui's own `drag_over` style refinement while an
+                // `ExternalPaths` drag sits over the pane. Not drawn at all
+                // while the composer can't accept input, matching the
+                // top-level `on_drop` binding just above.
+                let accent = theme.colors.accent;
+                let overlay = div()
+                    .id("chat-drop-overlay")
+                    .debug_selector(|| "chat-drop-overlay".into())
+                    .invisible()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.composer)
+                    .border_1()
+                    .border_color(accent)
+                    .bg(accent.opacity(0.08))
+                    .child(
+                        div()
+                            .id("chat-drop-overlay-label")
+                            .debug_selector(|| "chat-drop-overlay-label".into())
+                            .text_color(theme.colors.title)
+                            .child("Drop files to attach"),
+                    );
+                if can_accept_drop {
+                    overlay.drag_over::<ExternalPaths>(|style, _, _, _| style.visible())
+                } else {
+                    overlay
+                }
+            })
     }
 }
 
@@ -6068,7 +6255,8 @@ fn split_diff_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
@@ -8707,6 +8895,142 @@ mod tests {
         assert!(chat.read_with(&cx.cx, |chat, _| {
             chat.composer.draft().images.is_empty()
         }));
+
+        // F-CHAT-12: the × must also re-request composer focus. Type
+        // immediately after the click, with no intervening click back into
+        // the field — a real user's next gesture — and the keystrokes must
+        // land, not vanish into a keyboard-dead composer.
+        cx.simulate_input("still here");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().text),
+            "still here",
+            "the composer must accept keystrokes right after chip removal, with no re-click"
+        );
+    }
+
+    /// F-CHAT-13: dropping files from outside the app (an `ExternalPaths`
+    /// drag, the platform's stand-in for a real desktop-file-manager drop)
+    /// onto the chat pane attaches a supported image as an image chip, a
+    /// non-image file as a `@`-style file chip with a worktree-relative
+    /// path, and rejects an oversized image with a transient message —
+    /// mirroring Swift's `FileDrop.classify` + `ComposerDropApplier.apply`.
+    #[gpui::test]
+    async fn dropping_external_files_attaches_chips_and_rejects_the_oversized_one(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        let png = dir.0.join("photo.png");
+        std::fs::write(&png, b"not really a png but the type check is extension-based")
+            .expect("write png");
+        std::fs::create_dir_all(dir.0.join("src")).expect("create src dir");
+        let txt = dir.0.join("src/notes.txt");
+        std::fs::write(&txt, b"todo").expect("write txt");
+        let huge = dir.0.join("huge.png");
+        std::fs::write(&huge, vec![0u8; 10 * 1024 * 1024 + 1]).expect("write huge png");
+        let cwd = dir.0.clone();
+
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
+            Chat::from_test_command(command, cwd, cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        assert!(
+            cx.debug_bounds("chat-drop-overlay").is_some(),
+            "the drop target exists (invisibly) whenever the composer can accept input"
+        );
+
+        let paths = ExternalPaths(vec![png.clone(), txt.clone(), huge.clone()].into_iter().collect());
+        cx.simulate_event(FileDropEvent::Entered {
+            position: composer.center(),
+            paths,
+        });
+        cx.simulate_event(FileDropEvent::Submit {
+            position: composer.center(),
+        });
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-chip-image").is_some(),
+            "the supported image becomes an attachment chip"
+        );
+        assert!(
+            cx.debug_bounds("composer-chip-file").is_some(),
+            "the non-image file becomes a @-style file chip"
+        );
+        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
+        assert_eq!(draft.images.len(), 1, "only the one valid image attaches");
+        assert_eq!(
+            draft.mention_paths,
+            vec!["src/notes.txt".to_string()],
+            "the file chip's path is relative to the agent's cwd"
+        );
+        assert!(
+            cx.debug_bounds("attach-error").is_some(),
+            "the oversized image is rejected with the transient message"
+        );
+    }
+
+    /// F-CHAT-13 + F-CHAT-05: a drop that arrives while a permission is
+    /// pending must be refused outright — no chip, no message — the same
+    /// rule `insert_text`/`send` already enforce for the keyboard.
+    #[gpui::test]
+    async fn dropping_external_files_is_refused_during_permission_wait(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let png = dir.0.join("photo.png");
+        std::fs::write(&png, b"not really a png but the type check is extension-based")
+            .expect("write png");
+        let cwd = dir.0.clone();
+
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "permission"]);
+            Chat::from_test_command(command, cwd, cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "may I?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+
+        // The same Entered+Submit sequence the happy-path test drives: with
+        // `can_accept_drop` false, `chat-root` never chained `.on_drop` this
+        // render (the overlay div is still drawn for layout purposes, just
+        // permanently `.invisible()` with no `.drag_over`/`.on_drop` bound),
+        // so gpui has nothing registered to call — the drop is a silent
+        // no-op, not a caught rejection.
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        let paths = ExternalPaths(vec![png.clone()].into_iter().collect());
+        cx.simulate_event(FileDropEvent::Entered {
+            position: composer.center(),
+            paths,
+        });
+        cx.simulate_event(FileDropEvent::Submit {
+            position: composer.center(),
+        });
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("composer-chip-image").is_none(),
+            "a drop during permission-wait must not add a chip"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.draft().images.is_empty()),
+            "a drop during permission-wait must not touch the draft"
+        );
     }
 
     /// F-CHAT-14: the overflow menu toggles Follow Edited Files on and off,
@@ -8793,6 +9117,109 @@ mod tests {
                 .any(|entry| matches!(entry, Entry::User(text) if text == "again"))
                 && chat.has_completed_turn
         });
+    }
+
+    /// F-CHAT-14: the toggle's other half — while Follow Edited Files is
+    /// on, a tool call reporting a location emits `ChatEvent::OpenFile`
+    /// for it (the same event an edit-summary card's own "open" link
+    /// uses, already wired by the host to a file tab); while it's off,
+    /// the same location never fires the event. A second location inside
+    /// the 500ms throttle window is dropped.
+    #[gpui::test]
+    async fn following_edited_files_opens_the_tool_calls_reported_location(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        // Off by default: a reported location opens nothing.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallStarted {
+                    id: "tool-1".into(),
+                    title: "Edit file".into(),
+                    status: "InProgress".into(),
+                    kind: "Edit".into(),
+                    content: vec![],
+                    locations: vec![ToolCallLocationInfo {
+                        path: PathBuf::from("src/lib.rs"),
+                        line: Some(3),
+                    }],
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+        });
+        assert!(
+            events.borrow().is_empty(),
+            "no follow while the toggle is off"
+        );
+
+        // On: the next reported location opens.
+        chat.update(cx, |chat, _| chat.following_edited_files = true);
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallUpdated {
+                    id: "tool-1".into(),
+                    title: None,
+                    status: None,
+                    kind: None,
+                    content: None,
+                    locations: Some(vec![ToolCallLocationInfo {
+                        path: PathBuf::from("src/other.rs"),
+                        line: None,
+                    }]),
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[ChatEvent::OpenFile(PathBuf::from("src/other.rs"))],
+            "a location reported while following opens that file"
+        );
+
+        // Throttled: a second location right after does not refollow.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallUpdated {
+                    id: "tool-1".into(),
+                    title: None,
+                    status: None,
+                    kind: None,
+                    content: None,
+                    locations: Some(vec![ToolCallLocationInfo {
+                        path: PathBuf::from("src/third.rs"),
+                        line: None,
+                    }]),
+                    raw_input: None,
+                    raw_output: None,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            events.borrow().len(),
+            1,
+            "a second location inside the throttle window does not refollow"
+        );
     }
 
     /// F-CHAT-17: the model picker offers the agent's advertised effort
