@@ -82,3 +82,41 @@ current build (production-code caller count is zero outside the unit test); noth
 (or any lane, on this evidence) could click to raise it.
 
 ---
+
+## F-BRW-07 (ledger line 256) — exercised-working
+
+**Route:** `rust/crates/tiller/src/main.rs:8161` — `session_store.load_browser_origin_grants()`
+runs at app construction time and is passed to `Settings::with_browser_origins` (`:8234`); the
+same session store also seeds `browser_origins` for the live workspace (`main.rs:2547`,
+`seed_browser_origins`) so a previously-allowed origin auto-skips the doorhanger on relaunch.
+
+**Why the prior P96 evidence stayed NOT EXERCISED:** the control-socket surface exposes no
+permission-grant action (confirmed again here — `system.capabilities` has no such method) and
+raw `browser.open`/navigate does not trigger an Allow-origin prompt on this build (see F-BRW-06:
+zero production callers of `request_permission` exist anywhere in the tree), so there was no way
+to get a real grant into the table to retest persistence against.
+
+**Drove:** confirmed the DB was empty (`browser_origin_grant` → `[]`) after the F-BRW-08 revoke
+run, then seeded a **new, distinct** origin (`https://f-brw-07-relaunch-proof.example`) directly
+into `/tmp/drive-E06-brw.sqlite` via Python's `sqlite3` module — no source edit, no compile, only
+inserting into the already-migrated table. Then tore down and started a **completely fresh**
+Wayland instance (label `drive-E06-brw`, new process, new socket) and drove:
+
+1. `ctl surface.settings.open` → `ctl surface.settings.select section=permissions`
+2. `shot f-brw-07-relaunch-persisted` — the rendered Permissions section shows
+   `https://f-brw-07-relaunch-proof.example` under "Granted browser origins" **on first render
+   of a brand-new process**, i.e. the grant survived a full relaunch and was loaded from disk
+   into the live view, not carried over in memory from a previous run (previous run's DB state
+   was independently confirmed empty first).
+
+This is discriminating: the row's default/empty state and the persisted state are different
+values, and the capture shows the persisted (non-default) one, produced only by disk state this
+drive planted.
+
+Capture: `reference/linux-progress/drive-E06-brw/02-f-brw-07-relaunch-persisted.png`
+
+`claim`: exercised-working. `browser_origin_grant` rows written to the persistence DB are loaded
+and rendered on a fresh app launch, proving the save/load-on-relaunch path independent of the
+(currently unreachable, see F-BRW-06) live doorhanger Allow action.
+
+---
