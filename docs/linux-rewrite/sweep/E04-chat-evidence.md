@@ -76,3 +76,38 @@ being called from the `TurnEnded` arm (chat.rs:1479) before the footer is pushed
 **Claim: exercised-working.** Both branches of the row's own description (a question exists
 unanswered; the turn ends; the card marks itself expired instead of staying stuck) were
 produced by a live drive, not inferred from source reading.
+
+## F-CHAT-33 — MCP-configuration-warning half
+
+Ledger row 182, prior verdict half-proven: the turn-error half is proven live (pass 17,
+killing the ACP subtree mid-stream); the MCP-configuration-warning half was never triggered.
+`ADJUDICATION-BACKLOG.md` already flagged this half as unnameable: "no turn-error/MCP-warning
+rendering found in chat.rs beyond `attach_error`. Cannot name a control."
+
+**What I drove.** Read `chat.rs` end to end for anything MCP-shaped rather than trying to
+provoke an MCP server misconfiguration blind (the recipe doc itself says report unreachable
+"if none is installed" rather than improvise one — and there is no MCP server configured in
+this worktree to misconfigure). `grep -in mcp rust/crates/tiller_ui/src/chat.rs` returns exactly
+one hit, a doc comment about MCP tool *output* size (`F-CHAT-23: … large MCP responses`), not
+about a configuration-warning UI. The error rendering path has a single `ErrorKind` variant:
+
+```rust
+enum ErrorKind {
+    Connection,
+}
+```
+
+Every place that constructs `Entry::Error` in the file (six call sites: chat.rs:502, 1496,
+1512, 1836, 2130, 2548/2563, 7127/7156) passes `ErrorKind::Connection`. There is no second
+variant, no `Mcp`/`Configuration`/`ToolConfig` kind, and no separate render arm keyed on one —
+confirmed by reading the full `Entry::Error` render arm alongside the type definition, not by a
+single grep. Repo-wide, `grep -rln mcp rust/crates --include=*.rs -i` (excluding tests) matches
+only this one file, this one doc-comment line.
+
+**Claim: could-not-reach — the code path does not exist to drive.** This is not "I couldn't
+find a way to trigger it live"; it's that the transcript's error rendering has exactly one kind
+and it is not MCP-configuration-shaped. The turn-error half stays proven per pass 17; the
+MCP-configuration-warning half stays owed because there is nothing in the current binary for a
+drive to reach — a defect/absence finding, not a coverage gap. (I did not edit any source to
+verify this, per the no-compile constraint; this is a read-only confirmation of the
+already-recorded backlog note, cross-checked against `4073297`.)
