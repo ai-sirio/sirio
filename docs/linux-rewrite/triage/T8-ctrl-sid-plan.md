@@ -283,3 +283,73 @@ not an inference from a sibling row.
 **size:** S (verification only, on current evidence).
 
 ---
+
+## F-CTRL-WORK-01 — `worktree.set --comment` persists
+
+**Ledger verdict:** FAILED — defective.
+
+**needs: build**
+
+The ledger's own corrected evidence is accurate on current code — I re-verified all of it.
+`ControlWorkspace.comment` (`main.rs:392-404`) really is documented "intentionally not
+persisted", and `set_worktree` (`main.rs:552-570`) only ever mutates that in-memory struct.
+Tracing further than the ledger did: the gap is structural, not a one-line oversight.
+
+- `ControlWorkspace` is rebuilt from scratch on every `sync_control_state()` call
+  (`main.rs:2707-2720`) via `ControlState::from_catalog` (`main.rs:414-443`), which
+  **hardcodes `comment: String::new()`** at `main.rs:432` — there is nowhere for a persisted
+  value to flow back in even if one existed on disk, because the source struct it reads from,
+  `session::CatalogWorktree` (`rust/crates/tiller/src/session.rs:365-368`), has **no `comment`
+  field at all** (only `branch`, `path`, `is_primary`).
+- The DB column is real and already wired at the `tiller_persistence` layer
+  (`WorktreeRecord.comment`, `rust/crates/tiller_persistence/src/model.rs:73`; upsert at
+  `db.rs:244`) — but nothing in `rust/crates/tiller/src/session.rs` ever reads or writes it.
+  `write_layout` and `write_catalog` (`session.rs:701-728`, `:787-839`) both construct fresh
+  `WorktreeRecord`s via `WorktreeRecord::new(...)` without ever setting `.comment`, so it is
+  always saved as `None` regardless of what a user set.
+- There is a **second, unrelated `comment` field** already sitting dead on
+  `tiller_project::Worktree` (`rust/crates/tiller_project/src/worktree.rs:33`, always
+  constructed as `None` at `:53` and never read or written anywhere else in the tree — I
+  grepped `\.comment\b` across `rust/crates` and it has zero other hits). This is a decoy: it
+  is not the type `session.rs`'s catalog actually uses (`session::CatalogWorktree`, not
+  `tiller_project::Worktree`), so wiring through *that* struct would not fix this row. Worth
+  flagging so nobody "fixes" the wrong `Worktree` type.
+- Restoration doesn't even read `WorktreeRecord`s to rebuild the live catalog in the first
+  place: `restore_catalog` (`session.rs:841-893`) rebuilds worktrees by **live git discovery**
+  (`discover_project`/`catalog_project`, `session.rs:576-608`), not from the `worktree` table.
+  So even a correct save wouldn't round-trip without also adding a merge step at load time that
+  joins the git-discovered worktree list against the DB's `comment` (and this project already
+  has one comparable merge for `is_primary`, worth checking whether that survives restart the
+  same way before assuming it's a template to copy — I did not chase that far).
+- Separately, `worktree.set` is handled **synchronously** inside the control-socket method
+  match (`main.rs:1439-1468`), never going through `queue_action`/`ControlAction` the way every
+  state-mutating control method that touches `self.project_catalog` does (`SelectWorktree`,
+  `CreateWorkspace`, etc., `main.rs:246-326`). Even if `CatalogWorktree` grew a `comment` field,
+  today's `set_worktree` has no path to the GPUI main thread's `self.project_catalog` to update
+  it there and trigger `self.session.schedule_catalog(...)` — it only ever touches the
+  socket-side `ControlState` snapshot.
+
+**files:**
+- `rust/crates/tiller/src/session.rs` (`CatalogWorktree` :365-368, `write_layout` :701-728,
+  `write_catalog` :787-839, `catalog_project` :576-608, `restore_catalog` :841-893) — needs a
+  new `comment` field and both a save-time write and a load-time merge.
+- `rust/crates/tiller/src/main.rs` (`ControlWorkspace` :392-404, `set_worktree` :552-570,
+  `ControlState::from_catalog` :414-443, the `"worktree.set"` handler :1439-1468, and likely a
+  new `ControlAction` variant + queue/dispatch arm so the socket handler can reach
+  `self.project_catalog` on the main thread) — needs the routing from socket to durable state.
+- `rust/crates/tiller_persistence/src/model.rs`, `db.rs` — already correct, no change expected.
+
+**approach:** first get a product decision — the evidence already flags this: does
+`worktree.set --comment` want to persist at all, or is "runtime annotation, gone on restart"
+the intended contract? If persistence is wanted: add `comment: Option<String>` to
+`session::CatalogWorktree`; make `set_worktree`'s handler route through a queued
+`ControlAction` that updates `self.project_catalog` on the main thread (not just
+`ControlState`) and calls `self.session.schedule_catalog(...)`; thread `.comment` through
+`write_catalog`'s `WorktreeRecord` construction; and add a git-discovery/DB merge step in
+`restore_catalog` (or wherever `is_primary` is merged, if it is) so a discovered worktree
+picks up its persisted comment by path.
+
+**size:** L. Touches the control-routing layer, the live catalog model, and the
+restore/save round-trip together — genuinely a small subsystem, not a one-file patch.
+
+---
