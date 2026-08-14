@@ -207,3 +207,106 @@ row's fix, since it needs its own live repro to confirm.
   :218-237, currently dead — needs its first real caller), `rust/crates/tiller/src/main.rs`
   (wherever the terminal context menu is invoked, to thread pane size/tab count down).
 - **size**: M
+
+---
+
+## `F-TAB-12` — FAILED — defective
+
+**Needs: build.** Part of the shared cause above. The Move Earlier/Move Later logic itself is
+already correct and unconditionally present in `tab_context_items()`
+(`rust/crates/tiller/src/main.rs:5745-5883`, the Move Earlier/Move Later block at :5796-5819) —
+right position-based enablement, right disabled reasons ("already the first/last tab"). This row
+needs nothing beyond the popover-visibility fix; once the menu paints on top instead of behind
+`centre-surface`, re-drive the exact P104 gesture (right-click the last tab, then the first tab,
+compare Move Earlier's presentation) to close it out.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`render_tab_context_menu` :5900-5923 and its mount
+  site :6451-6453 — same fix as F-TAB-02).
+- **size**: S (once the shared popover fix lands)
+
+---
+
+## `F-TAB-13` — FAILED — defective
+
+**Needs: build**, for the second conjunct only. This row has two independent conjuncts and
+P104 already scored the first live: right-click → Split Right inside the terminal pane produced
+a real, correct vertical split (`p104-g1-tab13-split-menu.png`/`-split-result.png`) — that half
+holds today and needs no further work. The second conjunct — right-click a *tab* and read every
+"Move to …" entry — hit the same "no menu appeared" wall as every other tab-strip right-click in
+this group. The item logic for that half is already correct too: `tab_context_items()`
+(:5838-5866) builds "Move to This Pane" (always disabled — a tab can't move to its own pane) and
+one "Move to Pane N" entry per other group, each individually enabled/disabled by whether other
+groups exist. Same fix, same file, as F-TAB-12.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`render_tab_context_menu` :5900-5923, mount site
+  :6451-6453).
+- **size**: S (once the shared popover fix lands)
+
+---
+
+## `F-TAB-14` — FAILED — defective
+
+**Needs: build.** Part of the shared cause above. Rename logic already exists and is wired: the
+menu's `Rename` item routes to `begin_tab_rename` and there's a drawn `tab-rename-field` with
+its own commit/key handling (`rust/crates/tiller/src/main.rs`, the `renaming`/`rename_draft`
+branch in `render_open_tab` at :5578-5604, and the Rename entry in `tab_context_items()` at
+:5764). The row's own two conjuncts (menu Rename → type → Enter, then Escape) are both gated on
+the same invisible popover; nothing else needs to change.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`render_tab_context_menu` :5900-5923, mount site
+  :6451-6453; rename field itself at :5578-5604 needs no change).
+- **size**: S (once the shared popover fix lands)
+
+---
+
+## `F-TAB-15` — FAILED — defective
+
+**Needs: build.** Part of the shared cause above. The close-control half of this row (click the
+✕) already PASSED independently and is unaffected — this row's remaining gap is specifically
+the *context-menu* Close path, which routes through the same invisible tab-strip popover
+(`TabContextAction::Close` in `tab_context_items()`, :5766, and `handle_tab_context_action`).
+Nothing to add beyond the shared fix.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`render_tab_context_menu` :5900-5923, mount site
+  :6451-6453).
+- **size**: S (once the shared popover fix lands)
+
+---
+
+## `F-TAB-16` — FAILED — defective
+
+**Needs: both.** This row is **not** part of the tab-strip-popover shared cause — its two
+conjuncts fail for a different reason, and `window.prompt()` itself is not suspect: GPUI paints
+its prompt dialogs at true window-root priority (`Window::draw`,
+`crates/gpui/src/window.rs:3218-3230`, painted after the whole root tree, the same mechanism
+`deferred()` uses), so a dirty-close confirm, if triggered, would be visible regardless of the
+F-TAB-02-family bug.
+
+The close-button code itself looks right: the strip's own `×` control calls
+`request_close_tab_by_id` (`rust/crates/tiller/src/main.rs:5709-5735`), which checks
+`tab_is_dirty` (:5688-5707) and only proceeds straight to `close_tab` when clean, otherwise
+raising `window.prompt(PromptLevel::Warning, "Close dirty tab?", ...)` (:5720-5726). The gap is
+almost certainly upstream of this function: P104's setup note records that a file opened from
+the Files panel never visibly became its own tab — it "replaced whatever the content pane
+already showed" (the live Chat view, in the recorded trial) — so the `×` click P104 drove
+actually closed the **Chat** tab, and `tab_is_dirty`'s `TabContent::Chat` branch
+(chat.`is_streaming()`) has no idea a file was dirty underneath it. Source reading contradicts
+part of that story though: `RightPanelEvent::OpenFile(path) => workspace.add_file_tab(path.clone(),
+cx)` (`main.rs:2738`) and `add_file_tab` (:4331-4391) do push a genuine new `OpenTab` with its
+own `TabContent::File`, which `tab_is_dirty`'s `TabContent::File` branch (:5696) *does* check via
+`view.read(cx).is_dirty()`. Both halves of the app read correctly in isolation; the live
+behaviour says otherwise. This needs an instrumented re-drive (log `self.tabs.len()` and each
+tab's title immediately after `add_file_tab` runs) before deciding whether the defect is in tab
+creation, in `FileView::is_dirty()`, or somewhere in between — hence "build", not a source-only
+fix.
+
+The two-dirty-tabs precondition (second conjunct) is blocked on the same open question: if a
+second file genuinely can't be open concurrently with a first, no amount of dialog-wiring work
+fixes this row until that's resolved. This overlaps `F-EDIT` rows in a different triage group —
+flagging the dependency rather than claiming it here.
+
+- **files**: `rust/crates/tiller/src/main.rs` (`request_close_tab_by_id` :5709-5735,
+  `tab_is_dirty` :5688-5707, `add_file_tab` :4331-4391, `RightPanelEvent::OpenFile` handler
+  :2738), `rust/crates/tiller_ui/src/right_panel.rs` (`open_file` :335-336, the double-click
+  gate at :500-512), `rust/crates/tiller_ui/src/editor.rs` (`FileView::is_dirty`).
+- **size**: M
