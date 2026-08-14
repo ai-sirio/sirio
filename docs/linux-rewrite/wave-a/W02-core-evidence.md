@@ -69,3 +69,50 @@ lock (`DISPLAY=:1`) is also off-limits to this slice, and even that lane's own d
 lacks a press/motion/release primitive for the virtual pointer.
 
 **Verdict left as:** NOT EXERCISED, unchanged — needs a human hand or a different drive tool.
+
+## `F-CORE-FILE-06`
+
+**Claim:** partially-exercised.
+
+**Drove:** Added a scratch git repo (`/tmp/w02file06-repo`, one file `testfile.txt`,
+outside this worktree — never touched anything under `rust/`), selected it as the current
+workspace over the socket (`workspace.select workspace=<scratch-wt-id>`), then double-clicked
+its file row in the real Files panel (`file-row` at `right_panel.rs:495`, reached at the
+computed on-screen position `TITLE_BAR_HEIGHT(32)+HEADER_HEIGHT(40)+TOOLBAR_HEIGHT(34)/2` from
+`main.rs`/`right_panel.rs`'s own layout constants) to drive `open_file` -> `add_file_tab` — this
+is genuinely `FileView`, not the Changes panel: opening it visibly replaced the terminal content
+with a distinct render (colour count and stddev of the main content region both dropped sharply,
+consistent with plain editor text replacing a terminal).
+
+Read `Editor::check_external`/`MarkdownDocument::refresh_from_disk`
+(`tiller_ui/src/editor.rs:547`, `tiller_markdown/src/document.rs:92`) first: a clean (non-dirty)
+buffer **silently reloads** on an external disk change and reports `Conflict::None` — the banner
+is design-reserved for the case where local edits and a disk change collide. So I drove two
+distinct gestures:
+
+1. **Clean-buffer external edit** (`echo >> testfile.txt` with no local edits made in the app):
+   captured before/after at matching resolution (1715x972) — pixel-identical in the editor
+   content region (`md5` equal on that crop), confirming the monitor's silent-reload path fires
+   without a banner, exactly as the code predicts. This is real evidence the
+   `FileSystemEventMonitor` -> `poll_file_system_events` -> `check_external` pipeline is live
+   and reacts to a real out-of-band inotify event — the thing the ledger's stale "not
+   exercised" verdict and the triage note's overclaim-correction both call for.
+2. **Dirty-buffer external edit** (clicked into the editor, `type LOCALEDIT_MARKER2`, then the
+   same external `echo >>`) to try to hit the `ChangedOnDisk` conflict-banner branch: inconclusive.
+   A large visual diff appeared between the pre-type and post-type captures (consistent with
+   typed text landing), but the post-external-edit capture was pixel-identical to the
+   pre-external-edit one in the editor content columns — no banner rendered. I cannot rule out
+   that the click into the editor missed `file-editor`'s focus target (a blind coordinate click,
+   not confirmed by `debug_bounds` at runtime) and the buffer was never actually marked dirty,
+   versus a genuine gap in the conflict path.
+
+**Observed:** silent-reload-on-clean-buffer path confirmed live; the `ChangedOnDisk` banner
+branch (dirty buffer + external edit) not confirmed — inconclusive, not disproven.
+
+**Captures:** `reference/linux-progress/wavea-W02-core/02-20-editor-open-a.png`,
+`04-22-after-edit-a.png` (clean-buffer pair, identical), `02-26-dirty-b.png`,
+`04-28-conflict-b.png` (dirty-buffer pair, inconclusive), plus intermediates 09/10/11/13-19/23-25.
+
+**Verdict left as:** half-proven (upgraded from NOT EXERCISED) — the silent-reload half is now
+real evidence the pipeline this row cares about is live and distinct from the Changes panel; the
+conflict-banner half remains owed.
