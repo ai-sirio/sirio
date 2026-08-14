@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/tiller_terminal-b07f251796f7a288)
+
+running 2 tests
+test tests::critic2_rapid_resizes_coalesce_to_one_pty_winch ... ok
+test view_tests::critic2_rapid_output_burst_coalesces_far_below_line_count ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 2.16s
+
