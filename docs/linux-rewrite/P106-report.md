@@ -664,4 +664,191 @@ context menu itself is also input-gated on this lane.)
 
 ---
 
-*(batch 2 — F-TAB-18/23/24/28, F-CHG-01/20, F-PER-07 — follows)*
+## Batch 2 — F-TAB-18/23/24/28, F-CHG-01/20, F-PER-07
+
+### F-TAB-18 — drag a tab to reorder the strip (census: BUILT)
+
+The clause is a drag end-to-end, and no socket method moves a tab (none of the 53
+`system.capabilities` methods is a reorder). What was drivable:
+
+- Precondition staged and captured: a four-tab strip — Chat, Terminal, Changes, Browser —
+  visible in `p106-fable-08-chg01-changes-tab.png`, `-09-tab01-browser-tab.png`,
+  `-17-win07-relaunch-autorestored.png`.
+- Wiring re-read at the render site (not test code): the tab element carries
+  `.on_drag(tab_drag, …)` (main.rs:5630) and `.on_drag_move::<RowDrag>` (:5631) which calls
+  `preview_tab_reorder` (:5635, defined :3360). Production-wired, matching the census.
+
+Owed: gesture — press-drag a tab to a different strip position and drop; observe the new
+order render.
+
+### F-TAB-23 — terminal splits in all four directions (census: BUILT)
+
+Driven — the split machinery itself, all four directions, via `pane.split`:
+
+- `pane.split direction=left` on the Browser tab's pane →
+  `p106-fable-10-tab23-split-left-on-browser.png`. **Placement anomaly for the critic:** the
+  new terminal pane appeared on the RIGHT half, browser on the left — `direction=left` and
+  `direction=right` produced visually identical placement in my frames.
+- `pane.split direction=right`, `=up`, `=down` on the Terminal tab →
+  `p106-fable-11-tab23-split-right.png`, `-12-tab23-split-up.png`,
+  `-13-tab23-split-down.png` — ending in the expected layout of one left pane plus a right
+  column of three.
+
+All splits created live panes; verbatim `panel.list` after the four splits (still true at
+write time):
+
+```
+{"id":"fable","ok":true,"result":{"panels":"[{…\"id\":\"pane-0\",\"tab\":\"Chat\"…},{…\"id\":\"pane-1\",\"tab\":\"Terminal\"…},{…\"id\":\"pane-2\",\"tab\":\"Changes\"…},{…\"id\":\"pane-3\",\"tab\":\"Browser\"…},{…\"id\":\"pane-4\",\"tab\":\"Browser\"…},{…\"id\":\"pane-5\",\"tab\":\"Terminal\"…},{…\"id\":\"pane-6\",\"tab\":\"Terminal\"…},{…\"id\":\"pane-7\",\"tab\":\"Terminal\"…}]"}}
+```
+
+The split layout also survived quit + relaunch (`-17-win07-relaunch-autorestored.png`,
+reported under F-WIN-07).
+
+The clause's *menu* route: all four items exist with the labels the clause names — "Split
+Left" / "Split Right" / "Split Above" / "Split Down" (context_menu.rs:68-84), dispatching
+typed `SplitLeft`/`SplitRight`/`SplitAbove`/`SplitDown` actions (:15-18). The ledger's
+"only right/down" is stale against this file. Whether the menu route and `pane.split`
+converge on identical placement I cannot say from this lane.
+
+Owed: gesture — right-click a terminal pane, click each of the four Split items.
+
+### F-TAB-24 — Escape cancels an in-progress tab drag (census: PARTIAL — drag built, cancel absent)
+
+Built conjunct (the drag): same input bar as F-TAB-18 — nothing socket-reachable; wiring
+confirmed at main.rs:5630-5635.
+
+Missing conjunct re-verified — needle `grep -in escape rust/crates/tiller/src/main.rs`:
+every production hit is either the F-SET-02 settings-escape (global binding :162, handler
+:6866) or the tab-**rename** cancel (:6091). No handler cancels a drag; `grep -n
+"drag_cancel\|cancel_drag"` over `rust/crates/tiller/src/` returns nothing. The census's
+missing half stands.
+
+Owed: gesture — begin dragging a tab, press Escape before dropping, observe the strip
+return to its original order (expected to fail per the re-verified absence — but the trial
+is what converts it).
+
+### F-TAB-28 — ⌘W closes the active tab, confirming when dirty (census: BUILT)
+
+State half driven as far as the lane reaches:
+
+- The chord is bound, twice: `KeyBinding::new("cmd-w", CloseTab)` main.rs:2582 and
+  `KeyBinding::new("ctrl-w", CloseTab)` :2583, dispatching `handle_close_tab` (:6642). The
+  ledger's pass-12 note ("no ⌘W; ctrl-alt-w closes a pane") is stale against these lines.
+- No socket method closes a *tab* — `pane.close` exists but closes a pane, a different
+  clause — so the close path itself could not be exercised without input.
+- The dirty predicate that gates the confirm is live and was driven indirectly under
+  F-TAB-01: `tab_is_dirty` (:5766) fed the red-orange dirty dot visible in the strip frames.
+
+Owed: gesture — press ctrl-w on a clean active tab (expect close), then on a dirty one
+(expect the confirm; Cancel keeps the tab).
+
+### F-CHG-01 — Changes as a surface, not a right-panel mode (census: PARTIAL)
+
+Driven conjunct — the Changes surface:
+
+- `ctl surface.changes.open` → tab created/selected via `tab.select index=3` →
+  `p106-fable-08-chg01-changes-tab.png`: header "Local changes (49)", sections Changed (2)
+  and Untracked (47), buttons Stage all / Expand All / Collapse All / Discard all.
+- The open reply is the *loading-state* snapshot — verbatim (re-issued at write time):
+
+```
+{"id":"fable","ok":true,"result":{"changed":"[]","changedCount":"0","error":"","loading":"true","ready":"false","sections":"[{\"count\":\"0\",\"files\":\"[]\",\"section\":\"Staged\"},{\"count\":\"0\",\"files\":\"[]\",\"section\":\"Changed\"},{\"count\":\"0\",\"files\":\"[]\",\"section\":\"Untracked\"}]","staged":"[]","stagedCount":"0","surfaceId":"changes","tabId":"4","untracked":"[]","untrackedCount":"0","worktree":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux"}}
+```
+
+  A `surface.changes.read` two seconds later returned populated sections (Untracked count
+  49, per-file additions/deletions) — including the two evidence PNGs this very report
+  copied into `reference/linux-progress/` a minute earlier, so the surface reads the
+  worktree live. **Note for the critic:** the top-level flags still said
+  `"loading":"true","ready":"false"` in that populated read — the flags did not settle even
+  though the data had.
+- The surface is a tab, corroborating the census's "Changes moved to a Diff tab":
+  `surface.changes.open` builds `TabContent::Changes` (main.rs:4205), and the reply above
+  carries `"tabId":"4"`.
+
+Missing conjunct re-verified — the right panel has no Files/Changes switch:
+`render_header` (right_panel.rs:603) renders a fixed "Files" title plus a close-panel ×
+and nothing else; every capture shows the same. The panel-open/close toggle in the
+titlebar is click-gated.
+
+Owed: gesture — click the titlebar right-panel toggle (close, reopen), confirming the
+panel is Files-only either way.
+
+### F-CHG-20 — Activity running count and empty state (census: BUILT)
+
+Count driven across 0 → 1 → 2 running:
+
+- Nothing running: the Activity header renders with no count —
+  `p106-fable-03-win10-duplicate-notice.png`, `-17-win07-relaunch-autorestored.png`.
+- `ctl notify session=pane-1 status=running` then `session=pane-5 status=running` — **two
+  running panes, both in the same Terminal tab** — header shows "**1 running**"
+  (`p106-fable-19-chg20-two-running.png`, crop `crop-19-activity.png` in /tmp/fable-shots).
+  The count is per tab surface, not per pane.
+- `ctl notify session=pane-4 status=running` (the Browser tab's split terminal pane) →
+  "**2 running**" (`p106-fable-20-chg20-second-tab-running.png`).
+
+Empty state: "No activity" (right_panel.rs:837) renders only inside the
+`if self.activity_expanded` branch (:821); `activity_expanded` defaults to `false` (:153)
+and toggles only on a header click (:754). A unit test at right_panel.rs:1949-1967 asserts
+exactly this and names F-CHG-20 in its message.
+
+Owed: gesture — click the Activity header with nothing running; observe the expanded
+"No activity" row.
+
+### F-PER-07 — project settings persist across relaunch (census: PARTIAL)
+
+Persistence layer driven (read-only over `/tmp/fable.sqlite`, `mode=ro` URI):
+
+- Schema `user_version` 12; `project` table columns: `id, name, root_path, color_hex,
+  display_name, icon_kind, icon_value, avatar_image, default_worktree_base,
+  worktree_location_override, order_idx` — every field the clause names has a column.
+- Both socket-added projects persisted rows; `display_name`, `default_worktree_base` and
+  `worktree_location_override` are NULL in both — nothing populates them without the UI
+  door.
+- Catalog persistence itself was observed live: the `fable-folder` project survived
+  `system.quit` + relaunch (`p106-fable-17-win07-relaunch-autorestored.png`).
+- Incidental cross-reference for F-SID-16/17: `order_idx` holds 0 and 1 for my two
+  projects — the reorder rows' persistence target exists.
+
+Built conjunct (display name / icon door): `update_project_settings` (main.rs:3240)
+persists through the catalog — but its only door is the Project Settings sheet, which is
+right-click-gated, and **no socket method updates project settings** (none of the 53).
+Could not be driven on this lane.
+
+Missing conjunct re-verified: `default_worktree_base` / `worktree_location_override` have
+no UI door at all — needle re-run finds only the persistence layer and the
+`tiller_project` model defaults as consumers; zero UI writers. The census's missing half
+stands.
+
+Owed: gesture — right-click a project row → Project Settings; change display name and
+icon; quit + relaunch; confirm both persisted. While there, confirm the sheet exposes no
+field for the two worktree-location columns.
+
+---
+
+## Slice close-out — 17/17 rows exercised
+
+Captures: `reference/linux-progress/p106-fable-01…20-*.png` (crops of status glyphs and
+the Activity header remain in `/tmp/fable-shots/crop-*.png`, not committed). The fable
+Wayland instance (app + nested sway) was shut down after the last read, env-matched per
+WAYLAND-LANE trap 4; `/tmp/fable.sqlite` and `/tmp/fable.log` left in place for the
+critic.
+
+**Owed-gesture batch** (everything on this slice that needs the X lock, exact gestures):
+
+1. F-WIN-01 — click the titlebar gear; then exit Settings by a click (no socket door out).
+2. F-WIN-10 — add a project via the **sidebar** "+" (invalid path, then duplicate) to see
+   the `set_notice` copy; socket `project.add` bypasses every notice.
+3. F-SID-06 — hover a worktree row; click the × remove control; observe confirm.
+4. F-SID-11 — right-click a worktree row: confirm menu shows Set/Unset Primary + 7
+   New-Tab items and **no** Remove Worktree.
+5. F-SID-15 — click a folder-project row; observe what a worktree-less project opens.
+6. F-SID-16/17 — drag a project row above/below the other; relaunch; confirm order
+   (persistence target `order_idx` confirmed present).
+7. F-TAB-11 — nothing exercisable (no disabled-reason surface exists — see row).
+8. F-TAB-18 — drag a tab to a new strip position and drop.
+9. F-TAB-24 — begin a tab drag, press Escape before dropping.
+10. F-TAB-28 — ctrl-w on a clean tab, then on a dirty tab (confirm dialog, Cancel).
+11. F-CHG-01 — click the titlebar right-panel toggle both ways.
+12. F-CHG-20 — click the Activity header with nothing running ("No activity" row).
+13. F-PER-07 — Project Settings sheet: change name/icon, relaunch, verify; note absence
+    of worktree-location fields.
