@@ -535,6 +535,10 @@ pub struct AcpClient {
     // (F-CHAT-15; see `AcpEvent::TransportError`'s doc for why this crate's
     // event enum cannot grow a new variant this wave).
     mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
+    // MCP-configuration-flavored lines observed on the agent's stderr
+    // (F-CHAT-33). See `looks_like_mcp_warning`'s doc for why stderr is the
+    // channel: ACP's wire protocol has no dedicated concept for this.
+    mcp_warnings: Arc<Mutex<Vec<String>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -571,6 +575,8 @@ impl AcpClient {
         let worker_pending = Arc::clone(&pending_permissions);
         let mode_catalog: Arc<Mutex<Option<ModeCatalog>>> = Arc::new(Mutex::new(None));
         let worker_mode_catalog = Arc::clone(&mode_catalog);
+        let mcp_warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let worker_mcp_warnings = Arc::clone(&mcp_warnings);
 
         let worker = thread::Builder::new()
             .name("tiller-acp".into())
@@ -583,6 +589,7 @@ impl AcpClient {
                     worker_tx,
                     worker_pending,
                     worker_mode_catalog,
+                    worker_mcp_warnings,
                 );
             })?;
 
@@ -638,6 +645,7 @@ impl AcpClient {
                 initialize_info: startup.initialize_info,
                 model_catalog: startup.model_catalog,
                 mode_catalog,
+                mcp_warnings,
                 worker: Some(worker),
             },
             event_rx,
@@ -675,6 +683,17 @@ impl AcpClient {
             .lock()
             .ok()
             .and_then(|catalog| catalog.clone())
+    }
+
+    /// MCP-configuration-flavored lines observed on the agent's stderr so
+    /// far, oldest first and capped at a small bound (F-CHAT-33). Empty
+    /// when nothing matched — most sessions, most of the time.
+    #[must_use]
+    pub fn mcp_warnings(&self) -> Vec<String> {
+        self.mcp_warnings
+            .lock()
+            .map(|warnings| warnings.clone())
+            .unwrap_or_default()
     }
 
     /// Ask the agent to switch to a different session mode (F-CHAT-15),
@@ -831,6 +850,7 @@ fn run_connection(
     worker_tx: mpsc::SyncSender<WorkerSignal>,
     pending_permissions: PermissionWaiters,
     mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
+    mcp_warnings: Arc<Mutex<Vec<String>>>,
 ) {
     let started = Arc::new(AtomicBool::new(false));
     let clean_shutdown = Arc::new(AtomicBool::new(false));
@@ -910,7 +930,7 @@ fn run_connection(
     let _stderr_drain = thread::Builder::new()
         .name("tiller-acp-stderr".into())
         .spawn(move || {
-            block_on(drain_stderr(stderr));
+            block_on(drain_stderr(stderr, mcp_warnings));
         });
 
     let connection_event_tx = event_tx.clone();
@@ -1339,16 +1359,69 @@ fn run_connection(
 
 type EventStreamSender = async_channel::Sender<AcpEvent>;
 
-async fn drain_stderr(mut stderr: impl futures::AsyncRead + Unpin) {
-    use futures::AsyncReadExt as _;
+/// Drains the agent subprocess's stderr so its pipe never backs up and
+/// blocks the child, scanning each line for an MCP-configuration-flavored
+/// failure (F-CHAT-33) — ACP's wire protocol has no dedicated concept for a
+/// misconfigured MCP server (confirmed by inspecting the full v1 schema:
+/// no error code, no `SessionUpdate` variant, nothing on
+/// `NewSessionResponse` beyond `modes`/`config_options`/`meta`), so a CLI
+/// adapter's own stderr text is the only channel such a problem has ever
+/// been observed to use.
+async fn drain_stderr(
+    stderr: impl futures::AsyncRead + Unpin,
+    mcp_warnings: Arc<Mutex<Vec<String>>>,
+) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end();
+                if !trimmed.is_empty() && looks_like_mcp_warning(trimmed) {
+                    push_mcp_warning(&mcp_warnings, trimmed.to_string());
+                }
+            }
+        }
+    }
+}
 
-    let mut buffer = [0_u8; 8 * 1024];
-    while stderr
-        .read(&mut buffer)
-        .await
-        .ok()
-        .is_some_and(|size| size > 0)
-    {}
+/// The bound on [`AcpClient::mcp_warnings`] — a long session's stderr
+/// should not grow this without limit.
+const MAX_MCP_WARNINGS: usize = 20;
+
+fn push_mcp_warning(cell: &Arc<Mutex<Vec<String>>>, warning: String) {
+    if let Ok(mut warnings) = cell.lock() {
+        if warnings.len() >= MAX_MCP_WARNINGS {
+            warnings.remove(0);
+        }
+        warnings.push(warning);
+    }
+}
+
+/// Conservative on purpose: "mcp" alone also matches benign startup logging
+/// some adapters emit on a successful connection (e.g. "Connected to MCP
+/// server 'foo'"), so a failure-shaped word must co-occur before this
+/// counts as a warning rather than routine noise (F-CHAT-33).
+fn looks_like_mcp_warning(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    if !lower.contains("mcp") {
+        return false;
+    }
+    const FAILURE_WORDS: [&str; 10] = [
+        "error",
+        "fail",
+        "warn",
+        "unable",
+        "could not",
+        "refused",
+        "timed out",
+        "timeout",
+        "invalid",
+        "not found",
+    ];
+    FAILURE_WORDS.iter().any(|word| lower.contains(word))
 }
 
 fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
@@ -2397,6 +2470,55 @@ mod tests {
             2,
             "the confirmed set_mode should update current_id in place, not drop the options"
         );
+
+        let _ = client.shutdown();
+    }
+
+    #[test]
+    fn looks_like_mcp_warning_requires_mcp_and_a_failure_word() {
+        assert!(looks_like_mcp_warning(
+            r#"Error: failed to connect to MCP server "docs": connection refused"#
+        ));
+        assert!(looks_like_mcp_warning("MCP server 'search' timed out"));
+        assert!(!looks_like_mcp_warning(
+            "Connected to MCP server 'docs' successfully"
+        ));
+        assert!(!looks_like_mcp_warning("something else entirely failed"));
+        assert!(!looks_like_mcp_warning(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_configuration_failure_on_stderr_is_captured_as_a_warning() {
+        // (F-CHAT-33) ACP's wire protocol has no dedicated concept for
+        // this — confirmed by inspecting the full v1 schema before writing
+        // `looks_like_mcp_warning` — so a CLI adapter's own stderr text,
+        // written outside ACP's JSON-RPC channel entirely, is the only
+        // place this crate has any hope of observing the problem.
+        let command = AgentCommand::new("/bin/sh").args([
+            "-c",
+            r#"printf '%s\n' 'Error: failed to connect to MCP server "docs": connection refused' >&2
+while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; esac; done"#,
+        ]);
+        let (mut client, _events) =
+            AcpClient::launch_with_timeout(command, ".", Duration::from_secs(5))
+                .expect("fixture agent should create a session despite the stderr line");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let warnings = loop {
+            let warnings = client.mcp_warnings();
+            if !warnings.is_empty() {
+                break warnings;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mcp_warnings never observed the agent's stderr line"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("MCP server"));
+        assert!(warnings[0].contains("connection refused"));
 
         let _ = client.shutdown();
     }
