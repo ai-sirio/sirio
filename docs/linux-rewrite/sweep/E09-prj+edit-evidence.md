@@ -58,3 +58,52 @@ duplicate-submission guard's missing half is `could-not-reach` for the same stru
 proven from prior evidence and is not re-claimed here.
 
 Captures: `02-fprj09b-menu.png` … `07-fprj09b-click2.png`.
+
+## F-PRJ-14 — Avatar tab exercised live: PNG/GitHub/favicon fields all present, GitHub arm works
+
+Prior evidence (ledger line 107) only proved the `Avatar` tab exists, unopened. This drive opened
+it and exercised the GitHub-avatar arm.
+
+Route: hover the `tiller` project sidebar row → click the gear icon that appears → Project
+Settings sheet opens directly (no separate menu) → `Avatar` tab. `03-fprj14b-avatar.png` /
+`04-fprj14b-ghfieldclick.png` show all three documented controls: `Choose PNG…` button, a
+`GitHub user or repository` field with `Use GitHub Avatar` button, and a `Domain, like
+example.com` field with `Use Favicon` button (the last is clipped by the sheet's fixed width,
+same defect family as the Colour-row clipping noted for `F-PRJ-13`).
+
+**GitHub arm driven live**: typed `octocat` into the GitHub field, clicked `Use GitHub Avatar`
+— `06-fprj14b-ghclick1.png` shows the confirmation line `Current: GitHub avatar for octocat`
+appear beneath the controls. This is a real accepted submission, not just a rendered field.
+
+Not driven: `Choose PNG…` (needs a file-picker portal, likely invisible to this lane the same
+way other file dialogs are) and the favicon-domain arm (same button pattern as the GitHub arm,
+not separately exercised — no reason to expect it behaves differently, but not claimed).
+Whether the accepted GitHub avatar actually reaches the sidebar/project row was not checked here
+— cross-reference the `on_change` propagation defect already logged against `F-PRJ-13`/`SEAMS.md`,
+which plausibly affects this control too since it lives in the same picker.
+
+Captures: `02-fprj14b-settings.png` … `07-fprj14b-ghclick2.png`.
+
+## F-PRJ-16 — Emoji tab exercised live: single-emoji entry, invalid-input validation, both driven
+
+Prior evidence (ledger line 109) only proved the `Emoji` tab exists, unopened. This drive opened
+it and exercised both halves of the row's clause.
+
+**Invalid multi-character input**: typed `ab` into the emoji field, clicked `Set Emoji` →
+`06-fprj16b-setemoji-ab.png` shows the field outlined and the exact validation text `Enter
+exactly one emoji.` appear beneath the controls — a real, visible, specific error.
+
+**Valid single-emoji entry**: cleared the field (`BackSpace`), typed the literal emoji `🎉`
+via `wtype` (this lane's docs list non-ASCII typed input as previously unexercised — it worked
+here), clicked `Set Emoji` → `06-fprj16c-setemoji-result.png` shows the swatch now rendering
+🎉 with no validation error. Both the accept and reject paths are real.
+
+**`Open Emoji Picker`**: on a fresh app instance (emoji field empty — confirms the picker's
+choice does not persist across restarts, consistent with the unwired-`on_change`/no-durable-store
+defect already logged for `F-PRJ-13` in `SEAMS.md`), clicking `Open Emoji Picker` while the field
+was empty did nothing observable — no picker overlay appeared, matching a disabled/no-op state
+gated on non-empty input. The picker overlay itself was not reached (button never fired), so
+that specific door in the clause is unexercised.
+
+Captures: `02-fprj16b-settings.png` … `06-fprj16c-setemoji-result.png`, `02-fprj16d-settings.png`
+… `04-fprj16d-openpicker.png`.
