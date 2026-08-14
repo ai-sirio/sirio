@@ -316,3 +316,31 @@ make our code wrong in order to make a bad build run.
 **For the user, when you are awake:** this needs `oh-my-pi` reinstalled or pinned to a version whose
 published `bin` is actually JavaScript. It was deliberately left alone rather than downgrading a
 global npm package unattended.
+
+## The critic pane is out until ~2026-08-24 — the rule is *not the builder*, not *pireview*
+
+`pireview` (`w1:p6`, deepseek-v4-pro on Opencode Go) refuses every dispatch as of 2026-08-14:
+
+```
+Error: 429: {"type":"GoUsageLimitError","message":"Monthly usage limit reached. Resets in 10 days…"}
+```
+
+It accepted the text and failed at the model call, so **a dispatch to it looks delivered and simply
+never runs.** Read the pane back after dispatching, or you will believe a critic is working when
+none is.
+
+**Only the user can lift this** — it needs balance-based usage enabled on the Opencode workspace.
+Do not try to work around it by switching that pane's model.
+
+**What this changes.** "The critic runs on `pireview`" was never the real constraint; it was where
+the role happened to live. The real invariant is:
+
+> **The critic must not be the agent that built the piece.** A builder judging its own work is not
+> a second opinion, it is the same opinion with more confidence.
+
+So the role **rotates** among whoever is live: `codex11`, `codex12`, `sonnet`, `fable`. When you
+hand out a critic pass, name the builder in the brief and pick anyone else. A critic still starts
+fresh, still exercises live, and still may not accept a green test as `PASSED`.
+
+`P101` is the first brief affected — it critiques `codex11`'s `P95`, so it may go to anyone
+**except `codex11`**.

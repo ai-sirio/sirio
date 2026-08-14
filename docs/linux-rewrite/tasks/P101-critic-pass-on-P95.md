@@ -1,6 +1,11 @@
 # P101 — critic pass on P95's seven rows
 
-**Owner: `pireview`, as critic. You did not build this** — `codex11` did, in commit `cc73d71`
+**Owner: the next free agent that is *not* `codex11`.** (Originally routed to `pireview`, which is
+refusing every dispatch with a 429 monthly-usage error until ~2026-08-24 — see `ENVIRONMENT.md`
+§"The critic pane is out". The binding rule is *the critic is never the builder*, not *the critic is
+`pireview`*.)
+
+**You did not build this** — `codex11` did, in commit `cc73d71`
 ("fix: connect existing linux rewrite seams", 578 insertions across `file_view.rs`,
 `right_panel.rs`, `file_events.rs`, `main.rs`). Worktree
 `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, branch `linux/gpui-waku`.
