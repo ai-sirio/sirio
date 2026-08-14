@@ -14,6 +14,7 @@ use gpui::{
     quad, rgb, transparent_black,
 };
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -223,6 +224,18 @@ enum Entry {
         retryable: bool,
         kind: ErrorKind,
     },
+}
+
+/// A socket-safe projection of the one chat entity that GPUI renders.
+///
+/// The shell owns protocol encoding; this type keeps the UI independent of
+/// the control transport while making the rendered state observable there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatControlSnapshot {
+    pub status: String,
+    pub composer_text: String,
+    pub queued_text: String,
+    pub transcript: Vec<BTreeMap<String, String>>,
 }
 
 impl Entry {
@@ -1508,6 +1521,83 @@ impl Chat {
         let persistence = self.persistence.as_ref()?;
         let transcript = Self::transcript_from_entries(&persistence.tab_id, &self.entries);
         (!transcript.turns.is_empty()).then_some(transcript)
+    }
+
+    /// Replaces the visible composer's plain-text draft through the control
+    /// socket route. Attachments deliberately remain a pointer-only concern.
+    pub fn control_compose(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.composer = Composer::new();
+        self.composer.insert_text(text);
+        self.reset_composer_popups();
+        self.refresh_token_popups(cx);
+        cx.notify();
+    }
+
+    /// Sends exactly as the rendered Send control does, after replacing the
+    /// visible composer with the socket request's text.
+    pub fn control_send(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.control_compose(text, cx);
+        self.send(cx);
+    }
+
+    /// Resolves a rendered permission option by its protocol id and sends the
+    /// answer through the same path used by the card's buttons.
+    pub fn control_permission(
+        &mut self,
+        request_id: u64,
+        option_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let option = self.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Permission {
+                request_id: id,
+                options,
+                ..
+            } if *id == request_id => options
+                .iter()
+                .find(|option| option.id == option_id)
+                .cloned(),
+            Entry::Plan {
+                approval: Some(approval),
+                ..
+            } if approval.request_id == request_id => approval
+                .options
+                .iter()
+                .find(|option| option.id == option_id)
+                .cloned(),
+            _ => None,
+        });
+        let Some(option) = option else {
+            return Err(format!("unknown chat permission option: {option_id}"));
+        };
+        self.respond_permission(request_id, &option, cx);
+        Ok(())
+    }
+
+    /// Stops the rendered turn. It is intentionally a no-op while idle,
+    /// matching the visible Stop affordance.
+    pub fn control_stop(&mut self, cx: &mut Context<Self>) {
+        self.cancel_turn(cx);
+    }
+
+    /// Produces the control API's read model from the entity that owns the
+    /// composer and transcript on screen.
+    pub fn control_snapshot(&self) -> ChatControlSnapshot {
+        let status = if self.streaming {
+            "streaming"
+        } else if self.connecting {
+            "connecting"
+        } else if self.has_completed_turn {
+            "completed"
+        } else {
+            "idle"
+        };
+        ChatControlSnapshot {
+            status: status.to_string(),
+            composer_text: self.composer.text(),
+            queued_text: self.queued_item.clone().unwrap_or_default(),
+            transcript: self.entries.iter().map(control_entry_row).collect(),
+        }
     }
 
     fn restore_persisted_transcript(&mut self) {
@@ -4932,6 +5022,77 @@ impl Chat {
     }
 }
 
+fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
+    let mut row = BTreeMap::new();
+    match entry {
+        Entry::User(text) => {
+            row.insert("kind".into(), "user".into());
+            row.insert("text".into(), text.clone());
+        }
+        Entry::Assistant { text, .. } => {
+            row.insert("kind".into(), "assistant".into());
+            row.insert("text".into(), text.clone());
+        }
+        Entry::Thought { text, .. } => {
+            row.insert("kind".into(), "thought".into());
+            row.insert("text".into(), text.clone());
+        }
+        Entry::ToolCall {
+            id, title, status, ..
+        }
+        | Entry::SubagentTask {
+            id, title, status, ..
+        } => {
+            row.insert("kind".into(), "tool".into());
+            row.insert("id".into(), id.clone());
+            row.insert("text".into(), title.clone());
+            row.insert("status".into(), status.clone());
+        }
+        Entry::Permission {
+            request_id,
+            resolved,
+            expired,
+            dismissed,
+            ..
+        } => {
+            row.insert("kind".into(), "permission".into());
+            row.insert("id".into(), request_id.to_string());
+            row.insert(
+                "status".into(),
+                if *dismissed {
+                    "cancelled".into()
+                } else if *expired {
+                    "expired".into()
+                } else if resolved.is_some() {
+                    "selected".into()
+                } else {
+                    "pending".into()
+                },
+            );
+        }
+        Entry::Plan { entries, .. } => {
+            row.insert("kind".into(), "plan".into());
+            row.insert(
+                "text".into(),
+                entries
+                    .iter()
+                    .map(|entry| format!("{} · {}", entry.status, entry.content))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+        Entry::TurnFooter(text) => {
+            row.insert("kind".into(), "turn".into());
+            row.insert("text".into(), text.clone());
+        }
+        Entry::Error { message, .. } => {
+            row.insert("kind".into(), "error".into());
+            row.insert("text".into(), message.clone());
+        }
+    }
+    row
+}
+
 impl Chat {
     // --- Read-only status, for the shell's activity indicators (sidebar
     // dot / tab checkmark / Activity row) — P28. Added at the end of this
@@ -5633,6 +5794,29 @@ mod tests {
         assert!(
             chat.read_with(&cx.cx, |chat, _| chat.entries.is_empty()),
             "typing alone must not send anything"
+        );
+    }
+
+    /// The control socket must edit this entity's composer, rather than an
+    /// unrendered ACP session with a coincidentally matching tab id.
+    #[gpui::test]
+    async fn control_compose_changes_the_rendered_composer(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+
+        chat.update(&mut cx.cx, |chat, cx| {
+            chat.control_compose("MARKER_P107", cx);
+        });
+        refresh_frame(cx);
+
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            "MARKER_P107",
+            "the visible composer owns socket-driven draft text"
+        );
+        assert!(
+            cx.debug_bounds("composer-input").is_some(),
+            "the edited composer remains mounted in the rendered chat"
         );
     }
 
