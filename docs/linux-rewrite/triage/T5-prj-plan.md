@@ -127,7 +127,112 @@ the relabeled button; confirm the status transitions `Failed → Running → Com
 
 ---
 
-## `F-PRJ-11` — FAILED — absent
+## `F-PRJ-16` — half-proven
+
+**Needs: build.** The entry/validation half is proven live. The "Open Emoji Picker" half is
+genuinely unbuilt, not just unwired — traced end to end: `render_emoji_mode`
+(`project_identity.rs:612-685`) draws `controls::button_maybe("project-icon-emoji-open-picker",
+"Open Emoji Picker", theme, open_picker_handler)` where `open_picker_handler` comes from
+`self.on_open_emoji_picker.clone().map(...)` (`:641-646`) — a host callback hook, exactly like
+`on_change`/`on_change_with_context`, with its own builder method `.on_open_emoji_picker(...)`
+(`:310-312`). `button_maybe` renders the control inert when the handler is `None`, which is
+exactly "clicked with field empty, no observable effect." The one call site that ever supplies
+this callback is a unit test (`:1306`, inside `#[cfg(test)]`) — `sidebar.rs`'s real mount site,
+`open_project_settings` (`:912-920`), builds `ProjectIconPicker` with `.on_change_with_context(
+...)` only and never chains `.on_open_emoji_picker(...)`. And there is nothing to wire it *to*:
+a repo-wide search for an emoji-picker overlay/grid component (`EmojiPicker`, `emoji_overlay`,
+etc.) turns up nothing outside that one test — no such surface exists anywhere in `rust/`.
+
+**Approach**: this is two pieces of real work, not one wiring gap — (1) build an actual emoji
+picker surface (a searchable grid overlay is the bounded-scope option; there is no Linux
+equivalent of macOS's system character palette to shell out to) that on selection calls back into
+`commit_emoji`-equivalent logic; (2) wire `.on_open_emoji_picker(...)` at the `sidebar.rs` mount
+site to open it. Piece (2) alone is trivial; piece (1) is the actual size of this row.
+
+- **files**: `rust/crates/tiller_ui/src/project_identity.rs` (new overlay component + `render_emoji_mode`, `:612-685`), `rust/crates/tiller_ui/src/sidebar.rs` (`open_project_settings`, `:912-920`, to chain `.on_open_emoji_picker(...)`)
+- **size**: M
+
+---
+
+## `F-PRJ-17` / `F-PRJ-18` — FAILED — absent (both) — shared cause, traced through three crates
+
+**Needs: build, both — one shared cause.** Confirmed live and by reading: the New Worktree
+popover (`WorktreePrompt`, `sidebar.rs:282-295`, rendered `:2534-2630`) has exactly one field,
+`draft` (branch name) — no base-branch or location control, matching both rows' evidence. But
+this is not a from-scratch feature: it is a fully-built, three-layer seam whose *consuming* half
+was simply never wired, and none of it is registered in `SEAMS.md` today.
+
+**What already exists, bottom-up:**
+- `tiller_git::create_worktree(repo, branch, path, base: Option<&str>)`
+  (`tiller_git/src/worktree.rs:63-67`) and `resolve_parent_directory(root, override_dir:
+  Option<&Path>)` (`:152-158`) already accept a base branch and a location override — both real
+  parameters, not stubs.
+- `tiller_persistence` already has durable columns for both: `default_worktree_base` and
+  `worktree_location_override` (`migrations.rs:41-42`), read and written in `db.rs` (`:131,143-
+  156,167-168,1194-1195,1313-1314,1326-1327`) as part of `ProjectRecord`.
+- `tiller_project::Project` already carries both fields (`tiller_project/src/project.rs:34-37`).
+
+**Where it breaks:** `rust/crates/tiller/src/session.rs`'s `CatalogProjectSettings` — the
+*runtime* session model `sidebar.rs` actually consumes, distinct from `tiller_project::Project`
+— has only `color_hex`/`display_name`/`icon_kind`/`icon_value` (`:375-380`); no
+`default_worktree_base`, no `worktree_location_override`. Consequently:
+- `write_catalog` (`session.rs:787-839`) builds a `ProjectRecord` and sets `color_hex`/
+  `display_name`/`icon_kind`/`icon_value` from settings (`:807-810`) but never sets
+  `record.default_worktree_base`/`record.worktree_location_override` — so even if the DB row
+  already had a value, saving the catalog again would silently null it out.
+- `restore_catalog` (`session.rs:841-898`) reads `record.color_hex`/`display_name`/`icon_kind`/
+  `icon_value` back into `CatalogProjectSettings` (`:870-878`) but never reads
+  `record.default_worktree_base`/`worktree_location_override` — so the columns are write-only
+  dead weight from the app's point of view today.
+- `confirm_worktree_prompt` (`sidebar.rs:1333-1373`) always calls `resolve_parent_directory(
+  &repo_root, None)` (`:1354`) and `create_worktree(..., None)` (`:1366`) — both `None`s are
+  exactly the two arguments this feature would supply, and there is no data available at that
+  call site to supply them with even if it wanted to.
+- No UI anywhere — neither the popover nor `render_project_settings` — offers a control for
+  either setting, matching the Swift source's placement in `ProjectSettingsSheet.swift` rather
+  than the New Worktree popover the evidence happened to check.
+
+**Approach**: (1) add the two fields to `CatalogProjectSettings` and thread them through
+`write_catalog`/`restore_catalog` so they round-trip through the existing DB columns; (2) add two
+controls to `render_project_settings` (default-base: current/pinned/primary/no-primary per the
+clause; location: a folder chooser plus a "restore default parent" action) that emit
+`ProjectSettingsChanged` the same way the icon picker does; (3) at `confirm_worktree_prompt`,
+read the owning project's settings and pass the real base/override instead of the two hard-coded
+`None`s. All three steps are needed together — a fix that stops at (1)+(2) without (3) would
+persist a setting nothing ever reads at worktree-creation time.
+
+- **files**: `rust/crates/tiller/src/session.rs` (`CatalogProjectSettings` `:375`, `write_catalog` `:787`, `restore_catalog` `:841`), `rust/crates/tiller_ui/src/sidebar.rs` (`render_project_settings` `:1865`, `WorktreePrompt`/`confirm_worktree_prompt` `:282`/`:1333`)
+- **size**: M
+
+---
+
+## Cross-row notes
+
+**Shared causes found, in order of leverage:**
+1. **F-PRJ-17 + F-PRJ-18** — one seam, three already-built layers (`tiller_git`,
+   `tiller_persistence`, `tiller_project`) with the session-model + UI consuming half missing.
+   The highest-leverage fix in this group: closing it clears two rows and needs no new
+   persistence-layer or git-layer work at all, only plumbing and two controls.
+2. **F-PRJ-06 + F-PRJ-09** — not a code defect at all; the in-flight guard (`project_forms.rs`)
+   is correct and unit-tested, but both live operations resolve in sub-frame time in this
+   environment, so the guard's "second click during Running" branch can never be observed live
+   without artificially slowing the operation first.
+3. **F-PRJ-13 + F-PRJ-15 (+ half of F-PRJ-14)** — the "defective"/"discarded" reasoning in all
+   three rows describes a state that commit `28a41fa` (same day, same repo, after the evidence
+   was collected) appears to have fixed. Flagged `reclassify` rather than silently assumed fixed,
+   per the brief.
+
+**Note for whoever schedules the build fleet**: F-PRJ-03 and F-PRJ-17/18 both touch
+`rust/crates/tiller/src/main.rs` / `session.rs` — F-PRJ-03's non-git-folder prompt branches
+inside `add_project` (`main.rs:2956`), and F-PRJ-17/18's session-model fields live in
+`session.rs`, which `main.rs`'s `write_catalog`/`restore_catalog` call directly. Neither touches
+the same lines, but both are `codex12`/session-owner territory per `SEAMS.md`'s naming — worth
+sequencing rather than parallelizing if the same owner holds both.
+
+**Nothing in this group needs reclassify away from a currently-`build`-shaped verdict** — the
+only reclassify candidates found (F-PRJ-13, F-PRJ-15) already carried `FAILED — defective`
+verdicts whose stated reasoning looks stale, not verdicts that look wrong in the other direction.
+
 
 **Needs: build, but small.** Confirmed live and by reading: `render_project_settings`
 (`sidebar.rs:1865-2022`) draws heading, path, repo-type text, display-name field, a conditional
