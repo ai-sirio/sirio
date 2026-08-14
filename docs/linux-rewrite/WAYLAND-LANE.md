@@ -70,6 +70,22 @@ with `invalid type: integer 0, expected a string`. Note that the Rust builder
 `request::tab_select(position: usize)` documents no such base, so `tab_select(0)` always fails at
 runtime.
 
+### `surface.chat.*` does not drive the chat you can see
+
+**Do not use this lane to judge any `F-CHAT` row until `P107` lands.** The chat control API operates
+on a `chat_sessions` map owned by the control handler (`tiller/src/main.rs:650`) that is disjoint
+from the rendered chat view — separate ACP agent, separate database. A completed turn with a real
+assistant answer leaves the rendered transcript empty; `surface.chat.compose` leaves the visible
+composer showing its placeholder.
+
+It is convincing because the id is right: `surface.chat.open` returns `surfaceId: "default-chat"`,
+which really is the persisted id of the visible Chat tab (`session.rs:322`). The socket answers with
+the right name for the wrong object. `panel.list` calls that same tab `pane-0`, and the chat API
+refuses that id — two id spaces that do not interoperate.
+
+`tab.select` genuinely brings the Chat tab forward, so the chat surface's **chrome** (composer,
+status dot, mode label, context ring) is judgeable here. Its **content** is not.
+
 ### The embedded browser does not work on this lane
 
 `browser.open` + `tab.select` reaches the Browser surface, and its chrome renders — address bar,
