@@ -45,6 +45,7 @@ pub enum TabContextAction {
     MoveLater,
     MoveToCurrentPane,
     MoveToPane(usize),
+    AttachToCurrentTerminal,
 }
 
 /// One row in the shell-owned tab context menu.

@@ -506,6 +506,14 @@ impl<T> PaneNode<T> {
         if matches!(self, Self::Leaf { .. }) {
             return None;
         }
+        self.take(target)
+    }
+
+    /// Removes a leaf even when it is the only pane. Callers that move a
+    /// live terminal to another tab need this stronger transition; ordinary
+    /// close operations keep using [`Self::remove`] so they never leave an
+    /// accidental empty terminal tree behind.
+    pub(crate) fn take(&mut self, target: usize) -> Option<T> {
         let current = std::mem::replace(self, Self::empty());
         let (replacement, removed) = remove_node(current, target);
         if let Some(replacement) = replacement {
