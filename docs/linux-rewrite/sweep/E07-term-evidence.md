@@ -74,3 +74,24 @@ on single-pane tabs due to the `len() <= 1` guard) stands and is unaffected by t
 drive did not retest the single-pane case, only the multi-pane one that was previously unproven.
 The row stays below full proof because the right-click gesture that a real user would press is
 still not exercisable from this lane.
+
+## F-TERM-UI-01 (ledger line 535)
+
+**Claim: could-not-reach.**
+
+The missing half (per `UNPROVEN-ROWS-RECIPES.md`) is invoking all 10 context-menu items once
+and reporting what changes on screen per item — Set Title, Clear Terminal, Close Terminal, etc.
+— i.e. the menu itself must be opened by right-click and each item clicked. Same blocker as
+F-TERM-04/F-TERM-06: `open_context_menu` (`rust/crates/tiller_terminal/src/lib.rs:970`) is wired
+only to `.on_mouse_down(MouseButton::Right, ...)` at lines 1446 and 1504; there is no keyboard
+path to open it. `Scripts/wayland-drive.sh` supports only `click <x> <y>` (left-click), `move`,
+`type`, `key` (named key through `wtype`, no mouse-button selection) — no right-click primitive.
+
+Note: `pane.close` (control socket) reaches the *delegation target* of one item (`Close
+Terminal…`) without going through the menu at all — see F-TERM-08 above, driven this same
+session — but that proves the handler behind one item, not the menu's rendering or its
+delegation from a real right-click, which is this row's clause. Forbidden from
+`Scripts/linux-drive.sh`/`DISPLAY=:1` per this slice's instructions.
+
+No drive performed for the menu-open half; no new capture. Row is not reachable from the
+Wayland lane.
