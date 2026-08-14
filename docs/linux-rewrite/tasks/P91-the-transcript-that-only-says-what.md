@@ -87,3 +87,104 @@ two are the likeliest of the six to be genuinely unbuildable.
 5. `cargo fmt`, suite green on what you touched, and `git status --short | grep '??'` before you
    finish — `tiller_terminal` currently has two untracked module files that `lib.rs` already
    declares, which is exactly the trap this check exists for.
+
+## Builder report — sonnet, 2026-08-14
+
+**1. `F-CHAT-21`.** Landed at `396dd27` — `Entry::Thought` carries its own `expanded: bool`;
+collapsed shows a capped one-line summary, a click toggles it live or after the turn ends.
+Exercised by GPUI tests in `chat.rs` that construct a thought entry and simulate the click. I did
+not re-drive this against the real windowed app this session — the shared display lock
+(`/tmp/tiller-drive-1.lockd`) was held by another agent's live session throughout (see item 3) — so
+this claim rests on the GPUI test harness's simulated click/render cycle, not a screenshot. Flagging
+that distinction explicitly rather than letting "landed and driven live" imply more than was checked
+this round.
+
+**2. Field list found.** Read `agent_client_protocol-schema-1.5.0`'s `ToolCall` /
+`ToolCallUpdate` / `ToolCallUpdateFields` directly (not a stale registry copy). Beyond
+`{id, title, status}`, the protocol carries:
+
+- `kind` — an enum (`Edit`, `Read`, `Delete`, `Move`, `Search`, `Execute`, `Think`, `Fetch`,
+  `SwitchMode`, `Other`); no `Task`/`Agent`/`Subagent` variant exists anywhere in this enum, which
+  bears on item 4.
+- `content` — a list of `Text` or `Diff { path, old_text, new_text }` entries.
+- `locations` — `{ path, line }` pairs, the files/lines the tool touched.
+- `raw_input` — the tool's raw JSON arguments.
+- `raw_output` — the tool's raw JSON result. **Caught late**: this one was missed in the first
+  widening pass despite the brief pairing it with `raw_input` explicitly. Added this session at
+  `f3069d6`, symmetric with `raw_input` end to end (`AcpEvent` → `Entry::ToolCall` → render).
+- `meta` (`_meta`) — present on both types, typed as `serde_json::Map<String, Value>`. The schema's
+  own doc comment says implementations "MUST NOT make assumptions about values at these keys." Not
+  widened into `AcpEvent` — investigated instead (item 4) because the brief's Part 3 question is
+  exactly whether this bag carries anything usable, and it does not for the case that matters here.
+
+All five typed fields are widened through `AcpEvent::ToolCallStarted/Updated/Completed`
+(`lib.rs`), `Entry::ToolCall` (`chat.rs`), and rendered by `render_tool_call_card`. Test:
+`started_tool_call_carries_kind_content_locations_and_raw_input_and_output` (`tiller_acp/src/lib.rs`).
+
+**3. Live-agent verification (`F-CHAT-23`/`-31`/`-32`).** Connected a real agent from the
+workspace — `npx @agentclientprotocol/claude-agent-acp@latest`, bridging to the installed `claude`
+CLI — through the production `AcpClient::launch` / `notification_to_events` path (a temporary
+`eprintln!` probe on `tool.meta`/`update.meta` was added for item 4's investigation and fully
+reverted; `git diff` against `f3069d6` is empty). Prompted it to write a file then read it back,
+which produced two consecutive real tool calls (Write, then Read), 9 tool-call-lifecycle events
+total, ending in a normal `TurnEnded { stop_reason: "EndTurn" }`. Observed directly in the Debug
+output:
+
+- `kind`: `"Edit"` for the write, `"Read"` for the read.
+- `content`: a real `Diff { old_text: None, new_text: "hello from ACP\n" }` mid-write, then a real
+  `Text("```\n1\thello from ACP\n```")` on the completed read.
+- `locations`: the real temp-file path, with `line: Some(1)` once the read resolved it.
+- `raw_input`: progressively-populated real JSON (`{}` → `{"file_path": …}` → `{"file_path": …,
+  "content": …}`).
+- `raw_output`: `None` on `Started`/most `Updated` events (the tool hasn't returned yet), populated
+  on `Completed` with the tool's real return value (e.g.
+  `"1\thello from ACP\n2\t"` for the read).
+
+This is the exact seam this task widened, driven by a real subprocess rather than a fixture, and
+it produced correctly-shaped, real data at every widened field. Full transcript:
+`/tmp/claude-1000/-home-enzopalmisano--claude/993e51a1-270a-49d7-b90e-35d74aeac1e0/scratchpad/p91-live-check-2.log`.
+
+**What this does not cover:** actually watching `chat.rs` paint these events on the real, windowed
+app. The rendering logic itself is exercised by GPUI tests using data shaped identically to what
+this live run produced (`Diff`/`Text` content, real locations, both raw fields) — but that is a
+render test against realistic fixtures, not a screenshot of the live pipeline end to end. I did not
+force this: `/tmp/tiller-drive-1.lockd` was held (`pid=1101962 label=fable-p92-held`, alive,
+43+ minutes) by another agent's own live-driving session for the full duration of this work, and
+the project's own environment notes are explicit that contending for that lock corrupts the other
+holder's input and is the expensive kind of false negative. Recording this as a real, named gap
+rather than asserting a screenshot I did not take.
+
+**4. Part 3 — `F-CHAT-22` and `F-CHAT-28`.**
+
+- `F-CHAT-22` (grouped-step expansion): **built**, at `2638338`. The protocol carries no group id,
+  but grouping consecutive `Entry::ToolCall` entries by transcript adjacency is real structure, not
+  invented data — every grouped entry is still a real, individually protocol-sourced tool call, and
+  the live run above produced exactly this shape organically (two consecutive tool calls from one
+  prompt, no synthetic setup needed to get a run of length 2). Collapses to one "N steps" header by
+  default; a `group_expanded: bool` on the run's tail entry toggles every member to its own full
+  card. Pure-function boundary detection (`tool_call_run_bounds`) plus one GPUI end-to-end test
+  (`consecutive_tool_calls_group_under_one_toggle_and_expand_to_full_cards`) cover it.
+- `F-CHAT-28` (subagent task cards): **unbuildable with today's evidence — leaving the row alone.**
+  Two independent signals, both gathered live rather than assumed from the schema:
+  1. `ToolKind`, the protocol's own typed vocabulary for what a tool call *is*, has no
+     `Task`/`Agent`/`Subagent` variant — see item 2. There is no protocol-level concept of "this
+     tool call is a subagent" to hang UI on.
+  2. `_meta`, the one open extension point, was probed live across both runs (three tool calls, four
+     distinct `_meta` snapshots). Every one carried only implementation tags —
+     `{"claudeCode": {"toolName": "Write"}}`, once with `"nonExecutionKind": "permission-rule"`, and
+     once with a full `toolResponse` echo — never anything resembling a parent/subagent identifier.
+     This matches the SwiftUI original's use of a Claude-specific `parent_tool_use_id` that the
+     generic ACP schema has no equivalent for, and confirms this specific bridge doesn't fill the
+     gap through `_meta` either, at least not for ordinary (non-Task-tool) calls, which is all this
+     session's prompts exercised — I did not specifically try to force the agent to spawn a Claude
+     Code subagent (its `Task` tool), so this finding covers "ordinary tool calls carry no subagent
+     data," not "no prompt could ever surface one." Recorded as the honest scope of what was
+     actually tried, per the brief's own standard.
+
+**5. Verification.** `cargo fmt -p tiller_ui -p tiller_acp -- --check` clean. `cargo test -p
+tiller_acp`: 11 unit + 6 integration passed, 1 ignored (needs live credentials, pre-existing).
+`cargo test -p tiller_ui --lib`: 246 passed, 0 failed. `git status --short | grep '??'` shows no
+untracked files under `chat.rs` or `tiller_acp` scope; the previously-documented `tiller_terminal`
+untracked-module trap is not present in the current tree. The temporary investigation example
+(`tiller_acp/examples/p91_live_check.rs`) was deleted; the temporary `_meta` `eprintln!` probes in
+`lib.rs` were fully reverted (`git diff` against `f3069d6` is empty).
