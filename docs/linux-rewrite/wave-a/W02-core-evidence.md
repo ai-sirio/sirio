@@ -135,3 +135,38 @@ attempting a gesture this lane cannot produce.
 
 **Verdict left as:** half-proven, unchanged — the per-item effects remain reachable only on
 the `DISPLAY=:1` lane, out of scope for this slice.
+
+## `F-CORE-USG-07`
+
+**Claim:** partially-exercised.
+
+**Drove:** Launched a fresh instance with `CODEX_HOME=/tmp/w02usg07-empty-codex-home` (a
+newly created, genuinely empty directory — no `auth.json` at all, so
+`load_credentials()`/`load_credentials_from` at `codex.rs:107,140` hits a real file-open
+error, the `Err(_)` branch at `codex.rs:319` that maps to `UsageReason::LoggedOut`) and
+compared its status bar against a normal instance (default `CODEX_HOME`, real credentials)
+at matching resolution (1715x972).
+
+**Observed:** The two status-bar captures are not byte-identical (different `md5`); a
+`compare`-based diff localizes the change to a small region inside the status bar
+(`101x12` at offset `~183,946` within the full frame) — exactly the label/text area where a
+usage indicator renders, not noise elsewhere in the frame. This is a real, distinguishable
+visual difference between the "real credentials, usage loaded" state (already on record
+from the prior pass) and the "credentials genuinely absent" state driven by this pass —
+confirming the `load_credentials() Err(_)` -> `LoggedOut` gesture the row's `Approach`
+names, with a positive control (the normal-credentials capture) ruling out "the status bar
+never changes" as the explanation.
+
+I did not attempt the refresh-needed / merge-save-on-success half this pass: per the row's
+own `Approach` and its shared-cause note with `F-CORE-USG-05`, that gesture needs a real
+401 response during a live token refresh followed by a successful retry — reproducing that
+deterministically requires either a mock HTTP endpoint or a token already naturally near
+expiry, neither of which this pass set up, and it is explicitly the same drive
+`F-CORE-USG-05` still owes.
+
+**Captures:** `reference/linux-progress/wavea-W02-core/02-30-normal-statusbar.png`,
+`02-32-missing-creds-statusbar.png`.
+
+**Verdict left as:** half-proven, unchanged overall — missing-credentials is now positively
+confirmed distinguishable via a real gesture with a positive control; refresh-needed
+(shared with USG-05) remains owed.
