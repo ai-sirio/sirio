@@ -6781,6 +6781,7 @@ dependencies = [
  "gpui_platform",
  "libc",
  "parking_lot",
+ "tiller_project",
  "tiller_theme",
 ]
 
@@ -6814,6 +6815,7 @@ dependencies = [
  "tiller_agents",
  "tiller_git",
  "tiller_markdown",
+ "tiller_persistence",
  "tiller_project",
  "tiller_theme",
  "tiller_usage",

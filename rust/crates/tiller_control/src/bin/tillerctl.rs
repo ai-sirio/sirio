@@ -20,12 +20,29 @@ use tiller_control::{
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(subcommand) = args.first() else {
+    let (subcommand_index, leading_socket) = if args.first().map(String::as_str) == Some("--socket")
+    {
+        if args.len() < 2 {
+            eprintln!("tillerctl: --socket requires a path");
+            usage();
+            exit(2);
+        }
+        (2, Some(args[1].clone()))
+    } else if let Some(socket) = args.first().and_then(|arg| arg.strip_prefix("--socket=")) {
+        (1, Some(socket.to_string()))
+    } else {
+        (0, None)
+    };
+    let Some(subcommand) = args.get(subcommand_index) else {
         usage();
         exit(2);
     };
 
-    let parsed = match parse_args(&args[1..]) {
+    let mut option_args = args[subcommand_index + 1..].to_vec();
+    if let Some(socket) = leading_socket {
+        option_args.insert(0, format!("--socket={socket}"));
+    }
+    let parsed = match parse_args(&option_args) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("tillerctl: {message}");
@@ -45,6 +62,7 @@ fn main() {
         "quit" => cmd_quit(socket, &parsed),
         "capabilities" => cmd_capabilities(socket, &parsed),
         "identify" => cmd_identify(socket, &parsed, &environment),
+        "project" => cmd_project(socket, &parsed),
         "list-workspaces" => cmd_list_workspaces(socket, &parsed),
         "new-workspace" => cmd_new_workspace(socket, &parsed),
         "select-workspace" => cmd_select_workspace(socket, &parsed),
@@ -86,6 +104,8 @@ fn usage() {
          \x20 ping                              check that Tiller is running\n\
          \x20 quit                              gracefully quit Tiller\n\
          \x20 capabilities [--json]             list available socket methods\n\
+         \x20 project list [--json]              list discovered projects and worktrees\n\
+         \x20 project add <path> [--json]        add a project and report the new catalog\n\
          \x20 identify [--json]                 show the current workspace/surface context\n\
          \x20 list-workspaces [--json]          list all worktrees\n\
          \x20 new-workspace --project <p> [--branch <b>]\n\
@@ -303,6 +323,43 @@ fn cmd_identify(
         parsed.flag("json"),
     );
     Ok(())
+}
+
+fn cmd_project(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let action = parsed
+        .positional
+        .first()
+        .ok_or_else(|| "Missing project action".to_string())?;
+    match action.as_str() {
+        "list" => {
+            let response = require_ok(socket, &tiller_control::protocol::request::project_list());
+            print_rows(
+                &response,
+                "projects",
+                &["id", "name", "path", "isGit", "worktreeCount", "empty"],
+                parsed.flag("json"),
+            );
+            Ok(())
+        }
+        "add" => {
+            let path = parsed
+                .value("path")
+                .or_else(|| parsed.positional.get(1).map(String::as_str))
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "Missing project path".to_string())?;
+            let response = require_ok(
+                socket,
+                &tiller_control::protocol::request::project_add(path),
+            );
+            print_result(
+                &response,
+                &["added", "projectId", "worktreeCount"],
+                parsed.flag("json"),
+            );
+            Ok(())
+        }
+        other => Err(format!("unknown project action '{other}'")),
+    }
 }
 
 fn cmd_list_workspaces(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
@@ -738,6 +795,16 @@ fn cmd_session_ref(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
 /// The notify command: user notification (--title) or agent-status update
 /// (--session/--status), mirroring the Swift CLI's two modes.
 fn cmd_notify(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
+    let has_agent_mode_options = parsed.value("session").is_some()
+        || parsed.value("status").is_some()
+        || parsed.value("agent-session").is_some()
+        || parsed.flag("stdin-json");
+    if parsed.value("title").is_some() && has_agent_mode_options {
+        return Err(
+            "ambiguous notify modes: choose either agent status (--session/--status) or user notification (--title/--body)"
+                .to_string(),
+        );
+    }
     if let Some(title) = parsed.value("title") {
         let subtitle = parsed.value("subtitle").map(str::to_string);
         let body = parsed.value("body").unwrap_or("").to_string();

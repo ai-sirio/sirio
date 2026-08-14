@@ -454,6 +454,14 @@ fn serve_connection(mut stream: UnixStream, handler: Arc<dyn ControlHandler>) {
         // Pull complete lines out of the buffer first (a read may carry
         // several requests).
         while let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            if newline > MAX_BUFFER_BYTES {
+                // Check the complete line before draining or dispatching it;
+                // otherwise a single read can bypass the cap entirely.
+                let response = ControlResponse::failure("?", "request line too large");
+                let _ = write_line(&mut stream, &response);
+                let _ = stream.shutdown(Shutdown::Both);
+                return;
+            }
             let line: Vec<u8> = buffer.drain(..=newline).collect();
             let line = &line[..line.len() - 1];
             if line.is_empty() {
