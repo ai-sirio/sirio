@@ -107,3 +107,45 @@ that specific door in the clause is unexercised.
 
 Captures: `02-fprj16b-settings.png` … `06-fprj16c-setemoji-result.png`, `02-fprj16d-settings.png`
 … `04-fprj16d-openpicker.png`.
+
+## F-EDIT-05 — full conflict banner exercised live, both Reload and Keep
+
+Prior evidence (P101 critic) reached only a Files context-menu frame; the conflict gesture
+itself was never driven (blocked by the `:1` drive lock for 900s). This drive reached it
+cleanly on the Wayland lane by adding a throwaway git-inited fixture project
+(`ctl project.add path=/tmp/e09fixture`, a single `edit-target.md`) so the real repo tree
+under test is never touched.
+
+Route: `workspace.select` the fixture worktree → double-click `edit-target.md` in Files →
+switch to `Code` view → click into the buffer and type, producing a genuine dirty/`edited`
+tab (confirmed: `edited` badge, dot on the tab, typed text visible in the buffer,
+`04-fedit05l-dirty.png`). With the tab dirty, the file was appended to **from outside the
+app** (`echo … >> edit-target.md`, a real external writer — the same class of event the row
+describes), then focus returned to the tab by clicking away to `Terminal` and back.
+
+**Result: the exact banner the clause names.** `99-fedit05p-banner2.png` shows `This file
+changed on disk.` with `Reload` and `Keep` controls, the dirty local text (`DIRTY-RELOAD-TESTline1`)
+still shown underneath (proving this is a real conflict prompt gated on dirty state, not a
+silent reload — a first pass with a *clean* tab reloaded silently with no banner at all,
+`99-fedit05k-conflict.png`, which is consistent with there being nothing to protect when there
+is no local edit to lose).
+
+**Both buttons driven and verified by outcome, not just click:**
+- **Keep** (`99-fedit05n-keep.png`): banner dismissed, buffer still shows the local dirty text
+  `DIRTY-LOCAL-EDITline1` — the external disk change was *not* pulled in, exactly what "Keep"
+  should do.
+- **Reload** (`99-fedit05q-reload.png`, separate cycle, fresh dirty edit `DIRTY-RELOAD-TEST…`):
+  banner dismissed, buffer now shows `line1 / line2 / external-change-line-2` — the disk version,
+  local edit discarded, `edited` badge cleared. Exactly what "Reload" should do.
+
+Mechanical note for reproducing this: `wayland-drive.sh` restarts the app on every invocation
+(`kill_ours` runs unconditionally), so the "modify externally while the tab stays open" half of
+this row cannot be driven inside one `wayland-drive.sh` call. It was driven by launching with
+`TILLER_WL_KEEP=1`, then — between the open-with-dirty-edit step and the recheck step — sending
+the external file write via plain `Bash`, and the follow-up click/resolution-flip/`grim` capture
+manually against the same already-running instance's `$VP_FIFO`/`$SWAYSOCK`/`$WAYLAND_DISPLAY`
+(all still valid since the instance was never killed).
+
+Captures: `02-fedit05e-fileopen.png`, `02-fedit05j-open.png`, `99-fedit05k-conflict.png`
+(clean-tab silent reload, negative control), `04-fedit05l-dirty.png`, `99-fedit05m-conflict-dirty.png`,
+`99-fedit05n-keep.png`, `99-fedit05p-banner2.png`, `99-fedit05q-reload.png`.
