@@ -100,3 +100,49 @@ evidence for the "status changes while the process runs" half against a true neg
 control, but a same-session repeat did not reproduce it and the "clears when killed" half
 has no positive result at all. Not enough for PASSED; recording as partial rather than
 either could-not-reach (the gesture plainly *can* reach it once) or a clean pass.
+
+## `F-CORE-ACT-06`
+
+**Claim:** partially-exercised.
+
+**Drove:** With the fixed `title <text>` action (`WAYLAND-LANE.md`'s 2026-08-14 addition),
+selected the Terminal tab, clicked into it, and typed `title ". Working"` — the `". "`
+prefix `identify_agent_from_title` (`title.rs`) recognizes unconditionally as Claude,
+assigning identity + `title_owned_panes` + `Running` status on an unregistered pane
+(`model.rs:187-207`). Then switched to the Chat tab (so the Terminal tab's own status
+indicator, if any, is not suppressed by being the focused tab — same technique as
+`F-CORE-ACT-10`) and captured. Then switched back to Terminal, clicked in again, typed an
+unrelated plain-text title (`UNRELATEDPLAINTEXT`, no glyph/keyword match), which should
+hit the `title_owned_panes.contains → clear` branch (`model.rs:210-219`), and captured
+again after switching back to Chat.
+
+Ran this twice, once against a freshly-emptied DB (`project.add` on a brand-new instance,
+so no leftover activity state) and once as one continuous app lifetime covering both the
+identify and the clear step (a second, separate script invocation restarts the app process,
+which resets `AgentActivityModel`'s in-memory state — activity is not DB-persisted — so
+identify-then-clear only means anything measured inside one continuous run).
+
+**Observed:** Result was not reproducible run to run, matching the same instability seen
+on `F-CORE-ACT-10`. In the isolated single-step run, the identify step alone produced a
+real top-strip diff (baseline-Terminal-active vs. after-identify-Chat-active: mean 2.50,
+full-frame mean 3.10, plus a real body-text diff of mean 2.85 confirming the `title`
+command's `printf` genuinely executed and echoed in the pane). In the combined
+identify-then-clear run, the same procedure barely moved the pixels at all (mean 0.063 for
+identify, and exactly mean 0 between the identified and cleared captures) — either the
+`title` command's keystrokes did not land that time (most likely, given the low
+body-visible delta too) or the identify step silently no-op'd. I could not isolate which
+within the time available; both runs used the identical typed sequence and timing.
+
+**Captures:** `reference/linux-progress/wavea-W01-core/act06/` —
+`clean-x0-baseline.png`/`clean-x1-after-title-focused.png`/`clean-x2-chat-active.png`
+(isolated identify step, real positive result), `f0-baseline-term-active.png`/
+`f1-chat-active-identified.png`/`f2-chat-active-after-clear.png` (combined
+identify-then-clear, near-null both steps).
+
+**Verdict left as:** NOT EXERCISED — blocker (broken title injection) is genuinely fixed
+and the identify half of the mechanism was driven and produced discriminating evidence
+once, but the clear half was never cleanly isolated: the one run that attempted both steps
+in sequence did not show the identify step taking effect either, so it cannot speak to
+clearing. Recommend a follow-up pass with more settle time between `click`/`title` pairs
+and a body-text check after each `title` call to confirm the keystrokes landed before
+trusting the visual diff.
