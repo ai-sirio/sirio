@@ -375,16 +375,19 @@ impl TerminalHandle {
         processor.advance(&mut *term, b"\x1b[3J\x1b[2J\x1b[H");
     }
 
-    /// Terminate the PTY's dedicated process group and ask alacritty to drop
-    /// the PTY. The PTY destructor only signals its direct child; signaling
-    /// the group here is what also reaches shells' descendants. A stubborn
-    /// process gets SIGKILL after a short grace period so close/quit cannot
-    /// leave a live process group behind.
+    /// Terminate the PTY's process group(s) and ask alacritty to drop the
+    /// PTY. The PTY destructor only signals its direct child; signaling the
+    /// group(s) here is what also reaches the shell's descendants —
+    /// including ones that detached into their own process group after job
+    /// control forked them (F-PER-06), which a single `killpg` on the pgid
+    /// captured at spawn never reaches. A stubborn process gets SIGKILL
+    /// after a short grace period so close/quit cannot leave a live process
+    /// group behind.
     fn shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        terminate_process_group(self.shell_pid);
+        terminate_descendant_process_groups(self.shell_pid);
         let _ = self.sender.send(Msg::Shutdown);
     }
 
@@ -529,6 +532,78 @@ fn terminate_process_group(process_group: u32) {
             }
         }
     });
+}
+
+/// Every process id that is currently a descendant of `root` (not
+/// including `root` itself), discovered by walking the kernel's own live
+/// parent/child view (F-PER-06).
+///
+/// `/proc/<pid>/task/<tid>/children` is read fresh per pid rather than
+/// cached: a job-control-spawned child (a compound command, a backgrounded
+/// job) can detach into its own session/process group at any point after
+/// spawn, and a stubborn descendant can itself keep forking, so only a walk
+/// done at kill time — not the single pgid captured once at spawn — can
+/// find all of it. A process can have multiple threads (`task/<tid>`), and
+/// each thread's `children` file only lists the children *that thread*
+/// directly spawned, so every tid must be read to see the whole process's
+/// children.
+fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut discovered = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(root);
+    let mut frontier = vec![root];
+    while let Some(pid) = frontier.pop() {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let Ok(contents) = std::fs::read_to_string(task.path().join("children")) else {
+                continue;
+            };
+            for token in contents.split_whitespace() {
+                let Ok(child) = token.parse::<libc::pid_t>() else {
+                    continue;
+                };
+                if seen.insert(child) {
+                    discovered.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+    }
+    discovered
+}
+
+/// The distinct process groups spanning the shell (`shell_pid`) and every
+/// descendant it has right now, deduplicated. A single `killpg` on the pgid
+/// captured once at spawn only ever reaches the shell's *original* group —
+/// a job-control-spawned child that detached into a new group (a compound
+/// command run under job control, a backgrounded job in an interactive
+/// shell) is invisible to it and survives shutdown as an orphan (F-PER-06).
+/// Reading `getpgid` per pid at kill time, rather than assuming the shell's
+/// own pid is still its pgid, is what makes this correct even if the shell
+/// itself has re-grouped.
+fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut pids = vec![shell_pid];
+    pids.extend(descendant_pids(shell_pid));
+    let mut groups: Vec<libc::pid_t> = Vec::new();
+    for pid in pids {
+        let pgid = unsafe { libc::getpgid(pid) };
+        if pgid > 0 && !groups.contains(&pgid) {
+            groups.push(pgid);
+        }
+    }
+    groups
+}
+
+/// Terminates the shell at `shell_pid` and every process group any of its
+/// current descendants live in — not just the group captured at spawn
+/// (F-PER-06). Each distinct group gets its own SIGTERM-then-grace-then-
+/// SIGKILL handling via [`terminate_process_group`].
+fn terminate_descendant_process_groups(shell_pid: u32) {
+    for group in descendant_process_groups(shell_pid as libc::pid_t) {
+        terminate_process_group(group as u32);
+    }
 }
 
 /// A live PTY-backed terminal view, or a failed pane showing why the PTY
@@ -762,8 +837,16 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn receive_file_drop(&mut self, path: PathBuf, cx: &mut gpui::Context<Self>) {
-        let paths = vec![path];
+    /// Handles both drop payload shapes that land here (F-TERM-PTY-06): the
+    /// in-app typed drag (a Files-panel row, always exactly one path) and a
+    /// real OS-level `ExternalPaths` drop (an XDND file manager drag, which
+    /// can carry several paths in one drop). Both funnel into the same
+    /// quoted-and-space-joined insertion `tiller_project::terminal_file_drop`
+    /// already builds for a `Vec`.
+    fn receive_file_drop(&mut self, paths: Vec<PathBuf>, cx: &mut gpui::Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
         let insertion = tiller_project::terminal_file_drop(&paths);
         if insertion.is_empty() {
             return;
@@ -1321,6 +1404,7 @@ impl gpui::Render for TerminalView {
         let palette = TerminalPalette::from_theme(&theme);
         let terminal_entity = cx.entity();
         let file_drop_entity = terminal_entity.clone();
+        let external_drop_entity = terminal_entity.clone();
         let dropped_path = self
             .last_dropped_diff
             .as_ref()
@@ -1452,7 +1536,18 @@ impl gpui::Render for TerminalView {
                 })
                 .on_drop::<PathBuf>(move |path: &PathBuf, _, cx| {
                     file_drop_entity.update(cx, |terminal, cx| {
-                        terminal.receive_file_drop(path.clone(), cx);
+                        terminal.receive_file_drop(vec![path.clone()], cx);
+                    });
+                })
+                // F-TERM-PTY-06: the in-app `on_drop::<PathBuf>` above only
+                // ever catches GPUI's own typed drag payload (a Files-panel
+                // row dragged within the app). A real OS-level file-manager
+                // drag arrives as `gpui::ExternalPaths` (GPUI's XDND
+                // payload), which can carry more than one path in a single
+                // drop; both funnel into the same quoted insertion.
+                .on_drop::<gpui::ExternalPaths>(move |paths: &gpui::ExternalPaths, _, cx| {
+                    external_drop_entity.update(cx, |terminal, cx| {
+                        terminal.receive_file_drop(paths.paths().to_vec(), cx);
                     });
                 })
                 .child(TerminalElement {
@@ -2117,6 +2212,78 @@ mod tests {
         );
     }
 
+    /// F-PER-06: a job-control-spawned child (a compound command, a
+    /// backgrounded job under an interactive shell) can detach into its
+    /// *own* process group, distinct from the shell's. `setsid` reproduces
+    /// that deterministically — it puts its argument into a brand-new
+    /// session and process group regardless of whether the parent shell
+    /// happens to have job control enabled, which a plain `sleep 60 &`
+    /// (the older, weaker test above) does not reliably do under a
+    /// non-interactive `-c` shell. The old fix only ever `killpg`'d the
+    /// pgid captured once at spawn — the shell's own group — so this
+    /// grandchild used to survive shutdown as an orphan.
+    #[test]
+    fn shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group() {
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-test-detached-group-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).unwrap();
+        let pid_file = working_directory.join("detached.pid");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "trap '' HUP; setsid sleep 60 & printf '%s' \"$!\" > {}; wait",
+                    pid_file.display()
+                ),
+            ],
+        };
+        let (handle, _wakeup_rx) = TerminalHandle::new(&working_directory, &shell).unwrap();
+        let process_group = ProcessGroupGuard(handle.shell_pid);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let detached_pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = pid.parse::<i32>()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY child did not publish the setsid child's pid"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let guard = PidGuard(detached_pid);
+
+        assert!(
+            process_is_running(detached_pid),
+            "the setsid child exited before shutdown was exercised"
+        );
+        let detached_pgid = unsafe { libc::getpgid(detached_pid) };
+        assert_ne!(
+            detached_pgid, process_group.0 as libc::pid_t,
+            "setsid must actually have put the child in a new process \
+             group for this test to prove anything"
+        );
+
+        handle.shutdown();
+        drop(handle);
+
+        while std::time::Instant::now() < deadline && process_is_running(detached_pid) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !process_is_running(detached_pid),
+            "the detached process group {detached_pgid} survived shutdown \
+             of the shell's own group {}",
+            process_group.0
+        );
+        drop(guard);
+    }
+
     struct ProcessGroupGuard(u32);
 
     impl Drop for ProcessGroupGuard {
@@ -2126,6 +2293,20 @@ mod tests {
             // shutdown made this fallback unnecessary.
             unsafe {
                 let _ = libc::kill(-(self.0 as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+
+    /// Test cleanup for a single detached pid (its own session/group, so
+    /// [`ProcessGroupGuard`]'s `killpg` on the shell's group cannot reach
+    /// it). Same role as `ProcessGroupGuard`: a fallback that must prove
+    /// unnecessary once the assertion above has run.
+    struct PidGuard(i32);
+
+    impl Drop for PidGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = libc::kill(self.0, libc::SIGKILL);
             }
         }
     }
@@ -2169,6 +2350,21 @@ mod view_tests {
         path: PathBuf,
     }
 
+    /// F-TERM-PTY-06: a real OS-level file-manager drag lands as
+    /// `gpui::ExternalPaths` (GPUI's XDND payload), distinct from the
+    /// in-app typed drag `FileDropFixture` exercises above. XDND itself is
+    /// not exercisable by this harness (no real window manager to drive
+    /// it), but the `on_drop::<ExternalPaths>` handler on the terminal does
+    /// not care whether the payload arrived from a real XDND drop or an
+    /// in-app drag carrying the same type — both dispatch through GPUI's
+    /// identical typed-drop matching. Driving that handler with an in-app
+    /// `ExternalPaths` drag is therefore a real exercise of the production
+    /// code this row was missing, not a simulation of a simulation.
+    struct ExternalFileDropFixture {
+        terminal: gpui::Entity<TerminalView>,
+        paths: gpui::ExternalPaths,
+    }
+
     impl gpui::Render for DiffDropFixture {
         fn render(
             &mut self,
@@ -2206,6 +2402,26 @@ mod view_tests {
                         .h(px(40.0))
                         .on_drag(self.path.clone(), |_, _, _, cx| cx.new(|_| gpui::Empty))
                         .child("file source"),
+                )
+                .child(self.terminal.clone())
+        }
+    }
+
+    impl gpui::Render for ExternalFileDropFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("terminal-external-drag-source")
+                        .debug_selector(|| "terminal-external-drag-source".to_owned())
+                        .h(px(40.0))
+                        .on_drag(self.paths.clone(), |_, _, _, cx| cx.new(|_| gpui::Empty))
+                        .child("external files source"),
                 )
                 .child(self.terminal.clone())
         }
@@ -2717,6 +2933,105 @@ mod view_tests {
                 .last_dropped_files()
                 .map(<[PathBuf]>::to_vec)),
             Some(vec![path])
+        );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn a_drawn_terminal_accepts_a_real_external_paths_drop_with_several_files(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-external-drop-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create drop directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+        };
+        let dropped = gpui::ExternalPaths(
+            [
+                PathBuf::from("src/one.rs"),
+                PathBuf::from("src/two with spaces.rs"),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let window = cx.add_window(|_, cx| {
+            let terminal = cx.new(|cx| {
+                TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
+            });
+            ExternalFileDropFixture {
+                terminal,
+                paths: dropped.clone(),
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<ExternalFileDropFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let terminal = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal.clone());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalDropEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is a drawn drop target");
+        let source = cx
+            .debug_bounds("terminal-external-drag-source")
+            .expect("test source is drawn");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(source.center().x + px(8.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[TerminalDropEvent::Files {
+                paths: dropped.paths().to_vec()
+            }],
+            "an ExternalPaths drop with several files reaches the terminal, \
+             not just GPUI's in-app single-path typed drag"
+        );
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal
+                .last_dropped_files()
+                .map(<[PathBuf]>::to_vec)),
+            Some(dropped.paths().to_vec())
         );
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
