@@ -115,3 +115,30 @@ correctly proven per the existing record (main.rs:8161/8234, re-confirmed by gre
 call sites this pass, unchanged). Do not close this row until F-BRW-06 gets a real caller.
 
 No new captures (grep-only re-confirmation).
+
+## F-BRW-08 — ledger line 257, currently half-proven
+
+**Drove:** seeded two distinct origins directly into the running instance's own DB (`python3`
+stdlib `sqlite3`, no source edit, exercising the existing `browser_origin_grant` table from
+migration v11): `https://w11-origin-a.example`, `https://w11-origin-b.example`. Confirmed both
+present with a fresh `SELECT`. Then, live on the Wayland lane: `ctl surface.settings.open`,
+`ctl surface.settings.select section=permissions`, `shot before-revoke-all`, then a real
+left-click at `1272 158` — one row-height (44px) above the coordinate
+(`1272 202`) that the prior E06-brw sweep proved lands on the per-origin `Revoke` button,
+landing on the card's header row where `render_browser_grants` (settings.rs:3038) places the
+"Revoke all" pill — then `shot after-click-158`.
+
+**Observed:** DB re-query after the click returned `[]` — both origins gone in a single click,
+which a per-origin Revoke button could not do (it only ever removes the one row wired to its
+own `on_click`); this is decisive that the click landed on "Revoke all" specifically, wired to
+`Db::revoke_all_browser_origins` (main.rs:8253-8255), not two lucky clicks on individual rows.
+The capture region also changed in stddev/mean between before (16.8/46.4) and after
+(13.9/33.9), consistent with both origin rows disappearing and the empty-state message
+appearing.
+
+**Claim:** exercised-working. Both halves the ledger names are now proven live: the
+single-origin `Revoke` path (already proven in E06-brw), and this pass's owed
+multi-origin `Revoke all` path — seeded 2 origins, one real click cleared both, confirmed by
+DB re-query and a changed capture region.
+
+Captures: `reference/linux-progress/wavea-W11-ctrl+brw+sid/brw08/{01-baseline,02-before-revoke-all,03-after-click-158}.png`.
