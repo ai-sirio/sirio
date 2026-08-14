@@ -15,7 +15,8 @@ shared worktree.
 ## Design
 
 1. Provider cards derive their displayed identity from the provider's real
-   local state. Claude reads its credentials JSON and uses
+   local state. Claude checks its credentials JSON for presence, then parses
+   the JSON emitted by `claude auth status` with
    `AgentAccountIdentity::parse_claude_json`. Codex checks its auth file and
    parses the output of `codex login status` with `parse_codex_identity`.
    OpenCode Go remains an honest Linux `Unknown`/no-local-store state because
