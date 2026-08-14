@@ -245,3 +245,62 @@ control-test menu) instead of a keyboard shortcut worked: the line read
 `echo PASTE3_START; /tmp/claude-1000/-home-enzopalmisano--claude/21454512-bda7-4263-9407-7cd8167468c6/scratchpad/p104-fixture-repo/main.rs`
 — the exact copied path, correctly pasted. Captures: `p104-g3-edit11-ctrlshiftv-fail.png`,
 `p104-g3-edit11-ctrlv-fail.png`, `p104-g3-edit11-menu-paste-success.png`.
+
+## Group 4 · sidebar
+
+Setup for this group: registered a second project via the sidebar's "+" → "Create Project"
+dialog, attempted first under the name `p104-sid07-git` to reuse a folder that had already
+been `git init`'d directly via a terminal — the dialog refused with a verbatim red-text
+error, **"Creation failed: could not create /home/enzopalmisano/p104-sid07-git: File exists
+(os error 17)"** (the dialog only ever makes a brand-new folder; it is not an "add existing
+folder" flow). Recovered by creating a fresh, differently-named folder through the same
+dialog (`p104-sid07b`) and then running `git init` against that new folder directly from a
+terminal, giving a genuine git project for the git-side of `F-SID-08`'s comparison alongside
+the already-registered plain, non-git `p104-sid08-plain`.
+
+**F-SID-07** — Gesture: right-click the project header, choose Project Settings, report the
+fields shown and which respond to input. Screen: right-clicking `p104-sid07b`'s header opened
+a menu, top to bottom: **Project Settings, Initialize Git repository, Show in File Manager,
+Remove Project** (capture: `p104-g4-sid07-rclick-menu.png`). Choosing Project Settings opened
+a card (capture: `p104-g4-sid07-settings-panel.png`) titled "Project Settings · p104-sid07b",
+showing: the path `/home/enzopalmisano/p104-sid07b`; a "Repository: Folder" label; a "Display
+name" text field (empty, placeholder-only); an "Initialize Git" button; a "Project icon"
+control with three tabs (Icon / Emoji / Avatar) and, under the Icon tab, five icon choices
+plus a globe icon and a row of colour swatches; a "Reset" button; a "Close" link; and a small
+grey project-id string (`p-1be93e71585bdff2`). Fields tested for response: typing into
+Display name updated the card's own title live, from "Project Settings · p104-sid07b" to
+"Project Settings · SID07 Display" as each character landed (capture:
+`p104-g4-sid07-displayname-live.png`), and the change persisted into the sidebar itself after
+Close — the project's row now reads "SID07 Display" instead of its folder name. Clicking a
+colour swatch (blue) drew a selection ring around it (capture:
+`p104-g4-sid07-colour-selected.png`) — responds to input. Clicking the "Emoji" tab swapped the
+panel to an emoji preview box with "Set Emoji" / "Open Emoji Picker" buttons (capture:
+`p104-g4-sid07-emoji-tab.png`) — tab strip responds to input. Clicking "Initialize Git" on
+this already-git project produced no visible on-screen change and, checked from a terminal,
+left the repo exactly as it was (`git status` still clean, `git log` still showing only the
+prior `init` commit) — the button is present and clickable but is a no-op with no toast/error
+shown, on a project already under git.
+
+**F-SID-08** — Gesture: add a plain non-git folder as a project (done in setup:
+`p104-sid08-plain`, confirmed via terminal `git status` beforehand to not be a repository);
+right-click it and the git project, and report how "Initialize Git repository" presents on
+each; then click it on the plain folder and report `git status` from a terminal. Screen: on
+the git project (`p104-sid07b`), a second right-click's menu showed **Initialize Git
+repository** greyed out, with inline reason text reading verbatim **"Git is already
+initialized"** immediately to its right (capture: `p104-g4-sid09-git-initgit-greyed.png` —
+this same screenshot also serves `F-SID-09` below). On the plain folder (`p104-sid08-plain`),
+the same menu entry showed **Initialize Git repository** as a normal, non-greyed,
+no-reason-text item (capture: `p104-g4-sid08-plain-initgit-enabled.png`). Clicking it: a
+terminal `git status` on `p104-sid08-plain` immediately afterward reported `Sul branch
+master` / `Non ci sono ancora commit` ("On branch master" / "No commits yet") with a fresh
+`.git` directory present — the click had genuinely run `git init` on the plain folder, taking
+it from "not a repository" to a valid, empty, uncommitted git repository.
+
+**F-SID-09** — Gesture: right-click the project, choose Show in File Manager, report what
+opens on the desktop, or what appears at the sidebar's bottom if nothing does. Screen:
+something did open — a separate desktop window, **COSMIC Files**, titled "p104-sid07b —
+COSMIC Files", confirmed both by its window title and by its backing process
+(`/usr/bin/cosmic-files /home/enzopalmisano/p104-sid07b`, launched via an `xdg-open` helper),
+showing the project folder's single `note.md` file (capture:
+`p104-g4-sid09-cosmicfiles-window.png`). Nothing appeared at the bottom of the app's own
+sidebar, consistent with the recipe's stated fallback only applying when nothing opens.
