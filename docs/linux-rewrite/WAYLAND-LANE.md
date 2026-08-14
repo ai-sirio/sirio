@@ -319,3 +319,39 @@ Three rules make it evidence rather than a number:
 
 Use this to check your own work before asking for a visual acceptance pass — it turns a
 frame you cannot read into a claim you can defend.
+
+## `title <text>` — setting a pane's OSC title (added 2026-08-14)
+
+`title ORCHTITLE` clicks nothing and assumes nothing: it types `printf '\033]0;<text>\007'`
+into the focused pane's shell and presses Return, which is the input path a real user has.
+Click a terminal pane first so the shell has focus.
+
+**Use it rather than writing the escape sequence inline.** The whole action block reaches
+`eval`, and an OSC sequence carries a bare `;` — so `type printf '\033]0;X\007'` parses as two
+commands, types half a sequence, and leaves the title untouched while looking like the app
+ignored it. Four `F-CORE-ACT` rows (02, 06, 07, 11) sat unexercised on exactly that mistake.
+
+Verified live: `reference/linux-progress/title-gesture-test/03-after-title.png` shows the
+`printf` typed into the pane and executed (prompt returned, 2 ms).
+
+### Trap: `panel.list`'s `agent` and `title` fields are NOT activity observables
+
+`panel.list` returns `{"agent":"","tab":"Terminal","title":"Terminal"}`. Neither field moves
+when activity state changes, so **a null result from them means nothing at all**:
+
+- `title` is the *tab label*. `tiller_terminal/src/lib.rs:134` says so outright — the context
+  menu's `SetTitle` is a user-set label, deliberately distinct from `OscTitle`. It does not
+  change when an OSC 0 title arrives, and that is by design.
+- `agent` stays `""` even after a **successful** `notify`. Confirmed with a positive control:
+  `ctl notify session=pane-1 status=running` returned `{"queued":"true"}` and the very next
+  `panel.list` still read `agent:""`.
+
+That control is the whole point. Reading `agent:""` after an OSC title looks exactly like
+"Layer B is broken" — and it is *not evidence of that*, because the field reads empty when
+Layer A demonstrably worked. A verdict filed off this instrument would have been a fabricated
+defect. If you need to observe activity state, read it from the frame (tab dot, sidebar
+status), not from `panel.list`.
+
+Valid `notify` statuses, from `main.rs:1483`: `running`, `needs-input`/`needs_input`,
+`done`/`finished`, `error`/`failed`. Anything else returns "notify has an unknown status" —
+`working` is **not** one of them.
