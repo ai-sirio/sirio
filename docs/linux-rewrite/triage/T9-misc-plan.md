@@ -418,3 +418,201 @@ logical rows survive with the new schema's field names/ordering intact — not j
 tables exist.
 
 **size:** M.
+
+## `F-USE-01` — FAILED — absent
+
+**needs: build.** Confirmed live-absent by two independent passes and a stale-hand-check
+(`ADJUDICATION-BACKLOG.md:132-136`) that re-checked and held it. Reading the source explains
+why: `StatusBar` (`rust/crates/tiller_ui/src/status_bar.rs`) has a real `on_refresh:
+Option<Rc<dyn Fn()>>` field and a public `on_refresh(callback)` builder (`status_bar.rs:113,
+160-162`), but **grep for `on_refresh` returns exactly those three lines — it is never called
+anywhere inside `impl Render for StatusBar`** (`status_bar.rs:300-420`). The render tree builds
+one `icon_button("status-settings", Icon::Settings)` for the gear (`status_bar.rs:308-312`
+onward) and nothing else — no sibling refresh icon exists to invoke the hook. This is exactly
+`DEAD-MODELS.md`'s "dead `on_refresh`" finding: the wiring exists one layer up, the control that
+would fire it does not exist in the render tree at all.
+
+**files:** `rust/crates/tiller_ui/src/status_bar.rs` (add a refresh icon button beside the
+existing settings gear, using the same `icon_button(...)` closure already defined in `render()`,
+wired to call `self.on_refresh` the way the gear calls `self.on_settings`).
+
+**approach:** add a second `icon_button` (e.g. a refresh/reload glyph) next to
+`"status-settings"` in the `left` row being built in `render()`, with an `.on_click` that invokes
+`(self.on_refresh)()` if set — mirroring the settings gear's own click handler pattern exactly.
+
+**size:** S.
+
+## `F-USE-02` — half-proven
+
+**needs: build** for the code gap; **exercise** for the half already blocked by Cluster 4.
+Confirmed by reading: `rust/crates/tiller_ui/src/status_bar.rs` has **zero** occurrences of
+`.tooltip(` anywhere in the file (and only three hits repo-wide in `tiller_ui`, none in this
+file). The `provider_segment` closure (`status_bar.rs:349-364`) that builds each usage segment
+attaches no tooltip at all — the unavailable *reason* (`segment_text`, `status_bar.rs:254-292`,
+already distinguishes `NotInstalled`/`LoggedOut`/`TimedOut`/`Error`) is only ever shown as the
+segment's permanently-visible label text, never as hover-only content. The enabled-segment half
+(no tooltip on hover, live-confirmed) is a real, separately-provable absence. The
+unavailable-segment half is additionally blocked by Cluster 4's broken PATH-strip precondition,
+so it can't be exercised until that's fixed regardless of whether a tooltip is added.
+
+**files:** `rust/crates/tiller_ui/src/status_bar.rs` (`provider_segment` closure and its call
+sites).
+
+**approach:** add `.tooltip(...)` to each segment `div()` in `provider_segment`, and decide
+explicitly whether the tooltip should repeat the reason (already visible as text, per current
+design) or add detail (e.g. exact timestamp for `Stale`, exact error string for `Error`) —
+otherwise a literal reading of the row would be satisfied by a tooltip that duplicates the
+already-visible label, which may or may not be what the row's author intended.
+
+**size:** S.
+
+## `F-USE-03` — half-proven
+
+**needs: exercise.** Belongs to Cluster 4. The loaded and logged-out states are confirmed live.
+Loading and stale states are simply untested — no code gap is indicated; `ProviderUsageState`
+already models `Loading`/`Stale`/`Loaded`/`Unavailable(reason)` distinctly
+(`rust/crates/tiller_usage/src/model.rs`), and `status_bar.rs`'s own tests
+(`unavailable_reasons_render_distinct_text`, `status_bar.rs:558+`) already assert the text/dim
+differences at the unit level — this just hasn't been driven live end-to-end with real timing.
+The "overclaim" the critic found (`PATH`-stripped providers still reading "Signed in") is not a
+code defect: each provider's `fetch()` (`rust/crates/tiller_usage/src/claude.rs:281-290`, and
+siblings in `codex.rs`/`opencode_go.rs`/`ollama.rs`) shells out via `Command::new`, which
+resolves the binary against the **process's own `PATH`, captured at exec time** — editing `PATH`
+in a shell after Tiller is already running has no effect on the already-running process's
+environment. The prior test edited `PATH` post-launch, so it never had a chance to trigger
+`NotInstalled`.
+
+**files:** none indicated for the loading/stale gap — pure driving work. If the PATH-strip retest
+still shows no effect after launching with a genuinely scrubbed `PATH`, then (and only then) the
+gap would be in `rust/crates/tiller_usage/src/claude.rs`/`codex.rs`'s `fetch()`.
+
+**approach:** for `Loading`/`Stale`: drive the refresh cycle live and capture the bar mid-fetch
+(`Loading`) and past the staleness threshold without a successful refresh (`Stale`) — a slow/
+delayed provider or a paused refresh timer would do it. For the unavailable half shared with
+`F-USE-02`: launch Tiller itself with `env -u PATH` (or a `PATH` pre-scrubbed of `claude`/
+`codex`) rather than stripping `PATH` on a live process, then confirm the segment reads
+`NotInstalled` and the tooltip (once `F-USE-02` is built) shows it.
+
+**size:** S.
+
+## `F-USE-06` — FAILED — defective (ledger)
+
+**needs: reclassify** for the specific "starved of identity" claim; the row's simpler,
+non-restart VERIFY gesture ("start an agent, hide/switch away, cause a transition, confirm
+notification") looks independently exercisable already via `agent_spawned`. The ledger's cited
+defect — `register_agent_id` "has zero production callers" so a restored agent pane can never
+notify — is the exact defect `docs/linux-rewrite/tasks/P100-the-notification-that-never-
+arrives.md` describes, and **it reads as already fixed**: commit `a5d09d7` ("fix: wire
+notification delivery and restored agents", 2026-08-14 13:42, same commit that fixed
+`F-AUTO-06`) added `register_restored_agent()` (`rust/crates/tiller/src/main.rs:7567-7574`,
+calling `activity.register_agent_id`) and wired it into **both** restore paths —
+`restore_tabs` (`main.rs:7608`) and `restore_tabs_in_workspace` (`main.rs:7734`) — exactly
+satisfying P100's own "say which of the two you changed... both restore paths exist and a fix to
+one leaves the other dead" instruction. `register_agent_id` now has one real production caller
+via that helper, not zero. `post_activity_notification`'s early return on
+`self.activity.agent_id(pane)` (`main.rs:3739`) and `notification.create`'s unconditional
+delivery (see `F-AUTO-06`) both read as wired.
+
+**files:** none required if the reclassify holds. `rust/crates/tiller/src/main.rs`
+(`register_restored_agent`, `restore_tabs`, `restore_tabs_in_workspace`,
+`post_activity_notification`) is where to re-verify.
+
+**approach:** the judgeable gesture P100 itself specifies: open an agent tab, quit, relaunch,
+background the restored pane (note `app_active` is hardcoded `true` at the call site, so the
+pane must be in a non-active tab or `should_notify`'s suppression will hide a real success),
+drive a status transition on it, and confirm a `notify-send` D-Bus call fires. Also re-run the
+simpler non-restart gesture from a fresh session, since that path (`agent_spawned` populates
+`pane_agents` directly) doesn't depend on the restore fix at all and may already have been
+passable independent of P100.
+
+**size:** S.
+
+## `F-WIN-06` — FAILED — defective (ledger)
+
+**needs: reclassify.** The ledger's evidence ("`NewTabAction::NewBrowser` is an empty match arm
+(`main.rs:4215`)") does not match current source. `open_action`
+(`rust/crates/tiller/src/main.rs:4639+`, the real dispatch function, subscribed at `main.rs:2336`
+from the tab-bar's `NewTabAction` event) has a `NewBrowser` arm at `main.rs:4663-4665` that calls
+`self.add_browser_tab("https://example.com", window, cx)` — not empty, and it produces a real
+browser tab via the same `add_browser_tab` the `browser.open` control-socket method also uses
+(see `F-AUTO-09`'s analysis, `main.rs:1503`). `git log -S"NewTabAction::NewBrowser => {"` shows
+this arm already present at the `c63378e` recovery-commit baseline (2026-08-12), predating the
+ledger's `pass 14` evidence. The `4215` line number in the evidence likely pointed at drifted/
+stale line content — `ADJUDICATION-BACKLOG.md` itself warns line numbers move under five
+concurrent builders.
+
+**files:** none required if the reclassify holds. `rust/crates/tiller/src/main.rs`
+(`open_action`, `NewTabAction::NewBrowser` arm, `add_browser_tab`) is where to re-verify.
+
+**approach:** press `⇧⌘L`/the equivalent Linux chord (or click "New Browser" in the tab-bar
+menu) against a current build and confirm a browser tab opens with `https://example.com`
+loaded, then separately confirm `⌘L`-equivalent focuses the address field, per the row's
+two-conjunct VERIFY.
+
+**size:** S.
+
+## `F-WIN-07` — half-proven
+
+**needs: build.** Two separate gaps, confirmed independently by reading:
+
+1. **No History menu exists.** `grep -rniE "previous launch|history"` across `tiller`/
+   `tiller_ui` (re-run, matching the critic's own re-grep) returns nothing but unrelated hits
+   (browser back/forward, chat-history setting, an unrelated test variable). There is no menu,
+   no "Restore Previous Launch" entry, no `⇧⌘O`-equivalent binding anywhere.
+2. **The underlying restore mechanism only fires once, at boot, and can't be re-invoked.**
+   `launch_snapshot: RestoredSession` (`rust/crates/tiller/src/main.rs:2255`) is a plain field
+   set once in `Workspace::new` from the constructor's arguments — not a `Mutex`, not refreshed
+   from the DB later. `restore_launch_snapshot` (`main.rs:3661-3696`, the function behind the
+   `session.restore` control door) diffs this **same boot-time value** against the *current*
+   tabs and restores whatever's still "missing". `docs/linux-rewrite/P106-report.md:506-527`
+   drove this live and found exactly what that architecture predicts: a genuine quit/relaunch
+   auto-restores everything correctly (the boot-time consumption working as designed), but
+   calling `session.restore` explicitly **after** boot — including immediately after closing a
+   worktree in the same live process — always returns `restoredCount:"0"`, because by then
+   `current` already contains everything `launch_snapshot` ever had (it was consumed once at
+   startup) and nothing appears "missing" to the diff, regardless of what the user closes
+   afterward. This isn't a bug in the diff logic itself so much as a design mismatch: the row
+   describes an on-demand, repeatable "restore what I just closed" action; the code implements a
+   one-shot boot action.
+
+**files:** `rust/crates/tiller/src/main.rs` (`launch_snapshot` field, `restore_launch_snapshot`,
+`merge_launch_snapshot_tabs`); a History menu needs a UI entry point — likely
+`rust/crates/tiller_ui/src/titlebar.rs` (or wherever the app's menu bar/command surface lives)
+plus a new keybinding alongside `linux_window_shortcuts()` (`main.rs:114-122`).
+
+**approach:** two independent pieces of work, both real: (a) add a History menu UI with a
+"Restore Previous Launch" entry and its own chord, wired to the existing `session.restore`
+control-action machinery; (b) make the underlying restore re-invocable by having it re-read the
+last-persisted session **fresh from the database** on each invocation instead of reusing the
+immutable boot-time `launch_snapshot`, so closing something mid-session and then restoring
+actually finds it "missing" and brings it back.
+
+**size:** M–L (two conjuncts; (b) touches the restore semantics the History menu in (a) would
+depend on, so (a) is largely blocked on (b) being decided first).
+
+## `F-WIN-10` — FAILED — absent
+
+**needs: build.** `docs/linux-rewrite/P106-report.md:531-548` already isolated this precisely:
+the only feedback mechanism that exists is `sidebar.set_notice(...)`
+(`rust/crates/tiller/src/main.rs:3226-3235` and every other call site), which renders a
+**persistent inline notice inside the sidebar**, not a floating, auto-dismissing, bottom-right
+toast — confirmed by the row's own live evidence (duplicate-path and invalid-name errors both
+rendered as persistent inline red text inside the Create Project dialog, no toast anywhere on
+screen in either capture, neither auto-dismissed). A repo-wide re-grep for "toast" finds exactly
+one unrelated hit (a design-token assertion name in `tiller_ui/src/conformance.rs:156`) — there
+is no toast surface, no overlay layer, no auto-dismiss timer anywhere in the tree.
+
+**files:** likely a new file in `rust/crates/tiller_ui/src/` (e.g. `toast.rs`) for the
+component itself (a floating, timed, dismissible overlay), plus `rust/crates/tiller/src/main.rs`
+(the `Workspace` root render tree needs to mount a toast layer above everything else, and every
+existing `sidebar.set_notice`/error-surfacing call site is a candidate to also/instead raise a
+toast, per the row's "without leaving the current surface" wording — a sidebar-local notice
+doesn't satisfy that for errors raised while the sidebar isn't the visible surface).
+
+**approach:** build a toast component with an auto-dismiss timer (a `Task`/timer that removes
+itself after N seconds, following the same pattern `ensure_refresh_task` in `status_bar.rs` uses
+for its own timed loop), mount it as an overlay in the workspace's root render, and have at
+least the operations the row's own evidence already exercises (duplicate-path/invalid-name
+project-add errors) raise it instead of — or in addition to — the existing inline dialog text.
+
+**size:** M.
