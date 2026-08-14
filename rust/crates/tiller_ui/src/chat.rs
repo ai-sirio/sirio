@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tiller_acp::{
     AcpClient, AcpEvent, AgentCommand, AvailableCommandInfo, ContextUsage, EffortOption,
-    ImageAttachment, ModelCatalog, ModelOption,
+    ImageAttachment, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo,
 };
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_theme::Theme;
@@ -139,10 +140,21 @@ enum Entry {
     /// a one-line summary until the reader opts in, live or historical.
     Thought { text: String, expanded: bool },
     /// A tool call, tracked by protocol id so later updates can patch it.
+    ///
+    /// `kind`, `content`, `locations` and `raw_input` are the protocol's
+    /// widened tool-call surface (F-CHAT-23/-31/-32) — a diff or text
+    /// result, the files touched, and the raw input sent, when the agent
+    /// reported them. `expanded` starts `false`, same as `Thought`
+    /// (F-CHAT-21): the card renders as one line until the reader opts in.
     ToolCall {
         id: String,
         title: String,
         status: String,
+        kind: String,
+        content: Vec<ToolCallContentInfo>,
+        locations: Vec<ToolCallLocationInfo>,
+        raw_input: Option<String>,
+        expanded: bool,
     },
     /// A question the agent put to the user, answered in place (F-CHAT-25).
     /// `resolved` is the recorded answer once one is chosen or typed;
@@ -181,7 +193,28 @@ impl Entry {
             Self::User(text) => text.clone(),
             Self::Thought { text, .. } => text.clone(),
             Self::Assistant { document, .. } => document.plain_text(),
-            Self::ToolCall { title, status, .. } => format!("{title}\n{status}"),
+            Self::ToolCall {
+                title,
+                status,
+                content,
+                locations,
+                ..
+            } => {
+                let mut lines = vec![format!("{title}\n{status}")];
+                for item in content {
+                    match item {
+                        ToolCallContentInfo::Text(text) => lines.push(text.clone()),
+                        ToolCallContentInfo::Diff(diff) => {
+                            lines.push(format!("diff: {}", diff.path.to_string_lossy()))
+                        }
+                        ToolCallContentInfo::Other => {}
+                    }
+                }
+                for location in locations {
+                    lines.push(location.path.to_string_lossy().into_owned());
+                }
+                lines.join("\n")
+            }
             Self::Permission {
                 options, resolved, ..
             } => resolved.clone().unwrap_or_else(|| {
@@ -652,6 +685,15 @@ impl Chat {
         cx.notify();
     }
 
+    /// F-CHAT-23: flips one tool call entry's expand/collapse state.
+    fn toggle_tool_call_expanded(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(Entry::ToolCall { expanded, .. }) = self.entries.get_mut(index) {
+            *expanded = !*expanded;
+            self.remeasure_entry(index);
+        }
+        cx.notify();
+    }
+
     /// Install the composer keymap in the host application.
     pub fn bind_keys(cx: &mut App) {
         cx.bind_keys([
@@ -716,13 +758,42 @@ impl Chat {
                     });
                 }
             }
-            AcpEvent::ToolCallStarted { id, title, status } => {
-                self.push_entry(Entry::ToolCall { id, title, status });
+            AcpEvent::ToolCallStarted {
+                id,
+                title,
+                status,
+                kind,
+                content,
+                locations,
+                raw_input,
+            } => {
+                self.push_entry(Entry::ToolCall {
+                    id,
+                    title,
+                    status,
+                    kind,
+                    content,
+                    locations,
+                    raw_input,
+                    expanded: false,
+                });
             }
-            AcpEvent::ToolCallUpdated { id, title, status } => {
+            AcpEvent::ToolCallUpdated {
+                id,
+                title,
+                status,
+                kind,
+                content,
+                locations,
+                raw_input,
+            } => {
                 if let Some((index, Entry::ToolCall {
                     title: existing_title,
                     status: existing_status,
+                    kind: existing_kind,
+                    content: existing_content,
+                    locations: existing_locations,
+                    raw_input: existing_raw_input,
                     ..
                 })) = self
                     .entries
@@ -737,12 +808,35 @@ impl Chat {
                     if let Some(status) = status {
                         *existing_status = status;
                     }
+                    if let Some(kind) = kind {
+                        *existing_kind = kind;
+                    }
+                    if let Some(content) = content {
+                        *existing_content = content;
+                    }
+                    if let Some(locations) = locations {
+                        *existing_locations = locations;
+                    }
+                    if let Some(raw_input) = raw_input {
+                        *existing_raw_input = Some(raw_input);
+                    }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
-            AcpEvent::ToolCallCompleted { id, status } => {
+            AcpEvent::ToolCallCompleted {
+                id,
+                status,
+                kind,
+                content,
+                locations,
+                raw_input,
+            } => {
                 if let Some((index, Entry::ToolCall {
                     status: existing_status,
+                    kind: existing_kind,
+                    content: existing_content,
+                    locations: existing_locations,
+                    raw_input: existing_raw_input,
                     ..
                 })) = self
                     .entries
@@ -752,6 +846,18 @@ impl Chat {
                     .find(|(_, entry)| matches!(entry, Entry::ToolCall { id: entry_id, .. } if *entry_id == id))
                 {
                     *existing_status = status;
+                    if let Some(kind) = kind {
+                        *existing_kind = kind;
+                    }
+                    if let Some(content) = content {
+                        *existing_content = content;
+                    }
+                    if let Some(locations) = locations {
+                        *existing_locations = locations;
+                    }
+                    if let Some(raw_input) = raw_input {
+                        *existing_raw_input = Some(raw_input);
+                    }
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
@@ -2409,6 +2515,109 @@ impl Chat {
         div().w_full().child(text).into_any_element()
     }
 
+    /// F-CHAT-23: a tool call's text output, tail-truncated (large MCP
+    /// results in particular can run long, and the tail is where the
+    /// result usually lands) rather than shown in full.
+    fn render_tool_output_text(text: &str, theme: &Theme) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let (shown, truncated) = truncate_tool_output(text);
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(theme.radii.code_block)
+            .bg(colors.code_inset_fill)
+            .px(px(10.0))
+            .py(px(6.0))
+            .gap(px(4.0));
+        if truncated {
+            column = column.child(
+                div()
+                    .text_size(typography.caption2)
+                    .text_color(colors.meta)
+                    .child(format!("Showing last {TOOL_OUTPUT_MAX_CHARS} characters")),
+            );
+        }
+        column
+            .child(
+                div()
+                    .font_family(typography.code_family)
+                    .text_size(typography.code_size)
+                    .line_height(typography.code_line_height)
+                    .text_color(colors.primary_text_color)
+                    .child(shown),
+            )
+            .into_any_element()
+    }
+
+    /// F-CHAT-31: a diff preview for a tool call that changed a file —
+    /// removed lines then added lines at each point of divergence, capped
+    /// so one huge rewrite cannot make the transcript unusable.
+    fn render_tool_diff(diff: &ToolCallDiff, theme: &Theme) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        let lines = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text);
+        let total = lines.len();
+        let shown = lines.into_iter().take(DIFF_PREVIEW_MAX_LINES);
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(theme.radii.code_block)
+            .bg(colors.code_inset_fill)
+            .py(px(6.0))
+            .child(
+                div()
+                    .text_size(typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.meta)
+                    .px(px(10.0))
+                    .pb(px(4.0))
+                    .child(diff.path.display().to_string()),
+            );
+        for line in shown {
+            let (prefix, text, text_color, background) = match line {
+                DiffLine::Context(text) => (" ", text, colors.primary_text_color, None),
+                DiffLine::Removed(text) => (
+                    "-",
+                    text,
+                    colors.diff_deletion,
+                    Some(colors.diff_deletion_background),
+                ),
+                DiffLine::Added(text) => (
+                    "+",
+                    text,
+                    colors.diff_addition,
+                    Some(colors.diff_addition_background),
+                ),
+            };
+            let mut row = div()
+                .flex()
+                .px(px(10.0))
+                .font_family(typography.code_family)
+                .text_size(typography.code_size)
+                .line_height(typography.code_line_height)
+                .text_color(text_color)
+                .child(format!("{prefix} {text}"));
+            if let Some(background) = background {
+                row = row.bg(background);
+            }
+            column = column.child(row);
+        }
+        if total > DIFF_PREVIEW_MAX_LINES {
+            column = column.child(
+                div()
+                    .text_size(typography.caption2)
+                    .text_color(colors.meta)
+                    .px(px(10.0))
+                    .pt(px(4.0))
+                    .child(format!("… {} more lines", total - DIFF_PREVIEW_MAX_LINES)),
+            );
+        }
+        column.into_any_element()
+    }
+
     fn render_entry(
         entry: Entry,
         entry_index: usize,
@@ -2510,35 +2719,108 @@ impl Chat {
                 }
                 column.into_any_element()
             }
-            Entry::ToolCall { title, status, .. } => div()
-                .w_full()
-                .flex()
-                .rounded(theme.radii.code_block)
-                .bg(colors.card_fill)
-                .border_l_2()
-                .border_color(colors.rail_tool)
-                .child(
-                    div()
-                        .flex_1()
-                        .px(px(CARD_H_PADDING))
-                        .py(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(typography.callout)
-                                .text_color(colors.title)
-                                .child(title),
+            Entry::ToolCall {
+                title,
+                status,
+                kind,
+                content,
+                locations,
+                expanded,
+                ..
+            } => {
+                let toggle_entity = entity.clone();
+                let header = div()
+                    .id(("tool-call-toggle", entry_index))
+                    .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
+                    .flex_1()
+                    .px(px(CARD_H_PADDING))
+                    .py(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor(CursorStyle::PointingHand)
+                    .child(
+                        IconElement::new(
+                            if expanded {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            px(10.0),
                         )
-                        .child(
-                            div()
-                                .text_size(typography.footnote)
-                                .text_color(colors.meta)
-                                .child(status),
-                        ),
-                )
-                .into_any_element(),
+                        .text_color(colors.meta),
+                    )
+                    .child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child(kind),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(typography.callout)
+                            .text_color(colors.title)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(typography.footnote)
+                            .text_color(colors.meta)
+                            .child(status),
+                    )
+                    .on_click(move |_, _, cx| {
+                        toggle_entity.update(cx, |chat, cx| {
+                            chat.toggle_tool_call_expanded(entry_index, cx);
+                        });
+                    });
+                let mut card = div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .rounded(theme.radii.code_block)
+                    .bg(colors.card_fill)
+                    .border_l_2()
+                    .border_color(colors.rail_tool)
+                    .child(header);
+                if expanded {
+                    let mut body = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .px(px(CARD_H_PADDING))
+                        .pb(px(CARD_V_PADDING));
+                    for item in &content {
+                        match item {
+                            ToolCallContentInfo::Text(text) => {
+                                body = body.child(Self::render_tool_output_text(text, theme));
+                            }
+                            ToolCallContentInfo::Diff(diff) => {
+                                body = body.child(Self::render_tool_diff(diff, theme));
+                            }
+                            ToolCallContentInfo::Other => {}
+                        }
+                    }
+                    if !locations.is_empty() {
+                        body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
+                            locations.iter().map(|location| {
+                                let label = match location.line {
+                                    Some(line) => {
+                                        format!("{}:{line}", location.path.display())
+                                    }
+                                    None => location.path.display().to_string(),
+                                };
+                                div()
+                                    .text_size(typography.footnote)
+                                    .text_color(colors.meta)
+                                    .child(label)
+                            }),
+                        ));
+                    }
+                    card = card.child(body);
+                }
+                card.into_any_element()
+            }
             Entry::Permission {
                 request_id,
                 title,
@@ -4136,6 +4418,75 @@ fn thought_summary(text: &str) -> String {
     }
 }
 
+/// F-CHAT-23: caps a tool call's rendered text output. Kept as the tail
+/// rather than the head — a long run's result or error is usually at the
+/// end, not the start.
+const TOOL_OUTPUT_MAX_CHARS: usize = 2000;
+
+fn truncate_tool_output(text: &str) -> (String, bool) {
+    let char_count = text.chars().count();
+    if char_count <= TOOL_OUTPUT_MAX_CHARS {
+        (text.to_string(), false)
+    } else {
+        let skip = char_count - TOOL_OUTPUT_MAX_CHARS;
+        (text.chars().skip(skip).collect(), true)
+    }
+}
+
+/// F-CHAT-31: one line of a diff preview.
+#[derive(Debug, PartialEq, Eq)]
+enum DiffLine {
+    Context(String),
+    Removed(String),
+    Added(String),
+}
+
+/// Caps the number of diff lines rendered in the transcript; a full-file
+/// rewrite should not make the transcript unusable.
+const DIFF_PREVIEW_MAX_LINES: usize = 60;
+
+/// Builds a readable diff preview without a full LCS diff: matching lines
+/// stay in context, a mismatch emits the old line then the new line at the
+/// point where the two texts diverge.
+fn diff_preview_lines(old_text: Option<&str>, new_text: &str) -> Vec<DiffLine> {
+    let old_lines = split_diff_lines(old_text.unwrap_or(""));
+    let new_lines = split_diff_lines(new_text);
+    let mut rows = Vec::new();
+    let mut old_index = 0;
+    let mut new_index = 0;
+    while old_index < old_lines.len() || new_index < new_lines.len() {
+        if old_index < old_lines.len()
+            && new_index < new_lines.len()
+            && old_lines[old_index] == new_lines[new_index]
+        {
+            rows.push(DiffLine::Context(old_lines[old_index].clone()));
+            old_index += 1;
+            new_index += 1;
+        } else {
+            if old_index < old_lines.len() {
+                rows.push(DiffLine::Removed(old_lines[old_index].clone()));
+                old_index += 1;
+            }
+            if new_index < new_lines.len() {
+                rows.push(DiffLine::Added(new_lines[new_index].clone()));
+                new_index += 1;
+            }
+        }
+    }
+    rows
+}
+
+fn split_diff_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5385,6 +5736,47 @@ mod tests {
         );
     }
 
+    /// F-CHAT-23: text output past the cap is truncated to its tail, not
+    /// its head — a long run's result or error usually lands at the end.
+    #[test]
+    fn truncate_tool_output_keeps_the_tail_past_the_cap() {
+        let (shown, truncated) = truncate_tool_output("short output");
+        assert_eq!(shown, "short output");
+        assert!(!truncated);
+
+        let long: String = (0..(TOOL_OUTPUT_MAX_CHARS + 500))
+            .map(|index| char::from(b'a' + (index % 26) as u8))
+            .collect();
+        let (shown, truncated) = truncate_tool_output(&long);
+        assert!(truncated);
+        assert_eq!(shown.chars().count(), TOOL_OUTPUT_MAX_CHARS);
+        assert_eq!(shown, &long[long.len() - TOOL_OUTPUT_MAX_CHARS..]);
+    }
+
+    /// F-CHAT-31: matching lines stay context; a changed line emits the old
+    /// text as `Removed` then the new text as `Added` at the point the two
+    /// texts diverge, and a pure addition/deletion needs no counterpart.
+    #[test]
+    fn diff_preview_lines_marks_context_removed_and_added() {
+        let rows = diff_preview_lines(Some("one\ntwo\nthree\n"), "one\nTWO\nthree\nfour\n");
+        assert_eq!(
+            rows,
+            vec![
+                DiffLine::Context("one".into()),
+                DiffLine::Removed("two".into()),
+                DiffLine::Added("TWO".into()),
+                DiffLine::Context("three".into()),
+                DiffLine::Added("four".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_preview_lines_treats_a_missing_old_text_as_a_pure_addition() {
+        let rows = diff_preview_lines(None, "brand new\n");
+        assert_eq!(rows, vec![DiffLine::Added("brand new".into())]);
+    }
+
     #[test]
     fn acp_program_converts_to_the_adapters_own_agent_command() {
         // The picker contract: the chosen adapter's `AcpProgram` converts
@@ -5587,6 +5979,180 @@ mod tests {
         let toggle = cx
             .debug_bounds("thought-toggle-0")
             .expect("thought toggle stays rendered while expanded");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
+    }
+
+    /// P91 part 2: `ToolCallStarted` carries the widened fields straight
+    /// into `Entry::ToolCall`, and the card starts collapsed like a
+    /// thought — the reader opts into the detail, live or historical.
+    #[gpui::test]
+    async fn tool_call_started_carries_widened_fields_and_starts_collapsed(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallStarted {
+                    id: "tool-1".into(),
+                    title: "Edit file".into(),
+                    status: "InProgress".into(),
+                    kind: "Edit".into(),
+                    content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
+                        path: PathBuf::from("src/lib.rs"),
+                        old_text: Some("old\n".into()),
+                        new_text: "new\n".into(),
+                    })],
+                    locations: vec![ToolCallLocationInfo {
+                        path: PathBuf::from("src/lib.rs"),
+                        line: Some(3),
+                    }],
+                    raw_input: Some("{\"path\":\"src/lib.rs\"}".into()),
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| match chat.entries.last() {
+            Some(Entry::ToolCall {
+                id,
+                title,
+                status,
+                kind,
+                content,
+                locations,
+                raw_input,
+                expanded,
+            }) => {
+                assert_eq!(id, "tool-1");
+                assert_eq!(title, "Edit file");
+                assert_eq!(status, "InProgress");
+                assert_eq!(kind, "Edit");
+                assert_eq!(content.len(), 1);
+                assert_eq!(locations.len(), 1);
+                assert!(raw_input.is_some());
+                assert!(!expanded, "a new tool call starts collapsed");
+            }
+            other => panic!("expected a widened ToolCall entry, got {other:?}"),
+        });
+    }
+
+    /// A status-only `ToolCallUpdated` (the common case — a spinner or
+    /// status flip with no new content) must not blank out the detail an
+    /// earlier update already attached.
+    #[gpui::test]
+    async fn tool_call_update_merges_widened_fields_and_preserves_the_rest(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::ToolCall {
+                id: "tool-1".into(),
+                title: "Edit file".into(),
+                status: "InProgress".into(),
+                kind: "Edit".into(),
+                content: vec![ToolCallContentInfo::Text("partial output".into())],
+                locations: vec![],
+                raw_input: None,
+                expanded: false,
+            });
+            chat
+        });
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::ToolCallUpdated {
+                    id: "tool-1".into(),
+                    title: None,
+                    status: Some("Completed".into()),
+                    kind: None,
+                    content: None,
+                    locations: None,
+                    raw_input: None,
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| match chat.entries.last() {
+            Some(Entry::ToolCall {
+                title,
+                status,
+                kind,
+                content,
+                ..
+            }) => {
+                assert_eq!(
+                    title, "Edit file",
+                    "an unset update field keeps the old value"
+                );
+                assert_eq!(status, "Completed");
+                assert_eq!(kind, "Edit");
+                assert_eq!(
+                    content,
+                    &vec![ToolCallContentInfo::Text("partial output".into())],
+                    "a status-only update must not blank out earlier content"
+                );
+            }
+            other => panic!("expected the patched ToolCall entry, got {other:?}"),
+        });
+    }
+
+    #[gpui::test]
+    async fn tool_call_starts_collapsed_and_toggles_on_click(cx: &mut TestAppContext) {
+        // F-CHAT-23: a tool call's detail (kind, content, locations) is
+        // hidden until the reader clicks it open, same control as F-CHAT-21.
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::ToolCall {
+                id: "tool-1".into(),
+                title: "Edit file".into(),
+                status: "Completed".into(),
+                kind: "Edit".into(),
+                content: vec![ToolCallContentInfo::Text("the tool's output".into())],
+                locations: vec![],
+                raw_input: None,
+                expanded: false,
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        fn is_expanded(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> bool {
+            chat.read_with(cx, |chat, _| {
+                matches!(chat.entries.last(), Some(Entry::ToolCall { expanded, .. }) if *expanded)
+            })
+        }
+        assert!(!is_expanded(&chat, cx), "a new tool call starts collapsed");
+
+        let toggle = cx
+            .debug_bounds("tool-call-toggle-0")
+            .expect("tool call toggle is rendered");
+        cx.simulate_click(toggle.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            is_expanded(&chat, cx),
+            "clicking the toggle expands the tool call"
+        );
+
+        let toggle = cx
+            .debug_bounds("tool-call-toggle-0")
+            .expect("tool call toggle stays rendered while expanded");
         cx.simulate_click(toggle.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
