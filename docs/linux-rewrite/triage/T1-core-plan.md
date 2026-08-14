@@ -429,3 +429,74 @@ first, then repeat with local edits present to hit the conflict branch specifica
 
 - **files**: none (exercise only — code already correct and wired)
 - **size**: S
+
+---
+
+## `F-CORE-SET-01` — half-proven
+
+**Needs: both**, split by clause — the four named remaining settings are not one shape.
+
+- **`TILLER_SOCKET_ENABLE` env override — exercise only, and the manifest evidence plus both
+  `SEAMS.md` and `DEAD-MODULES.md` are stale here.** Both documents describe
+  `with_environment_override` as inert / "queued for codex12." Reading the live tree
+  contradicts that: `rust/crates/tiller/src/main.rs:8076-8081`
+  (`app_settings_with_environment_override`) calls
+  `AppSettings::with_environment_override()` and is itself called at boot,
+  `main.rs:8114` (`app_settings_with_environment_override(session_store.load_settings())`).
+  There's even a passing unit test exercising exactly this env var,
+  `main.rs:10443-10454` (`boot_settings_honor_tiller_socket_enable_environment_override`),
+  which sets `TILLER_SOCKET_ENABLE=off`/`on` and asserts `control_socket_enabled` follows.
+  This clause is wired and unit-proven; it only needs a live drive (set the env var, launch
+  the real app, confirm the control socket really is enabled/disabled) to close, not a build.
+- **`summarizerAgent` — exercise only.** `summarizer_agent`/`SummarizerChoice` is a real,
+  wired settings field with UI (picker at `rust/crates/tiller_ui/src/settings.rs:2651-2735`)
+  and persistence round-trip tests (`main.rs:10057-10176`, `settings.rs:3340,5167`). Just
+  needs a live restart-and-reread pass like the five already-confirmed settings.
+- **mount cap — build, and it shares its cause with `F-CORE-ACT-26`.** `mount_cap`
+  (`rust/crates/tiller_project/src/settings.rs:12`) persists and clamps correctly but has
+  **zero references in `rust/crates/tiller/src/main.rs`** — nothing reads it to decide
+  anything. See ACT-26 above for the matching missing consumer
+  (`WorktreeMountPolicy::ids_to_evict`, also uncalled). One fix — read `mount_cap`, call
+  `ids_to_evict` — closes both this clause and ACT-26 entirely.
+- **sidebar/right-panel widths — build.** Confirmed: `AppSettings::sidebar_width`/
+  `right_panel_width` (`tiller_project/src/settings.rs:15-16`, clamped 160-480 / 220-640) has
+  **zero references in `main.rs`**. The actual rendered sidebar width is a hardcoded
+  constant, `SIDEBAR_WIDTH = 325.0`, defined independently in *two* places
+  (`rust/crates/tiller/src/main.rs:175` and `rust/crates/tiller_ui/src/sidebar.rs:66`) —
+  neither reads the settings field. There is no drag-to-resize handle for the sidebar or
+  right panel at all: the only resize/drag code in `main.rs` is
+  `DraggedPaneDivider`/`update_divider` (`main.rs:5195-5370`), which is for terminal *split*
+  dividers, a different UI element entirely. This clause is fully unbuilt: no UI to resize
+  by dragging, and the persisted field it would read/write is disconnected even if a fixed
+  width were set programmatically.
+
+- **files**: for mount cap — `rust/crates/tiller/src/main.rs` (see ACT-26 for the exact
+  shape); for sidebar/right-panel widths — `rust/crates/tiller/src/main.rs` (replace the
+  `SIDEBAR_WIDTH` const usage with the settings-backed value, add a drag handle analogous to
+  `DraggedPaneDivider`), `rust/crates/tiller_ui/src/sidebar.rs` (same for its own
+  `SIDEBAR_WIDTH` const), `rust/crates/tiller_project/src/settings.rs` (no change expected;
+  fields already exist and clamp correctly)
+- **size**: M (mount cap, shared with ACT-26) + M (sidebar/right-panel widths, a real
+  drag-resize UI feature) — do not schedule as one S ticket; two of the four sub-clauses are
+  real builds.
+- **sharedCause**: the mount-cap sub-clause is the same gap as `F-CORE-ACT-26`.
+
+---
+
+## `F-CORE-TERM-02` — half-proven
+
+**Needs: exercise**, environment-limited, matching the manifest exactly.
+`rust/crates/tiller_terminal/src/lib.rs` wires `open_context_menu` only to
+`MouseButton::Right` (cited at `lib.rs:1446,1504` per the manifest and reconfirmed by the
+row's own evidence) — no keyboard path exists anywhere in the crate, and
+`WAYLAND-LANE.md` documents that right-click on this harness needs `DISPLAY=:1`. Every named
+per-item effect (copy, paste, copy context, set title, copy pane ID, copy terminal ID, split
+right/down, clear, close) already has its own test coverage per pass 12
+(`right_click_resolves_this_terminal_and_draws_all_context_actions`,
+`terminal_context_app_actions_have_workspace_routes`) — this is a proof-of-live-gesture gap,
+not a missing feature. Gesture: run the drive on the `DISPLAY=:1` lane specifically, right-
+click a terminal, and confirm each menu item's real effect (clipboard, title, split, clear,
+close) one at a time.
+
+- **files**: none (exercise only, environment-limited to the DISPLAY=:1 lane)
+- **size**: S
