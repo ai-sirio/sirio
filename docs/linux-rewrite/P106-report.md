@@ -169,3 +169,32 @@ ctl surface.settings.read
 Normal PATH capture: `/tmp/codex12-p2-shots/03-settings-agents.png`. It visibly contained a `Search agents` field and `Refresh` button. With `PATH=/usr/bin:/bin`, the same surface rendered all five rows as `Not found on PATH`, with the text `Not installed — install the … CLI to use it.`: `/tmp/codex12-p6-shots/02-agents-reduced-path.png`.
 
 The search and refresh controls were visible but not clicked or typed into because Wayland has no input devices. No updated timestamp was visible in either capture. Thus the search/refresh half was state-observed but gesture-owed; the timestamp half was not observed.
+
+## Rows 21–22
+
+### F-SET-18
+
+The reduced-PATH Agents run was driven with:
+
+```text
+PATH=/usr/bin:/bin
+ctl surface.settings.open
+ctl surface.settings.select section=agents
+ctl surface.settings.read
+```
+
+All five provider rows rendered a red `Not found on PATH` badge and the corresponding text `Not installed — install the … CLI to use it.`: `/tmp/codex12-p6-shots/02-agents-reduced-path.png`. The normal-PATH capture showed available providers and ACP badges: `/tmp/codex12-p2-shots/03-settings-agents.png`.
+
+No Install, installation-progress, Update-to-latest, or failed-Retry control was visible in either state. The availability/status half was exercised; the action controls named by the row were not present in the rendered state.
+
+### F-SET-21
+
+Drove the Appearance section:
+
+```text
+ctl surface.settings.open
+ctl surface.settings.select section=appearance
+ctl surface.settings.read
+```
+
+The response reported `fileIcons:"Material"`. The capture rendered a File icons control showing only `Material`; no second selectable icon set was present: `/tmp/codex12-p2-shots/07-settings-appearance.png`. The chooser surface was visible, but no segment click could be delivered and no icon-set change was observed. The second-option/change half remains owed to a lane with pointer input.
