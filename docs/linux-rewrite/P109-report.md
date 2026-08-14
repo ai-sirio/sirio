@@ -400,3 +400,176 @@ control whose label suggests history (`Resume Chat`) opens a new empty chat
 rather than browsing or resuming any retained session.** Browsing a session
 list, opening a retained session, and exercising delete-with-confirmation
 were none of them reached — there is no list to browse or delete from.
+
+## F-SET / F-SID rows
+
+**Infrastructure note.** Two more incidents this batch, both recovered with
+the same `env -u WAYLAND_DISPLAY DISPLAY=:1 TILLER_DB=/tmp/sonnet-p109.sqlite`
+relaunch used earlier: (1) the same severe stall pattern recurred a third
+time — clicking sidebar items in Settings (`Agents`/`Appearance`/`General`)
+stopped switching sections at all, confirmed by two separate no-op clicks —
+and was fixed by a restart. (2) Immediately after that restart, before any
+gesture could be driven, the app process **exited on its own with no error,
+no panic, and no signal trace in `app.log`, `dmesg`, or `coredumpctl`** —
+`xwininfo` showed no app window and `kill -0` on the tracked PID found no
+such process. A second relaunch on the same `TILLER_DB` came up clean and
+stayed responsive for the rest of this batch. Reporting both as findings,
+not debugging further per the "do not edit `rust/`" rule. Separately: a tight
+shell loop of `xdotool key BackSpace` calls (0.2–0.4s apart) intermittently
+registered only the first keypress and dropped the rest — the same field
+reliably accepted a Backspace when it was sent as an isolated call with a
+full tool round-trip between presses. Recorded as an observation about the
+drive lane's event delivery under rapid repetition, not a claim about the
+app.
+
+### F-SET-16
+
+Owed gesture (P106): click the `Search agents` field and type into it,
+click `Refresh`, and observe whether an updated timestamp appears — the
+search/refresh half was state-observed but gesture-owed; no timestamp was
+observed under either PATH condition.
+
+Opened `Settings → Agents` (gear icon at `27,948` in the bottom status bar,
+then the `Agents` sidebar item) on a freshly restarted instance. Clicked
+`Refresh` (`1345,119`) first with an empty search field: **zero visible
+change** — no spinner, no reordering, no timestamp text anywhere on the
+five-row list, before or after, byte-identical captures
+(`shots/101-agents-fresh.png`, `shots/102-refresh-fresh.png`).
+
+Then clicked the `Search agents` field (`705,119`) and typed `zzz-nomatch`:
+the field accepted all eleven characters and the entire five-row list (
+`Claude Code`, `Codex`, `OpenCode`, `Pi`, `Oh-My-Pi`) disappeared — filtered
+to nothing, with **no "no results" message or empty-state text of any kind**,
+just blank space under the search bar (`shots/105-search-nomatch-r4.png`).
+Cleared the field back to empty (isolated `BackSpace` presses, one per
+capture, per the infra note above) and the full five-row list reappeared
+unchanged (`shots/108-search-fully-cleared.png`). **No updated-timestamp
+control or text was ever found on this screen, refreshed or not.**
+
+### F-SET-21
+
+Owed gesture (P106): click the File icons chooser control, select the
+second icon set, and observe the change — the chooser surface was visible
+in P106 but no click could be delivered.
+
+Opened `Settings → Appearance`. The `Files` group shows a `File icons` row
+with a single button reading `Material` (`1335,578`). Clicked it: **no
+dropdown, popover, or menu opened** — the capture before and after the
+click is pixel-identical (`shots/89-gear-click.png`,
+`shots/90-fileicons-click.png`). No second icon set was ever presented to
+select, so no change was observed. `Material` behaves as a static label,
+not an interactive chooser, on this build.
+
+All five rows below were driven in one continuous sidebar session against
+two projects: `.claude` (a plain, worktree-less folder project) and `Sonnet
+P109 Test Display` (containing worktrees `master` [Primary] and
+`feature-test`).
+
+### F-SID-11
+
+Owed gesture, per `P106-report.md`'s numbered close-out batch item 4 (used
+as the authoritative gesture text for this row, per the task instructions):
+right-click a worktree row and confirm the menu shows `Set/Unset Primary`
+plus the seven New-Tab items, and **no** `Remove Worktree` entry.
+
+Right-clicked `feature-test` (`150,328`, capture:
+`shots/110-sid11-rclick-featuretest.png`). Menu, top to bottom, verbatim:
+`Set Primary`, `New Terminal`, `Claude Code`, `Codex`, `OpenCode`, `Pi`,
+`Oh-My-Pi`, `New Chat`. That is exactly `Set Primary` + the seven New-Tab
+items named in the close-out batch, and **no `Remove Worktree` item is
+present anywhere in the menu**, confirming the census's missing-half claim.
+
+**Side finding:** this menu could not be dismissed by `Escape` or by
+clicking outside its bounds in the main content pane — the same
+undismissable-popover pattern already reported for the model-pill Effort
+selector in F-CHAT-16. While attempting to dismiss it, a stray click landed
+on the menu's own `Set Primary` item and actually changed the primary
+worktree from `master` to `feature-test` as an unintended side effect
+(visible in every capture from `shots/113-reclick-row-dismiss-test.png`
+onward) — itself further evidence that this app's context menus have no
+safe outside-click dismissal.
+
+### F-SID-15
+
+Owed gesture, per the same numbered close-out batch, item 5: click a
+folder-project row (a project with no worktree children) and observe what a
+worktree-less project opens to.
+
+Clicked the `.claude` project row (`114,140`,
+`shots/114-sid15-claude-folder-click.png`): **nothing opened in the main
+content pane** — the previously-active worktree's tab content (`feature-test`'s
+`Terminal`) stayed exactly as it was, unchanged pixel-for-pixel except for a
+hover affordance (a disclosure chevron and a settings-gear icon) appearing
+on the row itself. Clicked the chevron (`46,140`,
+`shots/115-sid15-chevron-click.png`): it flipped from `>` to `v` (expanded)
+but **disclosed zero child rows** — there is nothing under a worktree-less
+project to show. A folder-project row is inert as a click target beyond
+this local disclosure toggle; it does not select, open, or navigate
+anywhere.
+
+### F-SID-16
+
+Owed gesture (P106, per-row): drag one project row above/below the other in
+the Projects list, release, and confirm the order changes and survives a
+relaunch.
+
+Drove two independent real press-move-release drags (`drag()`, 12–15
+interpolated steps) of the `.claude` project row down past `Sonnet P109
+Test Display`: first to `(150,140)→(150,230)`
+(`shots/116-sid16-drag-projects.png`), then to `(150,140)→(150,199)`
+(`shots/117-sid16-drag-projects-v2.png`) — both captures showed the
+original order (`.claude` above `Sonnet P109 Test Display`) completely
+unchanged immediately after the drag. **The reorder did eventually take
+effect**, but only became visible two unrelated actions later: a capture
+taken after a subsequent mousemove-only hover event
+(`shots/119-sid06-hover-featuretest.png`) showed the order flipped to
+`Sonnet P109 Test Display` above `.claude`. This is a stale-repaint
+finding, not a "drag doesn't work" finding — the underlying reorder
+happened at drag-release time, but the sidebar did not visually repaint
+until a later, unrelated input event forced it to. Relaunch-persistence of
+the new order was not separately checked (the app was not restarted again
+before the lock was released for this batch).
+
+### F-SID-17
+
+Owed gesture (P106, per-row): drag one worktree row to the other worktree's
+position within the same project and confirm the order changes.
+
+Dragged `feature-test` up onto `master`'s position within `Sonnet P109 Test
+Display` (`drag 150 317 150 258 15`,
+`shots/118-sid17-drag-worktrees.png`): order stayed `master` then
+`feature-test`, and — unlike the F-SID-16 project drag above — it was
+**still unchanged** in the next capture taken after a subsequent hover
+event (`shots/120-sid06-hover-featuretest-v2.png`), ruling out the same
+stale-repaint explanation. **Worktree-row drag reorder was driven with a
+genuine press-move-release gesture and produced no observed effect,
+immediate or delayed.**
+
+### F-SID-06
+
+Owed gesture, per the same numbered close-out batch, item 3: hover a
+worktree row, click the `×` remove control, and observe whether any
+confirmation prompt appears.
+
+Hovered `feature-test` to reveal its row-level `×` (distinct from the `×`
+on its child `Chat`/`Terminal` tabs — confirmed by first mis-targeting the
+child-tab close control at the same screen position before the sidebar's
+delayed repaint settled, `shots/119-sid06-hover-featuretest.png`, then
+re-hovering the worktree row itself at its corrected position,
+`shots/120-sid06-hover-featuretest-v2.png`). Clicked the worktree row's `×`
+at `349,258` (`shots/121-sid06-x-click.png`): the capture immediately after
+still showed `feature-test` present — consistent with the same
+stale-repaint pattern seen in F-SID-16. A second click at the same
+coordinate (`shots/122-sid06-x-click-retry.png`) landed on `New
+Worktree…` (which had shifted up to that position once the first click's
+removal actually repainted) and opened its inline branch-name creation
+prompt as an accidental side effect; that prompt was cancelled with
+`Escape` (`shots/123-sid06-after-cancel.png`).
+
+**`feature-test` was removed with no confirmation prompt of any kind** —
+no dialog, no banner, nothing to answer — matching the P106 census's ledger
+note that this route "confirms nothing." The removal also deleted the
+underlying worktree directory on disk: the Files panel, still pointed at
+the now-gone `/home/enzopalmisano/Sonnet P109 Test Display-feature-test`,
+switched to `Files unavailable: No such file or directory (os error 2)`
+with a `Retry` button (visible in `shots/122` and `shots/123`).
