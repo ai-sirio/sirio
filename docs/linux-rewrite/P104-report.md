@@ -202,3 +202,46 @@ tab" or equivalent — and no gesture tried in this group (double-click, `ctrl-o
 produces a second concurrently-open file; each one replaces the single content pane's current
 file. With no discovered way to get two files open at once, "two dirty tabs" could not be set
 up, and this conjunct was not driven. Capture: `p104-g2-tab16-rowmenu-no-newtab.png`.
+
+## Group 3 · right panel, Files tab
+
+This is the same right-hand "Files" panel used throughout Groups 1-2 (already open at
+`ctrl-shift-i` from session setup).
+
+**F-CHG-03** — Gesture: click Refresh, report what the panel shows between the click and the
+list settling. Screen: no transient state was observed at all — the capture taken
+immediately after the click and a second capture ~1s later are both identical to the
+pre-click state (no spinner, no skeleton row, no flash). The listing (including `README.md`'s
+orange-dot "Diff" badge) was unchanged throughout. The optional Retry-control path (inducing a
+failed refresh via `chmod 000 .git`) was not attempted — it risked destabilising the fixture
+mid-session for a row marked optional. Capture: `p104-g3-chg03-refresh-immediate.png`.
+
+**F-CHG-05** — Gesture: click a file row, then press down, up, space; report selection and
+what each key did. Screen: clicked `main.rs`'s row — the selection highlight visibly stayed
+on `README.md` (carried over from earlier), not `main.rs`; the click itself did not appear to
+move it. `Down`: no visible change in the immediate capture. `Up`: the highlight moved to
+`main.rs`'s row (the row above `README.md`). `Space`: no further visible change. Across all
+three keys the path bar and content pane stayed on `main.rs` throughout — none of Down, Up, or
+Space opened, closed, or changed the active file; they only moved a selection cursor
+independent of what's open. Capture: `p104-g3-chg05-after-space.png`.
+
+**F-EDIT-10** — Gesture: right-click a file row, report the menu's items. Screen: right-click
+on `main.rs`'s row opened a menu directly at the row (not elsewhere in the panel), listing top
+to bottom: **Open, Reveal in File Manager, Copy Path**. Capture:
+`p104-g3-edit10-rclick-menu.png`.
+
+**F-EDIT-11** — Gesture: choose Copy Path, paste into a terminal pane, report the pasted
+text. Screen: clicked "Copy Path" from the menu above. Pasting into a terminal pane with
+`ctrl-shift-v` produced nothing — the surrounding command executed as if nothing had been
+inserted (`bash: errore di sintassi vicino al token non atteso ";"` from
+`echo PASTE_START; ; echo PASTE_END`). Retried with plain `ctrl-v`: same empty result
+(`echo PASTE2_START; ; echo PASTE2_END`, same syntax error). Checking the X11 clipboard
+directly (outside the app, via `xclip -selection clipboard -o`) showed Copy Path had in fact
+written the correct absolute path
+(`.../scratchpad/p104-fixture-repo/main.rs`) to the clipboard — the failure is specific to
+those two paste shortcuts inside the terminal pane, not to Copy Path itself. Using the
+terminal pane's own right-click → **Paste** menu entry (documented in the Setup notes'
+control-test menu) instead of a keyboard shortcut worked: the line read
+`echo PASTE3_START; /tmp/claude-1000/-home-enzopalmisano--claude/21454512-bda7-4263-9407-7cd8167468c6/scratchpad/p104-fixture-repo/main.rs`
+— the exact copied path, correctly pasted. Captures: `p104-g3-edit11-ctrlshiftv-fail.png`,
+`p104-g3-edit11-ctrlv-fail.png`, `p104-g3-edit11-menu-paste-success.png`.
