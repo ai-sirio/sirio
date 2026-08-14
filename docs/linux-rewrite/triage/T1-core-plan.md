@@ -500,3 +500,153 @@ close) one at a time.
 
 - **files**: none (exercise only, environment-limited to the DISPLAY=:1 lane)
 - **size**: S
+
+---
+
+## `F-CORE-USG-05` — half-proven
+
+**Needs: both**, split by clause. The load, real 401 -> refresh-fail -> LoggedOut chain, and
+credential-shape parsing are all live-proven already. Two remaining pieces:
+
+- **`needs_refresh` 8-day gate — build.** Confirmed:
+  `CodexOAuthCredentials::needs_refresh` (`rust/crates/tiller_usage/src/codex.rs:52`, gate
+  constant `REFRESH_AFTER = 8 * 24h` at `codex.rs:50`) has zero callers outside its own
+  crate's tests. `CodexUsageFetcher::fetch()` (`codex.rs:315-350`) never calls it — it only
+  refreshes *reactively*, after a live 401 (`Err(CodexApiFailure::Unauthorized) => {}` at
+  `codex.rs:329`, followed by an unconditional `refresh_token` call). There is currently no
+  proactive "credentials are old, refresh before even trying" path at all; the 8-day
+  threshold is computed nowhere it can affect behavior.
+- **merge-save-on-success — exercise only, code already looks correct.**
+  `save_credentials`/`save_credentials_to` (`codex.rs:154-158`, doc comment: "Merges refreshed
+  tokens into the auth file rather than overwriting it — `codex` itself may store other
+  fields Tiller doesn't know about") is called at `codex.rs:339` right after a successful
+  refresh, and reads-then-merges into the existing JSON object rather than replacing it
+  (`codex.rs:158-172`). This looks correct; it just wasn't driven to a real refresh success
+  this pass (only the refresh-*fail* path was). Gesture: force a real successful token
+  refresh (a genuinely near-expiry or 401'd but valid credential) and confirm the auth file's
+  unrelated fields (anything `codex` itself wrote) survive the save.
+
+- **files**: `rust/crates/tiller_usage/src/codex.rs` — for the build half, add a
+  `needs_refresh` check ahead of the first `fetch_usage` attempt in `CodexUsageFetcher::fetch`
+  (or wherever a periodic background refresh loop would live, if one is added) so aging
+  credentials get refreshed before they're used, not only after they're rejected
+- **size**: M
+- **sharedCause**: shares the same file and same `CodexUsageFetcher::fetch` pipeline as
+  `F-CORE-USG-06` and `F-CORE-USG-07` below — all three land in
+  `rust/crates/tiller_usage/src/codex.rs`.
+
+---
+
+## `F-CORE-USG-06` — half-proven
+
+**Needs: build.** Confirmed exactly as recorded, with the precise discard site:
+`classify_token_refresh_failure` (`rust/crates/tiller_usage/src/codex.rs:69-79`) correctly
+classifies a failed-refresh response body into `Reused`/`Revoked`/`Expired`/`Other`, and is
+genuinely called from production at `codex.rs:253` inside `refresh_token`. But its caller in
+`CodexUsageFetcher::fetch` throws the result away:
+
+```rust
+// codex.rs:336-339
+let refreshed = match refresh_token(&credentials) {
+    Ok(refreshed) => refreshed,
+    Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+};
+```
+
+`Err(_)` discards the `TokenRefreshFailure` variant entirely — every one of the four
+classifications collapses to the identical `UsageReason::LoggedOut`. It isn't only the
+call-site pattern match that loses the information, either:
+`UsageReason` (`rust/crates/tiller_usage/src/model.rs:64-74`) has exactly four variants —
+`NotInstalled`/`LoggedOut`/`TimedOut`/`Error` — and none of them can represent
+reused/revoked/expired even if the caller wanted to. Fix needs both ends: either add
+distinct `UsageReason` variants (or a nested field carrying `TokenRefreshFailure`) and match
+on the real error in `fetch`, then extend `rust/crates/tiller_ui/src/status_bar.rs:283-286`
+(the only renderer of `UsageReason`, currently a 4-arm match) to display the new
+distinction.
+
+- **files**: `rust/crates/tiller_usage/src/codex.rs` (line 338's `Err(_)` needs to match on
+  the real `TokenRefreshFailure`), `rust/crates/tiller_usage/src/model.rs` (`UsageReason`
+  enum needs new variants or a carried field), `rust/crates/tiller_ui/src/status_bar.rs`
+  (render the new distinction, currently a plain 4-arm match at `status_bar.rs:283-286`)
+- **size**: M
+- **sharedCause**: same file/pipeline as USG-05/USG-07 — see USG-05.
+
+---
+
+## `F-CORE-USG-07` — half-proven
+
+**Needs: exercise.** Both remaining states have real code paths already, and both are simpler
+to reach than the manifest's framing of "refresh-needed" implies. "Missing-credentials" is
+the `load_credentials()` `Err(_)` branch at `codex.rs:319`, which already maps to
+`UsageReason::LoggedOut` — gesture: point `$CODEX_HOME` at a directory with no `auth.json` (or
+delete it) and confirm the status bar shows the logged-out state. "Refresh-needed" as this
+row's VERIFY describes it doesn't require the still-unwired `needs_refresh` 8-day proactive
+gate (that's USG-05's build item, not a precondition for this row) — the *reactive* 401 ->
+refresh -> retry path already exists and already ran live for USG-05's refresh-*fail* case;
+what's missing here is only the refresh-*success* case: real credentials that get a 401,
+refresh successfully, and retry into `UsageFetchOutcome::Success`. That's the same live
+gesture USG-05's merge-save-on-success needs — worth driving once and crediting both rows.
+
+- **files**: none (exercise only — code paths exist; see USG-05 for the one shared gesture
+  that would close both)
+- **size**: S
+- **sharedCause**: same file/pipeline as USG-05/USG-06, and its outstanding half is literally
+  the same live gesture USG-05's merge-save-on-success needs — drive once, close both.
+
+---
+
+## `F-CORE-AUTH-01` — half-proven
+
+**Needs: exercise.** `AgentAccountIdentity::parse_claude_json`
+(`rust/crates/tiller_usage/src/account.rs:52`) is genuinely called from production, not just
+tests: `rust/crates/tiller_ui/src/settings.rs:548` —
+`AgentAccountIdentity::parse_claude_json(&String::from_utf8_lossy(&output.stdout))?` — parses
+the output of a real `claude` CLI invocation. This is wired correctly; the manifest's "never
+exercised" is accurate only because the live drive deliberately stopped short of completing
+the OAuth login (confirmed: real `claude auth login` spawn + genuine `oauth/authorize` PKCE
+URL, "flow deliberately aborted pre-completion"). Gesture: carry the real login flow through
+to completion (finish the browser OAuth consent) so `claude`'s own CLI writes real account
+JSON to stdout, and confirm `settings.rs:548` parses it into a populated identity (email,
+organization) rather than stopping at "button not dead."
+
+- **files**: none (exercise only — code already correct and wired to a real call site)
+- **size**: S
+
+---
+
+## Cross-cutting notes
+
+**`main.rs` bottleneck.** Of the 23 rows, the following need `main.rs` changes: ACT-20,
+ACT-24, ACT-25, ACT-26, DOM-07, WSP-04, WSP-08, SET-01 (both build sub-clauses). That's
+**8 of 23** rows needing real `main.rs` changes, all in different regions of the file (activity
+notification call site ~3750, restart/restore path ~4600s/startup, sidebar-width consts
+~175, layout-command integration, mount-cap check). None of them overlap each other's line
+ranges as far as this pass could tell, but they all land in the single file the rest of the
+inventory's 29 rows also depend on — sequence with whoever owns other `main.rs`-touching
+groups.
+
+**Two seams already named in `SEAMS.md` account for four rows.** WSP-04 is the unbuilt Half B
+of "Terminal pane composition." WSP-08's live model gap and ACT-24/25's restore-classification
+gap are new seams this pass surfaced that aren't in `SEAMS.md` yet — worth registering there
+per that file's own rule ("a brief that cuts a seam must register Half B here, in the same
+commit").
+
+**Three "NOT EXERCISED" rows turned out to already have real code with zero non-test
+callers** (ACT-25, and — checked but confirmed correctly classified — ACT-26 already carried
+the right verdict). ACT-25 is flagged as `reclassify` above: the live-snapshot ambiguity the
+manifest recorded is real, but the reachability grep isn't ambiguous, and it points the same
+direction ACT-26 and DOM-07 already point (`FAILED — absent`, not `NOT EXERCISED`).
+
+**Two evidence corrections against other docs, not just the manifest.** `SEAMS.md` and
+`DEAD-MODULES.md` both describe `TILLER_SOCKET_ENABLE`'s `with_environment_override` as
+inert/unwired (SET-01) — it isn't; it's called at boot and unit-tested. `DEAD-MODULES.md`
+also describes `FileSystemEventMonitor::poll` as unsubscribed (FILE-06) — it isn't; it's
+polled every 100ms from a real background task in `file_view.rs`. Both docs were accurate
+when written and the tree has moved under concurrent builders since; worth a note to whoever
+maintains those two documents, since a build agent trusting either document's prose over the
+current source would spend effort re-building something that already works.
+
+**Biggest single leverage point:** the broken `wtype`-based OSC-title-injection gesture
+blocking ACT-06/07/11 (and slowing ACT-02) is not a Tiller code defect at all — it's a
+one-line quoting fix in whatever drives that exercise. Fixing the driver's gesture, not any
+crate in `rust/crates/`, closes three rows' proof gap at once.
