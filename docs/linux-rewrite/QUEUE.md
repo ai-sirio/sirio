@@ -2134,3 +2134,38 @@ write site are also never repaired at the read site.
 owed, the verdict is `UNREACHABLE` and the wiring is a queue item. "Package capability proven" is a
 true statement about a package and never a statement about the app — which is the whole reason this
 ledger counts app behaviour and not library coverage.
+
+## Evidence the repo already held — 2026-08-14, 08:20
+
+Four rows sat at `NOT EXERCISED` — `F-TERM-04`, `F-TERM-06`, `F-CORE-TERM-02`, `F-TERM-UI-01`, the
+terminal context menu — while a screenshot proving half of each had been in
+`reference/linux-progress/` since pass 17.
+
+`p17-rclick-term.png` was taken to settle a *platform* question: can XTEST deliver button 3 under
+XWayland? It could, ENVIRONMENT.md was corrected, and twelve rows were saved from a false
+"the platform forbids it". **Nobody then asked what else that frame proved.** It shows the menu
+mounted on a live terminal pane with twelve real items — `Copy`, `Paste`, `Copy C…`, `Set Titl…`,
+`Copy P…`, `Copy T…`, four `Split …`, `Clear T…`, `Close T…`.
+
+That is live proof of the *surface* half of all four rows, and it cost nothing to apply. All four are
+now `half-proven` with the remaining half named precisely: nobody has **clicked** an item. The next
+critic starts from "invoke twelve actions and observe the effects", not from "drive this from
+scratch" — roughly half the work, recovered from a file already committed.
+
+### The shape
+
+**A frame is evidence about everything in it, not only about the question that motivated it.**
+Verification artefacts get filed under the row that commissioned them and are never re-read. The
+inverse of the staleness sweeps: there a row's evidence had expired, here a row's evidence existed
+and had never been collected.
+
+`reference/linux-progress/` holds 576 files. Before commissioning a drive, it is worth a minute to
+ask whether some existing frame already shows the surface — especially for rows about a control's
+*existence*, which is the half a screenshot proves best and a drawn test proves worst.
+
+### One free defect, also from that frame
+
+The Files panel paints **over** the open context menu and truncates its long labels. Both are GPUI
+elements, so paint order is ours to fix — unlike the P72 webview occlusion, where a native child
+window sits above the GL surface and cannot be reordered. Recorded on `F-TERM-UI-01` so whoever
+drives that row does not report it as a missing menu.

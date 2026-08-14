@@ -88,3 +88,19 @@ named after the row. One `grep` of the owning file for the row's own vocabulary 
 4. `cargo fmt`, `clippy -D warnings` green on what you touched.
 5. `git status --short | grep '??'` before you finish — explicit-path commits never catch new files,
    and that habit already left 31 MB of this project untracked once.
+
+## Done report — 2026-08-14
+
+- The two suite-only failures reproduced with the gate's own test command
+  `(cd rust && cargo test --workspace)` were
+  `panes::tests::real_pty_layer_a_debounce_suppresses_first_title_and_accepts_second` and
+  `tests::drawn_tab_context_resume_chat_reopens_the_retained_session`.
+- The PTY test used wall-clock delivery time for a logical debounce assertion; it now uses a
+  deterministic evidence clock while retaining the real PTY boundary. The chat tests now allocate
+  unique scratch roots and SQLite databases (including each database's `-wal` sidecar), and release
+  ACP workers before the GPUI test scheduler is torn down.
+- The gate was executed 20 times: **0/20 `CI OK`, 20/20 failures**. The current external blocker is
+  `tests::scrollback_can_be_viewed_after_output_exceeds_the_viewport` in `tiller_terminal/**`,
+  owned by `codex11`; it passes in isolation. The owned-crate clippy stage and rustfmt checks for
+  the touched files pass. The full workspace clippy is still blocked by warnings in other owners'
+  UI files.
