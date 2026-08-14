@@ -78,3 +78,52 @@ browser content — a property of the lane, not evidence about the feature. Rout
   glyph only appears here because this drive picked a favicon/GitHub avatar source.
 - **Captures:** 02-avatar-open.png, 02-favicon-typed.png, 03-favicon-committed.png,
   02-favicon-closed.png, 02-favicon-closed2.png, 02-precheck.png, 03-png-dialog2.png
+
+## `F-PRJ-06` and `F-PRJ-09` — ledger lines 99/102, both half-proven
+
+- **Triage says:** exercise (shim git on PATH with a sleep wrapper so Running persists across
+  a frame, then fire two real clicks and confirm only one worker starts)
+
+Built a `git` PATH shim (`/tmp/w07prj-slowgit/git`, `sleep 2; exec /usr/bin/git "$@"`) and
+launched the app with it prepended to `PATH` (the launcher's `env` call inherits the invoking
+shell's `PATH`, confirmed by `Loading Files…` staying visible far longer than normal — the
+wrapper is genuinely in the loop for every git shell-out, including the ones behind
+create-project's implicit git init and clone's git binary). This part of the approach worked
+and is worth keeping for a future pass.
+
+**What blocked both rows is earlier than the guard being tested.** Neither the Create-project
+"Project name" field nor the Clone-repository "Repository URL" field — both live inside a
+floating card opened from the sidebar `+` menu — accept synthetic input on this lane. `type`
+after `click`ing the field leaves the placeholder text untouched (`crop-field.png`,
+`crop-field2.png`, `crop-field3.png`, `crop-url2.png`); a bare `key a`/`key b`/`key c` sequence
+lands nothing either. This is not a focus-timing race — inserted `sleep 1`/`sleep 2` between
+click and type made no difference. It is also not specific to text entry: three repeated clicks
+directly on the same card's **Cancel** button (`02-cancel-check.png`, `02-cancel-retry.png`)
+left the card open every time, though the cursor visibly shows the button's hover/pressed
+highlight in every capture — hover delivery reaches the card, click delivery does not
+consistently take effect inside it. The identical click-then-type sequence worked moments
+earlier in this same session against the sidebar Filter field and the Project-Settings-sheet
+Avatar favicon field (see F-PRJ-14 above) — so this is specific to the `+`-menu's
+anchored/floating popover class of surface, not a general lane failure.
+
+This matches the caution already on record for `F-PRJ-06` ("unreliable rapid-click delivery —
+first of a pair dropped 4/4 tries") almost exactly, and extends it: it is not only the *second*
+click of a rapid pair that drops here, entry into the form is not reliably drivable at all on
+this lane. Given the budget for one row, I did not chase further (no `DISPLAY=:1` — that lane
+is reserved and out of scope per the brief).
+
+- **F-PRJ-06 claim:** could-not-reach
+- **F-PRJ-09 claim:** could-not-reach
+- **Drove:** slow-git PATH shim + app relaunch (confirmed active via `Loading Files…` staying
+  up); repeated attempts to type into the Create-project name field and the Clone-repository
+  URL field; repeated plain clicks on the same card's Cancel button as a control
+- **Observed:** the anchored popover forms opened from the sidebar `+` menu do not reliably
+  accept synthetic clicks or keystrokes on this lane — confirmed with a Cancel-button click
+  control, not just the fields under test — so the in-flight double-submit guard cannot be
+  exercised here. The slow-git harness itself is validated and reusable once this input gap is
+  fixed or a different lane is used.
+- **Captures:** 02-slowgit-baseline.png, 02-plus-menu.png, 02-create-form.png,
+  02-doubleclick-fire.png, 03-after-type.png, 02-form-now.png, 02-typed-check.png,
+  02-typed-check2.png, crop-field.png, crop-field2.png, crop-field3.png, 02-sanity2.png
+  (positive control — Filter field accepts the same click+type), 02-clone-form.png,
+  02-url-typed.png, 02-url-typed2.png, crop-url2.png, 02-cancel-check.png, 02-cancel-retry.png
