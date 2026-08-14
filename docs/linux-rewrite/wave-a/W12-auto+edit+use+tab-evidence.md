@@ -125,3 +125,41 @@ the same OCR reason. Both are out of this pass's budget and this lane's instrume
 **Captures:**
 `reference/linux-progress/wavea-W12-auto+edit+use+tab/02-use-immediate.png` (uninterpretable
 without OCR — kept for a future pass with a vision-capable reader).
+
+## `F-USE-06` — Receive a user notification when an agent status changes while its pane is not visible
+
+**Claim: partially-exercised.**
+
+**Drove:** Opened a Chat tab (`surface.chat.open`) in a running instance, cleanly quit
+(`system.quit`, socket dropped), relaunched the app against the same `TILLER_DB` on the same
+compositor, confirmed via `panel.list` the Chat pane (`pane-0`) restored non-active (Browser
+was active — a genuine "backgrounded" pane), started
+`dbus-monitor --session "interface='org.freedesktop.Notifications'"`, then sent
+`notify session=pane-0 status=running` followed by `notify session=pane-0 status=needs-input`
+over the control socket — exactly the transition the row's approach names (`should_notify`
+rejects `new == Running`, so the second call, `Running -> NeedsInput` on an invisible pane, is
+the one that should fire per `NotificationPolicy::should_notify` in
+`tiller_activity/src/notification.rs:19-27`).
+
+**Observed:** Both `notify` calls returned `{"queued":"true"}`. Zero
+`org.freedesktop.Notifications.Notify` traffic followed. Reading `restore_tabs` /
+`restored_chat_spec` (`main.rs:1618-1635`) explains why without needing to guess: the default
+Chat tab this drive created has `tab.agent_id == None`, and `restored_chat_spec(None)` returns
+`agent_id: None` — so `register_restored_agent` (`main.rs:7566-7574`) is called with `None` and
+skips `activity.register_agent_id` entirely. `post_activity_notification` then early-returns at
+its very first line (`self.activity.agent_id(&transition.pane_id)` is `None`). This is a correct,
+uninteresting no-op for a pane that was never agent-identified in the first place — it does not
+test the row's real claim, which is about a pane that **was** a real agent chat before restore.
+
+**Not reached:** producing a restored pane with `tab.agent_id: Some(<agent>)` requires opening
+an actual agent chat (e.g. via the in-app agent picker's "+" control), which has no control-socket
+equivalent (`surface.chat.open` takes no agent parameter) and so needs a blind pixel-coordinate
+GUI click sequence this pass did not budget time to locate without a vision-capable reader.
+
+**Captures:**
+`reference/linux-progress/wavea-W12-auto+edit+use+tab/f-use-06-dbus-monitor.txt` (empty of
+Notify traffic, as predicted by the code trace above — not by itself proof of a defect).
+
+**Discriminating:** the restore-and-background state was real (confirmed via `panel.list`
+before/after quit+relaunch, not assumed), so this is a genuine negative result for the specific
+pane tested, not a null instrument; it just tested a pane the code was never going to notify for.
