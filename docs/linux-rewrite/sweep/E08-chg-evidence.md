@@ -73,3 +73,42 @@ all / Discard all buttons — the gesture-half equivalence to the drawn click te
 (`drawn_stage_all_button_stages_every_changed_file`,
 `drawn_discard_all_button_requires_confirmation_and_clears_worktree`) is asserted by the
 existing test suite, not re-clicked live here.
+
+## F-CHG-22 (ledger 213, half-proven)
+
+Missing half per manifest: needs-input and declined→idle already proven; running, done and
+error status cases were not all exercised.
+
+- **Running**: `panel.create worktree=/tmp/e08chg-fixture cmd=claude` launched a real `claude`
+  CLI process in a terminal panel (confirmed by `panel.list` returning
+  `"agent":"claude"` for the new pane). Answered the initial trust prompt
+  (`panel.write input="1\r"`), then sent a real prompt
+  (`say the single word READY and nothing else`). `panel.scrollback` while it was working
+  showed the live "Whisking… (Ns · ~N tokens)" spinner line mid-transcript, and a forced
+  repaint captured `chg22-running.png`/`chg22-running2.png` during that window — a genuine
+  in-progress state, not idle or needs-input.
+- **Done**: same session, after it produced its answer and the shell returned, `panel.state`
+  (a control method not used by the prior pass) reported `exitCode:"0"`,
+  `exitStatus:"success"` — a completed, successful agent run. This is a materially different,
+  more direct signal than a scrollback text-guess: `panel.state` is the app's own verdict on
+  the process exit.
+- **Error**: `panel.create worktree=/tmp/e08chg-fixture cmd=false` ran a command that exits
+  non-zero. `panel.state` on it reported `exitCode:"1"`, `exitStatus:"code:1"` — the error
+  path, distinct in kind (not just value) from the `success` string above, confirming the app
+  distinguishes clean vs. failed exits at the state level.
+- Pixel capture: `chg22-done-error.png` (1715x972, forced repaint) taken after both the
+  Done and Error panes existed side by side in `panel.list`.
+- **Not closed**: I cannot see the captures, so I cannot confirm which literal glyph/label the
+  sidebar Activity list renders for each of these three states (Running/Done/Error) — only that
+  `panel.state`'s own exit classification genuinely differs between them (`success` vs
+  `code:1`) and that a real Running spinner was captured live in the terminal content itself.
+  The Activity-row-label ↔ `panel.state` mapping is inferred, not read off a screenshot by a
+  sighted pass.
+- Captures: `reference/linux-progress/drive-E08-chg/chg22-running.png`,
+  `chg22-running2.png`, `chg22-done-error.png`.
+
+Claim: `exercised-working` for the three missing status cases at the data/process level
+(Running captured live via scrollback + pixel, Done and Error each confirmed via
+`panel.state`'s exit classification, genuinely differing not just in text but in shape:
+`exitStatus:"success"` vs `exitStatus:"code:1"`); the visual Activity-row rendering itself
+remains a sighted-pass item, same limitation as F-CHG-06.
