@@ -120,3 +120,43 @@ and rendered on a fresh app launch, proving the save/load-on-relaunch path indep
 (currently unreachable, see F-BRW-06) live doorhanger Allow action.
 
 ---
+
+## F-BRW-05 (ledger line 254) — partially-exercised
+
+**Clause** (`docs/linux-rewrite/01-inventory-app.md:126`): "Show when an agent is driving the
+browser — VERIFY: Start an agent browser action, observe the browser tab during the action, and
+confirm the Agent driving indicator appears."
+
+**Route:** `Browser::set_agent_driving`/`agent_driving()` (`rust/crates/tiller_ui/src/browser.rs:
+581,454,905`) backs a toolbar pill rendered `.when(self.state.agent_driving(), ...)` at `:1148`.
+The only wiring into this flag anywhere in the tree is the control method `browser.act`
+(`rust/crates/tiller/src/main.rs:4512`), whose own comment says: `"browser.act is unsupported on
+Linux: only the driving flag is implemented"` — i.e. there is currently no real ACP tool call
+that drives the browser and flips this flag as a side effect; `browser.act driving=<bool>` is the
+only lever that exists.
+
+**Drove:**
+1. `ctl browser.open url=https://example.com` → `ctl tab.select index=3` to bring the Browser tab
+   forward.
+2. `shot f-brw-05-browser-tab-driving-off` — toolbar shows only `Browser` / `Stop`, no pill.
+3. `ctl browser.act driving=true` → `shot f-brw-05-agent-driving-on` — an orange **"Agent
+   driving"** pill appears next to `Browser`/`Stop` in the toolbar.
+4. `ctl browser.act driving=false` → `shot f-brw-05-agent-driving-off` — the pill disappears
+   again. Positive+negative control both landed, so the render/toggle genuinely tracks the flag.
+
+**What is proven / what is not:** the indicator's render logic is real and correctly wired to
+`agent_driving()` — verified appearing and disappearing on command. What is **not** proven is the
+VERIFY clause's actual trigger ("start an agent browser action") — no such live path exists yet
+on this build; `browser.act` is a manual test hook, not a byproduct of a real ACP browser tool
+call, so this cannot be closed to full `exercised-working` from any lane today, Wayland or X11.
+
+Captures:
+- `reference/linux-progress/drive-E06-brw/02-f-brw-05-browser-tab-driving-off.png`
+- `reference/linux-progress/drive-E06-brw/03-f-brw-05-agent-driving-on.png`
+- `reference/linux-progress/drive-E06-brw/04-f-brw-05-agent-driving-off.png`
+
+`claim`: partially-exercised. The driving-indicator render is proven live (on and off, positive
+and negative control); the "real agent browser action" half of the clause has no implemented
+trigger anywhere in the codebase to drive.
+
+---
