@@ -1,0 +1,31 @@
+[session] development build: session state is checkout-local at /home/enzopalmisano/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+[control] listening on /run/user/1000/TillerRust/control.sock
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+
+(tiller:2080011): dbind-WARNING **: 00:54:58.570: Couldn't connect to accessibility bus: Failed to connect to socket /run/user/1000/at-spi/bus_1: Connessione rifiutata
+
+(tiller:2080011): Gdk-CRITICAL **: 00:54:58.655: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2080011): Gdk-CRITICAL **: 00:54:58.660: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2080011): Gdk-CRITICAL **: 00:54:58.665: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2080011): Gdk-CRITICAL **: 00:54:58.672: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(process:2080395): libsoup-WARNING **: 00:54:59.245: Failed to execute query: table soup_hsts_policies already exists
+
+(process:2080383): libsoup-WARNING **: 00:54:59.245: Failed to execute query: table soup_hsts_policies already exists
+
+(process:2080383): libsoup-WARNING **: 00:54:59.245: Failed to execute query: database is locked
+
+** (process:2080390): WARNING **: 00:54:59.336: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2080396): WARNING **: 00:54:59.446: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2080384): WARNING **: 00:54:59.449: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2080380): WARNING **: 00:54:59.516: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+(tiller:2080011): Gdk-CRITICAL **: 00:55:04.002: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+** (process:2084088): WARNING **: 00:55:04.089: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
