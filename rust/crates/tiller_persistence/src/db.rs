@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
@@ -17,7 +18,8 @@ use crate::MAX_DATABASE_BYTES;
 use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
-    AppSettings, AppearanceMode, FileIconTheme, ProjectRecord, SidebarState, TabRecord,
+    AppSettings, AppearanceMode, ChatSessionSummary, ChatTranscript, ChatTurn, FileIconTheme,
+    MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord, SidebarState, TabRecord,
     TabStateRecord, WorktreeRecord, settings_keys,
 };
 
@@ -199,7 +201,8 @@ impl AppDatabase {
     /// All worktrees, ordered by project then position.
     pub fn worktrees(&self) -> Result<Vec<WorktreeRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, project_id, branch, path, is_primary, order_idx
+            "SELECT id, project_id, branch, path, is_primary, order_idx,
+                    comment, created_at, updated_at
              FROM worktree
              ORDER BY project_id, order_idx, id",
         )?;
@@ -213,7 +216,8 @@ impl AppDatabase {
         project_id: &str,
     ) -> Result<Vec<WorktreeRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, project_id, branch, path, is_primary, order_idx
+            "SELECT id, project_id, branch, path, is_primary, order_idx,
+                    comment, created_at, updated_at
              FROM worktree
              WHERE project_id = ?1
              ORDER BY order_idx, id",
@@ -224,15 +228,22 @@ impl AppDatabase {
 
     /// Upserts a single worktree.
     pub fn save_worktree(&self, worktree: &WorktreeRecord) -> Result<(), PersistenceError> {
-        self.conn.execute(
-            "INSERT INTO worktree (id, project_id, branch, path, is_primary, order_idx)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        let transaction = self.conn.unchecked_transaction()?;
+        clear_other_primaries(&transaction, worktree)?;
+        transaction.execute(
+            "INSERT INTO worktree
+                (id, project_id, branch, path, is_primary, order_idx,
+                 comment, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                  project_id = excluded.project_id,
                  branch = excluded.branch,
                  path = excluded.path,
                  is_primary = excluded.is_primary,
-                 order_idx = excluded.order_idx",
+                 order_idx = excluded.order_idx,
+                 comment = excluded.comment,
+                 created_at = excluded.created_at,
+                 updated_at = excluded.updated_at",
             params![
                 worktree.id,
                 worktree.project_id,
@@ -240,8 +251,12 @@ impl AppDatabase {
                 worktree.path,
                 worktree.is_primary,
                 worktree.order_idx,
+                worktree.comment,
+                worktree.created_at,
+                worktree.updated_at,
             ],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -267,31 +282,50 @@ impl AppDatabase {
         Ok(())
     }
 
+    /// Finds one worktree by exact stored path equality. No canonicalization
+    /// or normalization is performed, so callers can distinguish path
+    /// spellings that the store recorded separately.
+    pub fn worktree_by_path(&self, path: &str) -> Result<Option<WorktreeRecord>, PersistenceError> {
+        self.conn
+            .query_row(
+                "SELECT id, project_id, branch, path, is_primary, order_idx,
+                        comment, created_at, updated_at
+                 FROM worktree
+                 WHERE path = ?1
+                 ORDER BY project_id, order_idx, id
+                 LIMIT 1",
+                [path],
+                map_worktree,
+            )
+            .optional()
+            .map_err(PersistenceError::from)
+    }
+
     // ------------------------------------------------------------------
     // Tabs
     // ------------------------------------------------------------------
 
     /// All tabs, ordered by worktree then position.
     pub fn tabs(&self) -> Result<Vec<TabRecord>, PersistenceError> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, worktree_id, title, kind, order_idx, is_active
+        read_tabs(
+            &self.conn,
+            "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active
              FROM tab
              ORDER BY worktree_id, order_idx, id",
-        )?;
-        let rows = statement.query_map([], map_tab)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            [],
+        )
     }
 
     /// The tabs of one worktree, in order.
     pub fn tabs_of_worktree(&self, worktree_id: &str) -> Result<Vec<TabRecord>, PersistenceError> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, worktree_id, title, kind, order_idx, is_active
+        read_tabs(
+            &self.conn,
+            "SELECT rowid, id, worktree_id, title, kind, agent_id, order_idx, is_active
              FROM tab
              WHERE worktree_id = ?1
              ORDER BY order_idx, id",
-        )?;
-        let rows = statement.query_map([worktree_id], map_tab)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+            [worktree_id],
+        )
     }
 
     /// Upserts a single tab.
@@ -312,12 +346,13 @@ impl AppDatabase {
             )?;
         }
         transaction.execute(
-            "INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                  worktree_id = excluded.worktree_id,
                  title = excluded.title,
                  kind = excluded.kind,
+                 agent_id = excluded.agent_id,
                  order_idx = excluded.order_idx,
                  is_active = excluded.is_active",
             params![
@@ -325,6 +360,7 @@ impl AppDatabase {
                 tab.worktree_id,
                 tab.title,
                 tab.kind,
+                tab.agent_id,
                 tab.order_idx,
                 tab.is_active,
             ],
@@ -376,6 +412,7 @@ impl AppDatabase {
             [worktree_id],
         )?;
         for state in states {
+            serde_json::from_str::<serde_json::Value>(&state.state)?;
             transaction.execute(
                 "INSERT INTO tab_state (tab_id, state) VALUES (?1, ?2)",
                 rusqlite::params![state.tab_id, state.state],
@@ -391,16 +428,196 @@ impl AppDatabase {
         worktree_id: &str,
     ) -> Result<Vec<TabStateRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
-            "SELECT tab_state.tab_id, tab_state.state
+            "SELECT tab_state.rowid, tab_state.tab_id, tab_state.state
              FROM tab_state
              JOIN tab ON tab.id = tab_state.tab_id
              WHERE tab.worktree_id = ?1
              ORDER BY tab.order_idx, tab.id",
         )?;
+        let mut rows = statement.query([worktree_id])?;
+        let mut valid = Vec::new();
+        let mut corrupt = Vec::new();
+        while let Some(row) = rows.next()? {
+            let rowid: i64 = row.get(0)?;
+            let tab_id: rusqlite::Result<String> = row.get(1);
+            let state: rusqlite::Result<String> = row.get(2);
+            match (tab_id, state) {
+                (Ok(tab_id), Ok(state)) => {
+                    if serde_json::from_str::<serde_json::Value>(&state).is_ok() {
+                        valid.push(TabStateRecord { tab_id, state });
+                    } else {
+                        corrupt.push(CorruptRow {
+                            rowid,
+                            record_id: tab_id,
+                            payload: state.into_bytes(),
+                            reason: "tab state is not valid JSON".to_string(),
+                        });
+                    }
+                }
+                (tab_id, state) => {
+                    let payload = format!("tab_id={tab_id:?}; state={state:?}").into_bytes();
+                    let record_id = tab_id.unwrap_or_else(|_| format!("rowid:{rowid}"));
+                    corrupt.push(CorruptRow {
+                        rowid,
+                        record_id,
+                        payload,
+                        reason: "tab state row has an invalid SQLite value".to_string(),
+                    });
+                }
+            }
+        }
+        drop(rows);
+        drop(statement);
+        quarantine_rows(&self.conn, "tab_state", &corrupt)?;
+        Ok(valid)
+    }
+
+    // ------------------------------------------------------------------
+    // Chat transcripts
+    // ------------------------------------------------------------------
+
+    /// Replaces one chat tab's rendered transcript atomically.
+    ///
+    /// Turns are serialized independently and retained newest-first until
+    /// their payload bytes reach [`MAX_CHAT_TRANSCRIPT_BYTES`]. A turn is
+    /// either kept whole or omitted; no JSON entry is sliced. The foreign key
+    /// makes an unknown tab fail the transaction, and deleting a tab removes
+    /// its transcript rows automatically.
+    pub fn save_chat_transcript(
+        &self,
+        transcript: &ChatTranscript,
+    ) -> Result<(), PersistenceError> {
+        let mut retained = Vec::new();
+        let mut retained_bytes = 0usize;
+        for turn in transcript.turns.iter().rev() {
+            let payload = serde_json::to_vec(turn)?;
+            if payload.len() > MAX_CHAT_TRANSCRIPT_BYTES {
+                continue;
+            }
+            if retained_bytes + payload.len() > MAX_CHAT_TRANSCRIPT_BYTES {
+                break;
+            }
+            retained_bytes += payload.len();
+            retained.push(payload);
+        }
+        retained.reverse();
+        let updated_at = unix_millis();
+
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM chat_turn WHERE tab_id = ?1",
+            [&transcript.tab_id],
+        )?;
+        for (index, payload) in retained.into_iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO chat_turn (tab_id, ordinal, payload, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![transcript.tab_id, index as i64, payload, updated_at],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Lists saved chat tabs for one worktree, newest transcript first.
+    pub fn chat_sessions(
+        &self,
+        worktree_id: &str,
+    ) -> Result<Vec<ChatSessionSummary>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tab.id, tab.title, tab.agent_id,
+                    COUNT(chat_turn.ordinal), MAX(chat_turn.updated_at), tab.order_idx
+             FROM tab
+             JOIN chat_turn ON chat_turn.tab_id = tab.id
+             WHERE tab.worktree_id = ?1 AND tab.kind = 'chat'
+             GROUP BY tab.id, tab.title, tab.agent_id, tab.order_idx
+             ORDER BY MAX(chat_turn.updated_at) DESC, tab.order_idx, tab.id",
+        )?;
         let rows = statement.query_map([worktree_id], |row| {
-            Ok(TabStateRecord {
+            let turn_count = row.get::<_, i64>(3)?;
+            Ok(ChatSessionSummary {
                 tab_id: row.get(0)?,
-                state: row.get(1)?,
+                title: row.get(1)?,
+                agent_id: row.get(2)?,
+                turn_count: usize::try_from(turn_count).unwrap_or(0),
+                last_activity: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Deletes one chat transcript while preserving its shell tab record.
+    pub fn delete_chat_session(&self, tab_id: &str) -> Result<bool, PersistenceError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM chat_turn WHERE tab_id = ?1", [tab_id])?
+            > 0)
+    }
+
+    /// Loads one chat tab's rendered transcript in display order.
+    pub fn load_chat_transcript(
+        &self,
+        tab_id: &str,
+    ) -> Result<Option<ChatTranscript>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT rowid, ordinal, payload
+             FROM chat_turn
+             WHERE tab_id = ?1
+             ORDER BY ordinal",
+        )?;
+        let mut rows = statement.query([tab_id])?;
+        let mut turns = Vec::new();
+        let mut corrupt = Vec::new();
+        while let Some(row) = rows.next()? {
+            let rowid: i64 = row.get(0)?;
+            let ordinal: i64 = row.get(1)?;
+            let payload: rusqlite::Result<Vec<u8>> = row.get(2);
+            match payload {
+                Ok(payload) => match serde_json::from_slice::<ChatTurn>(&payload) {
+                    Ok(turn) => turns.push(turn),
+                    Err(error) => corrupt.push(CorruptRow {
+                        rowid,
+                        record_id: format!("{tab_id}:{ordinal}"),
+                        payload,
+                        reason: format!("chat turn JSON could not be decoded: {error}"),
+                    }),
+                },
+                Err(error) => corrupt.push(CorruptRow {
+                    rowid,
+                    record_id: format!("{tab_id}:{ordinal}"),
+                    payload: format!("SQLite payload conversion failed: {error}").into_bytes(),
+                    reason: "chat turn row has an invalid SQLite value".to_string(),
+                }),
+            }
+        }
+        drop(rows);
+        drop(statement);
+        quarantine_rows(&self.conn, "chat_turn", &corrupt)?;
+        if turns.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ChatTranscript {
+            tab_id: tab_id.to_string(),
+            turns,
+        }))
+    }
+
+    /// Returns rows preserved after a malformed serialized record was
+    /// removed from active state.
+    pub fn quarantined_records(&self) -> Result<Vec<QuarantinedRecord>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, record_type, record_id, payload, reason, quarantined_at
+             FROM quarantine_record
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(QuarantinedRecord {
+                id: row.get(0)?,
+                record_type: row.get(1)?,
+                record_id: row.get(2)?,
+                payload: row.get(3)?,
+                reason: row.get(4)?,
+                quarantined_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -440,6 +657,48 @@ impl AppDatabase {
     }
 
     // ------------------------------------------------------------------
+    // Browser permissions
+    // ------------------------------------------------------------------
+
+    /// Loads browser origins that the user allowed through the GPUI
+    /// doorhanger. Origins are returned deterministically for settings and
+    /// relaunch snapshots.
+    pub fn browser_origin_grants(&self) -> Result<Vec<String>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT origin
+             FROM browser_origin_grant
+             ORDER BY origin",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Persists one allowed browser origin. The primary key makes repeated
+    /// Allow decisions idempotent.
+    pub fn save_browser_origin_grant(&self, origin: &str) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO browser_origin_grant (origin, granted_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(origin) DO UPDATE SET granted_at = excluded.granted_at",
+            params![origin, unix_timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Revokes one browser origin and reports whether a grant was removed.
+    pub fn revoke_browser_origin(&self, origin: &str) -> Result<bool, PersistenceError> {
+        Ok(self.conn.execute(
+            "DELETE FROM browser_origin_grant WHERE origin = ?1",
+            [origin],
+        )? > 0)
+    }
+
+    /// Revokes all browser-origin grants and reports how many were removed.
+    pub fn revoke_all_browser_origins(&self) -> Result<usize, PersistenceError> {
+        Ok(self.conn.execute("DELETE FROM browser_origin_grant", [])?)
+    }
+
+    // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
 
@@ -468,18 +727,57 @@ impl AppDatabase {
                 FileIconTheme::parse(&value).unwrap_or(FileIconTheme::SfSymbols);
         }
         if let Some(value) = self.setting_value(settings_keys::CONTROL_SOCKET_ENABLED)? {
-            defaults.control_socket_enabled = match value.as_str() {
-                "true" => true,
-                "false" => false,
-                _ => true, // unparseable → default (enabled), like Swift
-            };
+            defaults.control_socket_enabled = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::RESUME_AGENT_SESSIONS)? {
+            defaults.resume_agent_sessions = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::AUTO_NAMING)? {
+            defaults.auto_naming = parse_bool_setting(&value, false);
+        }
+        if let Some(value) = self.setting_value(settings_keys::LIMIT_CHAT_HISTORY)? {
+            defaults.limit_chat_history = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::CHAT_RETENTION)? {
+            defaults.chat_retention =
+                clamp_setting(&value, crate::model::settings_ranges::CHAT_RETENTION, 100);
+        }
+        if let Some(value) = self.setting_value(settings_keys::LIMIT_MOUNTED_WORKTREES)? {
+            defaults.limit_mounted_worktrees = parse_bool_setting(&value, false);
+        }
+        if let Some(value) = self.setting_value(settings_keys::MOUNTED_WORKTREES)? {
+            defaults.mounted_worktrees =
+                clamp_setting(&value, crate::model::settings_ranges::MOUNTED_WORKTREES, 6);
+        }
+        if let Some(value) = self.setting_value(settings_keys::SUMMARIZER_AGENT)?
+            && matches!(
+                value.as_str(),
+                "claude" | "codex" | "opencode" | "pi" | "omp"
+            )
+        {
+            defaults.summarizer_agent = value;
+        }
+        if let Some(value) = self.setting_value(settings_keys::CLAUDE_SHOW_IN_BAR)? {
+            defaults.claude_show_in_bar = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::CODEX_SHOW_IN_BAR)? {
+            defaults.codex_show_in_bar = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::OPENCODE_SHOW_IN_BAR)? {
+            defaults.opencode_show_in_bar = parse_bool_setting(&value, false);
+        }
+        if let Some(value) = self.setting_value(settings_keys::REFRESH_INTERVAL_MIN)? {
+            defaults.refresh_interval_min = clamp_setting(
+                &value,
+                crate::model::settings_ranges::REFRESH_INTERVAL_MIN,
+                5,
+            );
         }
 
         Ok(defaults)
     }
 
-    /// Persists all five settings in one transaction, under the exact Swift
-    /// key names.
+    /// Persists the complete settings contract in one transaction.
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), PersistenceError> {
         let transaction = self.conn.unchecked_transaction()?;
         set_setting(
@@ -510,6 +808,89 @@ impl AppDatabase {
             } else {
                 "false"
             },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::RESUME_AGENT_SESSIONS,
+            if settings.resume_agent_sessions {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::AUTO_NAMING,
+            if settings.auto_naming {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::LIMIT_CHAT_HISTORY,
+            if settings.limit_chat_history {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CHAT_RETENTION,
+            &settings.chat_retention.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::LIMIT_MOUNTED_WORKTREES,
+            if settings.limit_mounted_worktrees {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::MOUNTED_WORKTREES,
+            &settings.mounted_worktrees.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::SUMMARIZER_AGENT,
+            &settings.summarizer_agent,
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CLAUDE_SHOW_IN_BAR,
+            if settings.claude_show_in_bar {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CODEX_SHOW_IN_BAR,
+            if settings.codex_show_in_bar {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::OPENCODE_SHOW_IN_BAR,
+            if settings.opencode_show_in_bar {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::REFRESH_INTERVAL_MIN,
+            &settings.refresh_interval_min.to_string(),
         )?;
         transaction.commit()?;
         Ok(())
@@ -573,6 +954,14 @@ impl AppDatabase {
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// Serializes the tiny window in which SQLite has created a new zero-byte
@@ -688,7 +1077,9 @@ fn validate_existing_file(path: &Path) -> Result<(), PersistenceError> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| classify_open_error(PersistenceError::Sqlite(error), path))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| classify_open_error(PersistenceError::Sqlite(error), path))?;
     if version > CURRENT_SCHEMA_VERSION {
         return Err(PersistenceError::NewerSchema {
             version,
@@ -793,18 +1184,107 @@ fn map_worktree(row: &rusqlite::Row) -> rusqlite::Result<WorktreeRecord> {
         path: row.get(3)?,
         is_primary: row.get(4)?,
         order_idx: row.get(5)?,
+        comment: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
-fn map_tab(row: &rusqlite::Row) -> rusqlite::Result<TabRecord> {
+fn map_tab(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<TabRecord> {
     Ok(TabRecord {
-        id: row.get(0)?,
-        worktree_id: row.get(1)?,
-        title: row.get(2)?,
-        kind: row.get(3)?,
-        order_idx: row.get(4)?,
-        is_active: row.get(5)?,
+        id: row.get(offset)?,
+        worktree_id: row.get(offset + 1)?,
+        title: row.get(offset + 2)?,
+        kind: row.get(offset + 3)?,
+        agent_id: row.get(offset + 4)?,
+        order_idx: row.get(offset + 5)?,
+        is_active: row.get(offset + 6)?,
     })
+}
+
+struct CorruptRow {
+    rowid: i64,
+    record_id: String,
+    payload: Vec<u8>,
+    reason: String,
+}
+
+fn read_tabs<P: rusqlite::Params>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    parameters: P,
+) -> Result<Vec<TabRecord>, PersistenceError> {
+    let mut statement = conn.prepare(sql)?;
+    let mut rows = statement.query(parameters)?;
+    let mut valid = Vec::new();
+    let mut corrupt = Vec::new();
+    while let Some(row) = rows.next()? {
+        let rowid: i64 = row.get(0)?;
+        match map_tab(row, 1) {
+            Ok(tab) => valid.push(tab),
+            Err(error) => {
+                let record_id = row
+                    .get::<_, String>(1)
+                    .unwrap_or_else(|_| format!("rowid:{rowid}"));
+                corrupt.push(CorruptRow {
+                    rowid,
+                    record_id,
+                    payload: format!("tab row conversion failed: {error}").into_bytes(),
+                    reason: "tab row has an invalid SQLite value".to_string(),
+                });
+            }
+        }
+    }
+    drop(rows);
+    drop(statement);
+    quarantine_rows(conn, "tab", &corrupt)?;
+    Ok(valid)
+}
+
+fn quarantine_rows(
+    conn: &rusqlite::Connection,
+    record_type: &str,
+    rows: &[CorruptRow],
+) -> Result<(), PersistenceError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let transaction = conn.unchecked_transaction()?;
+    for row in rows {
+        transaction.execute(
+            "INSERT INTO quarantine_record
+                (record_type, record_id, payload, reason, quarantined_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                record_type,
+                row.record_id,
+                row.payload,
+                row.reason,
+                unix_timestamp_millis(),
+            ],
+        )?;
+        match record_type {
+            "tab" => transaction.execute("DELETE FROM tab WHERE rowid = ?1", [row.rowid])?,
+            "tab_state" => {
+                transaction.execute("DELETE FROM tab_state WHERE rowid = ?1", [row.rowid])?
+            }
+            "chat_turn" => {
+                transaction.execute("DELETE FROM chat_turn WHERE rowid = ?1", [row.rowid])?
+            }
+            other => panic!("unknown quarantine source {other}"),
+        };
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn unix_timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 fn insert_project(tx: &rusqlite::Transaction, project: &ProjectRecord) -> rusqlite::Result<()> {
@@ -830,10 +1310,27 @@ fn insert_project(tx: &rusqlite::Transaction, project: &ProjectRecord) -> rusqli
     Ok(())
 }
 
+fn clear_other_primaries(
+    tx: &rusqlite::Transaction,
+    worktree: &WorktreeRecord,
+) -> rusqlite::Result<()> {
+    if worktree.is_primary {
+        tx.execute(
+            "UPDATE worktree SET is_primary = 0
+             WHERE project_id = ?1 AND id != ?2 AND is_primary = 1",
+            params![worktree.project_id, worktree.id],
+        )?;
+    }
+    Ok(())
+}
+
 fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rusqlite::Result<()> {
+    clear_other_primaries(tx, worktree)?;
     tx.execute(
-        "INSERT INTO worktree (id, project_id, branch, path, is_primary, order_idx)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO worktree
+            (id, project_id, branch, path, is_primary, order_idx,
+             comment, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             worktree.id,
             worktree.project_id,
@@ -841,6 +1338,9 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
             worktree.path,
             worktree.is_primary,
             worktree.order_idx,
+            worktree.comment,
+            worktree.created_at,
+            worktree.updated_at,
         ],
     )?;
     Ok(())
@@ -848,13 +1348,14 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
 
 fn insert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             tab.id,
             tab.worktree_id,
             tab.title,
             tab.kind,
+            tab.agent_id,
             tab.order_idx,
             tab.is_active,
         ],
@@ -876,6 +1377,14 @@ fn clamp_setting(value: &str, range: std::ops::RangeInclusive<i64>, default: i64
         .parse::<i64>()
         .map(|parsed| parsed.clamp(*range.start(), *range.end()))
         .unwrap_or(default)
+}
+
+fn parse_bool_setting(value: &str, default: bool) -> bool {
+    match value {
+        "true" => true,
+        "false" => false,
+        _ => default,
+    }
 }
 
 /// Maps an open-time SQLite failure onto [`PersistenceError::Corrupt`] when
