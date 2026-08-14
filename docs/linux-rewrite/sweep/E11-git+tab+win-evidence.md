@@ -77,3 +77,37 @@ click the "Other agents…" fallback) and it does nothing — no Agents settings
 This is the row's previously-unproven half; the first half (fallback renders with correct
 wording under bare PATH) was already proven at pass 15 and is corroborated again here by
 `04-picker-open.png`.
+
+## F-WIN-07 (ledger line 59, half-proven)
+
+Missing half per current ledger note: explicit `session.restore` returns `restoredCount:0`
+(confirmed working half: relaunch auto-restores everything), and "the required History
+menu/⇧⌘O is absent" (unproven half, from P106/P108).
+
+Re-checked both at HEAD `4073297`:
+
+1. **Source grep, current HEAD** — `grep -rniE "previous launch|history" rust/crates/tiller/src
+   rust/crates/tiller_ui/src --include=*.rs`, filtered for non-test hits: every "history" hit
+   is either browser back/forward history (`tiller_ui/src/browser.rs`) or an unrelated
+   `Vec<T>` borrow named `history` in a settings-picker test (`project_identity.rs`). **No
+   "History" menu, no "previous launch" string, no restore-session UI route anywhere in the
+   app or UI crates.** This is the same conclusion P106/P108 reached, reconfirmed against the
+   current tree rather than assumed stale.
+
+2. **Live socket drive** (Wayland lane, fresh instance,
+   `reference/linux-progress/drive-E11-git+tab+win/f-win-07/`): `ctl system.capabilities`
+   lists all 50 control methods this build exposes — no `history.*` method, no
+   `session.list`/`session.recent` or similar exists at the socket layer either, so there is
+   no non-visual route to a "previous launch" picker to drive around the missing menu.
+   `ctl workspace.list` on this already-populated DB shows both worktrees `mounted:"true"`
+   (state carried over from earlier drives in this session, itself informal corroboration that
+   mount state persists across relaunches). `ctl session.restore` on this live, already-fully-
+   mounted state again returned `{"path":".../tiller-linux","restoredCount":"0"}` — identical
+   to the P106/P108 finding, now reproduced independently on a different instance/DB.
+
+**Claim: could-not-reach** for the missing half specifically (a History menu / ⇧⌘O binding to
+click or press) — there is nothing in the running app, in any menu, or on the control socket
+that this half could be driven through; its absence is exhaustively confirmed by source grep
+and by the live `system.capabilities` method list, not by a UI gesture that failed. The
+already-proven half (`session.restore` → `restoredCount:0` despite working relaunch-time
+restore) is reaffirmed live in this pass with fresh capture evidence in `f-win-07/`.
