@@ -1,0 +1,29 @@
+[session] development build: session state is checkout-local at /home/enzopalmisano/.local/state/TillerRust/checkouts/tiller-linux-ea1b05ec/tiller.sqlite
+[control] listening on /run/user/1000/TillerRust/control.sock
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+
+(tiller:2278888): dbind-WARNING **: 01:02:29.726: Couldn't connect to accessibility bus: Failed to connect to socket /run/user/1000/at-spi/bus_1: Connessione rifiutata
+
+(tiller:2278888): Gdk-CRITICAL **: 01:02:29.811: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2278888): Gdk-CRITICAL **: 01:02:29.814: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2278888): Gdk-CRITICAL **: 01:02:29.817: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2278888): Gdk-CRITICAL **: 01:02:29.822: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2278888): Gdk-CRITICAL **: 01:02:29.834: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+(tiller:2278888): Gdk-CRITICAL **: 01:02:29.849: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)' failed
+
+** (process:2279135): WARNING **: 01:02:30.453: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2279143): WARNING **: 01:02:30.523: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2279127): WARNING **: 01:02:30.529: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2279147): WARNING **: 01:02:30.553: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2279139): WARNING **: 01:02:30.570: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
+
+** (process:2279170): WARNING **: 01:02:30.594: Can't connect to a11y bus: Impossibile connettersi: Connessione rifiutata
