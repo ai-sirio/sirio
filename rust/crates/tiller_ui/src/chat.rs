@@ -1519,7 +1519,15 @@ impl Chat {
     }
 
     fn can_send(&self) -> bool {
-        !self.streaming && !self.connecting && !self.composer.is_empty()
+        // F-CHAT-05: an unresolved permission/plan question must block Send
+        // in its own right, not merely ride along with `streaming` (a
+        // permission request always arrives mid-turn today, so the two
+        // happen to coincide, but the check must name its real reason —
+        // future non-streaming question types must not slip through).
+        !self.streaming
+            && !self.connecting
+            && !self.composer.is_empty()
+            && self.pending_question().is_none()
     }
 
     fn transcript_entry_ranges(&self) -> Vec<Range<usize>> {
@@ -2087,6 +2095,12 @@ impl Chat {
     }
 
     fn send(&mut self, cx: &mut Context<Self>) {
+        // F-CHAT-05: an unresolved permission/plan question takes the
+        // composer out of service entirely — no send, no queueing — until
+        // it is answered from its own card in the transcript.
+        if self.pending_question().is_some() {
+            return;
+        }
         // D-CHAT-03: Enter while a turn runs queues the draft for the next
         // turn instead of starting a second turn.
         if self.streaming {
@@ -2413,6 +2427,12 @@ impl Chat {
     }
 
     fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // F-CHAT-05: the composer is out of service while a permission/plan
+        // question is unanswered — the whole editor is disabled, not just
+        // Send, mirroring the Swift original's `.disabled(!canInteract)`.
+        if self.pending_question().is_some() {
+            return;
+        }
         self.composer.insert_text(text);
         self.refresh_token_popups(cx);
     }
@@ -2581,12 +2601,22 @@ impl Chat {
     }
 
     fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        // F-CHAT-05: see `insert_text` — the editor is fully disabled while
+        // a permission/plan question is unanswered.
+        if self.pending_question().is_some() {
+            return;
+        }
         self.composer.backspace();
         self.refresh_token_popups(cx);
         cx.notify();
     }
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        // F-CHAT-05: see `insert_text` — the editor is fully disabled while
+        // a permission/plan question is unanswered.
+        if self.pending_question().is_some() {
+            return;
+        }
         self.composer.delete_forward();
         self.refresh_token_popups(cx);
         cx.notify();
@@ -5146,10 +5176,22 @@ impl Chat {
         // the whole draft is empty, so a chip-only draft still reads as
         // content.
         let composer_parts: Vec<AnyElement> = if self.composer.is_empty() {
-            // D-CHAT-03: while a turn runs the empty composer says what
-            // Enter will do instead of sending. The element carries its own
-            // selector so a drawn test can see the placeholder switch.
-            if self.streaming {
+            // D-CHAT-03 / F-CHAT-05: the empty composer's placeholder names
+            // what state it's actually in — permission-wait is not ordinary
+            // mid-turn queueing, so it gets its own text, distinct selector,
+            // and (per `insert_text`/`backspace`/`delete`/`send` above)
+            // actually refuses input rather than merely describing itself
+            // that way.
+            if self.pending_question().is_some() {
+                vec![
+                    div()
+                        .id("permission-wait-placeholder")
+                        .debug_selector(|| "permission-wait-placeholder".into())
+                        .text_color(colors.meta)
+                        .child("Waiting for permission response…")
+                        .into_any_element(),
+                ]
+            } else if self.streaming {
                 vec![
                     div()
                         .id("queue-placeholder")
@@ -6745,6 +6787,58 @@ mod tests {
         });
         assert_eq!(answered, vec!["Allow once", "Deny once"]);
         assert_eq!(footers, 2, "both answered turns complete");
+    }
+
+    /// F-CHAT-05: a genuinely unresolved permission request takes the whole
+    /// composer out of service — its own distinct placeholder, not the
+    /// ordinary mid-turn "queue-placeholder", and typed characters/Enter are
+    /// refused outright rather than silently queued.
+    #[gpui::test]
+    async fn permission_wait_disables_the_composer_and_shows_its_own_placeholder(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["permission"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "may I?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Permission { resolved: None, .. }))
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("permission-wait-placeholder").is_some(),
+            "the permission-wait placeholder replaces the ordinary queue placeholder"
+        );
+        assert!(
+            cx.debug_bounds("queue-placeholder").is_none(),
+            "permission-wait must not read as ordinary mid-turn queueing"
+        );
+
+        let entries_before = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
+        focus_and_type(cx, "should not appear");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            "the disabled editor must refuse typed characters entirely"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.entries.len()),
+            entries_before,
+            "Enter must not send or queue while a permission is pending"
+        );
+        assert!(
+            cx.debug_bounds("permission-wait-placeholder").is_some(),
+            "the placeholder survives the blocked keystrokes"
+        );
     }
 
     /// F-CHAT-25 + F-CHAT-26: a structured question renders with a free-text
