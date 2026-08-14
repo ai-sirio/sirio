@@ -2200,3 +2200,71 @@ pireview" recorded openly in `tasks/CRITIC-pass17-handover.md`. All drives on th
   `.txt` files) and `aaa-f09-large.md` (any Markdown > 256 KiB reproduces it). Drives
   used `TILLER_DB` fixture SQLites; coordinates in the ledger rows belong to a 1715x972
   window with the Files panel open.
+
+## PASS 19 — P92: the twenty-eight rows a drawn test cannot see (fable, 2026-08-14 ~04:20)
+
+Held session on the fixture DB (`TILLER_DB=/tmp/p92.sqlite`, app pid 1101962, lock
+`fable-p92-held` with holder pid = app pid). Scratch repo `/tmp/p92src` cloned via the
+UI to `/home/enzopalmisano/p92src`, worktree `p92wt`. All frames `reference/linux-progress/p92-*`.
+
+**Coverage against the brief**: Tier 1 — 3/3 driven live (F-CHG-19/21, F-EDIT-09).
+Tier 2 — 10/10 driven against real ACP agents (claude-agent-acp AND codex-acp, both
+spawned as app children; per-conjunct records + agent-side JSONL payload checks per the
+Amendment). Tier 3 — 2/13 driven live (F-SID-03/13 before the reprioritization order);
+**11 deferred with honest count** (F-CHG-04/09/10/12/14, F-TAB-02/03/04/09, F-WIN-04,
+F-EDIT-13) per the orchestrator's mid-session directive to protect Tier 2's budget.
+Tier 4 — 2/2 re-checked by grep (F-SET-03/08, both hold; one stale sub-claim corrected).
+
+**Verdict deltas (mine)**: `F-CHAT-12` PASSED → **FAILED — defective**. Everything else
+re-confirmed or recharacterized in place. (The Totals shift UNREACHABLE 21→13 /
+NOT EXERCISED 21→29 is the stale block absorbing the orchestrator's earlier body edits,
+not this pass.)
+
+**The new defect (F-CHAT-12): chip removal leaves the composer keyboard-dead.**
+Removal itself is correct at both levels (chip gone from view; next payload carries no
+file part). But after clicking the ×, five recovery gestures a real user would try
+(click field, type, Return, Escape, click, type) all delivered nothing — four identical
+frames — while `echo hi` typed into the Terminal tab of the SAME window executed
+seconds later, proving the app's keyboard pipeline alive. Only leaving and re-entering
+the chat tab restores input. chat.rs:3786's mouse-down `composer_focus.focus()` does
+not win it back. Drawn tests are blind here by construction: `remove_chip` mutates the
+model correctly.
+
+**Recharacterizations worth knowing**:
+- `F-CHAT-36`: no agent in the roster exposes an empty model catalog — after one turn
+  BOTH real agents upgrade badge→picker. The no-models trigger is roster-unreachable;
+  badge verified live only as the pre-turn state.
+- `F-CHAT-17`: effort levels are real and host-supplied (six choices), chip label
+  tracked XHIGH→HIGH→MAX→XHIGH live; picker gate (`has_completed_turn`) seen from both
+  sides. "Max" sits at the panel's clipped right edge — clicking it also fires
+  mouse-down-out and closes the picker (cosmetic-adjacent, not filed as a row).
+- `F-CHAT-11`: attach dispatch proven at the D-Bus level (OpenFile, parent
+  `x11:400001`, accept_label "Attach image", **multiple:false** — multi-rejection is
+  delegated to the portal dialog). Portal `Request.Close` from a third party: Access
+  denied. The dangling dialog dies with the app (Request lifetime = sender lifetime).
+- `F-SET-03`: "zero updater code" now stale — `tiller_project/src/ui.rs` carries a
+  transport-less UpdateState machine, zero consumers; surface absence still asserted.
+
+**Instrument facts new this pass** (ENVIRONMENT.md candidates):
+- The @-mention popup's filter repaints one frame late; the pre-filter list is a stale
+  paint (cost me one misplaced click at a moved row).
+- The composer text field does NOT regain focus from chip-control clicks; always click
+  the field before typing after any chip interaction (and after the ×-trap, a tab
+  roundtrip is the only recovery).
+- An open modal portal dialog does NOT block XWayland app input under this compositor;
+  a "blocked" frame after a portal open is ordinary paint lag (second-capture rule).
+- Trivial streams are fast: a 200-line count completes in <5 s; use ≥1000 lines to
+  reliably hit a mid-stream window.
+
+**Anomalies recorded for other rows' owners** (not mine, not verdicts): waku's Chat
+tab and the alpha.txt file tab drop on restore; worktree terminal spawns in app cwd on
+creation but correct cwd on restore-respawn; status bar gained a "Fable" usage segment.
+
+**Residue**: fixture repo+worktree left at `/home/enzopalmisano/p92src{,-p92wt}` and
+`/tmp/p92src`. The volatile evidence is copied into the repo so verdicts stay replayable:
+D-Bus capture at `reference/linux-progress/p92-dbus-filechooser.log`, and the cited
+agent-side payload records (queue drain, both interrupts, `compact_boundary
+trigger:'manual'`, the alpha.txt resource link, the no-file-part send, the
+post-New-Conversation send) extracted to `reference/linux-progress/p92-payload-evidence.jsonl.txt`
+— full session JSONLs remain at `~/.claude/projects/-home-enzopalmisano-p92src-p92wt/`.
+App, lock and portal dialog released at session end.
