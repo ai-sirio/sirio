@@ -1,0 +1,22 @@
+worktree=p-c1fd7a5bbfd541af-wt-1
+panel=pane-2204179-2
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl panel write pane-2204179-2 --input 'printf terminal-control' --enter
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl panel key pane-2204179-2 --key enter
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl panel scrollback pane-2204179-2 --max-bytes 4096 --json
+[{"bytes":"36","data":"cHJpbnRmIHRlcm1pbmFsLWNvbnRyb2wNCg0KcHR5LXN0YXJ0"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl panel state pane-2204179-2 --json
+[{"exitStatus":"running","scrollback":"cHJpbnRmIHRlcm1pbmFsLWNvbnRyb2wNCg0KcHR5LXN0YXJ0","scrollbackBytes":"36","workingDirectory":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl capabilities --json
+[{"method":"system.ping"},{"method":"system.capabilities"},{"method":"system.identify"},{"method":"system.quit"},{"method":"project.list"},{"method":"project.add"},{"method":"workspace.list"},{"method":"workspace.create"},{"method":"workspace.select"},{"method":"workspace.current"},{"method":"workspace.close"},{"method":"worktree.set"},{"method":"notify"},{"method":"panel.create"},{"method":"panel.split"},{"method":"panel.list"},{"method":"panel.write"},{"method":"panel.key"},{"method":"panel.read"},{"method":"panel.state"},{"method":"panel.scrollback"},{"method":"panel.wait"},{"method":"panel.focus"},{"method":"panel.close"},{"method":"pane.split"},{"method":"pane.focus"},{"method":"pane.close"},{"method":"tab.cycle"},{"method":"tab.select"},{"method":"notification.create"},{"method":"notification.list"},{"method":"notification.clear"},{"method":"session.ref"},{"method":"session.restore"},{"method":"surface.changes.open"},{"method":"surface.changes.read"},{"method":"surface.changes.stage"},{"method":"surface.changes.unstage"},{"method":"surface.changes.discard"},{"method":"surface.changes.stage_all"},{"method":"surface.changes.discard_all"},{"method":"surface.settings.open"},{"method":"surface.settings.select"},{"method":"surface.settings.read"},{"method":"surface.chat.open"},{"method":"surface.chat.send"},{"method":"surface.chat.compose"},{"method":"surface.chat.permission"},{"method":"surface.chat.stop"},{"method":"surface.chat.read"},{"method":"browser.open"},{"method":"browser.navigate"},{"method":"browser.act"}]
+[exit=0]
+
+$ process environment DISPLAY fields

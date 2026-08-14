@@ -1,0 +1,39 @@
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl ping
+pong
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl project list --json
+[]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl project add /home/enzopalmisano/Scrivania/Progetti/tiller-linux --json
+[{"added":"true","projectId":"p-c1fd7a5bbfd541af","worktreeCount":"2"}]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl project list --json
+[{"empty":"false","id":"p-c1fd7a5bbfd541af","isGit":"true","name":"tiller","path":"/home/enzopalmisano/Scrivania/Progetti/tiller","worktreeCount":"2","worktrees":"[{\"branch\":\"rust/gpui-rewrite\",\"id\":\"p-c1fd7a5bbfd541af-wt-0\",\"path\":\"/home/enzopalmisano/Scrivania/Progetti/tiller\",\"primary\":\"true\"},{\"branch\":\"linux/gpui-waku\",\"id\":\"p-c1fd7a5bbfd541af-wt-1\",\"path\":\"/home/enzopalmisano/Scrivania/Progetti/tiller-linux\",\"primary\":\"false\"}]"}]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl list-workspaces --json
+[{"branch":"rust/gpui-rewrite","comment":"","id":"p-c1fd7a5bbfd541af-wt-0","mounted":"true","path":"/home/enzopalmisano/Scrivania/Progetti/tiller","project":"tiller","selected":"false"},{"branch":"linux/gpui-waku","comment":"","id":"p-c1fd7a5bbfd541af-wt-1","mounted":"true","path":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux","project":"tiller","selected":"true"}]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl current-workspace --json
+[{"branch":"linux/gpui-waku","id":"p-c1fd7a5bbfd541af-wt-1","path":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux","project":"tiller"}]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl identify --json
+[{"branch":"linux/gpui-waku","path":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux","project":"tiller","surfaceId":"","workspaceId":"p-c1fd7a5bbfd541af-wt-1"}]
+
+resolved_worktree=p-c1fd7a5bbfd541af-wt-1
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl worktree-set --worktree p-c1fd7a5bbfd541af-wt-1 --comment 'p116 headless' --session 'slice-c-1'
+p-c1fd7a5bbfd541af-wt-1	/home/enzopalmisano/Scrivania/Progetti/tiller-linux	p116 headless	slice-c-1
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel create --worktree p-c1fd7a5bbfd541af-wt-1 --cmd 'sh -lc "printf panel-ready; sleep 20"'
+pane-2157148-1
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+pane-0	Chat	Chat		false
+pane-1	Terminal	Terminal		true
+pane-2157148-1	control	sh	sh	true
+
+resolved_panel=pane-1
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel read pane-1
+tillerctl: unknown pane: pane-1

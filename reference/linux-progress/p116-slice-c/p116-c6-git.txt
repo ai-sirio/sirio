@@ -1,0 +1,31 @@
+project=p-bdcd4c1e4b1614f9
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl project list --json
+[{"empty":"false","id":"p-c1fd7a5bbfd541af","isGit":"true","name":"tiller","path":"/home/enzopalmisano/Scrivania/Progetti/tiller","worktreeCount":"2","worktrees":"[{\"branch\":\"rust/gpui-rewrite\",\"id\":\"p-c1fd7a5bbfd541af-wt-0\",\"path\":\"/home/enzopalmisano/Scrivania/Progetti/tiller\",\"primary\":\"true\"},{\"branch\":\"linux/gpui-waku\",\"id\":\"p-c1fd7a5bbfd541af-wt-1\",\"path\":\"/home/enzopalmisano/Scrivania/Progetti/tiller-linux\",\"primary\":\"false\"}]"},{"empty":"false","id":"p-bdcd4c1e4b1614f9","isGit":"true","name":"p116-git","path":"/tmp/p116-git","worktreeCount":"1","worktrees":"[{\"branch\":\"master\",\"id\":\"p-bdcd4c1e4b1614f9-wt-0\",\"path\":\"/tmp/p116-git\",\"primary\":\"true\"}]"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl new-workspace --project p-bdcd4c1e4b1614f9
+p-bdcd4c1e4b1614f9-wt-1
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl list-workspaces --json
+[{"branch":"rust/gpui-rewrite","comment":"","id":"p-c1fd7a5bbfd541af-wt-0","mounted":"true","path":"/home/enzopalmisano/Scrivania/Progetti/tiller","project":"tiller","selected":"false"},{"branch":"linux/gpui-waku","comment":"","id":"p-c1fd7a5bbfd541af-wt-1","mounted":"true","path":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux","project":"tiller","selected":"true"},{"branch":"master","comment":"","id":"p-bdcd4c1e4b1614f9-wt-0","mounted":"true","path":"/tmp/p116-git","project":"p116-git","selected":"false"},{"branch":"wt-1786722152","comment":"","id":"p-bdcd4c1e4b1614f9-wt-1","mounted":"true","path":"/tmp/.ctx-mode-GYdXpI/tiller-worktrees/p116-git-wt-1786722152-2204179","project":"p116-git","selected":"false"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock /home/enzopalmisano/Scrivania/Progetti/tiller-linux/rust/target/debug/tillerctl project list --json
+[{"empty":"false","id":"p-c1fd7a5bbfd541af","isGit":"true","name":"tiller","path":"/home/enzopalmisano/Scrivania/Progetti/tiller","worktreeCount":"2","worktrees":"[{\"branch\":\"rust/gpui-rewrite\",\"id\":\"p-c1fd7a5bbfd541af-wt-0\",\"path\":\"/home/enzopalmisano/Scrivania/Progetti/tiller\",\"primary\":\"true\"},{\"branch\":\"linux/gpui-waku\",\"id\":\"p-c1fd7a5bbfd541af-wt-1\",\"path\":\"/home/enzopalmisano/Scrivania/Progetti/tiller-linux\",\"primary\":\"false\"}]"},{"empty":"false","id":"p-bdcd4c1e4b1614f9","isGit":"true","name":"p116-git","path":"/tmp/p116-git","worktreeCount":"2","worktrees":"[{\"branch\":\"master\",\"id\":\"p-bdcd4c1e4b1614f9-wt-0\",\"path\":\"/tmp/p116-git\",\"primary\":\"true\"},{\"branch\":\"wt-1786722152\",\"id\":\"p-bdcd4c1e4b1614f9-wt-1\",\"path\":\"/tmp/.ctx-mode-GYdXpI/tiller-worktrees/p116-git-wt-1786722152-2204179\",\"primary\":\"false\"}]"}]
+[exit=0]
+
+$ git -C /tmp/p116-git branch --all
+* master
++ wt-1786722152
+
+$ git -C /tmp/p116-git worktree list --porcelain
+worktree /tmp/p116-git
+HEAD 0c82593429b5367255e92cccf0dd9225cd67018b
+branch refs/heads/master
+
+worktree /tmp/.ctx-mode-GYdXpI/tiller-worktrees/p116-git-wt-1786722152-2204179
+HEAD 0c82593429b5367255e92cccf0dd9225cd67018b
+branch refs/heads/wt-1786722152
+

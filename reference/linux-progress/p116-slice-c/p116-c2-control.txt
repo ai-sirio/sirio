@@ -1,0 +1,75 @@
+worktree=p-c1fd7a5bbfd541af-wt-1
+panel=pane-2157148-2
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+pane-0	Chat	Chat		false
+pane-1	Terminal	Terminal		true
+pane-2157148-1	control	sh	sh	false
+pane-2157148-2	control	sh	sh	true
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel read pane-2157148-2
+
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel write pane-2157148-2 --input 'printf socket-write' --enter
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel scrollback pane-2157148-2 --max-bytes 4096 --json
+[{"bytes":"32","data":"cHJpbnRmIHNvY2tldC13cml0ZQ0KcGFuZWwtcmVhZHk="}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel state pane-2157148-2 --json
+[{"exitStatus":"running","scrollback":"cHJpbnRmIHNvY2tldC13cml0ZQ0KcGFuZWwtcmVhZHk=","scrollbackBytes":"32","workingDirectory":"/home/enzopalmisano/Scrivania/Progetti/tiller-linux"}]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl session-ref --session pane-2157148-2 --ref p116-native-ref
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2157148-2 --status working --agent-session p116-agent-ref --title 'P116 activity' --body 'headless working push'
+tillerctl: ambiguous notify modes: choose either agent status (--session/--status) or user notification (--title/--body)
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl notify --session pane-2157148-2 --status idle --agent-session p116-agent-ref --title 'P116 activity idle'
+tillerctl: ambiguous notify modes: choose either agent status (--session/--status) or user notification (--title/--body)
+[exit=1]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl list-notifications --json
+[]
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel split right --from pane-2157148-2 --cmd 'sh -lc "printf split-pane; sleep 120"'
+pane-2157148-3
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl panel list --worktree p-c1fd7a5bbfd541af-wt-1
+pane-0	Chat	Chat		false
+pane-1	Terminal	Terminal		true
+pane-2157148-1	control	sh	sh	false
+pane-2157148-2	control	sh	sh	false
+pane-2157148-3	control	sh (right)	sh	true
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings open --section general
+settings	General
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings read
+settings	General
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings select appearance
+settings	Appearance
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface settings read
+settings	Appearance
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface changes open --worktree p-c1fd7a5bbfd541af-wt-1
+changes	/home/enzopalmisano/Scrivania/Progetti/tiller-linux	0	0	0	false
+[exit=0]
+
+$ env TILLER_SOCKET=/tmp/pi.sock rust/target/debug/tillerctl surface changes read
+changes	/home/enzopalmisano/Scrivania/Progetti/tiller-linux	0	0	0	false
+[exit=0]
