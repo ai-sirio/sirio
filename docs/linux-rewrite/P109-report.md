@@ -933,4 +933,154 @@ window-manager control over the app's window on `DISPLAY=:1`.
 This is reported as a rendering finding, not chased into `rust/` per the
 task's rules. Captures: `shots/220` through `shots/224d` as cited above.
 
+## F-PER rows
+
+### F-PER-07
+
+Owed gesture (close-out batch, item 13, matching row prose): "right-click a
+project row → Project Settings; change display name and icon; quit +
+relaunch; confirm both persisted. While there, confirm the sheet exposes
+no field for the two worktree-location columns."
+
+Right-clicked the `Sonnet P109 Test Display` project row (`150,140`; first
+attempt produced no menu, isolated retry opened it,
+`shots/230-per07-rclick-retry.png`). Menu, top to bottom: `Project
+Settings`, `Initialize Git repository` (greyed, reason `Git is already
+initialized`), `Show in File Manager`, `Remove Project`. Clicked `Project
+Settings` — opened the same sheet layout already on record from
+F-PRJ-11/12: path, `Repository: Git`, a display-name field, a `Project
+icon` picker (`Icon`/`Emoji`/`Avatar` tabs, a 6-icon grid, a `Colour`
+swatch row), a `Reset` button, then `Close` and the project id
+`p-2045d15e0c84e416` (`shots/231-per07-settings-sheet.png`). **No field
+for either worktree-location column (`default_worktree_base`,
+`worktree_location_override`) appears anywhere on this sheet** —
+confirming the row's expectation of absence.
+
+Changed the display name: cleared the field (a `ctrl+a`/`BackSpace`
+attempt only deleted one character, the same partial-clear behaviour
+already on record from the F-WIN-10 segment — recovered here with an
+explicit `End` then 60 isolated `BackSpace` keysyms in one call) and typed
+`P109 Renamed Project`. The edit did not render until a later, unrelated
+click forced a repaint — the same stale-repaint pattern already on record
+for F-SID-16/F-SID-06/F-CHG-20 above — but the sheet's own header
+(`Project Settings · P109 Renamed Project`) and the field both then
+showed the clean new value with no leftover fragment of the old name
+(`shots/234-per07-field-focus-check.png`).
+
+Changed the icon: clicked the fourth icon in the grid (a terminal-window
+glyph, `236,311`) — first click produced no visible change (retried
+isolated, `shots/236-per07-icon-retry.png`), after which its border went
+orange/selected in place of the original folder icon's.
+
+Closed the sheet (`Close`, `53,596`; first click was a no-op, isolated
+retry worked, `shots/238-per07-closed-retry.png`). The sidebar row updated
+immediately to both new values together: label `P109 Renamed Project`,
+icon the terminal-window glyph in place of the folder icon.
+
+**Quit + relaunch:** the tracked app process was found already exited
+(`kill` on its PID failed, "Nessun processo corrisponde") at the moment
+this drive went to quit it deliberately — another instance of the
+undiagnosed silent-exit behaviour already flagged twice above in this
+report, not chased further per the task's rules; it does not undermine
+this trial, since a quit (deliberate or not) followed by a clean relaunch
+is exactly what the row calls for. Relaunched
+(`env -u WAYLAND_DISPLAY DISPLAY=:1 TILLER_DB=/tmp/sonnet-p109.sqlite`,
+fresh PID) and re-captured the sidebar with no further interaction beyond
+window resolution: it read `P109 Renamed Project` with the same
+terminal-window icon (`shots/239-per07-relaunched.png`). **Both the
+renamed display name and the changed icon persisted across the
+quit/relaunch cycle.**
+
+## F-TERM-SPLIT rows
+
+### F-TERM-SPLIT-01
+
+This row carries no explicit "Owed:" line in `P106-report.md` (lines
+446-466) and is not part of the numbered close-out batch. Its own closing
+sentence is the owed gesture: "No resize-to-limit, close/prune/focus-restore
+visual capture was obtained." Driven as: split panes, resize a seam toward
+the limit, close/prune a pane, confirm focus-restore.
+
+Opened a new Terminal tab (`New Terminal`, `809,567`,
+`shots/240-termsplit-newterm.png`).
+
+**Split route.** `P106`'s own census records `SEAM_WIDTH` (`6.0`) and
+`MIN_SPLIT_PANE_SIZE` (`160.0`) but no successful split capture, and
+`F-TAB-23` in this same P109 batch found the tab-strip right-click
+produces no "Split" menu items. Reading `rust/crates/tiller/src/main.rs`
+(read-only) turned up a working route this project's own docs had not
+yet exercised: the Command Palette (`Ctrl+Shift+P`, universal chord; also
+`Ctrl+K` when a terminal is not focused) lists `Split Pane Right`
+(`Ctrl+Alt+Shift+Right`), `Split Pane Down` (`Ctrl+Alt+Shift+Down`),
+`Close Pane` (`Ctrl+Alt+W`), and `Focus Pane Left/Right/Above/Below`
+alongside the palette's other commands. Opened the palette and clicked
+`Split Pane Right` — produced a clean left/right split with a visible
+seam and a correctly-rendered second pane header
+(`shots/242-termsplit-splitright.png`). Opened the palette again and
+drove `Split Pane Down` (the typed filter text lagged a beat behind the
+keystrokes before rendering in full, the same stale-repaint pattern on
+record elsewhere in this report) — produced a 3-pane layout: left (tall),
+top-right, bottom-left, matching `P106`'s socket-driven right+down
+structure (`shots/245-termsplit-splitdown.png`). **This is a genuine,
+UI-reachable split mechanism, distinct from the broken tab-strip
+right-click `F-TAB-23` found — the Command Palette route works.**
+
+**Resize toward the limit.** Dragged the horizontal seam between the
+top-left and bottom-left panes. A first attempt (`400,508`→`400,812`)
+produced a byte-identical screenshot — the seam's hit target is thin (the
+census's own `SEAM_WIDTH` is `6.0`px) and the coordinate missed it.
+Cropped the seam region, corrected to `y=500`, and the retry
+(`400,500`→`400,812`) succeeded, visibly shrinking the bottom-left pane
+(`shots/247-termsplit-resize-drag1.png`). Two further attempts to push
+the same seam still lower — `400,735`→`400,950`
+(`shots/248-termsplit-resize-limit-test.png`) and, after re-cropping to
+re-locate the seam and correcting to `400,732`→`400,950`
+(`shots/249-termsplit-resize-limit-retry.png`) — both produced
+byte-identical screenshots: no further shrink. A sanity check dragging
+the same seam the other way, `400,732`→`400,690` (growing the bottom
+pane), succeeded immediately and visibly
+(`shots/250-termsplit-seam-sanity-up.png`), confirming the seam was still
+live and correctly targeted, not simply missed a third time. This is
+consistent with the bottom pane having reached a minimum-height floor
+that downward drags can no longer cross while upward drags remain free —
+consistent with, but not proven identical to, the census's
+`MIN_SPLIT_PANE_SIZE` (`160.0`) constant. Not chased further per the
+task's rules.
+
+**Close/prune a pane.** Sending the `Ctrl+Alt+W` keychord directly at the
+3-pane layout (after clicking into the bottom-left pane) produced no
+visible change on the immediately-following screenshot
+(`shots/253-termsplit-closepane-chord.png`). Opened the Command Palette
+and drove its `Close Pane` entry instead: the first two clicks on the
+list item were no-ops (intermittent click miss, on record throughout this
+report), and the eventual successful click collapsed the 3-pane layout
+straight to a single full-width pane
+(`shots/258-termsplit-closepane-retry2.png`) — one more pane than the
+single `Close Pane` invocation should have removed. Given the earlier
+`Ctrl+Alt+W` keychord attempt showed no *visible* effect but this report
+has repeatedly documented actions whose effect only renders on a later,
+unrelated repaint, the most likely explanation is that both the keychord
+and the palette command actually fired, compounding into two closes; this
+is reported as observed, not resolved further.
+
+**Focus-restore.** Rebuilt a clean 2-pane layout via the palette's `Split
+Pane Right`. Planted a distinguishable marker in each pane by typing a
+visible command: left pane got `echo LEFT_PANE_MARKER` (echoed
+`LEFT_PANE_MARKER`), right pane got `echo RIGHT_PANE_MARKER` (echoed
+`RIGHT_PANE_MARKER`), confirming which physical pane held which content
+(`shots/263-termsplit-markers-set.png`). With the right pane still
+focused, sent `Ctrl+Alt+W` directly — this time it took effect
+immediately. The resulting layout was **not** a single full-width pane:
+it was two panes stacked top/bottom, both full width (confirmed by a crop
+showing no vertical seam anywhere in the content area,
+`shots/264b-crop-fullpane.png`). The top pane retained the
+`LEFT_PANE_MARKER` scrollback; the bottom pane was empty with an active
+cursor (`shots/264-termsplit-closepane-direct.png`). **Closing the right
+pane of a left/right split did not restore a clean single-pane layout —
+it produced a second, empty, focused pane stacked below the surviving
+one.** Whether the bottom pane is genuinely new or is the same pane
+re-rendered at a different position/orientation was not determined; no
+further interaction was driven to avoid compounding an already-unclear
+state. Reported as observed, not a diagnosed root cause.
+
 
