@@ -5385,21 +5385,77 @@ impl TillerWorkspace {
                         .into_any_element()
                 })
                 .unwrap_or_else(|| {
-                    div()
-                        .id(format!("pane-group-empty-{}", group.id))
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.meta)
-                        .child("No tabs in this pane")
-                        .into_any_element()
+                    if group.id == 0 && self.has_current_worktree() {
+                        let new_terminal_entity = entity.clone();
+                        div()
+                            .id("empty-worktree")
+                            .debug_selector(|| "empty-worktree".to_owned())
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(theme.spacing.card_gap)
+                            .text_color(theme.meta)
+                            .child(
+                                IconElement::new(Icon::SquareTerminal, px(32.0))
+                                    .text_color(theme.meta),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.typography.headline)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.title)
+                                    .child("No Terminals"),
+                            )
+                            .child("Open a new terminal to get started.")
+                            .child(
+                                div()
+                                    .id("empty-worktree-new-terminal")
+                                    .debug_selector(|| "empty-worktree-new-terminal".to_owned())
+                                    .mt(theme.spacing.titlebar_control_spacing)
+                                    .px(theme.spacing.card_gap)
+                                    .py(theme.spacing.titlebar_control_spacing)
+                                    .rounded(theme.radii.control)
+                                    .bg(theme.tab_focus_accent)
+                                    .text_size(theme.typography.footnote)
+                                    .text_color(theme.canvas)
+                                    .hover(|style| style.bg(theme.accent))
+                                    .on_click(move |_, _, cx| {
+                                        new_terminal_entity.update(cx, |workspace, cx| {
+                                            workspace.add_terminal_tab("Terminal", cx);
+                                        });
+                                    })
+                                    .child("New Terminal"),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id(format!("pane-group-empty-{}", group.id))
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.meta)
+                            .child("No tabs in this pane")
+                            .into_any_element()
+                    }
                 });
             surfaces = surfaces.child(surface);
         }
         surfaces.into_any_element()
+    }
+
+    fn has_current_worktree(&self) -> bool {
+        self.control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .current_workspace()
+            .is_some()
     }
 
     fn render_open_tab(
@@ -5736,6 +5792,22 @@ impl TillerWorkspace {
             },
         ];
 
+        items.push(TabContextItem::separator());
+        if self.can_attach_tab_to_current_terminal(tab_id) {
+            items.push(TabContextItem::enabled(
+                "Attach to Current Terminal",
+                "attach-to-current-terminal",
+                TabContextAction::AttachToCurrentTerminal,
+            ));
+        } else {
+            items.push(TabContextItem::disabled(
+                "Attach to Current Terminal",
+                "attach-to-current-terminal",
+                TabContextAction::AttachToCurrentTerminal,
+                "select another terminal tab",
+            ));
+        }
+
         let other_groups = machinery
             .groups()
             .iter()
@@ -5875,7 +5947,110 @@ impl TillerWorkspace {
                 self.move_selected_tab(MoveTarget::Group(group_id), cx)
             }
             TabContextAction::MoveToPane(_) => {}
+            TabContextAction::AttachToCurrentTerminal => {
+                if let Some(tab_id) = self.tab_menu_tab {
+                    self.attach_tab_to_current_terminal(tab_id, cx);
+                }
+            }
         }
+    }
+
+    /// Mirrors the Swift `workspaceCanAdoptPane` contract at the tab strip:
+    /// the source must be another terminal-bearing tab, and the active tab
+    /// must provide the current terminal that receives the live pane.
+    fn can_attach_tab_to_current_terminal(&self, source_tab_id: usize) -> bool {
+        let Some(destination) = self.tabs.get(self.active_tab) else {
+            return false;
+        };
+        if destination.id == source_tab_id || !tab_has_terminal(destination) {
+            return false;
+        }
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == source_tab_id)
+            .is_some_and(tab_has_terminal)
+    }
+
+    /// Moves the first terminal leaf from the source tab into a horizontal
+    /// split beside the current terminal. The terminal entity itself moves —
+    /// no PTY is restarted — and a source tab that becomes empty is removed
+    /// without sending its still-live process a close signal.
+    fn attach_tab_to_current_terminal(&mut self, source_tab_id: usize, cx: &mut Context<Self>) {
+        if !self.can_attach_tab_to_current_terminal(source_tab_id) {
+            return;
+        }
+        let Some(destination_tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+            return;
+        };
+        let Some(source_index) = self.tabs.iter().position(|tab| tab.id == source_tab_id) else {
+            return;
+        };
+        let source_pane = {
+            let source = &self.tabs[source_index];
+            let mut terminal_pane = None;
+            source.panes.for_each(&mut |pane_id, content| {
+                if terminal_pane.is_none() && matches!(content, TabContent::Terminal { .. }) {
+                    terminal_pane = Some(pane_id);
+                }
+            });
+            terminal_pane
+        };
+        let Some(source_pane) = source_pane else {
+            return;
+        };
+        let source_will_be_empty = self.tabs[source_index].panes.leaf_ids().len() == 1;
+        let Some(moved) = self.tabs[source_index].panes.take(source_pane) else {
+            return;
+        };
+        let moved_terminal = moved.terminal();
+        if source_will_be_empty {
+            self.tabs.remove(source_index);
+        } else {
+            self.tabs[source_index]
+                .session_state
+                .pane_events
+                .push(PaneEvent::Close { id: source_pane });
+        }
+
+        let Some(destination_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == destination_tab_id)
+        else {
+            return;
+        };
+        let destination = &mut self.tabs[destination_index];
+        let Some(anchor) = destination.panes.first_id() else {
+            return;
+        };
+        if !destination.panes.split_focused_with_placement(
+            anchor,
+            source_pane,
+            SplitDirection::Horizontal,
+            SplitPlacement::After,
+            moved,
+        ) {
+            return;
+        }
+        destination.focused_pane = source_pane;
+        destination.session_state.pane_events.push(PaneEvent::Split {
+            focused: anchor,
+            new_id: source_pane,
+            direction: split_event_name(SplitDirection::Horizontal, SplitPlacement::After),
+        });
+        if let Some(terminal) = moved_terminal {
+            Self::bind_terminal(&terminal, destination_tab_id, source_pane, cx);
+        }
+        self.rebuild_tab_machinery();
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == destination_tab_id)
+            .unwrap_or(destination_index);
+        self.dismiss_tab_menu(cx);
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+        cx.notify();
     }
 
     fn move_selected_tab_direction(&mut self, direction: MoveDirection, cx: &mut Context<Self>) {
@@ -6161,6 +6336,56 @@ impl TillerWorkspace {
         window: &Window,
     ) -> impl IntoElement {
         let mut columns = div().flex().flex_row().size_full();
+
+        let centre_surface = if self.has_current_worktree() {
+            div()
+                .relative()
+                .flex_1()
+                .w_full()
+                .overflow_hidden()
+                .child(self.render_group_surfaces(*theme, entity.clone()))
+                .when_some(self.tabs.get(self.active_tab), |this, tab| {
+                    this.when(tab_has_terminal(tab), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(0.0))
+                                .right(px(10.0))
+                                .h(px(24.0))
+                                .px(px(8.0))
+                                .flex()
+                                .items_center()
+                                .bg(theme.background)
+                                .text_size(px(13.0))
+                                .text_color(theme.title)
+                                .child(self.terminal_breadcrumb.clone()),
+                        )
+                    })
+                })
+                .into_any_element()
+        } else {
+            div()
+                .id("no-worktree-selected")
+                .debug_selector(|| "no-worktree-selected".to_owned())
+                .flex_1()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(theme.spacing.card_gap)
+                .text_color(theme.meta)
+                .child(IconElement::new(Icon::SquareTerminal, px(32.0)).text_color(theme.meta))
+                .child(
+                    div()
+                        .text_size(theme.typography.headline)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.title)
+                        .child("No worktree selected"),
+                )
+                .child("Add a project, then select a worktree.")
+                .into_any_element()
+        };
 
         if self.sidebar_visible {
             columns = columns
