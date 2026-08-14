@@ -6,7 +6,8 @@
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, EventEmitter, FocusHandle, FontWeight, KeyDownEvent,
-    MouseButton, Render, Rgba, Task, Window, div, prelude::*, px, uniform_list,
+    MouseButton, Pixels, Point, Render, Rgba, Task, Window, anchored, div, prelude::*, px,
+    uniform_list,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -114,6 +115,7 @@ struct FileRow {
 #[derive(Clone, Debug)]
 struct FileContextMenu {
     path: PathBuf,
+    position: Point<Pixels>,
 }
 
 /// The GPUI right panel: the filesystem tree and the activity section.
@@ -312,9 +314,14 @@ impl RightPanel {
         cx.emit(RightPanelEvent::OpenFile(path));
     }
 
-    fn open_file_context_menu(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn open_file_context_menu(
+        &mut self,
+        path: PathBuf,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         self.selected_path = Some(path.clone());
-        self.file_context_menu = Some(FileContextMenu { path });
+        self.file_context_menu = Some(FileContextMenu { path, position });
         cx.notify();
     }
 
@@ -330,12 +337,10 @@ impl RightPanel {
         theme: Theme,
     ) -> impl IntoElement {
         let path = menu.path;
+        let position = menu.position;
         let mut view = div()
             .id("file-context-menu")
             .debug_selector(|| "file-context-menu".to_owned())
-            .absolute()
-            .left(theme.spacing.titlebar_control_spacing)
-            .top(px(HEADER_HEIGHT + TOOLBAR_HEIGHT))
             .w(theme.spacing.menu_width)
             .p(theme.spacing.titlebar_control_spacing)
             .rounded(theme.radii.user_pill)
@@ -393,9 +398,12 @@ impl RightPanel {
             view = view.child(row.child(label));
         }
 
-        view.on_mouse_down_out(move |_, _, cx| {
-            entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
-        })
+        anchored()
+            .position(position)
+            .snap_to_window()
+            .child(view.on_mouse_down_out(move |_, _, cx| {
+                entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
+            }))
     }
 
     fn open_diff(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -480,11 +488,11 @@ impl RightPanel {
                     }
                 });
             })
-            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            .on_mouse_down(MouseButton::Right, move |event, _, cx| {
                 cx.stop_propagation();
                 context_entity.update(cx, |panel, cx| {
                     if !is_dir {
-                        panel.open_file_context_menu(context_path.clone(), cx);
+                        panel.open_file_context_menu(context_path.clone(), event.position, cx);
                     }
                 });
             })
@@ -1558,7 +1566,21 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("file-context-menu").is_some());
+        let menu = cx
+            .debug_bounds("file-context-menu")
+            .expect("the file context menu is drawn");
+        assert!(
+            (menu.origin.x.as_f32() - row.center().x.as_f32()).abs() <= 1.0,
+            "the file context menu starts at the pointer's x coordinate: menu={:?}, pointer={:?}",
+            menu.origin.x,
+            row.center().x
+        );
+        assert!(
+            (menu.origin.y.as_f32() - row.center().y.as_f32()).abs() <= 1.0,
+            "the file context menu starts at the pointer's y coordinate: menu={:?}, pointer={:?}",
+            menu.origin.y,
+            row.center().y
+        );
         for selector in [
             "file-context-open",
             "file-context-reveal",

@@ -3066,14 +3066,11 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let expected_pane_id = format!("pane-{pane_id}");
-        cx.subscribe(
-            terminal,
-            move |_, _, event: &TerminalLinkEvent, cx| {
-                if let Some(url) = terminal_link_url_for_pane(event, &expected_pane_id) {
-                    cx.open_url(url);
-                }
-            },
-        )
+        cx.subscribe(terminal, move |_, _, event: &TerminalLinkEvent, cx| {
+            if let Some(url) = terminal_link_url_for_pane(event, &expected_pane_id) {
+                cx.open_url(url);
+            }
+        })
         .detach();
     }
 
