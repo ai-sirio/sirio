@@ -1,0 +1,119 @@
+{
+ "E01-set": {
+  "families": "F-SET",
+  "count": 5,
+  "ids": [
+   "F-SET-04",
+   "F-SET-05",
+   "F-SET-06",
+   "F-SET-07",
+   "F-SET-09"
+  ]
+ },
+ "E02-set": {
+  "families": "F-SET",
+  "count": 5,
+  "ids": [
+   "F-SET-11",
+   "F-SET-15",
+   "F-SET-18",
+   "F-SET-19",
+   "F-SET-24"
+  ]
+ },
+ "E03-chat": {
+  "families": "F-CHAT",
+  "count": 5,
+  "ids": [
+   "F-CHAT-05",
+   "F-CHAT-13",
+   "F-CHAT-20",
+   "F-CHAT-24",
+   "F-CHAT-25"
+  ]
+ },
+ "E04-chat": {
+  "families": "F-CHAT",
+  "count": 3,
+  "ids": [
+   "F-CHAT-26",
+   "F-CHAT-27",
+   "F-CHAT-33"
+  ]
+ },
+ "E05-core": {
+  "families": "F-CORE",
+  "count": 5,
+  "ids": [
+   "F-CORE-ACT-02",
+   "F-CORE-ACT-06",
+   "F-CORE-ACT-07",
+   "F-CORE-ACT-11",
+   "F-CORE-TERM-02"
+  ]
+ },
+ "E06-brw": {
+  "families": "F-BRW",
+  "count": 5,
+  "ids": [
+   "F-BRW-05",
+   "F-BRW-06",
+   "F-BRW-07",
+   "F-BRW-08",
+   "F-BRW-09"
+  ]
+ },
+ "E07-term": {
+  "families": "F-TERM",
+  "count": 4,
+  "ids": [
+   "F-TERM-04",
+   "F-TERM-06",
+   "F-TERM-08",
+   "F-TERM-UI-01"
+  ]
+ },
+ "E08-chg": {
+  "families": "F-CHG",
+  "count": 4,
+  "ids": [
+   "F-CHG-06",
+   "F-CHG-11",
+   "F-CHG-18",
+   "F-CHG-22"
+  ]
+ },
+ "E09-prj+edit": {
+  "families": "F-PRJ+F-EDIT",
+  "count": 6,
+  "ids": [
+   "F-PRJ-06",
+   "F-PRJ-09",
+   "F-PRJ-14",
+   "F-PRJ-16",
+   "F-EDIT-05",
+   "F-EDIT-12"
+  ]
+ },
+ "E10-persist+sid+agent+per": {
+  "families": "F-PERSIST+F-SID+F-AGENT+F-PER",
+  "count": 6,
+  "ids": [
+   "F-PERSIST-DB-06",
+   "F-PERSIST-DB-11",
+   "F-SID-12",
+   "F-SID-19",
+   "F-AGENT-SAFE-01",
+   "F-PER-08"
+  ]
+ },
+ "E11-git+tab+win": {
+  "families": "F-GIT+F-TAB+F-WIN",
+  "count": 3,
+  "ids": [
+   "F-GIT-REMOTE-01",
+   "F-TAB-08",
+   "F-WIN-07"
+  ]
+ }
+}
