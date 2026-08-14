@@ -505,6 +505,29 @@ impl Sidebar {
         self.project_identities = replacement.project_identities;
         self.filter = filter;
         self.pending_reorder = None;
+        // F-PRJ-12: an already-open Project Settings card snapshots
+        // is_git/path once, when it's opened (open_project_settings). If
+        // the rebuilt rows above changed that same project -- e.g.
+        // "Initialize Git" flipped it from a folder to a repo -- patch the
+        // live card in place so the open sheet doesn't keep showing the
+        // stale repo type/path underneath the (still correct) display-name
+        // field.
+        if let Some(card) = self.project_settings.as_ref() {
+            let fresh = self
+                .project_ids
+                .iter()
+                .find_map(|(row_id, id)| (id == &card.id).then_some(*row_id))
+                .and_then(|row_id| self.rows.iter().find(|row| row.id == row_id))
+                .map(|row| (row.is_git, row.path.clone()));
+            if let Some((is_git, path)) = fresh
+                && let Some(card) = self.project_settings.as_mut()
+            {
+                card.is_git = is_git;
+                if let Some(path) = path {
+                    card.path = path;
+                }
+            }
+        }
         cx.notify();
     }
 
@@ -3764,6 +3787,62 @@ mod tests {
                 .clone()
         });
         assert_eq!(row_title, "Renamed", "the sidebar reflects the edited name");
+    }
+
+    /// F-PRJ-12: open_project_settings snapshots is_git once; set_projects
+    /// (how the host reports "Initialize Git" completing) must patch an
+    /// already-open card in place rather than leaving it stale.
+    #[gpui::test]
+    async fn set_projects_refreshes_an_open_project_settings_card(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let make_project = |is_git: bool| SidebarProject {
+            id: "project".into(),
+            name: "Project".into(),
+            is_git,
+            root_path: PathBuf::from("/tmp/project"),
+            worktrees: Vec::new(),
+        };
+        let window =
+            cx.add_window(|_window, cx| Sidebar::from_projects(vec![make_project(false)], cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-settings-initialize-git").is_some(),
+            "a folder project's open sheet offers Initialize Git"
+        );
+
+        // The host reports the project is now a git repo the same way it
+        // reports any project-list change: a fresh set_projects call --
+        // the sheet is still open the whole time.
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_projects(vec![make_project(true)], cx);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("project-settings-initialize-git").is_none(),
+            "the open sheet must drop Initialize Git once the project is a repo, \
+             without being closed and reopened"
+        );
+        let is_git = cx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .project_settings
+                .as_ref()
+                .expect("sheet stays open across set_projects")
+                .is_git
+        });
+        assert!(is_git, "the open card's is_git field itself was patched");
     }
 
     /// F-SID-02: typing in the Filter field narrows the drawn rows to the
