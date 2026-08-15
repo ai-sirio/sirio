@@ -115,3 +115,57 @@ commit touched `layout.rs` or `session.rs`. Nobody has exposed a control-socket 
 this type since the prior record; the pane-restore evidence P116 gathered (control panes surviving
 quit+relaunch) remains a different subsystem than per-tab caret/scroll/fold/draft state. Prior
 record stands.
+
+### `F-CTRL-BROWSER-02` — verdict: **FAILED — defective** (unchanged, re-confirmed live today)
+
+Live-drove it twice today: a session with a project already added (`cmain2a`) and, separately, a
+genuinely fresh instance with **zero** prior `project.add` (`cmain2fresh`, socket path never
+touched before this drive). On the fresh instance, `ctl workspace.current` returns
+`{"ok":false,"error":"no current workspace"}` as expected, but `ctl browser.open
+url=https://example.com` immediately after still returns `{"ok":true,"result":{"surface":
+"surface:2","title":"","url":"https://example.com"}}` — a real browser tab is created with zero
+workspace context. Confirms the prior record's specific claim ("browser.open still succeeds with
+zero workspace context... no check exists in source") exactly, on current HEAD, with a fresh
+instrument rather than reusing the prior evidence. No wave-C commit touched
+`handle_browser_action`/`add_browser_tab`.
+
+### `F-CTRL-BROWSER-03`, `F-CTRL-BROWSER-04`, `F-CTRL-BROWSER-05`, `F-CTRL-BROWSER-06` — verdict: **FAILED — absent** (reclassified from "FAILED — defective"; the recorded evidence for all four is stale)
+
+**The specific defect on record for all four rows is gone**, and I want to be explicit that this
+is a correction, not a nitpick: the recorded evidence for every one of these rows describes
+`browser.get`/`.screenshot`/`.snapshot`/`.wait`/`.eval`/`.console` each returning
+`{"queued":"true"}` with no real work done — a silent no-op that lies about success, sourced from
+"main.rs:4638-4643, `let _ = surface.state();`". That line range is `drain_browser_events` today,
+an unrelated function; the described no-op arm does not exist on current HEAD.
+
+I drove all six methods live today (`cmain2a`, after a real `browser.open`) and every one came
+back an explicit, honest `ok:false`:
+
+```
+browser.get        -> "browser.get is unsupported on Linux: browser automation is not implemented"
+browser.screenshot  -> "browser.screenshot is unsupported on Linux: browser automation is not implemented"
+browser.snapshot    -> "browser.snapshot is unsupported on Linux: browser automation is not implemented"
+browser.wait        -> "browser.wait is unsupported on Linux: browser automation is not implemented"
+browser.eval        -> "browser.eval is unsupported on Linux: browser automation is not implemented"
+browser.console     -> "browser.console is unsupported on Linux: browser automation is not implemented"
+browser.act         -> "browser.act is unsupported on Linux: only the driving flag is implemented"
+```
+
+Traced why: `git log -p -L4600,4622:rust/crates/tiller/src/main.rs` shows the honest-rejection
+code (`browser_request_error` gating every method outside `BROWSER_CAPABILITIES = [open,
+navigate, act]`, `queue_action` returning the real `Result` instead of a fire-and-forget
+`queued:true`) landed in commit `988d9e9` ("fix: make browser control responses honest"),
+**2026-08-14 04:29**. `git merge-base --is-ancestor 988d9e9 f3b6169` confirms that commit is an
+*ancestor* of wave C's own start boundary — it predates this entire wave. The `queued:true`
+no-op the ledger's evidence describes was already fixed before wave C began; the evidence
+recording it as current must have been sourced from a stale checkout or misattributed to the
+wrong line range.
+
+**What has not changed: the underlying capability is still not implemented at all**, now honestly
+reported as such instead of faked. That is a materially different failure mode from "defective"
+(built, wired wrong) — there is no `get`/`screenshot`/`snapshot`/`wait`/`eval`/`console`
+implementation to be defective, only a stub that says so in its own error text. Reclassifying to
+`FAILED — absent` for all four rows on that basis, with today's live transcript as the new
+evidence of record. The clause each row makes (browser.get should return real page text,
+browser.screenshot should write a real file, etc.) remains unmet either way — this is a
+correction to the *how*, not the overall pass/fail.
