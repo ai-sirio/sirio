@@ -84,6 +84,7 @@ actions!(
         SaveFile,
         ToggleSidebar,
         ToggleRightPanel,
+        RestoreLaunchSnapshot,
     ]
 );
 
@@ -102,6 +103,7 @@ enum WindowCommand {
     SaveFile,
     ToggleSidebar,
     ToggleRightPanel,
+    RestoreLaunchSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,13 +117,16 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 5] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 6] {
     [
         (WindowCommand::NewTerminalTab, "ctrl-t"),
         (WindowCommand::OpenFile, "ctrl-o"),
         (WindowCommand::SaveFile, "ctrl-s"),
         (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
         (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+        // F-WIN-07: Linux stand-in for macOS's `⇧⌘O` "History > Restore
+        // Previous Launch" chord.
+        (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
     ]
 }
 
@@ -137,7 +142,8 @@ fn window_command_availability(
         | WindowCommand::OpenFile
         | WindowCommand::SaveFile
         | WindowCommand::ToggleSidebar
-        | WindowCommand::ToggleRightPanel => WindowCommandAvailability::Enabled,
+        | WindowCommand::ToggleRightPanel
+        | WindowCommand::RestoreLaunchSnapshot => WindowCommandAvailability::Enabled,
     }
 }
 
@@ -152,6 +158,9 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::ToggleSidebar => KeyBinding::new(shortcut, ToggleSidebar, None),
                 WindowCommand::ToggleRightPanel => {
                     KeyBinding::new(shortcut, ToggleRightPanel, None)
+                }
+                WindowCommand::RestoreLaunchSnapshot => {
+                    KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
                 }
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
@@ -483,6 +492,10 @@ enum WorkspaceAction {
     /// F-BRW-09: a plain (non-Cmd+Shift) click on an HTTP(S) link in chat
     /// opens Tiller's internal browser tab instead of the system browser.
     OpenBrowserLink(String),
+    /// F-WIN-07: the titlebar's History entry point (and the `ctrl-shift-o`
+    /// chord) both funnel here -- re-invoke the same `session.restore`
+    /// control-door path `ControlAction::RestoreSession` already drives.
+    RestoreLaunchSnapshot,
 }
 
 #[derive(Clone)]
@@ -2660,6 +2673,20 @@ impl TillerWorkspace {
                                 }
                                 WorkspaceAction::OpenBrowserLink(url) => {
                                     workspace.add_browser_tab(url, window, cx);
+                                }
+                                WorkspaceAction::RestoreLaunchSnapshot => {
+                                    if let Err(error) =
+                                        workspace.restore_launch_snapshot(window, cx)
+                                    {
+                                        workspace.sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.set_notice(
+                                                format!(
+                                                    "[history] could not restore the previous launch: {error}"
+                                                ),
+                                                cx,
+                                            )
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -7271,6 +7298,25 @@ impl TillerWorkspace {
         self.open_action(NewTabAction::NewTerminal, window, cx);
     }
 
+    /// F-WIN-07: `ctrl-shift-o`, the Linux stand-in for `⇧⌘O`'s "History >
+    /// Restore Previous Launch" -- the same path the titlebar's History
+    /// button and the `session.restore` control door both drive.
+    fn handle_restore_launch_snapshot(
+        &mut self,
+        _: &RestoreLaunchSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.restore_launch_snapshot(window, cx) {
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_notice(
+                    format!("[history] could not restore the previous launch: {error}"),
+                    cx,
+                )
+            });
+        }
+    }
+
     fn handle_open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -7794,6 +7840,9 @@ impl TillerWorkspace {
                 WindowCommand::ToggleRightPanel => {
                     window.dispatch_action(Box::new(ToggleRightPanel), cx)
                 }
+                WindowCommand::RestoreLaunchSnapshot => {
+                    window.dispatch_action(Box::new(RestoreLaunchSnapshot), cx)
+                }
             },
             PaletteCommand::Tab(command) => match command {
                 TabCommand::FocusPane(direction, forward) => match (direction, forward) {
@@ -8188,6 +8237,7 @@ impl Render for TillerWorkspace {
             .capture_key_down(cx.listener(Self::handle_root_key_down))
             .on_action(cx.listener(Self::handle_new_terminal_tab))
             .on_action(cx.listener(Self::handle_open_file))
+            .on_action(cx.listener(Self::handle_restore_launch_snapshot))
             .on_action(cx.listener(Self::handle_save_file))
             .on_action(cx.listener(Self::handle_open_settings_shortcut))
             .on_action(cx.listener(|workspace, _: &ToggleSidebar, _, cx| {
@@ -9113,6 +9163,7 @@ fn main() {
         let pending_for_tab_bar = pending_actions.clone();
         let pending_for_status_bar = pending_actions.clone();
         let pending_for_settings = pending_actions.clone();
+        let pending_for_titlebar = pending_actions.clone();
         let control_actions = Arc::new(Mutex::new(Vec::<ControlAction>::new()));
         let mut control_state_seed = ControlState::from_catalog(&project_catalog, &working_directory);
         // F-CTRL-WORK-01: a comment set via worktree.set before the
@@ -9312,7 +9363,22 @@ fn main() {
                         sidebar
                     });
                     TillerWorkspace::new(
-                        cx.new(Titlebar::new),
+                        cx.new(|cx| {
+                            Titlebar::new(cx).on_history(move |_, _| {
+                                // F-WIN-07: the History entry point --
+                                // there is no in-window menu bar by
+                                // design (`resting_frame_has_context_menu_surfaces_but_no_in_window_menu_bar`),
+                                // so this cluster button is the surface's
+                                // "History > Restore Previous Launch"
+                                // clause; the shell's action queue is how
+                                // every other titlebar/tab-bar seam
+                                // reaches `TillerWorkspace` from outside
+                                // its own render, see `pending_for_settings`.
+                                if let Ok(mut actions) = pending_for_titlebar.lock() {
+                                    actions.push(WorkspaceAction::RestoreLaunchSnapshot);
+                                }
+                            })
+                        }),
                         sidebar,
                         tab_bar,
                         status_bar,
@@ -9433,6 +9499,7 @@ mod tests {
             let save_file = self.fired.clone();
             let toggle_sidebar = self.fired.clone();
             let toggle_right_panel = self.fired.clone();
+            let restore_launch_snapshot = self.fired.clone();
             div()
                 .key_context("WindowCommandFixture")
                 .track_focus(&self.focus_handle)
@@ -9456,6 +9523,11 @@ mod tests {
                     toggle_right_panel
                         .borrow_mut()
                         .push(WindowCommand::ToggleRightPanel);
+                }))
+                .on_action(cx.listener(move |_, _: &RestoreLaunchSnapshot, _, _| {
+                    restore_launch_snapshot
+                        .borrow_mut()
+                        .push(WindowCommand::RestoreLaunchSnapshot);
                 }))
                 .child("window command fixture")
         }
@@ -10997,7 +11069,7 @@ mod tests {
         cx.update(|window, app| focus_handle.focus(window, app));
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i");
+        cx.simulate_keystrokes("ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o");
         cx.run_until_parked();
 
         assert_eq!(
@@ -11008,6 +11080,7 @@ mod tests {
                 WindowCommand::SaveFile,
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleRightPanel,
+                WindowCommand::RestoreLaunchSnapshot,
             ],
             "Linux primary and secondary chords must reach typed shell actions"
         );
@@ -11023,6 +11096,7 @@ mod tests {
                 (WindowCommand::SaveFile, "ctrl-s"),
                 (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
                 (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
+                (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
             ]
         );
     }
