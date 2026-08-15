@@ -18,8 +18,8 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, img,
-    prelude::*, px, rgb,
+    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, deferred,
+    div, img, prelude::*, px, rgb,
 };
 use tiller_git::{
     create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
@@ -2049,9 +2049,16 @@ impl Sidebar {
             }
             view = view.child(row);
         }
-        view.on_mouse_down_out(move |_, _, cx| {
+        // F-SID-15: without `deferred(...)` the menu paints in tree order,
+        // so later siblings in the sidebar's own child list (e.g. the New
+        // Worktree… row) painted on top of it and intercepted clicks aimed
+        // at items like Remove Worktree, even though the menu was visibly
+        // drawn above them. See the identical fix/comment on
+        // `render_tab_context_menu` in `tiller/src/main.rs`.
+        deferred(view.on_mouse_down_out(move |_, _, cx| {
             entity.update(cx, |sidebar, cx| sidebar.close_context_menu(cx));
-        })
+        }))
+        .with_priority(1)
     }
 
     fn render_add_project_menu(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
