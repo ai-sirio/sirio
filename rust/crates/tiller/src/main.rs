@@ -3149,25 +3149,19 @@ impl TillerWorkspace {
     }
 
     fn sidebar_projects(&self) -> Vec<SidebarProject> {
-        self.project_catalog
-            .projects()
+        // F-SID-11: comment is control-state metadata (worktree.set), keyed
+        // by path -- not part of the git-derived ProjectCatalog -- so it is
+        // looked up here rather than carried on session::CatalogWorktree.
+        let comments: BTreeMap<String, String> = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .workspaces
             .iter()
-            .map(|project| SidebarProject {
-                id: project.id.clone(),
-                name: project.name.clone(),
-                is_git: project.is_git,
-                root_path: project.root_path.clone(),
-                worktrees: project
-                    .worktrees
-                    .iter()
-                    .map(|worktree| SidebarWorktree {
-                        branch: worktree.branch.clone(),
-                        path: worktree.path.clone(),
-                        is_primary: worktree.is_primary,
-                    })
-                    .collect(),
-            })
-            .collect()
+            .filter(|workspace| !workspace.comment.is_empty())
+            .map(|workspace| (workspace.path.clone(), workspace.comment.clone()))
+            .collect();
+        sidebar_projects_with_comments(&self.project_catalog, &comments)
     }
 
     fn refresh_sidebar(&self, cx: &mut Context<Self>) {
@@ -8536,7 +8530,14 @@ impl Render for TillerWorkspace {
     }
 }
 
-fn sidebar_projects(catalog: &ProjectCatalog) -> Vec<SidebarProject> {
+/// F-SID-11: `comments` is control-state metadata (`worktree.set`), keyed by
+/// the worktree's path string -- not part of the git-derived
+/// `ProjectCatalog` -- so a caller with nothing to look up (a fresh
+/// instance, a test fixture) can just pass an empty map.
+fn sidebar_projects_with_comments(
+    catalog: &ProjectCatalog,
+    comments: &BTreeMap<String, String>,
+) -> Vec<SidebarProject> {
     catalog
         .projects()
         .iter()
@@ -8552,10 +8553,17 @@ fn sidebar_projects(catalog: &ProjectCatalog) -> Vec<SidebarProject> {
                     branch: worktree.branch.clone(),
                     path: worktree.path.clone(),
                     is_primary: worktree.is_primary,
+                    comment: comments
+                        .get(&worktree.path.to_string_lossy().into_owned())
+                        .cloned(),
                 })
                 .collect(),
         })
         .collect()
+}
+
+fn sidebar_projects(catalog: &ProjectCatalog) -> Vec<SidebarProject> {
+    sidebar_projects_with_comments(catalog, &BTreeMap::new())
 }
 
 fn sidebar_project_identities(
