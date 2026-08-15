@@ -791,7 +791,12 @@ impl RightPanel {
             .right_0()
             .h(px(ACTIVITY_HEADER_HEIGHT
                 + if self.activity_expanded {
-                    self.activity.len() as f32 * ACTIVITY_ROW_HEIGHT
+                    // F-CHG-20: even with zero rows, the expanded section
+                    // still renders one "No activity" placeholder row, so
+                    // the height must reserve space for at least one row —
+                    // otherwise that row is squeezed into near-zero visible
+                    // height and its text renders as illegible specks.
+                    self.activity.len().max(1) as f32 * ACTIVITY_ROW_HEIGHT
                 } else {
                     0.0
                 }))
