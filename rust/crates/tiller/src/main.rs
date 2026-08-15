@@ -23,7 +23,9 @@ use tiller_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, base64_encode,
 };
-use tiller_git::{GitError, discard, discard_all, init_repository, stage, stage_all, unstage};
+use tiller_git::{
+    GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
+};
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{TabKind, current_branch, is_git_repository};
 use tiller_terminal::{
@@ -1009,6 +1011,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.changes.discard",
                     "surface.changes.stage_all",
                     "surface.changes.discard_all",
+                    "git.branches",
                     "surface.settings.open",
                     "surface.settings.select",
                     "surface.settings.read",
@@ -1141,6 +1144,32 @@ impl ControlHandler for AppControlHandler {
             "surface.changes.discard" => self.run_changes_path_action(request, discard),
             "surface.changes.stage_all" => self.run_changes_all_action(request, stage_all),
             "surface.changes.discard_all" => self.run_changes_all_action(request, discard_all),
+            // F-GIT-BRANCH-01: GitBranches::list has no UI caller (the New
+            // Worktree prompt is free-text with no read-back), so this
+            // socket door is the exercisable route the row's own VERIFY
+            // asks for — list them through the Git layer, exact names
+            // preserved including internal spaces.
+            "git.branches" => {
+                let repo = match self.changes_worktree(request) {
+                    Ok(repo) => repo,
+                    Err(error) => return ControlResponse::failure(&request.id, error),
+                };
+                match GitBranches::list(&repo) {
+                    Ok(branches) => Self::success(
+                        &request.id,
+                        [(
+                            "branches".to_string(),
+                            tiller_control::protocol::rows::encode(
+                                &branches
+                                    .into_iter()
+                                    .map(|name| BTreeMap::from([("name".to_string(), name)]))
+                                    .collect::<Vec<_>>(),
+                            ),
+                        )],
+                    ),
+                    Err(error) => ControlResponse::failure(&request.id, error.to_string()),
+                }
+            }
             "surface.settings.open" => {
                 let section = match request.params.get("section") {
                     Some(value) => match parse_settings_category(value) {
