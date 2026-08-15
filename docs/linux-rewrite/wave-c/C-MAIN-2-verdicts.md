@@ -169,3 +169,54 @@ implementation to be defective, only a stub that says so in its own error text. 
 evidence of record. The clause each row makes (browser.get should return real page text,
 browser.screenshot should write a real file, etc.) remains unmet either way — this is a
 correction to the *how*, not the overall pass/fail.
+
+### `F-CTRL-CLI-02` — verdict: **PASSED** (upgraded from half-proven)
+
+The prior record already re-confirmed the XDG symlink half live (`ls -la
+~/.local/share/TillerRust/bin/tillerctl`) and flagged the real-agent-hook half as unexercised,
+noting the driver's "only reachable via ctrl-shift-p" claim was false because the tab-bar's plain
+`+` menu offers agents directly. I drove exactly that today, no chord, and it closes the gap
+completely:
+
+1. `click 974 50` (tab-bar `+`) then `click 1357 174` ("Claude Code") in one drive, with an
+   intermediate `shot` to let the menu open before the second click and two trailing `shot`s to
+   let the frame catch up (the first capture after an action can show the stale pre-action frame
+   — confirmed here: capture 1 still showed the menu open with a blank terminal underneath,
+   capture 2 caught the real result).
+2. Capture 2 (`cmain2-cli3-shots/04-after-click-2.png`) shows a genuine new "Claude Code" tab, and
+   its content is not a stub — it's the **real Claude Code CLI's own first-run trust prompt**:
+   "Accessing workspace: `/tmp/.../cmain2-repo` — Quick safety check: Is this a project you
+   created or one you trust?... 1. Yes, I trust this folder / 2. No, exit — Enter to confirm ·
+   Esc to cancel." That text does not exist anywhere in this codebase (grepped to confirm) — it
+   can only be the actual `claude` binary talking, spawned by `AgentAdapter::command`/`prepare`
+   through the plain-click path.
+3. On disk, the freshly-created worktree's `.claude/settings.local.json` (never touched by me,
+   written by the app's own `prepare` step during that same click) contains four real hook
+   entries, e.g. `"command": "'/home/enzopalmisano/.local/share/TillerRust/bin/tillerctl' notify
+   --session pane-2 --status needs-input --stdin-json"` — the installed XDG binary from step 1,
+   wired into the spawned session's own hook config, exactly as the contract requires.
+
+Both halves proven live in one pass, through the exact plain-click path the prior critic named:
+the installed CLI (re-confirmed) and the real-agent-hook wiring (now proven, not just argued).
+
+### `F-CTRL-WORK-01` — verdict: **FAILED — defective** (unchanged, upgraded to a direct restart proof)
+
+The prior record already read the source correctly (`main.rs:400-401`, `comment: String` field
+doc-commented "Runtime annotation from `worktree.set`; intentionally not persisted", re-confirmed
+unchanged on current HEAD — no wave-C commit touched this struct or `set_worktree`). I upgraded
+this to the house rule's preferred instrument — a genuine kill+relaunch against the same DB,
+rather than trusting the source comment alone:
+
+1. Drive 1 (label `cmain2wrk`, fresh DB): `project.add`, then `worktree.set
+   worktree=<path> comment=RESTART_PROOF_MARKER_9182` — echoed back immediately as
+   `"comment":"RESTART_PROOF_MARKER_9182"`. The script's own cleanup trap then fully killed the
+   `tiller` process (no `TILLER_WL_KEEP`).
+2. Drive 2 (same label `cmain2wrk`, same `/tmp/cmain2wrk.sqlite`): a fresh `tiller` process starts
+   against the identical DB file (`wayland-drive.sh` derives `DB=/tmp/$LABEL.sqlite`, so re-using
+   a label is a real restart against the same on-disk state, not a new instance). `ctl worktree.set
+   worktree=p-90a9905bd933cf90-wt-0 session=probe-readback` (passing only `session`, never
+   touching `comment`, so the response echoes whatever `comment` currently holds) comes back
+   `"comment":""`.
+
+The marker is gone after a real restart against the same database — direct, live confirmation
+that the comment is lost by design, not merely "the source says so."
