@@ -854,6 +854,21 @@ impl BrowserSurface {
         &self.state
     }
 
+    /// The error produced while constructing this surface (e.g. an invalid
+    /// initial address that forced the `https://example.com` fallback), if
+    /// any. Distinct from [`BrowserState::error`], which tracks in-flight
+    /// navigation failures after construction.
+    pub fn startup_error(&self) -> Option<&str> {
+        self.startup_error.as_deref()
+    }
+
+    /// Records an out-of-band navigation failure (e.g. a control-socket
+    /// reachability probe run before the address was handed to WebKit) in
+    /// the same visible error banner WebKit's own failures use.
+    pub fn record_navigation_error(&mut self, message: impl Into<String>) {
+        self.state.did_fail_navigation(message);
+    }
+
     /// Returns and clears browser events produced by WebKit or an explicit
     /// host action.
     pub fn take_events(&mut self) -> Vec<BrowserEvent> {
