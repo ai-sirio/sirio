@@ -779,6 +779,9 @@ impl AppDatabase {
         if let Some(value) = self.setting_value(settings_keys::OPENCODE_WORKSPACE_ID_OVERRIDE)? {
             defaults.opencode_workspace_id_override = value;
         }
+        if let Some(value) = self.setting_value(settings_keys::TRANSLUCENCY)? {
+            defaults.translucency = parse_bool_setting(&value, false);
+        }
 
         Ok(defaults)
     }
@@ -911,6 +914,11 @@ impl AppDatabase {
             &transaction,
             settings_keys::OPENCODE_WORKSPACE_ID_OVERRIDE,
             &settings.opencode_workspace_id_override,
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::TRANSLUCENCY,
+            if settings.translucency { "true" } else { "false" },
         )?;
         transaction.commit()?;
         Ok(())

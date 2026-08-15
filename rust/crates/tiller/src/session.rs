@@ -1650,6 +1650,7 @@ mod tests {
             ollama_show_in_bar: true,
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
+            translucency: true,
         };
 
         {
@@ -1672,6 +1673,7 @@ mod tests {
                 ("appearance.fileIconTheme".into(), "material".into()),
                 ("appearance.terminalFontSize".into(), "19".into()),
                 ("appearance.theme".into(), "dark".into()),
+                ("appearance.translucency".into(), "true".into()),
                 ("appearance.uiFontSize".into(), "17".into()),
                 ("chat.limitHistory".into(), "false".into()),
                 ("chat.retentionCount".into(), "37".into()),

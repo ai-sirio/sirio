@@ -373,6 +373,8 @@ pub struct SettingsSnapshot {
     /// Per-agent accent colour choice, in `SummarizerChoice::ALL` order —
     /// Claude Code, Codex, OpenCode, Pi, Oh-My-Pi (F-SET-22).
     pub agent_colors: [AgentAccentColor; 5],
+    /// The Appearance screen's Translucency toggle (F-SET-20).
+    pub translucency: bool,
 }
 
 impl Default for SettingsSnapshot {
@@ -409,6 +411,7 @@ impl Default for SettingsSnapshot {
                 AgentAccentColor::Green,
                 AgentAccentColor::Purple,
             ],
+            translucency: false,
         }
     }
 }
@@ -728,16 +731,8 @@ pub struct Settings {
     on_back: Option<Rc<dyn Fn()>>,
     on_change: Option<Rc<dyn Fn(SettingsSnapshot)>>,
     theme_mode: ThemeMode,
-    /// The Appearance screen's Translucency toggle. **Known incomplete
-    /// (F-SET-20):** [`Self::set_translucency`] now calls
-    /// [`Self::changed`] like every sibling setter, but the value still
-    /// cannot leave this surface — [`SettingsSnapshot`] has no
-    /// `translucency` field to carry it in the emitted payload. Adding one
-    /// is scoped to this file, but every call site that builds a
-    /// `SettingsSnapshot` struct literal (`rust/crates/tiller/src/main.rs`,
-    /// owned elsewhere this wave) would need a matching field to keep
-    /// compiling, so it is not added here — see the wave report for the
-    /// exact patch.
+    /// The Appearance screen's Translucency toggle (F-SET-20). Part of the
+    /// persistence contract — see [`SettingsSnapshot::translucency`].
     translucency: bool,
     interface_font_size: i32,
     terminal_font_size: i32,
@@ -940,7 +935,7 @@ impl Settings {
             on_back: None,
             on_change: None,
             theme_mode: initial.theme,
-            translucency: false,
+            translucency: initial.translucency,
             interface_font_size: initial.interface_font_size.clamp(10, 20),
             terminal_font_size: initial.terminal_font_size.clamp(9, 24),
             // A persisted choice from another platform (the database default
@@ -1149,6 +1144,7 @@ impl Settings {
             refresh_interval: self.refresh_interval,
             opencode_workspace_id_override: self.opencode_workspace_id_override.clone(),
             agent_colors: self.agent_colors,
+            translucency: self.translucency,
         }
     }
 
@@ -1198,9 +1194,6 @@ impl Settings {
 
     fn set_translucency(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.translucency = enabled;
-        // F-SET-20: matches every sibling setter now — see the field doc on
-        // `translucency` for why the emitted snapshot still can't carry
-        // this value.
         self.changed();
         cx.notify();
     }
@@ -5715,6 +5708,13 @@ mod tests {
         assert!(
             settings.read_with(&cx.cx, |settings, _| settings.translucency),
             "clicking the toggle turns translucency on"
+        );
+        // F-SET-20: the flag must also leave the surface — SettingsSnapshot
+        // now has a `translucency` field, so the emitted payload carries it
+        // rather than trapping the value inside this view.
+        assert!(
+            settings.read_with(&cx.cx, |settings, _| settings.snapshot().translucency),
+            "the emitted snapshot carries the translucency flag, not just the internal field"
         );
 
         // Interface font size: the stepper increments 13 to 14.

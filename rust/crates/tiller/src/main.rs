@@ -8326,6 +8326,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         // F-SET-22 has no AppSettings field yet; do not pretend this UI-only
         // picker is persisted until its schema follow-up lands.
         agent_colors: SettingsSnapshot::default().agent_colors,
+        translucency: settings.translucency,
     }
 }
 
@@ -8356,6 +8357,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         ollama_show_in_bar: snapshot.ollama_show_in_bar,
         refresh_interval_min: i64::from(snapshot.refresh_interval.clamp(1, 60)),
         opencode_workspace_id_override: snapshot.opencode_workspace_id_override,
+        translucency: snapshot.translucency,
     }
 }
 
@@ -10362,7 +10364,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_settings_round_trip_maps_all_eighteen_fields_explicitly() {
+    fn persisted_settings_round_trip_maps_all_nineteen_fields_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
@@ -10382,6 +10384,7 @@ mod tests {
             ollama_show_in_bar: true,
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
+            translucency: true,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
@@ -10409,6 +10412,7 @@ mod tests {
         assert!(snapshot.ollama_show_in_bar);
         assert_eq!(snapshot.refresh_interval, 11);
         assert_eq!(snapshot.opencode_workspace_id_override, "wrk_main");
+        assert!(snapshot.translucency);
 
         let restored = app_settings_from_snapshot(snapshot);
         assert_eq!(restored.appearance, persisted.appearance);
@@ -10447,6 +10451,7 @@ mod tests {
             restored.opencode_workspace_id_override,
             persisted.opencode_workspace_id_override
         );
+        assert_eq!(restored.translucency, persisted.translucency);
 
         let mut invalid_summarizer = persisted;
         invalid_summarizer.summarizer_agent = "not-a-supported-agent".into();
@@ -10485,6 +10490,7 @@ mod tests {
             ollama_show_in_bar: true,
             refresh_interval_min: 11,
             opencode_workspace_id_override: "wrk_main".into(),
+            translucency: true,
         };
         store.save_settings(&persisted);
 
@@ -10525,6 +10531,7 @@ mod tests {
             restored.refresh_interval_min,
             persisted.refresh_interval_min
         );
+        assert_eq!(restored.translucency, persisted.translucency);
 
         let _ = std::fs::remove_dir_all(root);
     }

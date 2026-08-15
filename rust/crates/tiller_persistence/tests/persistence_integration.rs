@@ -1041,6 +1041,7 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
             ollama_show_in_bar: true,
             refresh_interval_min: 99,
             opencode_workspace_id_override: "wrk_relaunch".into(),
+            translucency: true,
             ..AppSettings::default()
         })
         .expect("save Linux settings");
@@ -1065,6 +1066,8 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
     // F-SET-12: the workspace-ID override survives the relaunch verbatim —
     // free text, no clamp, and clearing it (saving "") must also survive.
     assert_eq!(settings.opencode_workspace_id_override, "wrk_relaunch");
+    // F-SET-20: a saved `true` survives the relaunch (the default is false).
+    assert!(settings.translucency);
     db.save_settings(&AppSettings {
         opencode_workspace_id_override: String::new(),
         ..settings
