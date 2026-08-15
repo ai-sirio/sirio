@@ -239,6 +239,19 @@ fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Opt
     }
 }
 
+/// Extracts the `scheme://host[:port]` origin from a normalized
+/// `http(s)://host[:port]/...` address, matching the shape stored in
+/// `allowed_origins`/`browser_origin_grant`. Returns `None` for a malformed
+/// address (already ruled out by `normalize_address` for real callers).
+fn browser_origin_of(address: &str) -> Option<String> {
+    let (scheme, rest) = address.split_once("://")?;
+    let host_port = rest.split('/').next().unwrap_or_default();
+    if host_port.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host_port}"))
+}
+
 /// F-BRW-04: bounded, synchronous reachability probe for a normalized
 /// `http(s)://host[:port]/...` address. `normalize_address` only checks
 /// syntax, so `browser.navigate` to a well-formed but dead host (DNS
@@ -4646,6 +4659,24 @@ impl TillerWorkspace {
                     .or_else(|| params.get("address"))
                     .or_else(|| params.get("href"))
                     .ok_or_else(|| "browser.navigate requires a non-empty url".to_string())?;
+                // F-BRW-06/F-BRW-07: an agent-driven navigation to an
+                // origin without a standing grant must stop for an
+                // Allow/Deny doorhanger instead of navigating straight
+                // through — this is the only production trigger for
+                // `request_permission`, which otherwise has zero callers.
+                if surface.state().agent_driving() {
+                    let normalized_target = normalize_address(address)
+                        .map_err(|error| format!("{method} failed: {error}"))?;
+                    if let Some(origin) = browser_origin_of(&normalized_target)
+                        && !surface.state().is_origin_allowed(&origin)
+                    {
+                        surface.request_permission(&origin);
+                        return Ok(vec![
+                            ("permission".to_string(), "requested".to_string()),
+                            ("origin".to_string(), origin),
+                        ]);
+                    }
+                }
                 surface
                     .submit_address(address)
                     .map_err(|error| format!("{method} failed: {error}"))?;
