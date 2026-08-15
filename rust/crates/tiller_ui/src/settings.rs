@@ -649,6 +649,70 @@ enum ProviderKind {
     OllamaCloud,
 }
 
+/// Every process id currently a descendant of `root` (not including `root`
+/// itself), found by walking the kernel's live parent/child view via
+/// `/proc/<pid>/task/<tid>/children`. Walked fresh at kill time rather than
+/// captured once at spawn: the login command a terminal emulator runs
+/// attaches to a brand new PTY session as soon as it starts (confirmed live
+/// — `cosmic-term -e sleep N` puts the child in a *different* process group
+/// from the launcher's own, `getpgid(child) != getpgid(launcher)`), so a
+/// single pgid recorded at spawn time never covers it; only a walk done now
+/// does.
+fn descendant_pids(root: u32) -> Vec<u32> {
+    let mut discovered = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(root);
+    let mut frontier = vec![root];
+    while let Some(pid) = frontier.pop() {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let Ok(contents) = std::fs::read_to_string(task.path().join("children")) else {
+                continue;
+            };
+            for token in contents.split_whitespace() {
+                let Ok(child) = token.parse::<u32>() else {
+                    continue;
+                };
+                if seen.insert(child) {
+                    discovered.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+    }
+    discovered
+}
+
+/// Kills the login terminal and every process it has spawned since launch
+/// (F-SET-14). `kill <pid>` on the launcher alone only ever reaches the
+/// launcher itself — the interactive login command it runs lands in its own
+/// PTY session, detached from the launcher's process group, which is
+/// exactly the failure this row's evidence recorded (the recorded pid, and
+/// even the terminal's own pid killed manually, left the login command
+/// alive). Walking `/proc` for every current descendant and signaling each
+/// one directly — SIGTERM first, SIGKILL after a short grace period for
+/// anything that ignored it — reaches the login command wherever it landed,
+/// without depending on process-group membership at all.
+fn terminate_login_process_group(pid: u32) {
+    let mut targets = vec![pid];
+    targets.extend(descendant_pids(pid));
+    for target in &targets {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(target.to_string())
+            .status();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for target in &targets {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(target.to_string())
+            .status();
+    }
+}
+
 /// Small settings view model. The real application can replace these values
 /// with its persistence layer without changing the reusable settings UI.
 /// The badge shown at the trailing edge of a permission row.
@@ -1393,10 +1457,11 @@ impl Settings {
             return;
         };
         if let Some(pid) = self.account_login_pid.take() {
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .status();
+            // Off the render thread: the escalation below deliberately waits
+            // out a grace period before the kill-9, and blocking here would
+            // freeze the surface for that whole window.
+            cx.background_spawn(async move { terminate_login_process_group(pid) })
+                .detach();
         }
         self.account_login_canceled = true;
         self.account_action_error = Some((provider, "Sign-in canceled".to_string()));
@@ -3496,6 +3561,63 @@ mod tests {
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
     use std::cell::{Cell, RefCell};
+
+    /// F-SET-14: proves `descendant_pids` finds a grandchild that has
+    /// detached into its own session/process group — the exact shape of
+    /// the live failure (`x-terminal-emulator -e <login>` puts the login
+    /// command in a *different* pgid from the launcher's own, confirmed
+    /// live against this sandbox's real terminal emulator) that made a
+    /// single `kill <launcher_pid>` leave the login command running.
+    /// `setsid` here reproduces that detachment without depending on any
+    /// terminal emulator being installed.
+    #[test]
+    fn descendant_pids_finds_a_child_detached_into_its_own_session() {
+        // `sh` is the launcher (kept as one live process, same pid the
+        // whole time — the same shape `x-terminal-emulator` has, confirmed
+        // live against this sandbox's real terminal emulator). Its
+        // backgrounded `setsid sleep` grandchild detaches into a brand new
+        // session/process group, the exact detachment that made a single
+        // `kill <launcher_pid>` leave the real login command running.
+        let mut launcher = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("setsid sleep 60 & wait")
+            .spawn()
+            .expect("spawn launcher");
+        let launcher_pid = launcher.id();
+
+        // Give the grandchild time to actually fork before walking /proc.
+        let mut found = Vec::new();
+        for _ in 0..50 {
+            found = descendant_pids(launcher_pid);
+            if !found.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !found.is_empty(),
+            "expected at least one descendant of the launcher (the `sleep` grandchild)"
+        );
+
+        terminate_login_process_group(launcher_pid);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        // Reap the launcher: SIGTERM already ended it, but as its real
+        // parent this process, not `kill -0`, is the one that decides
+        // whether its pid stays occupied as a zombie — reap it before
+        // checking liveness so the check reflects "terminated", not
+        // "terminated but not yet reaped".
+        let _ = launcher.wait();
+        for pid in found {
+            let status = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status();
+            assert!(
+                status.map(|status| !status.success()).unwrap_or(true),
+                "pid {pid} should have been terminated"
+            );
+        }
+    }
 
     #[test]
     fn settings_snapshot_defaults_match_the_persisted_contract() {
