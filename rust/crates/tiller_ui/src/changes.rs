@@ -2589,6 +2589,124 @@ mod tests {
         );
     }
 
+    /// A drop-target fixture standing in for a pane's real
+    /// `on_drop::<(PathBuf, String)>` handler (`tiller_terminal`'s
+    /// `TerminalView` owns the real one; `tiller_ui` cannot depend on
+    /// `tiller_terminal`, so this in-crate stand-in receives the identical
+    /// typed payload through GPUI's real drag machinery). The row's own
+    /// `.on_drag(payload, ..)` in production `changes.rs` is the drag
+    /// source under test here — nothing about the source half is faked.
+    struct DiffDropTargetFixture {
+        changes: gpui::Entity<ChangesTab>,
+        received: std::rc::Rc<std::cell::RefCell<Option<(PathBuf, String)>>>,
+    }
+
+    impl gpui::Render for DiffDropTargetFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let received = self.received.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.changes.clone())
+                .child(
+                    div()
+                        .id("pane-test-drop-target")
+                        .debug_selector(|| "pane-test-drop-target".to_owned())
+                        .h(px(200.0))
+                        .on_drop::<(PathBuf, String)>(move |payload, _, _| {
+                            *received.borrow_mut() = Some(payload.clone());
+                        }),
+                )
+        }
+    }
+
+    /// F-EDIT-12: dragging a changed-file row out of the real Changes list
+    /// and dropping it delivers the exact `(PathBuf, String)` diff payload
+    /// a pane's drop target expects — driven through GPUI's real
+    /// mouse-down/move/up drag path against the production
+    /// `changes-file-row` drag source, not a synthetic stand-in for it.
+    #[gpui::test]
+    async fn a_drawn_change_row_drags_its_diff_payload_to_a_drop_target(cx: &mut TestAppContext) {
+        use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, point};
+
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked file");
+
+        cx.update(Theme::init);
+        let received = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let fixture_received = received.clone();
+        let window = cx.add_window(|_window, cx| {
+            let changes = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+            DiffDropTargetFixture {
+                changes,
+                received: fixture_received,
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let tab = cx.update(|window, app| {
+            window
+                .root::<DiffDropTargetFixture>()
+                .flatten()
+                .expect("fixture root")
+                .read(app)
+                .changes
+                .clone()
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        cx.cx.run_until_parked();
+
+        let source = cx
+            .debug_bounds("changes-file-row")
+            .expect("the real changed-file row is drawn");
+        let target = cx
+            .debug_bounds("pane-test-drop-target")
+            .expect("the drop target is drawn");
+
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(8.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            received.borrow().as_ref().map(|(path, _)| path.clone()),
+            Some(PathBuf::from("tracked.txt")),
+            "the drop target receives the dragged row's real path"
+        );
+        assert!(
+            received
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, text)| text.contains("changed")),
+            "the drop target receives the row's real unified diff text"
+        );
+    }
+
     /// F-CHG-13: an expanded changed-file row exposes Open diff as a typed
     /// host action instead of silently duplicating the inline expansion.
     #[gpui::test]
