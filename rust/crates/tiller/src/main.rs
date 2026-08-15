@@ -4443,6 +4443,38 @@ impl TillerWorkspace {
         self.move_selected_tab_with_machinery(target, machinery, cx);
     }
 
+    /// Attaches a fresh, empty pane group and moves the selected tab into
+    /// it. This is the only production path that grows `tab_machinery`
+    /// beyond a single group -- everywhere else groups are inherited from
+    /// existing tabs' `group_id`, so without this the "Move to Other Pane"
+    /// family of actions could never have a second pane to target.
+    fn move_selected_tab_to_new_pane(&mut self, cx: &mut Context<Self>) {
+        let Some(tab_id) = self
+            .tab_menu_tab
+            .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
+        else {
+            return;
+        };
+        let new_group_id = self
+            .tab_machinery
+            .groups()
+            .iter()
+            .map(|group| group.id)
+            .max()
+            .map_or(1, |max_id| max_id + 1);
+        let mut machinery = self.tab_machinery.clone();
+        if !machinery.add_group(new_group_id) {
+            return;
+        }
+        if machinery
+            .move_tab(tab_id, MoveTarget::Group(new_group_id))
+            .is_err()
+        {
+            return;
+        }
+        self.move_selected_tab_with_machinery(MoveTarget::Group(new_group_id), machinery, cx);
+    }
+
     fn move_selected_tab_with_machinery(
         &mut self,
         _target: MoveTarget,
@@ -6373,11 +6405,10 @@ impl TillerWorkspace {
             "no other tab is available",
         ));
         if other_groups.is_empty() {
-            items.push(TabContextItem::disabled(
-                "Move to Other Pane",
-                "move-to-other-pane",
+            items.push(TabContextItem::enabled(
+                "Move to New Pane",
+                "move-to-new-pane",
                 TabContextAction::MoveToPane(usize::MAX),
-                "no other pane is available",
             ));
         } else {
             for group_id in other_groups {
@@ -6505,7 +6536,9 @@ impl TillerWorkspace {
             TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
                 self.move_selected_tab(MoveTarget::Group(group_id), cx)
             }
-            TabContextAction::MoveToPane(_) => {}
+            TabContextAction::MoveToPane(_) => {
+                self.move_selected_tab_to_new_pane(cx);
+            }
             TabContextAction::AttachToCurrentTerminal => {
                 if let Some(tab_id) = self.tab_menu_tab {
                     self.attach_tab_to_current_terminal(tab_id, cx);
