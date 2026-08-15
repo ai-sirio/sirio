@@ -260,15 +260,114 @@ fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Opt
         {
             Some("browser.eval requires a non-empty script".to_string())
         }
-        "browser.act"
-            if !params.contains_key("driving") && !params.contains_key("agentDriving") =>
-        {
-            Some(
-                "browser.act is unsupported on Linux: only the driving flag is implemented"
-                    .to_string(),
-            )
+        "browser.act" if params.contains_key("driving") || params.contains_key("agentDriving") => {
+            None
+        }
+        // F-CTRL-BROWSER-05: click/fill/type/press/scroll run as JS through
+        // BrowserSurface::evaluate_script (added for F-CTRL-BROWSER-06).
+        // Validating with the exact same script-building function used at
+        // dispatch time means a request missing a verb's required argument
+        // fails synchronously here, before ever queuing a ControlAction
+        // that needs a live browser surface to answer.
+        "browser.act" => {
+            let verb = params.get("verb").map(String::as_str).unwrap_or_default();
+            let selector = params.get("selector").map(String::as_str);
+            let text = params
+                .get("text")
+                .or_else(|| params.get("value"))
+                .map(String::as_str);
+            browser_act_script(verb, selector, text).err()
         }
         _ => None,
+    }
+}
+
+/// F-CTRL-BROWSER-05: builds the JS snippet `browser.act`'s verb runs
+/// through `BrowserSurface::evaluate_script` (the same public method
+/// F-CTRL-BROWSER-06's `browser.eval`/`browser.console` already use).
+/// `selector`/`text` are serialized through `serde_json::to_string` so they
+/// land as safe, correctly-escaped JS string literals regardless of what
+/// the caller passes — never string-concatenated raw.
+fn browser_act_non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn browser_act_script(verb: &str, selector: Option<&str>, text: Option<&str>) -> Result<String, String> {
+    let non_empty = browser_act_non_empty;
+    let selector_literal = |field: &str| -> Result<String, String> {
+        let selector = non_empty(selector)
+            .ok_or_else(|| format!("browser.act verb '{verb}' requires a non-empty {field}"))?;
+        serde_json::to_string(selector).map_err(|error| error.to_string())
+    };
+    match verb {
+        "click" => {
+            let selector = selector_literal("selector")?;
+            Ok(format!(
+                "(() => {{ const el = document.querySelector({selector}); \
+                 if (!el) throw new Error('browser.act click: no element matches selector'); \
+                 el.click(); return true; }})()"
+            ))
+        }
+        "fill" | "type" => {
+            let selector = selector_literal("selector")?;
+            let text_literal =
+                serde_json::to_string(text.unwrap_or("")).map_err(|error| error.to_string())?;
+            Ok(format!(
+                "(() => {{ const el = document.querySelector({selector}); \
+                 if (!el) throw new Error('browser.act {verb}: no element matches selector'); \
+                 el.value = {text_literal}; \
+                 el.dispatchEvent(new Event('input', {{ bubbles: true }})); \
+                 return true; }})()"
+            ))
+        }
+        "press" => {
+            let key = non_empty(text).ok_or_else(|| {
+                "browser.act verb 'press' requires a non-empty text (the key name)".to_string()
+            })?;
+            let key_literal = serde_json::to_string(key).map_err(|error| error.to_string())?;
+            let target = match non_empty(selector) {
+                Some(selector) => {
+                    let selector_literal =
+                        serde_json::to_string(selector).map_err(|error| error.to_string())?;
+                    format!(
+                        "document.querySelector({selector_literal}) || document.activeElement || document.body"
+                    )
+                }
+                None => "document.activeElement || document.body".to_string(),
+            };
+            Ok(format!(
+                "(() => {{ const el = {target}; \
+                 if (!el) throw new Error('browser.act press: no target element'); \
+                 el.dispatchEvent(new KeyboardEvent('keydown', {{ key: {key_literal}, bubbles: true }})); \
+                 el.dispatchEvent(new KeyboardEvent('keyup', {{ key: {key_literal}, bubbles: true }})); \
+                 return true; }})()"
+            ))
+        }
+        "scroll" => {
+            if let Some(selector) = non_empty(selector) {
+                let selector_literal =
+                    serde_json::to_string(selector).map_err(|error| error.to_string())?;
+                Ok(format!(
+                    "(() => {{ const el = document.querySelector({selector_literal}); \
+                     if (!el) throw new Error('browser.act scroll: no element matches selector'); \
+                     el.scrollIntoView({{ block: 'center' }}); return true; }})()"
+                ))
+            } else {
+                let dy = non_empty(text)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(400);
+                Ok(format!(
+                    "(() => {{ window.scrollBy(0, {dy}); return true; }})()"
+                ))
+            }
+        }
+        "" => Err(
+            "browser.act requires a driving flag or a verb (click, fill, type, press, scroll)"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "browser.act verb '{other}' is unsupported (known verbs: click, fill, type, press, scroll)"
+        )),
     }
 }
 
@@ -5251,16 +5350,33 @@ impl TillerWorkspace {
                 Ok(vec![("messages".to_string(), result)])
             }
             "browser.act" => {
-                let driving = params
-                    .get("driving")
-                    .or_else(|| params.get("agentDriving"))
-                    .ok_or_else(|| {
-                        "browser.act is unsupported on Linux: only the driving flag is implemented"
-                            .to_string()
-                    })?;
-                let driving = matches!(driving.as_str(), "1" | "true" | "yes");
-                surface.set_agent_driving(driving);
-                Ok(vec![("driving".to_string(), driving.to_string())])
+                if let Some(driving) = params.get("driving").or_else(|| params.get("agentDriving"))
+                {
+                    let driving = matches!(driving.as_str(), "1" | "true" | "yes");
+                    surface.set_agent_driving(driving);
+                    return Ok(vec![("driving".to_string(), driving.to_string())]);
+                }
+                // F-CTRL-BROWSER-05: click/fill/type/press/scroll, run as JS
+                // through evaluate_script. browser_request_error already
+                // validated the verb/selector/text combination synchronously
+                // before this queued action was ever dispatched.
+                let verb = params.get("verb").map(String::as_str).unwrap_or_default();
+                let selector = params.get("selector").map(String::as_str);
+                let text = params
+                    .get("text")
+                    .or_else(|| params.get("value"))
+                    .map(String::as_str);
+                let script = browser_act_script(verb, selector, text)
+                    .map_err(|error| format!("{method} failed: {error}"))?;
+                let timeout = params
+                    .get("timeoutMs")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_secs(5));
+                surface
+                    .evaluate_script(&script, timeout)
+                    .map_err(|error| format!("{method} failed: {error}"))?;
+                Ok(vec![("verb".to_string(), verb.to_string())])
             }
             // F-PER-08: allow_permission/deny_permission previously had no
             // caller except the doorhanger's GPUI on_click closures, so a
@@ -12289,6 +12405,58 @@ mod tests {
             );
             assert!(control_actions.lock().expect("action queue").is_empty());
         }
+    }
+
+    /// F-CTRL-BROWSER-05: `browser.act`'s click/fill/type/press/scroll verbs
+    /// build a real JS snippet against `evaluate_script`'s contract (a
+    /// self-invoking function, so the script's return value is well-defined
+    /// and any thrown error surfaces through wry's own error path) instead
+    /// of only flipping the `driving` flag.
+    #[test]
+    fn browser_act_script_builds_js_for_every_verb_and_rejects_bad_input() {
+        let click = browser_act_script("click", Some("#submit"), None).expect("click builds");
+        assert!(click.contains("document.querySelector(\"#submit\")"));
+        assert!(click.contains(".click()"));
+
+        let fill = browser_act_script("fill", Some("#name"), Some("Ada \"Lovelace\""))
+            .expect("fill builds");
+        assert!(fill.contains("document.querySelector(\"#name\")"));
+        // serde_json::to_string must have escaped the embedded quote, not
+        // string-concatenated it raw into the script.
+        assert!(fill.contains("Ada \\\"Lovelace\\\""));
+        assert!(fill.contains("dispatchEvent(new Event('input'"));
+
+        let typed = browser_act_script("type", Some("#name"), Some("hi")).expect("type builds");
+        assert!(typed.contains("el.value = \"hi\""));
+
+        let press = browser_act_script("press", None, Some("Enter")).expect("press builds");
+        assert!(press.contains("document.activeElement"));
+        assert!(press.contains("KeyboardEvent('keydown'"));
+        assert!(press.contains("\"Enter\""));
+
+        let scroll_selector =
+            browser_act_script("scroll", Some(".card"), None).expect("scroll-to-element builds");
+        assert!(scroll_selector.contains("scrollIntoView"));
+
+        let scroll_page = browser_act_script("scroll", None, Some("250")).expect("page scroll");
+        assert!(scroll_page.contains("window.scrollBy(0, 250)"));
+
+        assert!(
+            browser_act_script("click", None, None).is_err(),
+            "click without a selector is rejected, not sent as a broken script"
+        );
+        assert!(
+            browser_act_script("press", None, None).is_err(),
+            "press without a key name is rejected"
+        );
+        assert!(
+            browser_act_script("teleport", None, None).is_err(),
+            "an unknown verb is rejected, not silently ignored"
+        );
+        assert!(
+            browser_act_script("", None, None).is_err(),
+            "an empty verb (no driving flag, no verb) is rejected"
+        );
     }
 
     #[test]
