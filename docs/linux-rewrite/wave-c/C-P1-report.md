@@ -52,3 +52,17 @@ Asserts the fixture receives the exact dragged path and diff text.
 - Verdict left to the critic: this remains structurally NOT EXERCISED live, but the two halves
   are now each proven against real production code independently, closing the "harness-only"
   gap noted in older evidence (P81/E09).
+
+## F-TERM-PTY-06 — already correct, no code change
+
+Verified the evidence's own description was accurate and current: `receive_file_drop` takes
+`Vec<PathBuf>`, `on_drop::<gpui::ExternalPaths>` is wired on the running-terminal branch
+(`lib.rs` ~1567), and `receive_file_drop` funnels both the in-app typed-drag path (always one
+`PathBuf`) and the multi-file XDND path through the same quoted-and-space-joined insertion
+(`tiller_project::terminal_file_drop`). The test
+`a_drawn_terminal_accepts_a_real_external_paths_drop_with_several_files` drives the real
+`on_drop::<ExternalPaths>` handler with GPUI's actual XDND payload type carrying several files,
+and passes (`cargo test -p tiller_terminal a_drawn_terminal_accepts_a_real_external_paths_drop_with_several_files`).
+Nothing in the code needed fixing; the row's own evidence already correctly states no lane can
+drive a real XDND drop end-to-end (ENVIRONMENT.md). Left as `already-correct`, not reclassified,
+since I am not the verdict-writer.
