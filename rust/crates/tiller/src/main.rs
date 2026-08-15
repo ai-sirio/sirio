@@ -32,7 +32,7 @@ use tiller_terminal::{
 };
 use tiller_theme::{Theme, ThemeMode};
 use tiller_ui::{
-    browser::{BrowserEvent, BrowserSurface},
+    browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
     file_view::FileView,
@@ -236,6 +236,54 @@ fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Opt
             )
         }
         _ => None,
+    }
+}
+
+/// F-BRW-04: bounded, synchronous reachability probe for a normalized
+/// `http(s)://host[:port]/...` address. `normalize_address` only checks
+/// syntax, so `browser.navigate` to a well-formed but dead host (DNS
+/// failure, refused connection) otherwise returns `ok:true` with a blank
+/// title and no error. Runs the actual resolve+connect on a background
+/// thread with a hard timeout so a single navigation attempt can never hang
+/// the control socket indefinitely; a probe that neither succeeds nor fails
+/// within the timeout is treated as unreachable rather than blocking.
+fn probe_host_reachable(address: &str) -> Result<(), String> {
+    let Some(rest) = address
+        .strip_prefix("https://")
+        .map(|rest| (rest, 443u16))
+        .or_else(|| address.strip_prefix("http://").map(|rest| (rest, 80u16)))
+    else {
+        return Ok(());
+    };
+    let (host_and_port, default_port) = rest;
+    let host_port = host_and_port.split('/').next().unwrap_or_default();
+    let target = if host_port.contains(':') {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:{default_port}")
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let probe_target = target.clone();
+    std::thread::spawn(move || {
+        use std::net::{TcpStream, ToSocketAddrs};
+        let result = probe_target
+            .to_socket_addrs()
+            .map_err(|error| format!("Could not resolve {probe_target}: {error}"))
+            .and_then(|mut addrs| {
+                let addr = addrs.next().ok_or_else(|| {
+                    format!("Could not resolve {probe_target}: no addresses found")
+                })?;
+                TcpStream::connect_timeout(&addr, Duration::from_millis(1200))
+                    .map(|_| ())
+                    .map_err(|error| format!("Could not reach {probe_target}: {error}"))
+            });
+        // The receiver may already be gone if the caller's own timeout won.
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(Duration::from_millis(1500)) {
+        Ok(result) => result,
+        Err(_) => Err(format!("Could not reach {target}: timed out")),
     }
 }
 
@@ -4571,6 +4619,12 @@ impl TillerWorkspace {
                 .or_else(|| params.get("address"))
                 .filter(|url| !url.trim().is_empty())
                 .ok_or_else(|| "browser.open requires a non-empty url".to_string())?;
+            // F-BRW-04: reject an invalid address up front instead of
+            // silently falling back to https://example.com and reporting
+            // ok:true with no error, which is what BrowserSurface::new
+            // does internally when handed bad input.
+            normalize_address(initial_url)
+                .map_err(|error| format!("browser.open failed: {error}"))?;
             let (surface_id, browser) = self.add_browser_tab(initial_url, window, cx);
             return Ok(browser.update(cx, |surface, _| {
                 let state = surface.state();
@@ -4595,6 +4649,15 @@ impl TillerWorkspace {
                 surface
                     .submit_address(address)
                     .map_err(|error| format!("{method} failed: {error}"))?;
+                let normalized = surface.state().address().to_string();
+                // F-BRW-04: normalize_address only validates syntax; probe
+                // reachability with a short bounded timeout so a
+                // does-not-exist host or a closed port surfaces a visible
+                // error instead of a silent ok:true with a blank title.
+                if let Err(error) = probe_host_reachable(&normalized) {
+                    surface.record_navigation_error(error.clone());
+                    return Err(format!("{method} failed: {error}"));
+                }
                 let state = surface.state();
                 Ok(vec![
                     ("url".to_string(), state.address().to_string()),
