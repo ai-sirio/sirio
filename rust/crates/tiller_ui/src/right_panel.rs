@@ -260,11 +260,15 @@ impl RightPanel {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
+                // F-CHG-03: a failed refresh must self-heal once the
+                // underlying condition (e.g. permissions) clears, without
+                // requiring a manual Retry click. Keep retrying on the same
+                // 1s cadence even while `refresh_error` is set — `refresh`
+                // itself is still single-flight, so this costs nothing
+                // beyond the one background walk it already runs each tick.
                 if this
                     .update(cx, |panel, cx| {
-                        if panel.refresh_error.is_none() {
-                            panel.refresh(cx);
-                        }
+                        panel.refresh(cx);
                     })
                     .is_err()
                 {
