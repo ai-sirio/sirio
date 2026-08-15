@@ -699,6 +699,47 @@ impl AppDatabase {
     }
 
     // ------------------------------------------------------------------
+    // Account identity (F-PERSIST-DB-06)
+    // ------------------------------------------------------------------
+
+    /// Returns the last known-good identity detected for a provider
+    /// (`"claude"`, `"codex"`, …), and when it was detected, if one has ever
+    /// been saved. One row per provider — see migration v13's own comment:
+    /// this is a cache of the last successful shell-out, not a history.
+    pub fn account_identity(
+        &self,
+        provider: &str,
+    ) -> Result<Option<(String, i64)>, PersistenceError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT identity, detected_at FROM account_identity WHERE provider = ?1",
+                [provider],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Upserts the identity detected for a provider, stamped with the
+    /// current time. Replaces any previous row for the same provider —
+    /// there is exactly one live identity per provider by design.
+    pub fn save_account_identity(
+        &self,
+        provider: &str,
+        identity: &str,
+    ) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO account_identity (provider, identity, detected_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider) DO UPDATE SET
+                identity = excluded.identity,
+                detected_at = excluded.detected_at",
+            params![provider, identity, unix_timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
 
