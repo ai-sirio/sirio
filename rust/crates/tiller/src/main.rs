@@ -5,7 +5,7 @@ use gpui::{
     WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiller_acp::AgentCommand;
 use tiller_activity::{
-    AgentActivityModel, AgentStatus, NotificationPayload, NotificationPolicy, Transition,
+    AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
+    NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
 };
 use tiller_agents::ALL as AGENT_CATALOG;
 use tiller_control::{
@@ -3684,12 +3685,14 @@ impl TillerWorkspace {
                 tab_states: Vec::new(),
                 diagnostics: Vec::new(),
             };
+            let saved_session_refs = self.session.load_session_refs();
             let (tabs, _) = restore_tabs_in_workspace(
                 &restored,
                 &self.working_directory,
                 self.next_tab_id,
                 self.next_pane_id,
                 &mut self.activity,
+                &saved_session_refs,
                 window,
                 cx,
             );
@@ -7611,6 +7614,110 @@ fn register_restored_agent(
     }
 }
 
+/// `~/.claude`, honouring the same home resolution used to locate a native
+/// Claude session's transcript file — never overridden per-worktree.
+fn claude_config_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude")
+}
+
+/// `$CODEX_HOME`, falling back to `~/.codex` when unset or empty — the same
+/// precedence Codex's own CLI and `tiller_usage`'s credential lookup use.
+fn codex_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("CODEX_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex")
+}
+
+/// Splits saved agent session references into resumable/prunable via
+/// `AgentSessionRestorePlan`, keyed by the stable `"pane-N"` string that
+/// tillerctl hooks report notifications under (mirrors `restore_tabs`'
+/// per-tab `pane_id` derivation, so lookups against this map align exactly).
+/// A resumable reference is additionally gated by `AgentSessionValidator`:
+/// a session id whose on-disk transcript/rollout file has since vanished is
+/// treated as unresumable rather than handed to `--resume`/`resume`, which
+/// would otherwise fail or silently start a fresh session anyway.
+fn resumable_session_refs(
+    restored: &RestoredSession,
+    saved_refs: &BTreeMap<String, String>,
+    worktree_path: &str,
+) -> BTreeMap<String, String> {
+    let mut refs = Vec::new();
+    let mut live_ids = HashSet::new();
+    for (tab_index, tab) in restored.tabs.iter().enumerate() {
+        let root_id = restored
+            .tab_states
+            .get(tab_index)
+            .and_then(|state| state.root_id)
+            .unwrap_or(tab_index);
+        let pane_key = format!("pane-{root_id}");
+        if let (Some(agent_id), Some(session_ref)) =
+            (tab.agent_id.as_deref(), saved_refs.get(&pane_key))
+        {
+            refs.push(AgentSessionRef::new(
+                TerminalContentId::new(pane_key.clone()),
+                agent_id,
+                session_ref.clone(),
+            ));
+        }
+        live_ids.insert(TerminalContentId::new(pane_key));
+    }
+    let plan = AgentSessionRestorePlan::plan(&refs, &live_ids);
+    plan.resumable
+        .into_iter()
+        .filter(|reference| {
+            tiller_agents::AgentSessionValidator::is_likely_valid(
+                &reference.agent_id,
+                &reference.session_ref,
+                worktree_path,
+                claude_config_dir(),
+                codex_home(),
+            )
+        })
+        .map(|reference| (reference.content_id.as_str().to_string(), reference.session_ref))
+        .collect()
+}
+
+/// Builds the shell an agent-owned restored terminal pane should launch:
+/// resumes a validated native session when `resumable` has one on record for
+/// `pane_key`, otherwise starts fresh — the same `prepare` + `command` path
+/// `add_agent_tab` uses for a brand-new pane. Returns `None` for a tab with
+/// no agent identity (an ordinary terminal), which callers fall back to a
+/// plain shell for.
+fn restored_agent_shell(
+    agent_id: Option<&str>,
+    pane_key: &str,
+    worktree_path: &Path,
+    resumable: &BTreeMap<String, String>,
+) -> Option<TerminalShell> {
+    let agent_id = agent_id?;
+    let adapter = AGENT_CATALOG
+        .iter()
+        .find(|adapter| adapter.id() == agent_id)?;
+    let tillerctl_path = resolve_tillerctl_for_process().ok()?;
+    let tillerctl_path = tillerctl_path.to_string_lossy().into_owned();
+    let worktree_path = worktree_path.to_string_lossy().into_owned();
+    if let Err(error) = adapter.prepare(&worktree_path, pane_key, &tillerctl_path) {
+        eprintln!(
+            "failed to prepare {} in {worktree_path}: {error}",
+            adapter.display_name()
+        );
+    }
+    let command = resumable
+        .get(pane_key)
+        .and_then(|session_ref| {
+            adapter.resume_command(&worktree_path, pane_key, &tillerctl_path, session_ref)
+        })
+        .unwrap_or_else(|| adapter.command(&worktree_path, pane_key, &tillerctl_path));
+    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    Some(TerminalShell::WithArguments {
+        program: shell_program,
+        args: vec!["-lc".to_string(), command],
+    })
+}
+
 /// Rebuilds the shell's tabs from a restored session: chat tabs get a fresh
 /// `Chat` entity (identity, not transcript), terminal tabs get a fresh
 /// terminal in the restored worktree directory, and persisted pane events
@@ -7620,8 +7727,14 @@ fn restore_tabs(
     working_directory: &std::path::Path,
     mut window: Option<&mut Window>,
     activity: &mut AgentActivityModel,
+    saved_session_refs: &BTreeMap<String, String>,
     cx: &mut App,
 ) -> (Vec<OpenTab>, usize) {
+    let resumable = resumable_session_refs(
+        restored,
+        saved_session_refs,
+        &working_directory.to_string_lossy(),
+    );
     let mut tabs = Vec::new();
     let mut active = 0usize;
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
@@ -7653,10 +7766,28 @@ fn restore_tabs(
             })),
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
-                let view = cx.new(|cx| match TerminalView::new(&cwd, cx) {
-                    Ok(view) => view,
-                    Err(error) => {
-                        TerminalView::failed(&cwd, TerminalShell::System, format!("{error:#}"), cx)
+                let pane_key = format!("pane-{pane_id}");
+                let agent_id = tab.agent_id.clone();
+                let view = cx.new(|cx| {
+                    match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable) {
+                        Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
+                            Ok(view) => view,
+                            Err(error) => TerminalView::failed(
+                                &cwd,
+                                TerminalShell::System,
+                                format!("{error:#}"),
+                                cx,
+                            ),
+                        },
+                        None => match TerminalView::new(&cwd, cx) {
+                            Ok(view) => view,
+                            Err(error) => TerminalView::failed(
+                                &cwd,
+                                TerminalShell::System,
+                                format!("{error:#}"),
+                                cx,
+                            ),
+                        },
                     }
                 });
                 TabContent::Terminal { view }
@@ -7743,9 +7874,15 @@ fn restore_tabs_in_workspace(
     tab_id_start: usize,
     pane_id_start: usize,
     activity: &mut AgentActivityModel,
+    saved_session_refs: &BTreeMap<String, String>,
     window: &mut Window,
     cx: &mut Context<TillerWorkspace>,
 ) -> (Vec<OpenTab>, usize) {
+    let resumable = resumable_session_refs(
+        restored,
+        saved_session_refs,
+        &working_directory.to_string_lossy(),
+    );
     let mut tabs = Vec::new();
     let mut active = 0usize;
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
@@ -7779,10 +7916,28 @@ fn restore_tabs_in_workspace(
             })),
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
-                let view = cx.new(|cx| match TerminalView::new(&cwd, cx) {
-                    Ok(view) => view,
-                    Err(error) => {
-                        TerminalView::failed(&cwd, TerminalShell::System, format!("{error:#}"), cx)
+                let pane_key = format!("pane-{pane_id}");
+                let agent_id = tab.agent_id.clone();
+                let view = cx.new(|cx| {
+                    match restored_agent_shell(agent_id.as_deref(), &pane_key, &cwd, &resumable) {
+                        Some(shell) => match TerminalView::with_shell(&cwd, shell, cx) {
+                            Ok(view) => view,
+                            Err(error) => TerminalView::failed(
+                                &cwd,
+                                TerminalShell::System,
+                                format!("{error:#}"),
+                                cx,
+                            ),
+                        },
+                        None => match TerminalView::new(&cwd, cx) {
+                            Ok(view) => view,
+                            Err(error) => TerminalView::failed(
+                                &cwd,
+                                TerminalShell::System,
+                                format!("{error:#}"),
+                                cx,
+                            ),
+                        },
                     }
                 });
                 TabContent::Terminal { view }
@@ -8143,6 +8298,27 @@ fn main() {
         }
         let project_catalog =
             ProjectCatalog::from_restored(restored_catalog.projects, restored_catalog.settings);
+        // F-AGENT-SAFE-02: repair a stale leading `tillerctl` path in every
+        // known worktree's Claude hook config at launch — before any pane is
+        // opened, so a worktree with no pane reopened this run still gets
+        // fixed rather than waiting on a fresh `prepare()` that may never
+        // come. `migrate_file` touches only the path, never pane ids,
+        // arguments, unrelated hooks, or other JSON keys; an unchanged or
+        // unparseable file is a no-op.
+        if let Ok(tillerctl_path) = resolve_tillerctl_for_process() {
+            let tillerctl_path = tillerctl_path.to_string_lossy().into_owned();
+            for project in project_catalog.projects() {
+                for worktree in &project.worktrees {
+                    let settings_path = worktree.path.join(".claude").join("settings.local.json");
+                    if settings_path.is_file() {
+                        tiller_agents::ClaudeHookMigrator::migrate_file(
+                            &settings_path,
+                            &tillerctl_path,
+                        );
+                    }
+                }
+            }
+        }
         let session_store = SessionStore::open(&database_path);
         // Restore is tolerant of old path-based project ids; rewrite the
         // canonical catalog immediately so every later layout save sees one
@@ -8173,7 +8349,8 @@ fn main() {
         )));
         let panes = Arc::new(PaneRegistry::new());
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
-        let session_refs = Arc::new(Mutex::new(session_store.load_session_refs()));
+        let saved_session_refs = session_store.load_session_refs();
+        let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
         let control_environment: BTreeMap<String, String> = std::env::vars().collect();
         let socket_path = PathBuf::from(tiller_control::default_socket_path(&control_environment));
         let socket_info = ControlSocketInfo::new(socket_path);
@@ -8225,6 +8402,7 @@ fn main() {
                     &working_directory,
                     Some(window),
                     &mut activity_model,
+                    &saved_session_refs,
                     cx,
                 );
                 let activity = tabs
@@ -11689,6 +11867,7 @@ mod tests {
                 &working_directory,
                 None,
                 &mut activity,
+                &BTreeMap::new(),
                 cx,
             )
         });
@@ -11750,6 +11929,7 @@ mod tests {
                 &working_directory,
                 None,
                 &mut activity,
+                &BTreeMap::new(),
                 cx,
             )
         });
@@ -11813,6 +11993,7 @@ mod tests {
                 &working_directory,
                 None,
                 &mut activity,
+                &BTreeMap::new(),
                 cx,
             )
         });
@@ -12173,6 +12354,7 @@ mod tests {
                 &working_directory,
                 None,
                 &mut activity,
+                &BTreeMap::new(),
                 cx,
             )
         });
@@ -12237,6 +12419,7 @@ mod tests {
                 &working_directory,
                 None,
                 &mut activity,
+                &BTreeMap::new(),
                 cx,
             )
         });
