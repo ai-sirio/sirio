@@ -864,6 +864,7 @@ impl ControlHandler for AppControlHandler {
                     "notification.clear",
                     "session.ref",
                     "session.restore",
+                    "session.transcript",
                     "surface.changes.open",
                     "surface.changes.read",
                     "surface.changes.stage",
@@ -1436,6 +1437,71 @@ impl ControlHandler for AppControlHandler {
                         ("ref".to_string(), reference.clone()),
                     ],
                 )
+            }
+            // F-AGENT-SESSION-02: reads a native agent's own on-disk
+            // transcript for a session reference this socket already
+            // recorded via `session.ref`/`notify`'s `agentSession`, using
+            // `ClaudeTranscriptSource`/`CodexTranscriptSource` directly —
+            // the agent identity comes from the caller's explicit `agent`
+            // param rather than `panel.list`'s `agent` field, which is not
+            // a reliable read of live activity state.
+            "session.transcript" => {
+                let Some(pane_id) = request.params.get("session") else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "session.transcript requires session",
+                    );
+                };
+                let Some(agent_id) = request.params.get("agent") else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "session.transcript requires agent",
+                    );
+                };
+                let Some(worktree_path) = request.params.get("worktree") else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "session.transcript requires worktree",
+                    );
+                };
+                let Ok(references) = self.session_refs.lock() else {
+                    return ControlResponse::failure(&request.id, "session store unavailable");
+                };
+                let Some(session_ref) = references.get(pane_id).cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "no session reference recorded for this pane",
+                    );
+                };
+                drop(references);
+                let home_directory =
+                    PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let text = match agent_id.as_str() {
+                    "claude" => tiller_agents::ClaudeTranscriptSource::new(
+                        worktree_path.clone(),
+                        session_ref,
+                        home_directory,
+                    )
+                    .recent_text(),
+                    "codex" => tiller_agents::CodexTranscriptSource::new(
+                        session_ref,
+                        home_directory,
+                    )
+                    .recent_text(),
+                    other => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            format!("session.transcript has no reader for agent '{other}'"),
+                        );
+                    }
+                };
+                let Some(text) = text else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "no transcript available for this session",
+                    );
+                };
+                Self::success(&request.id, [("text".to_string(), text)])
             }
             "worktree.set" => {
                 let Some(selector) = request.params.get("worktree") else {
