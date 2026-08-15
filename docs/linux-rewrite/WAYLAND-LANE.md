@@ -21,15 +21,16 @@ one cannot work — it is verified working, with screenshots in `reference/linux
 | ✅ **Layout at any size** | change the output resolution and capture the reflow |
 | ✅ **Surfaces open and navigate over the socket** | `surface.settings.open`/`.select`, `surface.changes.open`, `browser.open`, `project.add`, `panel.*`, `tab.*`, `pane.*` — see "Driving without a pointer" below |
 | ✅ **Chat turns, in the visible transcript** | since `P107` (2026-08-14) `surface.chat.compose`/`.send` drive the rendered chat, so a real ACP turn can be photographed here. Socket-sourced `F-CHAT` evidence dated **before** that commit proves the old invisible replica and must be re-driven |
-| ✅ **Synthetic left-click, text and named-key input** | `click`, `move`, `type` and `key` in `wayland-drive.sh` use persistent virtual devices created **before** Tiller connects — see trap 3 and P112. Pointer drags, right-click, modifiers/chords and IME/non-ASCII text are not yet exercised. |
+| ✅ **Synthetic left-click, text and named-key input** | `click`, `move`, `type` and `key` in `wayland-drive.sh` use persistent virtual devices created **before** Tiller connects — see trap 3 and P112. |
+| ✅ **Right-click, button-held drag, scroll, modifier chords** | `rightclick`, `down`/`up`/`drag` and `scroll` extend the same persistent virtual-pointer client; `chord` and `modclick` extend the same persistent virtual-keyboard path. See "New pointer and keyboard primitives, P124" below — each has a live positive-control capture. IME and non-ASCII text are still not exercised. |
 | ❌ **No webview content** | the embedded browser needs an X11 window handle and gets a Wayland one; its chrome renders, the page does not. Every `F-BRW` row belongs on `DISPLAY=:1` |
 
-**A row whose `VERIFY` line names an absolute move, left-click, ASCII typed text, or named key can
-be closed here** when `move`/`click`/`type`/`key` drives that exact gesture and a forced-repaint
-capture shows its result. Right-click, button-held drag, modifier chords (including `Shift+Tab`),
-non-ASCII text, and IME input still require `DISPLAY=:1` until separately proven. A screenshot that
-merely *contains* a control is not proof the control works — that is the same mistake that produced
-this project's false `PASSED`s.
+**A row whose `VERIFY` line names an absolute move, left-click, right-click, button-held drag,
+scroll/axis, modifier chord (including `Shift+Tab`/`Shift+F10`), modifier-held click, ASCII typed
+text, or named key can be closed here** when the matching action in `wayland-drive.sh` drives that
+exact gesture and a forced-repaint capture shows its result. Non-ASCII text and IME input still
+require `DISPLAY=:1` until separately proven. A screenshot that merely *contains* a control is not
+proof the control works — that is the same mistake that produced this project's false `PASSED`s.
 
 ## Driving without a pointer — what this lane can actually close
 
@@ -270,13 +271,14 @@ working lane. Check the capture before you believe the log.
 ## Combining the lanes
 
 - **`HEADLESS-LANE.md`** — the control socket, no rendering at all. Best for state and API rows.
-- **This lane** — the socket, real pixels, and verified left-click/text/named-key input. Best for
-  visual and ordinary gesture rows; it remains parallel and lock-free.
-- **`DISPLAY=:1` + the drive lock** — reserve for unexercised gestures (right-click, drag,
-  modifiers/chords, non-ASCII/IME) and X11-only browser content.
+- **This lane** — the socket, real pixels, and verified left-click/right-click/drag/scroll/
+  chord/text/named-key input. Best for visual and ordinary gesture rows; it remains parallel and
+  lock-free.
+- **`DISPLAY=:1` + the drive lock** — reserve for still-unexercised gestures (non-ASCII/IME text)
+  and X11-only browser content.
 
 The natural division: everything that can be driven by socket and judged by eye moves here and runs
-in parallel; the drive lock is spent only on clicks, keystrokes and drags.
+in parallel; the drive lock is spent only on non-ASCII/IME input and browser content.
 
 ## Verified working, 2026-08-14
 
@@ -355,3 +357,122 @@ status), not from `panel.list`.
 Valid `notify` statuses, from `main.rs:1483`: `running`, `needs-input`/`needs_input`,
 `done`/`finished`, `error`/`failed`. Anything else returns "notify has an unknown status" —
 `working` is **not** one of them.
+
+## New pointer and keyboard primitives — right-click, drag, scroll, chords (added 2026-08-15, P124)
+
+The vocabulary was `ctl / click / move / type / key / title / shot`. It is now also
+`rightclick / down / up / drag / scroll / chord / modclick`, all built the same way `title` was:
+extending the persistent virtual-pointer and virtual-keyboard clients that `wayland-drive.sh`
+starts **before** Tiller connects (trap 3), never a one-shot process racing the first bind.
+`wayland-virtual-pointer.c` gained `rightclick`/`down`/`up`/`scroll` operations alongside its
+existing `move`/`click`; the keyboard side reuses plain `wtype`, which was already proven safe as
+a one-shot call once the persistent keeper has caused GPUI to bind `wl_keyboard` at startup (P112).
+Every action below still runs `verify_nested_sway` and fails clearly (`FAIL: …`) when its
+prerequisite tool or device is missing; `start_virtual_pointer`/`start_virtual_keyboard`'s
+startup-condition `grep` guards were extended, not replaced, to cover the new verbs.
+
+### `rightclick <x> <y>` — opens context menus
+
+Same persistent device as `click`/`move`, sending `BTN_RIGHT` (`0x111`) instead of `BTN_LEFT`.
+
+**Positive control:** right-clicked a live terminal pane (real PTY, `project.add` → click to focus
+→ `rightclick`) and got the full 12-item context menu — Copy, Paste, Copy Context, Set Title, Copy
+Pane ID, Copy Terminal ID, Split Left/Right/Above/Down, Clear Terminal, Close Terminal — not a
+screenshot that merely contains the pane.
+`reference/linux-progress/p124-wayland-primitives/p124-rightclick-context-menu.png`.
+
+### `chord <mod> <key>` — modifier-held named key
+
+One `wtype -M <mod> -k <key> -m <mod>` call. `<mod>` is anything `man wtype` accepts: `shift`,
+`ctrl`, `alt`, `logo`, `altgr`, `capslock`.
+
+**Positive control:** `chord shift F10` on a focused terminal pane opened the same context menu as
+`rightclick`, live — the exact keyboard path `F-CORE-TERM-02`'s unit test exercises
+(`shift_f10_opens_the_context_menu_from_the_keyboard`), now driven through real synthetic input
+instead of only a `gpui::test` harness.
+`reference/linux-progress/p124-wayland-primitives/p124-chord-shift-f10-menu.png`.
+
+### `down <x> <y>` / `up <x> <y>` / `drag <x1> <y1> <x2> <y2> [steps]` — button-held drag
+
+`down` presses `BTN_LEFT` with no release; `up` releases with no press; `drag` composes
+`down` → `steps` (default 4) intermediate `move` waypoints → `up`, so the target sees real
+intermediate motion, not a teleport many drop targets ignore.
+
+**Positive control:** right-click → Split Right on a terminal to create a pane divider, then
+`drag`ged the divider roughly 40% of the pane's width to the right. The divider's on-screen
+position moved from the pane midpoint to clearly past it in the forced-repaint capture — compare
+`p124-drag-divider-before.png` (divider at the split ratio's default midpoint) against
+`p124-drag-divider-after.png` (divider well to the right) in
+`reference/linux-progress/p124-wayland-primitives/`. This is a real GPUI `on_drag`/`on_drag_move`
+target (`DraggedPaneDivider`, `tiller/src/main.rs`), not a synthetic stand-in.
+
+### `scroll <x> <y> <steps>` — wheel/axis
+
+Moves to `(x, y)`, then sends `<steps>` wheel notches as a real `zwlr_virtual_pointer_v1`
+`axis`/`axis_source`/`axis_discrete` event sequence (15 libinput units per notch, matching a
+physical wheel) — not a synthesized `PageUp`/`PageDown` keypress standing in for a wheel.
+`<steps>` may be negative for the opposite direction.
+
+**Positive control:** scrolled the Files panel's file list. `steps=8` moved the visible top row
+from `.claude` down to `.tiller` (later entries, including `README.md`, scrolled into view at the
+bottom); `steps=-8` immediately after restored the original top row exactly. Compare
+`p124-scroll-files-before.png` and `p124-scroll-files-after.png` in
+`reference/linux-progress/p124-wayland-primitives/`. Sign convention: positive scrolls the content
+up (later items appear), matching a standard downward wheel motion.
+
+### `modclick <mod> <x> <y>` — modifier-held click
+
+`wtype -M <mod> -s 400 -m <mod>` backgrounded (wtype releases a modifier only when its own process
+exits, so the hold must outlive the click), a 50 ms settle for the press to land, then a normal
+`click`, then `wait` for the release. Guarded in **both** startup conditions since it needs the
+pointer device and the keyboard device pre-created.
+
+**Not independently proven end-to-end against a live app target** — flagged honestly rather than
+claimed. `chord` and `click`/`rightclick`/`drag`/`scroll` are each proven above; `modclick` is a
+straightforward composition of exactly those two already-proven mechanisms (modifier-hold via
+`wtype`, click via the same persistent pointer FIFO) and there is no reason specific to Wayland
+input delivery for it to behave differently. But every in-app target gated on
+`event.modifiers.platform` on a mouse event turned out unusable for a *live* proof in the time
+available:
+
+- The terminal's platform-modifier-click-opens-a-link path (`F-TERM-UI-02`,
+  `tiller_terminal/src/lib.rs:1071`) computes the clicked grid row/column directly from
+  `event.position` without subtracting the terminal element's own `bounds.origin` — the paint path
+  a few lines away (`bounds.origin.y + LINE_HEIGHT * line`) does add it, so the two are asymmetric.
+  In the isolated `gpui::test` window (origin ≈ 0,0) this coincidentally hits the right cell; in
+  the real multi-pane app the terminal is never at the window origin, and an exhaustive coordinate
+  sweep (both axes, values spanning the entire plausible range) never triggered the link's
+  `xdg-open` spawn. This looks like a genuine, pre-existing app defect independent of our lane —
+  noted here for whoever next touches `F-TERM-UI-02`, not filed separately since it is outside this
+  task's three assigned rows.
+- `file_view.rs`'s own platform-click-opens-a-markdown-link path (`open_markdown_link`,
+  `F-CORE-FILE-04`) emits `FileViewEvent::OpenFile`, but `Workspace::add_file_tab`
+  (`tiller/src/main.rs:4499`) never subscribes to that event on the `FileView` it constructs — only
+  a test harness does. Dead code in production.
+- Chat transcript links only parse as clickable markdown from **assistant**-authored messages;
+  `surface.chat.compose`/`.send`-posted user text renders as literal, unlinked text
+  (`[Example](url)` shown verbatim), so this path needs a live agent turn to reach, which is out of
+  this task's control.
+
+If a future pass needs `modclick` proven against a live target, `F-TERM-UI-02`'s row/column bug
+above is worth fixing first — it is currently the only reachable modifier+click target in the app.
+
+## The Clone/Create project popover — a real layout defect, not a lane gap (P123, 2026-08-15)
+
+`F-PRJ-06`/`07`/`09` were recorded `half-proven` against an "anchored-popover input-delivery gap."
+**It is a genuine app defect, not a Wayland-lane limitation**: `Sidebar::render_project_form`
+(`tiller_ui/src/sidebar.rs:1965`) builds a `.absolute().left(0).right(0).top(0).bottom(0)` overlay
+styled like a full-window modal (dark scrim, centered card), but its nearest `.relative()` ancestor
+is the Sidebar's own root div — `w(px(SIDEBAR_WIDTH))`, roughly 280px, not the window. The popover
+therefore renders squeezed into the sidebar's own narrow column, flush left, not centered on the
+window as its styling implies.
+
+Once clicks are targeted at the popover's *actual* (sidebar-confined) position instead of the
+window-center position its styling suggests, buttons register normally: Cancel closed the popover
+on the first click in two separate drives (including one where the URL field was clicked/focused
+immediately beforehand, matching the originally-reported sequence exactly), and the "Clone
+repository" submit button — after one retry click — drove a real `git clone` subprocess whose
+genuine stderr (`git: 'remote-tps' is not a git command`) rendered in the popover, proving the full
+click → handler → subprocess → error-surfaced round trip completes. Full evidence, screenshots and
+the discriminators run: `docs/linux-rewrite/tasks/P123-popover-click-routing.md`. Not fixed here —
+this task owns no Rust.
