@@ -383,6 +383,9 @@ pub struct AppSettings {
     /// fetcher discovers the workspace from `/_server`). Free text, no
     /// clamp: the Swift `@AppStorage` field it mirrors is unvalidated.
     pub opencode_workspace_id_override: String,
+    /// "appearance.translucency" — default: false. A Linux-rewrite-only
+    /// key (F-SET-20); there is no Swift-parity `@AppStorage` field for it.
+    pub translucency: bool,
 }
 
 impl Default for AppSettings {
@@ -406,6 +409,7 @@ impl Default for AppSettings {
             ollama_show_in_bar: false,
             refresh_interval_min: 5,
             opencode_workspace_id_override: String::new(),
+            translucency: false,
         }
     }
 }
@@ -432,6 +436,7 @@ pub mod settings_keys {
     pub const OLLAMA_SHOW_IN_BAR: &str = "usage.ollamaVisible";
     pub const REFRESH_INTERVAL_MIN: &str = "usage.refreshIntervalMin";
     pub const OPENCODE_WORKSPACE_ID_OVERRIDE: &str = "usage.opencodeGo.workspaceIdOverride";
+    pub const TRANSLUCENCY: &str = "appearance.translucency";
 }
 
 /// The Swift ranges settings values are clamped into.
