@@ -346,14 +346,36 @@ impl PaneRegistry {
     }
 
     pub fn read(&self, pane_id: &str) -> Result<Vec<u8>, PaneError> {
-        let pane = self.get(pane_id)?;
-        Ok(pane
-            .process
-            .state
+        // `panel.list` merges control-owned (`panes`) and renderer-owned
+        // (`external`) panes, so a pane it reports wired can be either kind.
+        // `state()`/`scrollback()` already check both maps; this used to
+        // check only `panes` via `self.get`, so a renderer-owned pane (e.g.
+        // OpenCode's ACP-bridged tab) that `panel.list` had just shown as
+        // wired would fail `panel.read` moments later with `UnknownPane`.
+        if let Some(pane) = self
+            .panes
             .lock()
-            .map_err(|_| PaneError::Io("pane state lock poisoned".to_string()))?
-            .output
-            .clone())
+            .map_err(|_| PaneError::Io("pane registry lock poisoned".to_string()))?
+            .get(pane_id)
+            .cloned()
+        {
+            return Ok(pane
+                .process
+                .state
+                .lock()
+                .map_err(|_| PaneError::Io("pane state lock poisoned".to_string()))?
+                .output
+                .clone());
+        }
+        if let Some(pane) = self
+            .external
+            .lock()
+            .map_err(|_| PaneError::Io("external pane registry lock poisoned".to_string()))?
+            .get(pane_id)
+        {
+            return Ok(pane.state.scrollback.clone());
+        }
+        Err(self.missing_pane_error(pane_id))
     }
 
     /// Returns the state snapshot currently held by the pane surface.
