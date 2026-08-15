@@ -45,12 +45,20 @@ impl super::AgentAdapter for OpenCodeAdapter {
         false
     }
 
+    fn skill_markdown(&self) -> Option<&'static str> {
+        // F-AGENT-SAFE-01: see `ClaudeCodeAdapter::skill_markdown`.
+        Some(include_str!("../../../../skills/tiller/SKILL.md"))
+    }
+
     fn prepare(
         &self,
         worktree_path: &str,
         pane_id: &str,
         tillerctl_path: &str,
     ) -> Result<(), PrepareError> {
+        if let Some(markdown) = self.skill_markdown() {
+            crate::install_skill(markdown, self.id(), worktree_path)?;
+        }
         let dir = Path::new(worktree_path).join(".opencode/plugin");
         std::fs::create_dir_all(&dir)?;
 

@@ -10,6 +10,21 @@ pub enum PrepareError {
     Io(std::io::Error),
     /// The existing config file could not be re-serialized after merging.
     Json(serde_json::Error),
+    /// The skill markdown Tiller was asked to install carries none of its
+    /// own managed-file marker — installing it would leave a file nothing
+    /// can later recognize as Tiller's own. Mirrors
+    /// `TillerSkillProvisioner.Error.missingMarker` in the Swift app
+    /// (F-AGENT-SAFE-01).
+    MissingSkillMarker,
+    /// `install_skill` was asked to provision an agent id this port does
+    /// not know a skill destination for. Mirrors
+    /// `TillerSkillProvisioner.Error.unsupportedAgent`.
+    UnsupportedSkillAgent(String),
+    /// A skill file already exists at the destination and carries no
+    /// Tiller managed-file marker — refusing to overwrite it protects a
+    /// user's own hand-authored file of the same name. Mirrors
+    /// `TillerSkillProvisioner.Error.unmanagedFile` (F-AGENT-SAFE-01).
+    UnmanagedSkillFile(std::path::PathBuf),
 }
 
 impl fmt::Display for PrepareError {
@@ -17,6 +32,13 @@ impl fmt::Display for PrepareError {
         match self {
             PrepareError::Io(error) => write!(f, "failed to write worktree config: {error}"),
             PrepareError::Json(error) => write!(f, "failed to serialize worktree config: {error}"),
+            PrepareError::MissingSkillMarker => {
+                write!(f, "Tiller skill content is missing its managed-file marker")
+            }
+            PrepareError::UnsupportedSkillAgent(id) => write!(f, "unsupported Tiller agent: {id}"),
+            PrepareError::UnmanagedSkillFile(path) => {
+                write!(f, "refusing to overwrite unmanaged skill at {}", path.display())
+            }
         }
     }
 }
