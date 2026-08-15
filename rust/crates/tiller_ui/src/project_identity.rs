@@ -1002,6 +1002,20 @@ impl ProjectIconPicker {
             ));
 
         if let Some(label) = current_avatar_label {
+            // A locally chosen PNG is real file content already on disk, so
+            // the preview can show the actual image rather than only a text
+            // caption. GitHub/Favicon sources still fall back to text-only
+            // here: rendering those needs a network fetch this app has no
+            // HTTP client for yet (F-PRJ-14).
+            if let ProjectIconValue::Avatar(AvatarSource::LocalPng(path)) = &self.value.value {
+                column = column.child(
+                    gpui::img(path.clone())
+                        .id("project-icon-avatar-preview")
+                        .w(px(48.0))
+                        .h(px(48.0))
+                        .rounded(theme.radii.control),
+                );
+            }
             column = column.child(
                 div()
                     .id("project-icon-avatar-current")

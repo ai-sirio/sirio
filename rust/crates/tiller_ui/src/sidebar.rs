@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div,
+    MouseButton, MouseDownEvent, PathPromptOptions, PromptLevel, Render, Rgba, Window, div, img,
     prelude::*, px, rgb,
 };
 use tiller_git::{
@@ -28,7 +28,7 @@ use tiller_project::TabKind;
 use tiller_theme::Theme;
 
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
-use crate::project_identity::{ProjectIcon, ProjectIconPicker, ProjectIconValue};
+use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconPicker, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
 use crate::tab_bar::NewTabAction;
 
@@ -2441,12 +2441,23 @@ impl Sidebar {
         let context_entity = entity.clone();
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
+        let mark_size = px(if is_project { 14.0 } else { 13.0 });
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
                 .text_size(px(14.0))
                 .child(emoji.clone())
                 .into_any_element(),
-            _ => IconElement::new(glyph, px(if is_project { 14.0 } else { 13.0 }))
+            // A locally chosen PNG is real file content already on disk — no
+            // network fetch needed, so it can render as an actual image
+            // instead of the generic globe glyph every other avatar source
+            // still falls back to (F-PRJ-14: GitHub/Favicon need an HTTP
+            // client this app doesn't have yet; see project_identity.rs).
+            Some(ProjectIconValue::Avatar(AvatarSource::LocalPng(path))) => img(path.clone())
+                .w(mark_size)
+                .h(mark_size)
+                .rounded(theme.radii.control)
+                .into_any_element(),
+            _ => IconElement::new(glyph, mark_size)
                 .text_color(glyph_color)
                 .into_any_element(),
         };
