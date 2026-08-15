@@ -452,6 +452,7 @@ impl RightPanel {
         theme: Theme,
         selected: bool,
         file_focus: FocusHandle,
+        repo_root: PathBuf,
     ) -> impl IntoElement {
         let path = row.node.path.clone();
         let is_dir = row.node.is_dir;
@@ -521,6 +522,17 @@ impl RightPanel {
                         panel.open_file_context_menu(context_path.clone(), event.position, cx);
                     }
                 });
+            })
+            // F-CORE-FILE-03: give every non-directory row a real drag source
+            // so a file can be dropped onto a terminal pane. The target side
+            // already exists (`tiller_terminal`'s `on_drop::<PathBuf>` calls
+            // straight into `tiller_project::terminal_file_drop`); this was
+            // the only missing half. `path` is worktree-relative, so the
+            // payload joins it against `repo_root` to hand the drop target an
+            // absolute path.
+            .when(!is_dir, |this| {
+                let drag_path = repo_root.join(&path);
+                this.on_drag(drag_path, |_, _, _, cx| cx.new(|_| gpui::Empty))
             })
             .child(
                 div()
@@ -675,6 +687,7 @@ impl RightPanel {
             .clone();
         let selected_path = self.selected_path.clone();
         let processor_focus = file_focus.clone();
+        let repo_root = self.repo_root.clone();
         let toolbar = div()
             .h(px(TOOLBAR_HEIGHT))
             .w_full()
@@ -752,6 +765,7 @@ impl RightPanel {
                                 theme,
                                 selected_path.as_ref() == Some(&row.node.path),
                                 processor_focus.clone(),
+                                repo_root.clone(),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1730,6 +1744,119 @@ mod tests {
             .expect("Reveal action is drawn");
         cx.simulate_click(reveal.center(), Modifiers::none());
         cx.run_until_parked();
+    }
+
+    struct FileDropTargetFixture {
+        panel: gpui::Entity<RightPanel>,
+        received: Rc<RefCell<Option<PathBuf>>>,
+    }
+
+    impl gpui::Render for FileDropTargetFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let received = self.received.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.panel.clone())
+                .child(
+                    div()
+                        .id("pane-test-drop-target")
+                        .debug_selector(|| "pane-test-drop-target".to_owned())
+                        .h(px(200.0))
+                        .on_drop::<PathBuf>(move |path, _, _| {
+                            *received.borrow_mut() = Some(path.clone());
+                        }),
+                )
+        }
+    }
+
+    /// F-CORE-FILE-03: dragging a real, drawn `file-row` out of the Files
+    /// panel and dropping it delivers the absolute path a terminal pane's
+    /// `on_drop::<PathBuf>` target expects — the same mouse-down/move/up
+    /// drag path `changes-file-row` already proves for diff payloads.
+    #[gpui::test]
+    async fn a_drawn_file_row_drags_its_absolute_path_to_a_drop_target(cx: &mut TestAppContext) {
+        use gpui::point;
+
+        let dir = TempDir::new();
+        let path = dir.0.join("dragged.md");
+        std::fs::write(&path, "# dragged\n").expect("write file");
+
+        cx.update(Theme::init);
+        let received = Rc::new(RefCell::new(None));
+        let fixture_received = received.clone();
+        let window = cx.add_window(|_window, cx| {
+            let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+            FileDropTargetFixture {
+                panel,
+                received: fixture_received,
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let panel = cx.update(|window, app| {
+            window
+                .root::<FileDropTargetFixture>()
+                .flatten()
+                .expect("fixture root")
+                .read(app)
+                .panel
+                .clone()
+        });
+        cx.update(|_, app| panel.update(app, |panel, cx| panel.refresh(cx)));
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                find_node(&panel.file_tree, &path).is_some()
+            })
+        });
+        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        let source = cx
+            .debug_bounds("file-row")
+            .expect("the real file row is drawn");
+        let target = cx
+            .debug_bounds("pane-test-drop-target")
+            .expect("the drop target is drawn");
+
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(8.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            received.borrow().as_ref(),
+            Some(&path),
+            "the drop target receives the dragged row's absolute path"
+        );
     }
 
     /// F-CHG-05: once a Files row has focus and selection, Return follows the
