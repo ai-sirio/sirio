@@ -48,4 +48,18 @@ either). First `rightclick` silently dropped (documented lane trap, reproduced);
 work. Close anyway?" banner appeared with Close Anyway/Cancel, not an immediate close. Did not
 click through.
 
-## `F-TERM-UI-01` — pending (verifying)
+## `F-TERM-UI-01` — half-proven
+
+Live drive, two separate instances. Reconfirmed the 12-item menu (Copy, Paste, Copy Context, Set
+Title, Copy Pane ID, Copy Terminal ID, Split Left/Right/Above/Down, Clear Terminal, Close
+Terminal…) renders completely, again matching the builder's and wave-D critic's independent
+findings. New evidence: drove "Split Above" through the menu (`click 1077 719` after a settled
+`rightclick`) and it produced a directly visible, discriminating result — the pane genuinely split
+into two, a fresh empty terminal appearing above the original. That is one of the six previously
+unexercised items now positively proven. Attempted "Clear Terminal" the same way the builder did
+(typed a marker, reopened the menu, clicked the item) and hit the identical inconclusive
+click-vs-repaint race the builder's report already documents — not a new finding, and not
+distinguishable from a dropped-input frame. Ran out of budget before driving Copy, Copy Context,
+Set Title, Copy Terminal ID, or Split Down individually (Copy variants need a paste-back to
+observe). Verdict stays `half-proven`: no regression found, one more item closed than before, but
+the row's own exercise list is still not fully driven.
