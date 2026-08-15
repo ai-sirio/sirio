@@ -185,7 +185,7 @@ const CHAT_TAB_WIDTH: f32 = 108.;
 const TERMINAL_TAB_WIDTH: f32 = 132.;
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
-const BROWSER_METHODS: [&str; 10] = [
+const BROWSER_METHODS: [&str; 11] = [
     "browser.open",
     "browser.navigate",
     "browser.get",
@@ -196,12 +196,13 @@ const BROWSER_METHODS: [&str; 10] = [
     "browser.eval",
     "browser.console",
     "browser.errors",
+    "browser.permission",
 ];
-// F-CTRL-BROWSER-03/05/06: browser.get, browser.wait, browser.eval and
-// browser.console are real, implemented methods (see handle_browser_action)
-// — they must not be turned away here as "not implemented" before ever
-// reaching that dispatch.
-const BROWSER_CAPABILITIES: [&str; 7] = [
+// F-CTRL-BROWSER-03/05/06/F-PER-08: browser.get, browser.wait, browser.eval,
+// browser.console and browser.permission are real, implemented methods (see
+// handle_browser_action) — they must not be turned away here as "not
+// implemented" before ever reaching that dispatch.
+const BROWSER_CAPABILITIES: [&str; 8] = [
     "browser.open",
     "browser.navigate",
     "browser.act",
@@ -209,6 +210,7 @@ const BROWSER_CAPABILITIES: [&str; 7] = [
     "browser.wait",
     "browser.eval",
     "browser.console",
+    "browser.permission",
 ];
 
 type ControlReply = Sender<Result<Vec<(String, String)>, String>>;
@@ -4967,6 +4969,34 @@ impl TillerWorkspace {
                 let driving = matches!(driving.as_str(), "1" | "true" | "yes");
                 surface.set_agent_driving(driving);
                 Ok(vec![("driving".to_string(), driving.to_string())])
+            }
+            // F-PER-08: allow_permission/deny_permission previously had no
+            // caller except the doorhanger's GPUI on_click closures, so a
+            // pending browser.navigate permission request (see
+            // "browser.navigate" above) could only be resolved by an actual
+            // mouse click — the browser-origin half of this row's grant
+            // roundtrip had no reachable route at all. This mirrors the
+            // doorhanger buttons exactly: resolving it is what makes
+            // `newly_allowed`'s scan of `allowed_origins()` (in the render
+            // loop) pick the grant up and call
+            // `session.save_browser_origin_grant`.
+            "browser.permission" => {
+                let action = params.get("action").map(String::as_str).unwrap_or("allow");
+                let resolved = match action {
+                    "allow" => surface.allow_permission(),
+                    "deny" => surface.deny_permission(),
+                    other => {
+                        return Err(format!(
+                            "browser.permission action '{other}' must be allow or deny"
+                        ));
+                    }
+                };
+                let origin = resolved
+                    .ok_or_else(|| "browser.permission: no pending permission request".to_string())?;
+                Ok(vec![
+                    ("origin".to_string(), origin),
+                    ("action".to_string(), action.to_string()),
+                ])
             }
             _ => Err(format!(
                 "{method} is unsupported on Linux: browser automation is not implemented"
@@ -11673,6 +11703,7 @@ mod tests {
                 "browser.wait",
                 "browser.eval",
                 "browser.console",
+                "browser.permission",
             ]
         );
 
