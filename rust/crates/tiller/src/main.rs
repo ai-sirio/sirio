@@ -2559,6 +2559,13 @@ impl TillerWorkspace {
                 }
             });
         }
+        for tab in &tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Chat(chat) = content {
+                    Self::bind_chat(chat, cx);
+                }
+            });
+        }
 
         cx.subscribe(
             &sidebar,
