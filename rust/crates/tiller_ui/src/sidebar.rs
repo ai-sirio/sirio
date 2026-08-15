@@ -1048,11 +1048,18 @@ impl Sidebar {
         });
         cx.spawn_in(window, async move |sidebar, cx| {
             let outcome = receiver.await;
-            let _ = sidebar.update(cx, |sidebar, cx| match outcome {
-                // A real selection: report the picked directory.
+            match outcome {
+                // A real selection: a non-git folder gets a confirmation
+                // prompt (F-PRJ-03) before it silently becomes a project —
+                // adding a plain folder as a project when the user most
+                // likely meant to pick their repo checkout is surprising,
+                // and a project with no git backing loses worktrees,
+                // branches, and every git-driven sidebar affordance.
                 Ok(Ok(Some(mut paths))) => {
                     if let Some(path) = paths.pop() {
-                        cx.emit(SidebarEvent::AddProject(path));
+                        let _ = sidebar.update_in(cx, |sidebar, window, cx| {
+                            sidebar.confirm_add_project(path, window, cx);
+                        });
                     }
                 }
                 // Cancelled (or an empty selection): nothing, silently.
@@ -1062,11 +1069,56 @@ impl Sidebar {
                 // here is the exact "drawn but does nothing" defect — say
                 // why instead of pretending nothing happened.
                 Ok(Err(error)) => {
-                    sidebar.notice = Some(format!("could not open the folder picker: {error}"));
-                    cx.notify();
+                    let _ = sidebar.update(cx, |sidebar, cx| {
+                        sidebar.notice =
+                            Some(format!("could not open the folder picker: {error}"));
+                        cx.notify();
+                    });
                 }
                 // The prompt was dropped with the window.
                 Err(_) => {}
+            }
+        })
+        .detach();
+    }
+
+    /// F-PRJ-03: a folder with no `.git` gets a three-way prompt — Initialize
+    /// Git, Add without Git, Cancel — instead of silently becoming a
+    /// project. A folder that is already a git checkout (the common case)
+    /// is added immediately with no extra click.
+    fn confirm_add_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if path.join(".git").exists() {
+            cx.emit(SidebarEvent::AddProject(path));
+            return;
+        }
+        let receiver = window.prompt(
+            PromptLevel::Info,
+            "This folder is not a git repository",
+            Some(
+                "Tiller's worktrees, branches, and git-driven sidebar features need a git \
+                 repository. You can initialize one here, or add the folder as-is.",
+            ),
+            &["Initialize Git", "Add without Git", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |sidebar, cx| {
+            let choice = receiver.await.unwrap_or(2);
+            let _ = sidebar.update(cx, |sidebar, cx| match choice {
+                0 => {
+                    if let Err(error) = std::process::Command::new("git")
+                        .arg("init")
+                        .arg("--quiet")
+                        .current_dir(&path)
+                        .status()
+                    {
+                        sidebar.notice = Some(format!("could not run git init: {error}"));
+                        cx.notify();
+                        return;
+                    }
+                    cx.emit(SidebarEvent::AddProject(path));
+                }
+                1 => cx.emit(SidebarEvent::AddProject(path)),
+                _ => {}
             });
         })
         .detach();
@@ -3290,6 +3342,72 @@ mod tests {
         assert_eq!(selected, 1, "exactly one row stays selected");
     }
 
+    /// F-PRJ-03: picking a non-git folder through Open Project prompts
+    /// before adding it. "Initialize Git" must leave a real `.git` behind
+    /// (not just claim to) and then still emit AddProject.
+    #[gpui::test]
+    async fn open_project_initialize_git_creates_a_real_repo_then_adds(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let picked = std::env::temp_dir().join(format!(
+            "tiller-sidebar-test-init-git-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&picked);
+        std::fs::create_dir_all(&picked).expect("create the plain (non-git) folder");
+        assert!(
+            !picked.join(".git").exists(),
+            "the fixture folder starts with no .git"
+        );
+
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let events = Rc::new(RefCell::new(Vec::<SidebarEvent>::new()));
+        let collected = events.clone();
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        cx.update(|_, cx| {
+            cx.subscribe(&entity, move |_, event: &SidebarEvent, _cx| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let plus_bounds = cx
+            .debug_bounds("add-project")
+            .expect("the + add-project control is rendered");
+        cx.simulate_click(plus_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        let open = cx
+            .debug_bounds("add-project-open")
+            .expect("open project choice");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_path_prompt_response(|_| Some(vec![picked.clone()]));
+        cx.run_until_parked();
+
+        cx.simulate_prompt_answer("Initialize Git");
+        cx.run_until_parked();
+
+        assert!(
+            picked.join(".git").is_dir(),
+            "Initialize Git must leave a real .git behind, not just claim to"
+        );
+        let emitted = events.borrow();
+        assert!(
+            emitted.iter().any(|event| matches!(
+                event,
+                SidebarEvent::AddProject(path) if *path == picked
+            )),
+            "after initializing git the folder is still added, got {emitted:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&picked);
+    }
+
     #[gpui::test]
     async fn add_project_menu_open_choice_reports_the_chosen_directory(
         cx: &mut gpui::TestAppContext,
@@ -3345,6 +3463,12 @@ mod tests {
             );
             Some(vec![picked.clone()])
         });
+        cx.run_until_parked();
+
+        // F-PRJ-03: the picked directory has no `.git`, so it gets the
+        // confirmation prompt before being added — answer "Add without Git"
+        // to reach the same AddProject outcome this test asserts.
+        cx.simulate_prompt_answer("Add without Git");
         cx.run_until_parked();
 
         let emitted = events.borrow();
