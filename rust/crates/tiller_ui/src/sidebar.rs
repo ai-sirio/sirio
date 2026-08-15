@@ -277,6 +277,20 @@ pub enum RowKind {
     NewWorktree,
 }
 
+/// Which field of the [`WorktreePrompt`] is receiving keystrokes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorktreePromptField {
+    /// The (required) branch-name field.
+    Branch,
+    /// The optional base-branch override (F-PRJ-17); empty means "from
+    /// HEAD", matching `create_worktree`'s own default.
+    Base,
+    /// The optional checkout-location override (F-PRJ-18); empty means
+    /// the project's sibling directory, matching
+    /// `resolve_parent_directory`'s own default.
+    Location,
+}
+
 /// The open branch-name prompt for creating a worktree.
 #[derive(Clone)]
 struct WorktreePrompt {
@@ -288,10 +302,27 @@ struct WorktreePrompt {
     repo_root: PathBuf,
     /// The branch name being typed.
     draft: String,
+    /// The optional base-branch override being typed (F-PRJ-17).
+    base_draft: String,
+    /// The optional checkout-location override being typed (F-PRJ-18).
+    location_draft: String,
+    /// Which of the three fields above Tab/keystrokes currently target.
+    focused_field: WorktreePromptField,
     /// A creation error to show under the field, if the last attempt failed.
     error: Option<String>,
     /// Focus for the prompt's text field.
     focus: FocusHandle,
+}
+
+impl WorktreePrompt {
+    /// The draft string that keystrokes currently target.
+    fn focused_draft_mut(&mut self) -> &mut String {
+        match self.focused_field {
+            WorktreePromptField::Branch => &mut self.draft,
+            WorktreePromptField::Base => &mut self.base_draft,
+            WorktreePromptField::Location => &mut self.location_draft,
+        }
+    }
 }
 
 /// A fixture-backed project sidebar.
@@ -1347,6 +1378,9 @@ impl Sidebar {
             project_name: project.title.clone(),
             repo_root,
             draft: String::new(),
+            base_draft: String::new(),
+            location_draft: String::new(),
+            focused_field: WorktreePromptField::Branch,
             error: None,
             focus,
         });
@@ -1380,10 +1414,25 @@ impl Sidebar {
         let repo_root = prompt.repo_root.clone();
         let project_name = prompt.project_name.clone();
         let project_row_id = prompt.project_row_id;
-        // The worktree lives next to the project (or at an explicit
-        // override), named `{project}-{branch}` — mirroring the Swift app.
+        // F-PRJ-17: an explicit base branch, when typed, is threaded through
+        // to `create_worktree`'s `base` argument instead of the hard-coded
+        // `None` this prompt used to send (git falls back to HEAD itself).
+        let base = {
+            let trimmed = prompt.base_draft.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        };
+        // F-PRJ-18: an explicit checkout-location override, when typed,
+        // replaces the project's sibling directory as the new worktree's
+        // parent — mirroring `WorktreeDefaults.resolveParentDirectory`'s
+        // override arm in the Swift app.
+        let location_override = {
+            let trimmed = prompt.location_draft.trim();
+            (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+        };
+        // The worktree lives next to the project (or at the override
+        // above), named `{project}-{branch}` — mirroring the Swift app.
         let path = derive_worktree_path(
-            &resolve_parent_directory(&repo_root, None),
+            &resolve_parent_directory(&repo_root, location_override.as_deref()),
             &project_name,
             &branch,
         );
@@ -1391,11 +1440,17 @@ impl Sidebar {
         let repo_root_for_task = repo_root.clone();
         let branch_for_task = branch.clone();
         let path_for_task = path.clone();
+        let base_for_task = base.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    create_worktree(&repo_root_for_task, &branch_for_task, &path_for_task, None)
+                    create_worktree(
+                        &repo_root_for_task,
+                        &branch_for_task,
+                        &path_for_task,
+                        base_for_task.as_deref(),
+                    )
                 })
                 .await;
             this.update(cx, |sidebar, cx| match result {
@@ -1530,9 +1585,19 @@ impl Sidebar {
         match event.keystroke.key.as_str() {
             "enter" | "return" => self.confirm_worktree_prompt(cx),
             "escape" => self.cancel_worktree_prompt(cx),
+            "tab" => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.focused_field = match prompt.focused_field {
+                        WorktreePromptField::Branch => WorktreePromptField::Base,
+                        WorktreePromptField::Base => WorktreePromptField::Location,
+                        WorktreePromptField::Location => WorktreePromptField::Branch,
+                    };
+                }
+                cx.notify();
+            }
             "backspace" | "delete" => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.draft.pop();
+                    prompt.focused_draft_mut().pop();
                 }
                 cx.notify();
             }
@@ -1543,7 +1608,7 @@ impl Sidebar {
                     && character != "\n"
                 {
                     if let Some(prompt) = self.prompt.as_mut() {
-                        prompt.draft.push_str(character);
+                        prompt.focused_draft_mut().push_str(character);
                     }
                     cx.notify();
                 }
@@ -1700,6 +1765,47 @@ impl Sidebar {
             | SidebarContextAction::NewTab(NewTabAction::NewBrowser)
             | SidebarContextAction::NewTab(NewTabAction::SplitClaudeCode) => "unsupported",
         }
+    }
+
+    /// One text field in the New Worktree prompt: branch, base branch
+    /// (F-PRJ-17), or checkout location (F-PRJ-18). The focused field draws
+    /// the selection-ring border the single branch field used to own alone;
+    /// unfocused fields fall back to a hairline so only one field reads as
+    /// "live" at a time (Tab, not click, moves focus — see `on_prompt_key`).
+    fn render_worktree_prompt_field(
+        id: &'static str,
+        placeholder: &'static str,
+        value: &str,
+        focused: bool,
+        theme: Theme,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .debug_selector(move || id.to_string())
+            .w_full()
+            .h(px(26.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded(theme.radii.control)
+            .bg(theme.filter_field_bg)
+            .border_1()
+            .border_color(if focused {
+                theme.selection_ring
+            } else {
+                theme.hairline
+            })
+            .text_size(theme.typography.footnote)
+            .text_color(if value.is_empty() {
+                theme.meta
+            } else {
+                theme.title
+            })
+            .child(if value.is_empty() {
+                placeholder.to_owned()
+            } else {
+                value.to_owned()
+            })
     }
 
     fn render_context_menu(
@@ -2647,29 +2753,27 @@ impl Render for Sidebar {
                                         .text_color(theme.title)
                                         .child(format!("New worktree in {}", prompt.project_name)),
                                 )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .h(px(26.0))
-                                        .px(px(8.0))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(theme.radii.control)
-                                        .bg(theme.filter_field_bg)
-                                        .border_1()
-                                        .border_color(theme.selection_ring)
-                                        .text_size(theme.typography.footnote)
-                                        .text_color(if prompt.draft.is_empty() {
-                                            theme.meta
-                                        } else {
-                                            theme.title
-                                        })
-                                        .child(if prompt.draft.is_empty() {
-                                            "branch name".to_owned()
-                                        } else {
-                                            prompt.draft.clone()
-                                        }),
-                                )
+                                .child(Self::render_worktree_prompt_field(
+                                    "worktree-prompt-branch",
+                                    "branch name",
+                                    &prompt.draft,
+                                    prompt.focused_field == WorktreePromptField::Branch,
+                                    theme,
+                                ))
+                                .child(Self::render_worktree_prompt_field(
+                                    "worktree-prompt-base",
+                                    "base branch (optional, defaults to HEAD)",
+                                    &prompt.base_draft,
+                                    prompt.focused_field == WorktreePromptField::Base,
+                                    theme,
+                                ))
+                                .child(Self::render_worktree_prompt_field(
+                                    "worktree-prompt-location",
+                                    "location (optional, defaults next to project)",
+                                    &prompt.location_draft,
+                                    prompt.focused_field == WorktreePromptField::Location,
+                                    theme,
+                                ))
                                 .when(prompt.error.is_some(), |this| {
                                     this.child(
                                         div()
@@ -2682,7 +2786,7 @@ impl Render for Sidebar {
                                     div()
                                         .text_size(theme.typography.caption2)
                                         .text_color(theme.meta)
-                                        .child("Enter to create · Esc to cancel"),
+                                        .child("Tab to switch field · Enter to create · Esc to cancel"),
                                 ),
                         ),
                 )
