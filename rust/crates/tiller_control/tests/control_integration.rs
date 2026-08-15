@@ -1027,6 +1027,50 @@ fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
 }
 
 #[test]
+fn pane_registry_read_finds_a_live_application_pane_panel_list_already_reported() {
+    // Regression for F-AGENT-API-01: `panel.list` merges control- and
+    // renderer-owned panes, but `read()` used to check only the
+    // control-owned map, so a renderer-owned pane (e.g. an ACP-bridged
+    // OpenCode tab) that `panel.list` had just shown as wired failed
+    // `panel.read` moments later with `UnknownPane`.
+    let registry = PaneRegistry::new();
+    let working_directory = std::env::current_dir().expect("current directory");
+    let pane = PaneInfo {
+        id: "pane-opencode-1".to_string(),
+        tab: "OpenCode".to_string(),
+        title: "OpenCode".to_string(),
+        agent: "opencode".to_string(),
+        active: true,
+    };
+    registry
+        .set_external_state(
+            working_directory.clone(),
+            vec![(
+                pane.clone(),
+                PaneStateSnapshot {
+                    working_directory: working_directory.clone(),
+                    scrollback: b"opencode ready\n".to_vec(),
+                    exit_status: None,
+                },
+            )],
+        )
+        .expect("application pane state registers");
+
+    assert!(
+        registry
+            .list_for(&working_directory)
+            .expect("list panes")
+            .iter()
+            .any(|listed| listed.id == pane.id),
+        "panel.list must report the renderer-owned pane as wired"
+    );
+    assert_eq!(
+        registry.read(&pane.id).expect("panel.read finds the pane"),
+        b"opencode ready\n".to_vec()
+    );
+}
+
+#[test]
 fn tillerctl_panel_create_emits_the_panel_method() {
     let (server, handler) = TestServer::start();
     let output = tillerctl(
