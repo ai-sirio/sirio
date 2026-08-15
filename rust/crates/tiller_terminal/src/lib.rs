@@ -263,6 +263,13 @@ struct TerminalHandle {
     shell_pid: u32,
     shutdown_started: Arc<AtomicBool>,
     resize_generation: Arc<AtomicU64>,
+    /// The terminal grid's last-painted window-space bounds. `TerminalElement`
+    /// (used only inside `Render`, no access to `TerminalView`'s fields)
+    /// writes this every `prepaint`; `TerminalView::on_left_mouse_down` reads
+    /// it to convert `event.position` (window space) into cell coordinates.
+    /// F-TERM-UI-02: without this, mouse clicks anywhere but the window's
+    /// top-left corner map to the wrong row/column.
+    last_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
 }
 
 impl TerminalHandle {
@@ -356,6 +363,7 @@ impl TerminalHandle {
                 shell_pid,
                 shutdown_started: Arc::new(AtomicBool::new(false)),
                 resize_generation: Arc::new(AtomicU64::new(0)),
+                last_bounds: Arc::new(Mutex::new(None)),
             },
             wakeup_rx,
         ))
@@ -1074,10 +1082,20 @@ impl TerminalView {
         let Some(terminal) = self.running_terminal() else {
             return;
         };
-        let column = (f32::from(event.position.x) / 8.0).floor().max(0.0) as usize;
-        let row = (f32::from(event.position.y) / f32::from(LINE_HEIGHT))
-            .floor()
-            .max(0.0) as usize;
+        // event.position arrives in window coordinates; the paint path below
+        // (TerminalElement::prepaint) computes cell rects as
+        // `bounds.origin + cell_width * column`, so hit-testing must undo
+        // that same offset or every pane but one flush against the window's
+        // top-left corner maps clicks to the wrong cell (F-TERM-UI-02).
+        let origin = terminal
+            .last_bounds
+            .lock()
+            .map(|bounds| bounds.origin)
+            .unwrap_or_default();
+        let local_x = (f32::from(event.position.x) - f32::from(origin.x)).max(0.0);
+        let local_y = (f32::from(event.position.y) - f32::from(origin.y)).max(0.0);
+        let column = (local_x / 8.0).floor().max(0.0) as usize;
+        let row = (local_y / f32::from(LINE_HEIGHT)).floor().max(0.0) as usize;
         if let Some(url) = terminal.link_at(row, column) {
             cx.emit(TerminalLinkEvent {
                 target: self.identity.clone(),
@@ -1287,6 +1305,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
+        *self.terminal.last_bounds.lock() = Some(bounds);
         let terminal_font = font("MesloLGS Nerd Font Mono");
         let font_id = window.text_system().resolve_font(&terminal_font);
         let cell_width = window
