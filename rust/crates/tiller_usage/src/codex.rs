@@ -252,7 +252,20 @@ enum CodexApiFailure {
 /// refresh token (when present) replaces the stored one, mirroring the
 /// Swift's `CodexTokenRefresher`.
 fn refresh_token(credentials: &CodexCredentials) -> Result<CodexCredentials, TokenRefreshFailure> {
-    refresh_token_at(TOKEN_URL, credentials)
+    refresh_token_at(&token_url(), credentials)
+}
+
+/// The token endpoint `refresh_token` calls, overridable via
+/// `TILLER_CODEX_TOKEN_URL` (F-CORE-USG-05). Before this override existed,
+/// `refresh_token_at` — the function that actually parses a response and
+/// drives `save_credentials_to`'s merge — was only reachable from the real
+/// `CodexUsageFetcher::fetch` path through the hardcoded `auth.openai.com`
+/// endpoint, so the merge-on-success behaviour could be proven live (through
+/// the actual `tiller` binary, not just a unit test) only by pointing this
+/// var at a local fixture server; `codex` itself never reads this var, so
+/// setting it cannot affect the real `codex` CLI's own token file.
+fn token_url() -> String {
+    std::env::var("TILLER_CODEX_TOKEN_URL").unwrap_or_else(|_| TOKEN_URL.to_string())
 }
 
 /// [`refresh_token`], against an explicit endpoint rather than the hardcoded
@@ -487,6 +500,37 @@ mod tests {
         assert_eq!(json["auth_mode"], "oauth");
         assert_eq!(json["custom_field"], "kept");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F-CORE-USG-05: proves the override itself, not just `refresh_token_at`
+    /// — drives the *public* `refresh_token()` (the function
+    /// `CodexUsageFetcher::fetch` actually calls) through
+    /// `TILLER_CODEX_TOKEN_URL` pointed at a local fixture, so this is the
+    /// same code path a live `tiller` binary run with that var set would
+    /// take, closing the "TOKEN_URL not overridable" gap.
+    #[test]
+    fn refresh_token_honors_the_token_url_override() {
+        let url = one_shot_http_fixture(
+            "200 OK",
+            r#"{"access_token":"override-access","refresh_token":"override-refresh"}"#,
+        );
+        // SAFETY: no other test in this module reads or writes this var.
+        unsafe {
+            std::env::set_var("TILLER_CODEX_TOKEN_URL", &url);
+        }
+        let credentials = CodexCredentials {
+            access_token: "stale".into(),
+            refresh_token: "old-refresh".into(),
+            account_id: None,
+            last_refresh: None,
+        };
+        let result = refresh_token(&credentials);
+        unsafe {
+            std::env::remove_var("TILLER_CODEX_TOKEN_URL");
+        }
+        let refreshed = result.expect("the override endpoint answers 200");
+        assert_eq!(refreshed.access_token, "override-access");
+        assert_eq!(refreshed.refresh_token, "override-refresh");
     }
 
     /// F-CORE-USG-06: the classification `refresh_token`'s caller currently
