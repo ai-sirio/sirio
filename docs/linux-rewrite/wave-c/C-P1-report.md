@@ -66,3 +66,21 @@ and passes (`cargo test -p tiller_terminal a_drawn_terminal_accepts_a_real_exter
 Nothing in the code needed fixing; the row's own evidence already correctly states no lane can
 drive a real XDND drop end-to-end (ENVIRONMENT.md). Left as `already-correct`, not reclassified,
 since I am not the verdict-writer.
+
+## F-TERM-UI-02 — strengthened as a unit test
+
+`opens_terminal_link(event.modifiers.platform)` at `lib.rs`'s `on_left_mouse_down` had only
+`link_router.rs`'s pure-function unit test (`linux_link_gesture_is_platform_modifier_only`)
+covering the boolean logic — no test drove the real mouse-dispatch path on a live, drawn
+terminal. Added `platform_modifier_click_opens_a_terminal_link`: spawns a real PTY that prints
+an actual URL, waits for it to land in the alacritty grid (`terminal.link_at(0, 0)`), then
+drives the real `on_left_mouse_down` via `cx.simulate_mouse_down` twice at the same screen
+point — once with `Modifiers::none()` (asserts no `TerminalLinkEvent`), once with
+`Modifiers { platform: true, .. }` (asserts the event carries the exact URL
+`https://example.test/docs`).
+
+- `howToExercise`: `cd rust && cargo test -p tiller_terminal platform_modifier_click_opens_a_terminal_link`.
+  Live: re-confirmed the lane genuinely cannot drive this — `wayland-drive.sh`'s pointer command
+  has no modifier-held-click primitive and the lane's keyboard-keeper stays unmodified after
+  startup (per prior evidence). Instrument-blocked, not platform-impossible.
+- Commit: `b177b53` — `test(terminal): prove platform-modifier click opens a terminal link`
