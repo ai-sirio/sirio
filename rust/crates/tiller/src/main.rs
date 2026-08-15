@@ -587,6 +587,10 @@ enum WorkspaceAction {
         command: &'static str,
     },
     OpenSettings,
+    /// F-TAB-08: clicking the New Chat menu's "Other agents…" empty-state
+    /// card (drawn when no supported agent is on PATH) opens Settings
+    /// straight to the Agents section instead of the general default.
+    OpenAgentSettings,
     CloseSettings,
     /// F-BRW-09: a plain (non-Cmd+Shift) click on an HTTP(S) link in chat
     /// opens Tiller's internal browser tab instead of the system browser.
@@ -2785,6 +2789,9 @@ impl TillerWorkspace {
                                 }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
+                                }
+                                WorkspaceAction::OpenAgentSettings => {
+                                    workspace.open_settings(Some(SettingsCategory::Agents), cx);
                                 }
                                 WorkspaceAction::CloseSettings => {
                                     workspace.show_settings = false;
@@ -9505,6 +9512,7 @@ fn main() {
                 let catalog_for_sidebar = sidebar_projects(&project_catalog);
                 let identities_for_sidebar = sidebar_project_identities(&project_catalog);
                 let pending_for_chat_agent = pending_for_tab_bar.clone();
+                let pending_for_agent_settings = pending_for_tab_bar.clone();
                 let tab_bar = cx.new(|cx| {
                     TabBar::new(cx)
                         .on_new_tab(move |action| {
@@ -9515,6 +9523,11 @@ fn main() {
                         .on_chat_agent(move |id| {
                             if let Ok(mut actions) = pending_for_chat_agent.lock() {
                                 actions.push(WorkspaceAction::NewChatAgent(id));
+                            }
+                        })
+                        .on_open_agent_settings(move || {
+                            if let Ok(mut actions) = pending_for_agent_settings.lock() {
+                                actions.push(WorkspaceAction::OpenAgentSettings);
                             }
                         })
                 });
