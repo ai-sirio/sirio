@@ -2575,6 +2575,19 @@ struct TillerWorkspace {
     /// bypass this — same precedent as `project.add`: no user is present to
     /// answer a prompt.
     pending_pane_close: Option<PendingPaneClose>,
+    /// F-WIN-10: a transient, floating, auto-dismissing notice -- distinct
+    /// from `Sidebar::set_notice`'s persistent inline banner, which stays
+    /// silent when the sidebar isn't the visible surface. `toast_id` tags
+    /// each raise so a stale auto-dismiss timer (from a toast a newer one
+    /// already replaced) can't clear a toast it doesn't own.
+    toast: Option<Toast>,
+    next_toast_id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Toast {
+    id: u64,
+    message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2944,6 +2957,8 @@ impl TillerWorkspace {
             show_settings: false,
             restore_focus_pending: false,
             pending_pane_close: None,
+            toast: None,
+            next_toast_id: 0,
         };
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
@@ -3329,15 +3344,15 @@ impl TillerWorkspace {
                 self.refresh_sidebar(cx);
             }
             Ok(false) => {
-                self.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.set_notice(format!("already tracked or nested: {}", path.display()), cx)
-                });
-                cx.notify();
+                let message = format!("already tracked or nested: {}", path.display());
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.set_notice(message.clone(), cx));
+                self.show_toast(message, cx);
             }
             Err(error) => {
                 self.sidebar
-                    .update(cx, |sidebar, cx| sidebar.set_notice(error, cx));
-                cx.notify();
+                    .update(cx, |sidebar, cx| sidebar.set_notice(error.clone(), cx));
+                self.show_toast(error, cx);
             }
         }
     }
@@ -4174,6 +4189,38 @@ impl TillerWorkspace {
                 snapshot.working_directory.to_string_lossy().into_owned(),
             ),
         ])
+    }
+
+    /// F-WIN-10: raises a transient, floating notice that clears itself
+    /// after `TOAST_DURATION` -- see the `toast` field docs for how this
+    /// differs from `Sidebar::set_notice`'s persistent inline banner.
+    fn show_toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        const TOAST_DURATION: Duration = Duration::from_secs(4);
+        self.next_toast_id += 1;
+        let id = self.next_toast_id;
+        self.toast = Some(Toast {
+            id,
+            message: message.into(),
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TOAST_DURATION).await;
+            let _ = this.update(cx, |workspace, cx| {
+                // Only clear it if nothing newer replaced it in the
+                // meantime -- an in-flight timer from a stale toast must
+                // not wipe a toast raised after it.
+                if workspace.toast.as_ref().is_some_and(|toast| toast.id == id) {
+                    workspace.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        self.toast = None;
+        cx.notify();
     }
 
     fn sync_activity(&self, cx: &mut Context<Self>) {
@@ -8142,6 +8189,39 @@ impl TillerWorkspace {
             .child(div().flex_1().child(body))
             .into_any_element()
     }
+
+    /// F-WIN-10: a floating, bottom-right, auto-dismissing notice -- the
+    /// row's clause explicitly, unlike `Sidebar::set_notice`'s persistent
+    /// inline banner (which stays silent unless the sidebar happens to be
+    /// the visible surface). `None` when no toast is live, so this costs
+    /// nothing in the common case.
+    fn render_toast(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
+        let toast = self.toast.clone()?;
+        let dismiss_entity = entity;
+        Some(
+            div()
+                .id("workspace-toast")
+                .debug_selector(|| "workspace-toast".to_owned())
+                .absolute()
+                .bottom(px(20.0))
+                .right(px(20.0))
+                .max_w(px(360.0))
+                .px(px(14.0))
+                .py(px(10.0))
+                .rounded(theme.radii.control)
+                .border_1()
+                .border_color(theme.hairline)
+                .bg(theme.card_fill)
+                .shadow_lg()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.title)
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    dismiss_entity.update(cx, |workspace, cx| workspace.dismiss_toast(cx));
+                })
+                .child(toast.message)
+                .into_any_element(),
+        )
+    }
 }
 
 impl TillerWorkspace {
@@ -8295,6 +8375,7 @@ impl Render for TillerWorkspace {
             .when(self.palette_open, |this| {
                 this.child(self.render_command_palette(theme, cx.entity()))
             })
+            .children(self.render_toast(theme, cx.entity()))
     }
 }
 
@@ -10751,6 +10832,17 @@ mod tests {
             }),
             project_count,
             "a duplicate insertion must not add a second project"
+        );
+
+        // F-WIN-10: the same error must also raise a floating, transient
+        // toast -- distinct from the sidebar's persistent inline banner
+        // asserted above, and it must disappear on its own.
+        wait_for_drawn(&mut cx, "workspace-toast");
+        cx.background_executor.advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("workspace-toast").is_none(),
+            "the toast must auto-dismiss after its duration elapses"
         );
     }
 
