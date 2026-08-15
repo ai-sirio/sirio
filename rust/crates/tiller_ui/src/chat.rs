@@ -19,9 +19,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tiller_acp::{
-    AcpClient, AcpEvent, AgentCommand, AvailableCommandInfo, ContextUsage, EffortOption,
-    ImageAttachment, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
-    ToolCallLocationInfo,
+    AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage,
+    EffortOption, ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo,
+    ToolCallDiff, ToolCallLocationInfo,
 };
 use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_git::{GitActions, status as git_status};
@@ -836,8 +836,18 @@ pub struct Chat {
     /// case-insensitive substring match against name/id/description, order
     /// preserved, empty query keeps every model.
     model_search: String,
+    /// F-CHAT-15: the session-mode selector (ask/plan/auto, entirely
+    /// agent-defined), re-read from `AcpClient::mode_catalog` on connect and
+    /// after every event since the wire only pushes mode changes as an
+    /// untyped `CurrentModeUpdate` the ACP layer folds into that live cell
+    /// rather than a discrete event. `None` when the agent never advertised
+    /// `modes` — most ACP agents today don't, so the pill stays a plain
+    /// status readout exactly as before this row.
+    mode_catalog: Option<ModeCatalog>,
+    mode_picker_open: bool,
     context_popover_open: bool,
     model_picker_focus: FocusHandle,
+    mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
     transcript_focus: FocusHandle,
     context_usage: Option<ContextUsage>,
@@ -961,6 +971,7 @@ impl Chat {
                 for_request: None,
             },
             model_picker_focus: cx.focus_handle().tab_stop(true),
+            mode_picker_focus: cx.focus_handle().tab_stop(true),
             context_popover_focus: cx.focus_handle().tab_stop(true),
             overflow_focus: cx.focus_handle().tab_stop(true),
             transcript_focus: cx.focus_handle().tab_stop(false),
@@ -974,6 +985,8 @@ impl Chat {
             selected_model: None,
             model_picker_open: false,
             model_search: String::new(),
+            mode_catalog: None,
+            mode_picker_open: false,
             context_popover_open: false,
             context_usage: None,
             list_state,
@@ -1533,6 +1546,15 @@ impl Chat {
             }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
+        // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
+        // this chat's own `set_mode` resolving) only reaches the wire as an
+        // untyped `OtherSessionUpdate` today — `AcpClient` folds it into its
+        // live `mode_catalog` cell for every kind of event, so re-reading it
+        // here after any event picks up the change without a dedicated
+        // event variant.
+        if let Some(client) = &self.client {
+            self.mode_catalog = client.mode_catalog();
+        }
         cx.notify();
     }
 
@@ -1905,6 +1927,42 @@ impl Chat {
         }
         self.selected_model = Some(option.id);
         self.model_picker_open = false;
+        cx.notify();
+    }
+
+    /// F-CHAT-15: opens the session-mode picker anchored to the status
+    /// pill. A no-op when the agent never advertised `modes` — the pill has
+    /// no chevron and no click handler in that case (mirrors the model
+    /// chip's degrade-to-badge rule, F-CHAT-36).
+    fn toggle_mode_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode_catalog.is_none() {
+            return;
+        }
+        self.model_picker_open = false;
+        self.context_popover_open = false;
+        self.mode_picker_open = !self.mode_picker_open;
+        if self.mode_picker_open {
+            let focus = self.mode_picker_focus.clone();
+            window.focus(&focus, cx);
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+            });
+        }
+        cx.notify();
+    }
+
+    /// F-CHAT-15: asks the live agent to switch session mode, then
+    /// optimistically reflects the choice as `current_id` so the pill label
+    /// updates immediately rather than waiting on the round-trip
+    /// `CurrentModeUpdate`/`set_mode` confirmation.
+    fn select_mode(&mut self, mode: AgentMode, cx: &mut Context<Self>) {
+        if let Some(client) = &self.client {
+            let _ = client.set_mode(mode.id.clone());
+        }
+        if let Some(catalog) = &mut self.mode_catalog {
+            catalog.current_id = mode.id;
+        }
+        self.mode_picker_open = false;
         cx.notify();
     }
 
@@ -2630,6 +2688,9 @@ impl Chat {
         if self.model_picker_open {
             self.model_picker_open = false;
             cx.notify();
+        } else if self.mode_picker_open {
+            self.mode_picker_open = false;
+            cx.notify();
         } else if self.context_popover_open {
             self.context_popover_open = false;
             cx.notify();
@@ -2677,6 +2738,7 @@ impl Chat {
             match result {
                 Ok((client, events)) => {
                     let initial_catalog = client.model_catalog().cloned();
+                    let initial_mode_catalog = client.mode_catalog();
                     let should_send = this
                         .update(cx, |chat, _| {
                             chat.clear_recovered_connection_errors();
@@ -2691,6 +2753,7 @@ impl Chat {
                                 chat.available_models = options;
                                 chat.selected_model = Some(selected_id);
                             }
+                            chat.mode_catalog = initial_mode_catalog;
                             chat.connecting = false;
                             std::mem::take(&mut chat.retry_pending_send)
                         })
@@ -4712,17 +4775,29 @@ impl Chat {
         // ("idle"/"working") or a mode name ("Ask") — the dot survives the
         // switch to the post-turn mode dropdown, it never disappears.
         let connecting = self.connecting;
+        // F-CHAT-15: once a live mode catalog exists, the "Ask" fallback
+        // gives way to the agent's own current-mode name — the pill was a
+        // hardcoded word before this row, now it reflects what
+        // `AcpClient::set_mode` would actually change.
+        let live_mode_name = self.mode_catalog.as_ref().and_then(|catalog| {
+            catalog
+                .options
+                .iter()
+                .find(|mode| mode.id == catalog.current_id)
+                .map(|mode| mode.name.clone())
+        });
         let (dot, label) = if connecting {
-            (rgb(0xf5a623), "connecting")
+            (rgb(0xf5a623), "connecting".to_string())
         } else if self.streaming {
-            (rgb(0xf5a623), "working")
+            (rgb(0xf5a623), "working".to_string())
         } else if self.has_completed_turn {
-            (rgb(0x53c653), "Ask")
+            (rgb(0x53c653), live_mode_name.unwrap_or_else(|| "Ask".into()))
         } else if self.client.is_some() {
-            (rgb(0x53c653), "idle")
+            (rgb(0x53c653), "idle".to_string())
         } else {
-            (rgb(0x8a8d99), "offline")
+            (rgb(0x8a8d99), "offline".to_string())
         };
+        let mode_selectable = self.has_completed_turn && self.mode_catalog.is_some();
         let status_pill = div()
             .flex()
             .items_center()
@@ -4731,12 +4806,7 @@ impl Chat {
             .px(px(7.0))
             .rounded(theme.radii.control)
             .bg(colors.raised)
-            .text_size(typography.ui_size)
-            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(div().text_color(colors.title).child(label))
-            .when(self.has_completed_turn, |this| {
-                this.child(div().text_color(colors.meta).child("⌄"))
-            });
+            .text_size(typography.ui_size);
         let status_pill = if connecting {
             status_pill
                 .id("chat-connecting")
@@ -4746,6 +4816,18 @@ impl Chat {
                 .id("chat-status")
                 .debug_selector(|| "chat-status".into())
         };
+        let status_pill = status_pill
+            .when(mode_selectable, |this| {
+                this.hover(|style| style.bg(colors.chat_row_hover))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_mode_picker(window, cx);
+                    }))
+            })
+            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
+            .child(div().text_color(colors.title).child(label))
+            .when(self.has_completed_turn, |this| {
+                this.child(div().text_color(colors.meta).child("⌄"))
+            });
 
         let selected_model_name = self
             .selected_model
@@ -5020,6 +5102,80 @@ impl Chat {
                                     .child(div().flex().gap(px(4.0)).children(choices)),
                             )
                     }),
+            )
+        } else {
+            None
+        };
+
+        // F-CHAT-15: the session-mode picker, anchored above the status
+        // pill the same way `model_picker` anchors above the model chip.
+        // No search field — mode lists are small and entirely agent-defined
+        // (ask/plan/auto today), so a flat list of rows is enough.
+        let mode_picker = if self.mode_picker_open {
+            let mode_entity = entity.clone();
+            let current_id = self
+                .mode_catalog
+                .as_ref()
+                .map(|catalog| catalog.current_id.clone())
+                .unwrap_or_default();
+            let options: Vec<AgentMode> = self
+                .mode_catalog
+                .as_ref()
+                .map(|catalog| catalog.options.clone())
+                .unwrap_or_default();
+            Some(
+                div()
+                    .id("mode-picker")
+                    .debug_selector(|| "mode-picker".into())
+                    .key_context("ChatModelPicker")
+                    .track_focus(&self.mode_picker_focus)
+                    .on_action(cx.listener(Self::cancel))
+                    .absolute()
+                    .left(px(0.0))
+                    .bottom(px(43.0))
+                    .w(px(200.0))
+                    .p(px(6.0))
+                    .rounded(theme.radii.toast)
+                    .bg(colors.card_fill)
+                    .border_1()
+                    .border_color(colors.hairline)
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.mode_picker_open = false;
+                        cx.notify();
+                    }))
+                    .when(options.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .p(px(8.0))
+                                .text_size(typography.footnote)
+                                .text_color(colors.meta)
+                                .child("No modes offered"),
+                        )
+                    })
+                    .children(options.into_iter().map(|mode| {
+                        let mode_id = mode.id.clone();
+                        let mode_name = mode.name.clone();
+                        let row_entity = mode_entity.clone();
+                        let is_selected = mode.id == current_id;
+                        div()
+                            .id(format!("mode-option-{mode_id}"))
+                            .debug_selector(move || format!("mode-option-{mode_id}"))
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.footnote)
+                            .text_color(colors.title)
+                            .when(is_selected, |this| this.bg(colors.selection_fill))
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(move |_, _, cx| {
+                                row_entity.update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
+                            })
+                            .child(mode_name)
+                    })),
             )
         } else {
             None
@@ -5715,6 +5871,7 @@ impl Chat {
             .children(mention_popup)
             .children(overflow_menu)
             .children(model_picker)
+            .children(mode_picker)
             .children(context_popover)
     }
 }
@@ -8251,6 +8408,66 @@ mod tests {
         cx.simulate_click(point(px(10.0), px(10.0)), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("model-picker").is_none());
+    }
+
+    /// F-CHAT-15: the session-mode pill opens a picker over the agent's
+    /// advertised modes, selecting one calls through to the live
+    /// `AcpClient::set_mode` seam and updates the pill label in place —
+    /// this was a purely cosmetic 4-way string flip before this row wired
+    /// it to `ModeCatalog`.
+    #[gpui::test]
+    async fn mode_picker_selects_an_agent_advertised_mode_and_updates_the_pill(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (_chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            configure_test_chat(&mut chat);
+            chat.mode_catalog = Some(ModeCatalog {
+                current_id: "ask".into(),
+                options: vec![
+                    AgentMode {
+                        id: "ask".into(),
+                        name: "Ask".into(),
+                        description: None,
+                    },
+                    AgentMode {
+                        id: "plan".into(),
+                        name: "Plan".into(),
+                        description: None,
+                    },
+                ],
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let pill = cx
+            .debug_bounds("chat-status")
+            .expect("status pill is rendered");
+        cx.simulate_click(pill.center(), Modifiers::none());
+        cx.run_until_parked();
+        let option = cx
+            .debug_bounds("mode-option-plan")
+            .expect("agent mode option is rendered");
+        cx.simulate_click(option.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("mode-picker").is_none(),
+            "selecting a mode closes the picker"
+        );
+        _chat.read_with(cx, |chat, _| {
+            assert_eq!(
+                chat.mode_catalog.as_ref().map(|catalog| catalog.current_id.as_str()),
+                Some("plan"),
+                "selecting a mode updates the live catalog's current id"
+            );
+        });
     }
 
     /// F-CHAT-16: the model picker's search field filters the driver's own
