@@ -862,22 +862,39 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
             .enumerate()
             .map(|(index, _)| worktree_id(&project.id, index))
             .collect();
+        // F-CTRL-WORK-01: this upsert re-derives every worktree row from
+        // the in-memory catalog, which carries no `comment` field. Without
+        // carrying the existing row's comment/created_at forward, every
+        // `schedule_catalog` call (startup normalization, project add,
+        // clone, ...) would blow away a comment set via `worktree.set`,
+        // even though that write went through `persist_worktree_comment`
+        // moments earlier.
+        let existing_by_id: std::collections::HashMap<String, WorktreeRecord> =
+            db.worktrees_of_project(&project.id)?
+                .into_iter()
+                .map(|worktree| (worktree.id.clone(), worktree))
+                .collect();
         if project.is_git {
-            for worktree in db.worktrees_of_project(&project.id)? {
+            for worktree in existing_by_id.values() {
                 if !desired_worktree_ids.contains(&worktree.id) {
                     db.remove_worktree(&worktree.id)?;
                 }
             }
         }
         for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
+            let id = worktree_id(&project.id, worktree_index);
             let mut record = WorktreeRecord::new(
-                worktree_id(&project.id, worktree_index),
+                id.clone(),
                 &project.id,
                 &worktree.branch,
                 worktree.path.to_string_lossy(),
             );
             record.order_idx = worktree_index as i64;
             record.is_primary = worktree.is_primary;
+            if let Some(existing) = existing_by_id.get(&id) {
+                record.comment = existing.comment.clone();
+                record.created_at = existing.created_at;
+            }
             db.save_worktree(&record)?;
         }
     }
@@ -2213,6 +2230,71 @@ mod tests {
             restored_settings.worktree_location_override.as_deref(),
             Some("/srv/worktrees"),
             "the worktree location override survives a write/restore round trip"
+        );
+    }
+
+    /// F-CTRL-WORK-01: a comment persisted on a worktree row (as
+    /// `persist_worktree_comment` does from `worktree.set`) must survive a
+    /// later `schedule_catalog` call built from an in-memory
+    /// `ProjectCatalog` that has no notion of comments at all — exactly
+    /// what `main()` does at every startup via its catalog-normalization
+    /// call. Before this fix, `write_catalog` rebuilt every worktree row
+    /// from scratch with `WorktreeRecord::new()` (comment: None) and
+    /// upserted it, wiping the column back to NULL on every boot.
+    #[test]
+    fn schedule_catalog_preserves_a_previously_persisted_worktree_comment() {
+        let dir = TempDir::new();
+        let root = dir.0.join("repo");
+        std::fs::create_dir_all(&root).expect("repo dir");
+        run_git(&root, &["init", "--quiet"]);
+        run_git(&root, &["config", "user.email", "tiller-tests@example.com"]);
+        run_git(&root, &["config", "user.name", "Tiller Tests"]);
+        std::fs::write(root.join("README"), "catalog fixture\n").expect("fixture file");
+        run_git(&root, &["add", "README"]);
+        run_git(&root, &["commit", "--quiet", "-m", "fixture"]);
+
+        let database = dir.db_path("worktree-comment");
+        let store = SessionStore::open(&database);
+        let discovered = discover_project(&root).expect("discover the fixture repo");
+        let project = catalog_project(&root, discovered);
+        let catalog = ProjectCatalog::from_projects(vec![project.clone()]);
+        // First boot: normalizes the catalog, creating the worktree row.
+        store.schedule_catalog(&catalog);
+
+        // Simulate `persist_worktree_comment`: directly upsert a comment
+        // onto the now-existing worktree row, as the control handler does.
+        let db = AppDatabase::open(&database).expect("reopen database");
+        let worktree_id = db
+            .worktrees_of_project(&project.id)
+            .expect("read worktrees")
+            .into_iter()
+            .next()
+            .expect("primary worktree row exists")
+            .id;
+        let mut record = db
+            .worktree_by_path(&root.to_string_lossy())
+            .expect("query by path")
+            .expect("worktree row exists");
+        record.comment = Some("needs review".to_string());
+        db.save_worktree(&record).expect("persist the comment");
+        drop(db);
+
+        // A later boot (or any other schedule_catalog call) must not wipe
+        // the comment back to NULL.
+        store.schedule_catalog(&catalog);
+
+        let reopened = AppDatabase::open(&database).expect("reopen database again");
+        let worktrees = reopened
+            .worktrees_of_project(&project.id)
+            .expect("read worktrees after re-schedule");
+        let worktree = worktrees
+            .iter()
+            .find(|worktree| worktree.id == worktree_id)
+            .expect("same worktree row still present");
+        assert_eq!(
+            worktree.comment.as_deref(),
+            Some("needs review"),
+            "schedule_catalog must not clobber a previously persisted comment"
         );
     }
 
