@@ -83,3 +83,35 @@ the grep evidence is unambiguous and unchanged from the recorded finding (an emi
 self-test subscriber and zero real ones is a clean, direct proof of "wired but not connected,"
 matching this same ledger's own bar for ACT-25/26). Verdict and reasoning stand on re-confirmed
 code.
+
+### `F-CORE-SET-01` — verdict: **half-proven** (unchanged)
+
+No wave-C commit touched `tiller_ui/src/settings.rs` or `tiller_project/src/settings.rs`'s
+load/clamp paths (the only settings-related wave-C commits, `cddf094`/`6af7ff4` by the
+integrator, added the Translucency toggle and account-identity cache — different fields
+entirely). Did not re-drive the 5 already-confirmed malformed-value fields (font sizes, theme,
+socket-enable, refresh interval) given they're unchanged and already proven live via restart per
+the prior record. Did not attempt the remaining untested fields (mount cap, sidebar widths,
+`TILLER_SOCKET_ENABLE` env override, summarizerAgent) this pass: the `TILLER_SOCKET_ENABLE`
+check specifically can't be driven through `Scripts/wayland-drive.sh` without extending the
+script, since the harness's own readiness gate (`[ -S "$SOCK" ]`) requires the control socket to
+be enabled to confirm the app started at all — disabling it to test the override would make the
+harness report a false `FAIL: no control socket`. Recording the gap rather than guessing.
+
+### `F-CORE-WSP-04` — verdict: **NOT EXERCISED** (unchanged)
+
+Re-grepped `LayoutCommand`/`classify_layout_command` workspace-wide: definition/impl in
+`tiller_project/src/layout.rs`, `pub use` re-export in `lib.rs`, and layout.rs's own tests. Zero
+references in `main.rs` or `tiller_ui`. Unchanged since the prior pass; no wave-C commit touched
+`layout.rs`. `PaneRegistry::split` (the thing P116 actually drove) remains a distinct code path
+from `classify_layout_command` — confirmed by the same grep. Prior record stands.
+
+### `F-CORE-WSP-08` — verdict: **NOT EXERCISED** (unchanged)
+
+Re-grepped `WorkspaceTabViewState` workspace-wide: only `tiller_project/src/layout.rs`
+(definition, field, default) and its `pub use` re-export in `lib.rs`. Zero references in
+`main.rs`, `session.rs`, or any `tiller_ui` file. Unchanged since the prior pass; no wave-C
+commit touched `layout.rs` or `session.rs`. Nobody has exposed a control-socket or UI path to
+this type since the prior record; the pane-restore evidence P116 gathered (control panes surviving
+quit+relaunch) remains a different subsystem than per-tab caret/scroll/fold/draft state. Prior
+record stands.
