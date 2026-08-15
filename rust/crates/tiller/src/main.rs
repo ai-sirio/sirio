@@ -8200,9 +8200,11 @@ fn restored_agent_shell(
 }
 
 /// Rebuilds the shell's tabs from a restored session: chat tabs get a fresh
-/// `Chat` entity (identity, not transcript), terminal tabs get a fresh
-/// terminal in the restored worktree directory, and persisted pane events
-/// rebuild split trees. Returns the tabs and the active index.
+/// `Chat` entity wired to the durable transcript (F-PER-01/F-PERSIST-DB-05 —
+/// its prior turns are restored into `entries` and later turns keep saving),
+/// terminal tabs get a fresh terminal in the restored worktree directory,
+/// and persisted pane events rebuild split trees. Returns the tabs and the
+/// active index.
 fn restore_tabs(
     restored: &RestoredSession,
     working_directory: &std::path::Path,
@@ -8216,6 +8218,18 @@ fn restore_tabs(
         saved_session_refs,
         &working_directory.to_string_lossy(),
     );
+    // F-PER-01/F-PERSIST-DB-05: a restored chat tab previously got a
+    // Chat::launch_with_command with `persistence: None` — this doc's own
+    // "identity, not transcript" comment described that as intentional, but
+    // it means every completed turn after the *first* restart is silently
+    // unsaved (persist_settled_transcript's `self.persistence.as_ref()?`
+    // early-returns), and the transcript never restores into `entries`
+    // either. `session::database_path()` is the same deterministic path
+    // `main()` already opened at startup; `worktree_id` matches what
+    // `add_chat_tab` computes for a freshly created chat, so restored and
+    // freshly-opened chats persist under the same key convention.
+    let database_path = session::database_path();
+    let worktree_id = session::persisted_worktree_id(working_directory);
     let mut tabs = Vec::new();
     let mut active = 0usize;
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
@@ -8239,9 +8253,12 @@ fn restore_tabs(
         register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
-                Chat::launch_with_command(
+                Chat::launch_with_command_and_persistence(
                     command.expect("chat restoration always has a fallback command"),
                     working_directory.to_path_buf(),
+                    database_path.clone(),
+                    tab.id.clone(),
+                    worktree_id.clone(),
                     cx,
                 )
             })),
@@ -8364,6 +8381,11 @@ fn restore_tabs_in_workspace(
         saved_session_refs,
         &working_directory.to_string_lossy(),
     );
+    // F-PER-01/F-PERSIST-DB-05: see the matching comment in restore_tabs —
+    // this is the same restore path taken by restore_launch_snapshot when a
+    // worktree without a mounted host gets pane-only tabs replayed in.
+    let database_path = session::database_path();
+    let worktree_id = session::persisted_worktree_id(working_directory);
     let mut tabs = Vec::new();
     let mut active = 0usize;
     for (tab_index, tab) in restored.tabs.iter().enumerate() {
@@ -8389,9 +8411,12 @@ fn restore_tabs_in_workspace(
         register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
-                Chat::launch_with_command(
+                Chat::launch_with_command_and_persistence(
                     command.expect("chat restoration always has a fallback command"),
                     working_directory.to_path_buf(),
+                    database_path.clone(),
+                    tab.id.clone(),
+                    worktree_id.clone(),
                     cx,
                 )
             })),
