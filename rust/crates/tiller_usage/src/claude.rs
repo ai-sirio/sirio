@@ -284,8 +284,50 @@ impl ClaudeUsageFetcher {
 
     /// Internal overload with explicit timing, for tests.
     pub fn fetch_with(settle: Duration, poll: Duration, timeout: Duration) -> UsageFetchOutcome {
+        Self::fetch_with_env(settle, poll, timeout, &[])
+    }
+
+    /// Like [`Self::fetch_with`], but with additional environment variables
+    /// set on the spawned shell (F-SET-11).
+    ///
+    /// The production path launches `claude` through a **login** shell
+    /// (`-lc`), matching a real terminal. That shell re-sources the user's
+    /// login/interactive dotfiles (`.bash_profile`, `.zprofile`, `.zshrc`,
+    /// …), which is exactly what a synthetic test cannot control: a `PATH`
+    /// or `CLAUDE_CONFIG_DIR` override this call sets on `envs` can be
+    /// silently reset by those dotfiles before `claude` ever runs, which
+    /// used to make the `NotInstalled`/`LoggedOut`/`Error` unavailable
+    /// states unreachable from any test. When `envs` carries
+    /// `TILLER_USAGE_NO_DOTFILES`, the shell is launched without sourcing
+    /// login/interactive dotfiles instead, so overrides in `envs` are the
+    /// only thing deciding what `claude` resolves to. Production `fetch()`
+    /// never sets that key, so real users still get the login shell.
+    pub fn fetch_with_env(
+        settle: Duration,
+        poll: Duration,
+        timeout: Duration,
+        envs: &[(&str, &str)],
+    ) -> UsageFetchOutcome {
         let shell = login_shell();
-        let pty = match Pty::spawn(&shell, &["-lc", "claude"]) {
+        let skip_dotfiles = envs.iter().any(|(key, _)| *key == "TILLER_USAGE_NO_DOTFILES");
+        let shell_name = Path::new(&shell)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let mut args: Vec<&str> = if skip_dotfiles {
+            if shell_name == "zsh" {
+                // `-f`: skip `.zshenv`/`.zshrc`/`.zprofile`/`.zlogin`.
+                vec!["-f", "-c"]
+            } else {
+                // bash (and `sh` symlinked to it): skip both the login
+                // profile scripts and the interactive rc file.
+                vec!["--noprofile", "--norc", "-c"]
+            }
+        } else {
+            vec!["-lc"]
+        };
+        args.push("claude");
+        let pty = match Pty::spawn_with_env(&shell, &args, envs) {
             Ok(pty) => pty,
             Err(_) => return UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
         };
@@ -418,7 +460,7 @@ struct Pty {
 }
 
 impl Pty {
-    fn spawn(program: &str, args: &[&str]) -> io::Result<Pty> {
+    fn spawn_with_env(program: &str, args: &[&str], envs: &[(&str, &str)]) -> io::Result<Pty> {
         // SAFETY: standard PTY opening sequence; all error paths check the
         // return values before proceeding.
         let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
@@ -465,6 +507,7 @@ impl Pty {
         command
             .args(args)
             .env("TERM", "xterm-256color")
+            .envs(envs.iter().copied())
             // SAFETY: these fds are owned by this function and passed to the
             // child as its standard streams.
             .stdin(unsafe { Stdio::from_raw_fd(slave) })

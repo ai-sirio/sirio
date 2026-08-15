@@ -220,6 +220,97 @@ fn the_fetch_is_bounded_and_single_attempts_do_not_hang() {
     ));
 }
 
+// ---------------------------------------------------------------------------
+// F-SET-11 — the three Claude `Unavailable` reasons reached through the
+// *real* PTY/login-shell fetch path, not the pure `transcript_outcome`
+// stand-in above. `fetch_with_env` skips dotfile re-sourcing
+// (`TILLER_USAGE_NO_DOTFILES`) so a `PATH` override actually decides what
+// `claude` resolves to inside the spawned shell.
+// ---------------------------------------------------------------------------
+
+/// A `PATH` containing only `dir`, so the fake (or absent) `claude` in it is
+/// all the spawned shell can find — the real `claude` on this machine's
+/// normal `PATH` never enters the picture.
+fn isolated_path(dir: &PathBuf) -> String {
+    dir.to_string_lossy().into_owned()
+}
+
+#[test]
+fn not_installed_is_reachable_through_the_real_shell_when_claude_is_absent_from_path() {
+    let dir = TempDir::new(); // no `claude` binary written into it
+    let path = isolated_path(&dir.0);
+    let outcome = ClaudeUsageFetcher::fetch_with_env(
+        Duration::from_millis(0),
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+        &[
+            ("TILLER_USAGE_NO_DOTFILES", "1"),
+            ("PATH", &path),
+            // The shell's own "command not found" text is locale-dependent
+            // ("comando non trovato" under an Italian locale, observed on
+            // this machine); pin the child to the C locale so the English
+            // marker `classify_failure` looks for is what it actually
+            // prints, independent of the host's `$LANG`.
+            ("LC_ALL", "C"),
+            ("LANG", "C"),
+        ],
+    );
+    assert_eq!(
+        outcome,
+        UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+        "a login shell whose dotfiles could reintroduce the real `claude` is \
+         skipped, so the shell's own \"command not found\" is what's seen"
+    );
+}
+
+/// Writes an executable `claude` shell script into `dir` and returns its
+/// path.
+fn fake_claude(dir: &PathBuf, script_body: &str) -> PathBuf {
+    let path = dir.join("claude");
+    std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("write fake claude");
+    let mut perms = std::fs::metadata(&path).expect("stat fake claude").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod fake claude");
+    path
+}
+
+#[test]
+fn logged_out_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
+    let dir = TempDir::new();
+    fake_claude(&dir.0, "echo 'Please run /login to continue'");
+    let path = isolated_path(&dir.0);
+    let outcome = ClaudeUsageFetcher::fetch_with_env(
+        Duration::from_millis(0),
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+        &[("TILLER_USAGE_NO_DOTFILES", "1"), ("PATH", &path)],
+    );
+    assert_eq!(
+        outcome,
+        UsageFetchOutcome::Unavailable(UsageReason::LoggedOut),
+        "the fake claude's own login prompt is what the fetch sees, not \
+         whatever a dotfile-restored real claude would have printed"
+    );
+}
+
+#[test]
+fn error_is_reachable_through_the_real_shell_with_a_fake_claude_on_path() {
+    let dir = TempDir::new();
+    fake_claude(&dir.0, "echo 'failed to load usage'");
+    let path = isolated_path(&dir.0);
+    let outcome = ClaudeUsageFetcher::fetch_with_env(
+        Duration::from_millis(0),
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+        &[("TILLER_USAGE_NO_DOTFILES", "1"), ("PATH", &path)],
+    );
+    assert_eq!(
+        outcome,
+        UsageFetchOutcome::Unavailable(UsageReason::Error),
+        "the fake claude's own error marker is what the fetch sees"
+    );
+}
+
 /// Maps a captured transcript onto a fetch outcome the way the PTY loop
 /// does: failure markers classify first, a parseable panel succeeds, and
 /// anything else never rendered and is a timeout.
