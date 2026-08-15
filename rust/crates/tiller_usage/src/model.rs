@@ -64,8 +64,20 @@ impl ProviderUsage {
 pub enum UsageReason {
     /// The CLI is not installed (or not on PATH).
     NotInstalled,
-    /// The provider needs credentials that are missing or invalid.
+    /// The provider needs credentials that are missing or invalid, with no
+    /// more specific reason known (e.g. no auth file at all).
     LoggedOut,
+    /// A Codex OAuth refresh token was rejected because the server saw it
+    /// used more than once (`refresh_token_reused`) — the strongest signal
+    /// of a compromised or duplicated token store.
+    TokenReused,
+    /// A Codex OAuth refresh token was rejected as invalidated
+    /// (`refresh_token_invalidated`) — e.g. the user signed out elsewhere.
+    TokenRevoked,
+    /// A Codex OAuth refresh token was rejected as expired, or the refresh
+    /// call failed for a reason `classify_token_refresh_failure` maps to
+    /// "expired" (F-CORE-USG-06).
+    TokenExpired,
     /// The bounded usage fetch exceeded its time budget before any value was
     /// available to keep as stale data.
     TimedOut,

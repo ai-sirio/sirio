@@ -66,6 +66,20 @@ pub enum TokenRefreshFailure {
     Other,
 }
 
+/// Maps a classified token-refresh failure (F-CORE-USG-06) onto the
+/// `UsageReason` the status bar renders distinct copy for. `Other` still
+/// collapses to the generic `LoggedOut`, matching the pre-existing
+/// behaviour for failures that aren't a clearly reused/revoked/expired
+/// refresh token (e.g. a network error, or a malformed response).
+pub fn token_refresh_failure_reason(failure: TokenRefreshFailure) -> UsageReason {
+    match failure {
+        TokenRefreshFailure::Reused => UsageReason::TokenReused,
+        TokenRefreshFailure::Revoked => UsageReason::TokenRevoked,
+        TokenRefreshFailure::Expired => UsageReason::TokenExpired,
+        TokenRefreshFailure::Other => UsageReason::LoggedOut,
+    }
+}
+
 pub fn classify_token_refresh_failure(status: i32, body: &str) -> TokenRefreshFailure {
     let lower = body.to_ascii_lowercase();
     if lower.contains("reuse") {
@@ -371,18 +385,13 @@ impl CodexUsageFetcher {
         let refreshed = match refresh_token(&credentials) {
             Ok(refreshed) => refreshed,
             Err(failure) => {
-                // F-CORE-USG-06: `classify_token_refresh_failure`'s output
-                // (Reused/Revoked/Expired/Other) is real here, but it has
-                // nowhere to go — `UsageReason` (tiller_usage::model, not
-                // owned by this file this wave) has no variant to carry it,
-                // so every case still surfaces to the status bar as the
-                // same generic `LoggedOut`. Logging keeps the
-                // classification from being silently and untraceably
-                // dropped until a `UsageReason` variant (or carried field)
-                // exists to route it into the UI; see the crate report for
-                // the exact model.rs / status_bar.rs shape still needed.
+                // F-CORE-USG-06: route `classify_token_refresh_failure`'s
+                // classification (Reused/Revoked/Expired/Other) into a
+                // `UsageReason` variant the status bar can render distinct
+                // copy for, instead of collapsing every case to the same
+                // generic `LoggedOut`.
                 eprintln!("[codex-usage] token refresh failed: {failure:?}");
-                return UsageFetchOutcome::Unavailable(UsageReason::LoggedOut);
+                return UsageFetchOutcome::Unavailable(token_refresh_failure_reason(failure));
             }
         };
         let _ = save_credentials(&refreshed);
@@ -694,6 +703,29 @@ mod tests {
         assert_eq!(
             classify_token_refresh_failure(500, "server unavailable"),
             TokenRefreshFailure::Other
+        );
+    }
+
+    /// F-CORE-USG-06: the classified failure must route to a distinct
+    /// `UsageReason` the status bar renders distinct copy for — not
+    /// collapse to the generic `LoggedOut` for every case.
+    #[test]
+    fn token_refresh_failure_routes_to_distinct_usage_reasons() {
+        assert_eq!(
+            token_refresh_failure_reason(TokenRefreshFailure::Reused),
+            UsageReason::TokenReused
+        );
+        assert_eq!(
+            token_refresh_failure_reason(TokenRefreshFailure::Revoked),
+            UsageReason::TokenRevoked
+        );
+        assert_eq!(
+            token_refresh_failure_reason(TokenRefreshFailure::Expired),
+            UsageReason::TokenExpired
+        );
+        assert_eq!(
+            token_refresh_failure_reason(TokenRefreshFailure::Other),
+            UsageReason::LoggedOut
         );
     }
 }

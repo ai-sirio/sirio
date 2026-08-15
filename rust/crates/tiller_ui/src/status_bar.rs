@@ -323,6 +323,12 @@ impl StatusBar {
                 let reason_text = match reason {
                     UsageReason::NotInstalled => "not found",
                     UsageReason::LoggedOut => "logged out",
+                    // F-CORE-USG-06: a Codex refresh-token failure classified
+                    // as reused/revoked/expired gets its own copy instead of
+                    // collapsing into the generic "logged out".
+                    UsageReason::TokenReused => "token reused",
+                    UsageReason::TokenRevoked => "token revoked",
+                    UsageReason::TokenExpired => "token expired",
                     UsageReason::TimedOut => "timed out",
                     UsageReason::Error => "error",
                 };
@@ -698,6 +704,34 @@ mod tests {
             StatusBar::segment_text("Claude", &ProviderUsageState::Stale(usage)),
             "Claude 12% 5h",
             "stale keeps showing the last good numbers — dimming is what marks it stale, not the text"
+        );
+    }
+
+    /// F-CORE-USG-06: a Codex refresh-token failure classified as
+    /// reused/revoked/expired must render its own copy, not collapse to
+    /// the generic "logged out" text every other login failure uses.
+    #[test]
+    fn token_refresh_reasons_render_distinct_text() {
+        assert_eq!(
+            StatusBar::segment_text(
+                "Codex",
+                &ProviderUsageState::Unavailable(UsageReason::TokenReused)
+            ),
+            "Codex token reused"
+        );
+        assert_eq!(
+            StatusBar::segment_text(
+                "Codex",
+                &ProviderUsageState::Unavailable(UsageReason::TokenRevoked)
+            ),
+            "Codex token revoked"
+        );
+        assert_eq!(
+            StatusBar::segment_text(
+                "Codex",
+                &ProviderUsageState::Unavailable(UsageReason::TokenExpired)
+            ),
+            "Codex token expired"
         );
     }
 
