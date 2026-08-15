@@ -34,6 +34,30 @@ Verification is a separate phase with fresh agents: **the critic is never the ag
 the piece**, and a builder's `howToExercise` is passed on as a route to find the control, never
 as evidence that it works.
 
+## What wave C cost, and what wave D changed
+
+Wave C returned 110 of 117 rows and moved the ledger from 242 to 278 PASSED, but lost two agents
+and, through one of them, 45 rows of build work. Three fixes came out of it, all in `wave-d.js`:
+
+1. **A chain link must not abort the links behind it.** `C-MAIN`'s link 1 finished all 15 rows and
+   committed each one, then failed the `StructuredOutput` retry cap on its final return — and
+   because a bare `await` in a `for` loop propagates, links 2–4 never started. Their 45 rows were
+   verified against untouched code. Every link is now wrapped in `try`/`catch`.
+2. **Big returns die.** Both casualties were the two 15-row slices; every 6–7-row slice validated
+   fine. Links are now 7 rows, `required` fields are minimal, `additionalProperties: false` is gone
+   from row objects, and agents are told the committed report is the record and the schema only an
+   index.
+3. **Normalise file paths before computing ownership.** A recovery step wrote `crates/…/main.rs`
+   while triage used `rust/crates/…/main.rs`; the same file under two spellings read as two owners
+   and put a parallel slice in collision with the whole `main.rs` chain. The check that caught it
+   compares normalised paths, and it is worth running before every launch.
+
+A fourth lesson is about reading the results rather than the process: **19 of the 74 rows still
+open are blocked by a missing drive primitive, not by missing app code** — no right-click, no
+modifier chords, no button-held drag, no scroll. The lane's vocabulary had quietly become the
+ceiling on what could be *proven*, independent of what had been *built*, so wave D extends the
+harness in parallel with building.
+
 ## Rebuilding the partition
 
 `rowfiles.json` is recoverable — `../triage/*-plan.md` are committed and name the files per row.
