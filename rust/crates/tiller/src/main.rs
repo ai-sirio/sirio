@@ -195,7 +195,16 @@ const BROWSER_METHODS: [&str; 10] = [
     "browser.console",
     "browser.errors",
 ];
-const BROWSER_CAPABILITIES: [&str; 3] = ["browser.open", "browser.navigate", "browser.act"];
+// F-CTRL-BROWSER-03/05: browser.get and browser.wait are real, implemented
+// read/status methods (see handle_browser_action) — they must not be turned
+// away here as "not implemented" before ever reaching that dispatch.
+const BROWSER_CAPABILITIES: [&str; 5] = [
+    "browser.open",
+    "browser.navigate",
+    "browser.act",
+    "browser.get",
+    "browser.wait",
+];
 
 type ControlReply = Sender<Result<Vec<(String, String)>, String>>;
 
@@ -4708,6 +4717,60 @@ impl TillerWorkspace {
             .browser_surface()
             .ok_or_else(|| format!("{method} failed: no browser surface"))?;
         browser.update(cx, |surface, _| match method {
+            // F-CTRL-BROWSER-03: read-only status, no navigation side
+            // effect — the counterpart to browser.navigate's write path.
+            "browser.get" => {
+                let state = surface.state();
+                Ok(vec![
+                    ("url".to_string(), state.address().to_string()),
+                    ("title".to_string(), state.page_title().to_string()),
+                    ("loading".to_string(), state.is_loading().to_string()),
+                    ("canGoBack".to_string(), state.can_go_back().to_string()),
+                    (
+                        "canGoForward".to_string(),
+                        state.can_go_forward().to_string(),
+                    ),
+                    (
+                        "error".to_string(),
+                        state.error().unwrap_or_default().to_string(),
+                    ),
+                ])
+            }
+            // F-CTRL-BROWSER-05: WebKit's navigation finishes asynchronously
+            // off a GTK main-loop callback that only runs when something
+            // pumps GTK events (tiller_ui's BrowserSurface does this itself
+            // on a 16ms timer while mounted). Spinning here without pumping
+            // would just burn the timeout and always report `loading`
+            // unchanged, so this drives the same process-global GTK main
+            // loop forward directly rather than trusting the timer to win
+            // the race before the caller's own timeout.
+            "browser.wait" => {
+                let timeout = params
+                    .get("timeoutMs")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_secs(5));
+                let deadline = Instant::now() + timeout;
+                loop {
+                    while gtk::events_pending() {
+                        gtk::main_iteration_do(false);
+                    }
+                    if !surface.state().is_loading() || Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let state = surface.state();
+                Ok(vec![
+                    ("url".to_string(), state.address().to_string()),
+                    ("title".to_string(), state.page_title().to_string()),
+                    ("loading".to_string(), state.is_loading().to_string()),
+                    (
+                        "timedOut".to_string(),
+                        state.is_loading().to_string(),
+                    ),
+                ])
+            }
             "browser.navigate" => {
                 let address = params
                     .get("url")
@@ -11444,14 +11507,29 @@ mod tests {
             .collect();
         assert_eq!(
             advertised,
-            ["browser.open", "browser.navigate", "browser.act"]
+            [
+                "browser.open",
+                "browser.navigate",
+                "browser.act",
+                "browser.get",
+                "browser.wait",
+            ]
         );
 
+        // F-CTRL-BROWSER-03/05: browser.get and browser.wait are now real,
+        // implemented methods (see handle_browser_action) and must not be
+        // pre-rejected as unsupported the way the remaining stubs are.
+        for method in ["browser.get", "browser.wait"] {
+            assert_eq!(
+                browser_request_error(method, &BTreeMap::new()),
+                None,
+                "{method} must be accepted, not pre-rejected as unsupported"
+            );
+        }
+
         for method in [
-            "browser.get",
             "browser.screenshot",
             "browser.snapshot",
-            "browser.wait",
             "browser.eval",
             "browser.console",
             "browser.errors",
