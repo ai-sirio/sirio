@@ -121,3 +121,32 @@ in place of the current `with_value(...)` call (`sidebar.rs` around line 976).
   the Avatar tab — the GitHub field should already show the parsed owner instead of being
   empty; clicking "Use GitHub Avatar" with no typing commits it.
 - Commit: `1f9f860` — `feat(ui): pre-fill GitHub avatar field from the repo's origin remote`
+
+## F-PRJ-06 / F-PRJ-09 — strengthened as real-button unit tests; popover gap out of scope
+
+Both rows' recorded evidence root-causes the same structural gap: this Wayland lane's virtual
+pointer/keyboard drops clicks and keystrokes into the anchored/floating popover class generally
+(Clone-repository, Create-project) — a Cancel-button click failed 3/3 with visible hover/press
+highlight, while non-popover controls in the same session worked. That popover chrome is owned
+by `sidebar.rs` (not a file this slice owns), so the input-delivery gap itself is out of scope
+here. The empty-URL/empty-name disablement half of each row was already proven; the remaining
+"cannot be started twice while running" half only had pure `CloneFormState`/`CreateFormState`
+unit tests (`clone_state_disables_empty_url_and_double_submission`,
+`create_state_disables_empty_name_and_double_submission`) — nothing drove the guard through a
+real drawn button with real GPUI clicks.
+
+Added `the_drawn_clone_button_cannot_start_a_second_clone` and
+`the_drawn_create_button_cannot_start_a_second_creation` in `project_forms.rs`: each mounts
+`CloneForm`/`CreateForm` directly (bypassing the popover chrome entirely, so the lane's
+input-delivery gap cannot interfere), clicks the real `clone-submit`/`create-submit` button
+twice back to back — against a real local git repo for Clone, a real filesystem destination for
+Create — and asserts exactly one successful `Complete`, not a destination-already-exists
+`Failed` a racing second clone/create would produce. `begin()` flips state to `Running`
+synchronously inside the first click's `submit()`, before any worker thread runs, so this is a
+deterministic proof, not a timing race.
+
+- `howToExercise`: `cd rust && cargo test -p tiller_ui the_drawn_clone_button_cannot_start_a_second_clone the_drawn_create_button_cannot_start_a_second_creation`
+  (run separately; cargo doesn't accept two free test-name args in one invocation). Live: the
+  popover input-delivery gap is unresolved and out of this slice's file ownership; the "Guard
+  half unreachable" characterization stands until `sidebar.rs`'s popover mounting is fixed.
+- Commit: `4370eea` — `test(ui): prove Clone/Create submit guards hold on the real drawn button`
