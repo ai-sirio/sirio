@@ -509,6 +509,38 @@ fn restored_entry(entry: ChatEntry) -> Entry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ErrorKind {
     Connection,
+    /// The agent rejected launch or a mid-session request with ACP's
+    /// `auth_required` error (F-CHAT-02) — distinct from a generic
+    /// connection failure because the fix isn't "retry", it's "sign in out
+    /// of band, then retry": the agent has already exited by the time this
+    /// reaches the caller, so there is no live prompt to authenticate on.
+    AuthRequired,
+}
+
+/// A mid-session `TransportError` never carries the typed `AcpError` that
+/// caused it — the ACP layer folds it to a plain `String` before it crosses
+/// the crate boundary (`AcpEvent::TransportError`'s own doc comment: "a
+/// mid-session request rejected with ACP's `auth_required` error... arrives
+/// here rather than as its own variant... `AcpError::AuthRequired`'s
+/// `Display` renders the same auth-guidance text `AcpClient::launch` uses
+/// for a startup failure, so the message string alone still carries it").
+/// This is the one place both the launch-failure and mid-session paths
+/// converge on that string convention to recover the distinction
+/// (F-CHAT-02): a dedicated banner and CLI-login guidance instead of the
+/// generic "retry the connection" card.
+fn classify_connection_error(message: String) -> (String, ErrorKind) {
+    if message.contains("requires authentication") {
+        (
+            format!(
+                "{message}\n\nSign in from a terminal using this agent's own CLI \
+                 (for example, its `login` subcommand), then Retry — Tiller cannot \
+                 complete authentication on the agent's behalf."
+            ),
+            ErrorKind::AuthRequired,
+        )
+    } else {
+        (message, ErrorKind::Connection)
+    }
 }
 
 struct ChatPersistence {
@@ -1521,10 +1553,11 @@ impl Chat {
             AcpEvent::TransportError(message) => {
                 self.client.take();
                 self.expire_unanswered();
+                let (message, kind) = classify_connection_error(message);
                 self.push_entry(Entry::Error {
                     message,
                     retryable: true,
-                    kind: ErrorKind::Connection,
+                    kind,
                 });
                 self.streaming = false;
             }
@@ -1881,7 +1914,7 @@ impl Chat {
             !matches!(
                 entry,
                 Entry::Error {
-                    kind: ErrorKind::Connection,
+                    kind: ErrorKind::Connection | ErrorKind::AuthRequired,
                     ..
                 }
             )
@@ -2793,14 +2826,16 @@ impl Chat {
                     });
                 }
                 Err(error) => {
+                    let (message, kind) =
+                        classify_connection_error(format!("could not launch ACP agent: {error:#}"));
                     let _ = this.update(cx, |chat, cx| {
                         chat.connecting = false;
                         chat.client = None;
                         chat.streaming = false;
                         chat.push_entry(Entry::Error {
-                            message: format!("could not launch ACP agent: {error:#}"),
+                            message,
                             retryable: true,
-                            kind: ErrorKind::Connection,
+                            kind,
                         });
                         cx.notify();
                     });
@@ -4309,22 +4344,48 @@ impl Chat {
                 .child(div().h(px(1.0)).flex_1().bg(colors.hairline))
                 .into_any_element(),
             Entry::Error {
-                message, retryable, ..
+                message,
+                retryable,
+                kind,
             } => {
                 let retry_entity = entity.clone();
+                // F-CHAT-02: AuthRequired gets its own amber treatment
+                // (matching the connecting/working status-dot color already
+                // used elsewhere in this file) instead of the generic red
+                // connection-failure card — the fix here is "sign in, then
+                // retry", not "the network hiccupped, retry", and the card
+                // should look like a different kind of problem.
+                let is_auth_required = kind == ErrorKind::AuthRequired;
+                let (banner_bg, banner_border, banner_text) = if is_auth_required {
+                    (
+                        rgb(0xf5a623).opacity(0.12),
+                        rgb(0xf5a623),
+                        colors.title,
+                    )
+                } else {
+                    (
+                        colors.diff_deletion_background,
+                        colors.diff_deletion,
+                        colors.diff_deletion,
+                    )
+                };
                 div()
+                    .id(("chat-error-banner", entry_index))
+                    .when(is_auth_required, |this| {
+                        this.debug_selector(|| "chat-auth-required-banner".into())
+                    })
                     .w_full()
                     .rounded(theme.radii.code_block)
-                    .bg(colors.diff_deletion_background)
+                    .bg(banner_bg)
                     .border_l_2()
-                    .border_color(colors.diff_deletion)
+                    .border_color(banner_border)
                     .px(px(CARD_H_PADDING))
                     .py(px(CARD_V_PADDING))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
                     .text_size(typography.callout)
-                    .text_color(colors.diff_deletion)
+                    .text_color(banner_text)
                     .child(div().flex_1().child(message))
                     .when(retryable, |this| {
                         this.child(
@@ -8408,6 +8469,60 @@ mod tests {
         cx.simulate_click(point(px(10.0), px(10.0)), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("model-picker").is_none());
+    }
+
+    /// F-CHAT-02: a launch that fails with ACP's `auth_required` error gets
+    /// a distinct banner (not the generic connection-failure card) with CLI
+    /// login guidance — driven end-to-end against a real (fixture) agent
+    /// process that rejects `session/new` with wire code -32000, same
+    /// fixture shape as `tiller_acp`'s own
+    /// `session_creation_auth_required_error_becomes_typed_auth_required`.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn auth_required_launch_gets_a_dedicated_banner_with_login_guidance(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let command = AgentCommand::new("/bin/sh").args([
+            "-c",
+            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
+        ]);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
+            configure_test_chat(&mut chat);
+            chat
+        });
+
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+
+        assert!(
+            cx.debug_bounds("chat-auth-required-banner").is_some(),
+            "an auth_required launch failure must render the dedicated banner, not the generic connection card"
+        );
+        chat.read_with(cx, |chat, _| {
+            let auth_entry = chat.entries.iter().find(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::AuthRequired,
+                        ..
+                    }
+                )
+            });
+            let Some(Entry::Error { message, .. }) = auth_entry else {
+                panic!("expected an AuthRequired error entry, got {:?}", chat.entries);
+            };
+            assert!(
+                message.contains("Login"),
+                "banner must name the agent-advertised login method: {message}"
+            );
+            assert!(
+                message.to_ascii_lowercase().contains("cli") || message.contains("login"),
+                "banner must carry CLI login guidance, not just the raw protocol message: {message}"
+            );
+        });
     }
 
     /// F-CHAT-15: the session-mode pill opens a picker over the agent's
