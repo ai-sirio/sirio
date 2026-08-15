@@ -874,6 +874,11 @@ pub struct Settings {
     /// Per-agent accent colour choice (F-SET-22), in `SummarizerChoice::ALL`
     /// order. Part of the persistence contract — see [`SettingsSnapshot::agent_colors`].
     agent_colors: [AgentAccentColor; 5],
+    /// Where the account-identity cache lives (F-PERSIST-DB-06) — the same
+    /// database file `chat.rs`'s transcript persistence opens on demand.
+    /// `None` in every UI-only/test construction; the host wires this once
+    /// via [`Self::with_database_path`], right after [`Self::with_snapshot`].
+    database_path: Option<PathBuf>,
 }
 
 /// The display data for one AI Provider card — everything the renderer
@@ -990,6 +995,51 @@ impl Settings {
             agent_search: String::new(),
             agent_search_focus: cx.focus_handle(),
             agent_colors: initial.agent_colors,
+            database_path: None,
+        }
+    }
+
+    /// Wires the durable account-identity cache (F-PERSIST-DB-06). Call
+    /// once, right after construction: a provider whose live discovery
+    /// already failed by then (offline, or the CLI binary transiently
+    /// unavailable) falls back to the last cached identity immediately, and
+    /// every later discovery sweep (Refresh, or a completed login) has a
+    /// database to persist a fresh success into.
+    pub fn with_database_path(mut self, path: PathBuf) -> Self {
+        self.database_path = Some(path);
+        self.sync_account_identity_cache();
+        self
+    }
+
+    /// Reconciles the just-discovered Claude/Codex account states against
+    /// the durable cache: a fresh identity is saved for next time, and a
+    /// provider that is locally signed in but whose live query for a
+    /// display identity failed this time (rather than never having signed
+    /// in) falls back to the last successfully cached one instead of
+    /// showing no identity at all. A no-op until [`Self::with_database_path`]
+    /// has been called.
+    fn sync_account_identity_cache(&mut self) {
+        let Some(path) = self.database_path.clone() else {
+            return;
+        };
+        let Ok(db) = tiller_persistence::AppDatabase::open(&path) else {
+            return;
+        };
+        Self::sync_one_account_identity("claude", &db, &mut self.provider_accounts.claude);
+        Self::sync_one_account_identity("codex", &db, &mut self.provider_accounts.codex);
+    }
+
+    fn sync_one_account_identity(
+        provider_id: &str,
+        db: &tiller_persistence::AppDatabase,
+        status: &mut ProviderAccountStatus,
+    ) {
+        if let Some(identity) = &status.identity {
+            let _ = db.save_account_identity(provider_id, identity);
+        } else if status.signed_in
+            && let Ok(Some((cached, _detected_at))) = db.account_identity(provider_id)
+        {
+            status.identity = Some(cached);
         }
     }
 
@@ -1333,6 +1383,7 @@ impl Settings {
     /// relaunch (F-SET-10).
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
         self.provider_accounts = ProviderAccountStates::discovered();
+        self.sync_account_identity_cache();
         cx.notify();
     }
 
@@ -1411,6 +1462,7 @@ impl Settings {
                     return;
                 }
                 settings.provider_accounts = ProviderAccountStates::discovered();
+                settings.sync_account_identity_cache();
                 settings.account_action_error = match result {
                     Ok(status) if status.success() => None,
                     Ok(status) => Some((
@@ -3719,6 +3771,63 @@ mod tests {
             0,
             "a choice that cannot exist here still selects the first real segment"
         );
+    }
+
+    #[test]
+    fn account_identity_cache_saves_a_fresh_identity_and_falls_back_when_absent() {
+        // F-PERSIST-DB-06: discover_claude_identity/discover_codex_identity
+        // had nowhere to persist a successful shell-out, so the display line
+        // could not survive the live query failing later (offline, or the
+        // CLI binary transiently unavailable). Drives sync_one_account_identity
+        // directly against a real database file rather than through the live
+        // shell-out, which this environment cannot make succeed or fail on
+        // demand.
+        let path = std::env::temp_dir().join(format!(
+            "tiller-settings-account-identity-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = tiller_persistence::AppDatabase::open(&path).expect("open database");
+
+        // A fresh, successfully discovered identity is cached for later.
+        let mut signed_in_with_identity = ProviderAccountStatus {
+            label: "Signed in",
+            signed_in: true,
+            identity: Some("dev@example.com".to_string()),
+        };
+        Settings::sync_one_account_identity("claude", &db, &mut signed_in_with_identity);
+        assert_eq!(
+            db.account_identity("claude")
+                .expect("query claude identity")
+                .map(|(identity, _)| identity),
+            Some("dev@example.com".to_string())
+        );
+
+        // Locally signed in, but this live query came back empty (offline,
+        // slow CLI, transient binary absence) — falls back to the cache
+        // rather than showing no identity for a provider that is signed in.
+        let mut signed_in_without_identity = ProviderAccountStatus {
+            label: "Signed in",
+            signed_in: true,
+            identity: None,
+        };
+        Settings::sync_one_account_identity("claude", &db, &mut signed_in_without_identity);
+        assert_eq!(
+            signed_in_without_identity.identity,
+            Some("dev@example.com".to_string()),
+            "falls back to the cached identity when the live shell-out fails"
+        );
+
+        // Never signed in: no identity is fabricated, cached or otherwise.
+        let mut not_signed_in = ProviderAccountStatus {
+            label: "Not signed in",
+            signed_in: false,
+            identity: None,
+        };
+        Settings::sync_one_account_identity("codex", &db, &mut not_signed_in);
+        assert_eq!(not_signed_in.identity, None);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
