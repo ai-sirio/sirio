@@ -346,6 +346,25 @@ impl ProjectIconPicker {
         }
     }
 
+    /// Same as [`Self::with_value`], but for a picker opened against a
+    /// project whose checkout is known: pre-fills the GitHub Avatar draft
+    /// from the checkout's own `origin` remote (F-GIT-REMOTE-01) so the host
+    /// doesn't have to ask the user to retype an owner Tiller can already
+    /// see. Purely a suggestion — it never touches `value`/`mode`, so an
+    /// existing icon choice is untouched and a non-GitHub or remote-less
+    /// checkout leaves the draft exactly as `with_value` would.
+    pub fn with_value_and_repo(
+        value: ProjectIcon,
+        repo: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::with_value(value, cx);
+        if let Some(owner) = tiller_git::github_owner(repo) {
+            this.github_draft = owner;
+        }
+        this
+    }
+
     pub fn on_change(mut self, callback: impl Fn(ProjectIcon) + 'static) -> Self {
         self.on_change = Some(Rc::new(callback));
         self
@@ -1401,6 +1420,72 @@ mod tests {
                 good.0.clone()
             )))
         );
+    }
+
+    /// F-GIT-REMOTE-01: opening the picker against a real checkout with a
+    /// GitHub `origin` remote pre-fills the Avatar tab's GitHub field with
+    /// the parsed owner, so clicking "Use GitHub Avatar" with no typing at
+    /// all commits it — driven through `tiller_git::github_owner`, not a
+    /// stand-in, against a real `git init` + `git remote add` checkout.
+    #[gpui::test]
+    async fn a_github_origin_remote_prefills_the_avatar_field(cx: &mut TestAppContext) {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let repo = std::env::temp_dir().join(format!(
+            "tiller-project-identity-remote-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:octocat/hello-world.git",
+        ]);
+
+        cx.update(Theme::init);
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let for_closure = captured.clone();
+        let repo_for_picker = repo.clone();
+        let (_picker, cx) = cx.add_window_view(move |_, cx| {
+            ProjectIconPicker::with_value_and_repo(ProjectIcon::default(), &repo_for_picker, cx)
+                .on_change(move |value| {
+                    for_closure.borrow_mut().push(value);
+                })
+        });
+        cx.update(|window, _| window.refresh());
+
+        let avatar_tab = cx
+            .debug_bounds("project-icon-mode-2")
+            .expect("the Avatar tab is drawn");
+        cx.simulate_click(avatar_tab.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        let use_github = cx
+            .debug_bounds("Use GitHub Avatar")
+            .expect("the Use GitHub Avatar control is drawn");
+        cx.simulate_click(use_github.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            captured.borrow().last().map(|icon| icon.value.clone()),
+            Some(ProjectIconValue::Avatar(AvatarSource::GitHub(
+                "octocat".to_string()
+            ))),
+            "the field committed without any typing, using the pre-filled owner"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// F-PRJ-14: the GitHub and favicon fields validate their input and
