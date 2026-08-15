@@ -4813,6 +4813,42 @@ impl TillerWorkspace {
                     ("title".to_string(), state.page_title().to_string()),
                 ])
             }
+            // F-CTRL-BROWSER-06: runs arbitrary JS in the page and returns
+            // its result. Companion to browser.console below.
+            "browser.eval" => {
+                let script = params
+                    .get("script")
+                    .or_else(|| params.get("expression"))
+                    .filter(|script| !script.trim().is_empty())
+                    .ok_or_else(|| "browser.eval requires a non-empty script".to_string())?;
+                let timeout = params
+                    .get("timeoutMs")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_secs(5));
+                let result = surface
+                    .evaluate_script(script, timeout)
+                    .map_err(|error| format!("{method} failed: {error}"))?;
+                Ok(vec![("result".to_string(), result)])
+            }
+            // F-CTRL-BROWSER-06: reads back the console-message buffer the
+            // page's own console.log/warn/error/info/debug calls have been
+            // appending to since navigation started (see
+            // CONSOLE_CAPTURE_SCRIPT in tiller_ui::browser).
+            "browser.console" => {
+                let timeout = params
+                    .get("timeoutMs")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_secs(5));
+                let result = surface
+                    .evaluate_script(
+                        "JSON.stringify(window.__tillerConsole || [])",
+                        timeout,
+                    )
+                    .map_err(|error| format!("{method} failed: {error}"))?;
+                Ok(vec![("messages".to_string(), result)])
+            }
             "browser.act" => {
                 let driving = params
                     .get("driving")
