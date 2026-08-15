@@ -1468,6 +1468,23 @@ impl Chat {
             AcpEvent::ContextUsage(usage) => {
                 self.context_usage = Some(usage);
             }
+            // F-CHAT-18: the breakdown arrives on a separate wire event
+            // (PromptResponse.usage, gated behind the ACP-agent-side
+            // `unstable_end_turn_token_usage` extension) from the
+            // used/size/cost triple on `ContextUsage`, so it merges into
+            // whatever context usage is already known rather than
+            // replacing it -- an agent that reports one without the other
+            // must not blank out the other's fields.
+            AcpEvent::TokenUsageBreakdown {
+                input_tokens,
+                output_tokens,
+                cached_read_tokens,
+            } => {
+                let usage = self.context_usage.get_or_insert_with(ContextUsage::default);
+                usage.input_tokens = Some(input_tokens);
+                usage.output_tokens = Some(output_tokens);
+                usage.cached_read_tokens = cached_read_tokens;
+            }
             AcpEvent::PermissionRequest {
                 request_id,
                 title,
@@ -5433,6 +5450,54 @@ impl Chat {
                                     .child(cost),
                             )
                         })
+                        // F-CHAT-18: input/output/cache breakdown, present
+                        // only for agents that report end-of-turn usage
+                        // (`unstable_end_turn_token_usage`) -- absent for
+                        // every other agent, so the rows are opt-in rather
+                        // than showing zeros.
+                        .when(
+                            usage.input_tokens.is_some()
+                                || usage.output_tokens.is_some()
+                                || usage.cached_read_tokens.is_some(),
+                            |this| {
+                                this.child(
+                                    div()
+                                        .id("context-usage-breakdown")
+                                        .debug_selector(|| "context-usage-breakdown".into())
+                                        .mt(px(6.0))
+                                        .pt(px(6.0))
+                                        .border_t_1()
+                                        .border_color(colors.hairline)
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .when_some(usage.input_tokens, |this, tokens| {
+                                            this.child(
+                                                div()
+                                                    .text_size(typography.caption2)
+                                                    .text_color(colors.meta)
+                                                    .child(format!("Input: {tokens} tokens")),
+                                            )
+                                        })
+                                        .when_some(usage.output_tokens, |this, tokens| {
+                                            this.child(
+                                                div()
+                                                    .text_size(typography.caption2)
+                                                    .text_color(colors.meta)
+                                                    .child(format!("Output: {tokens} tokens")),
+                                            )
+                                        })
+                                        .when_some(usage.cached_read_tokens, |this, tokens| {
+                                            this.child(
+                                                div()
+                                                    .text_size(typography.caption2)
+                                                    .text_color(colors.meta)
+                                                    .child(format!("Cache read: {tokens} tokens")),
+                                            )
+                                        }),
+                                )
+                            },
+                        )
                     })
                     .when(self.context_usage.is_none(), |this| {
                         this.child(
@@ -6978,7 +7043,8 @@ mod tests {
             Some(ContextUsage {
                 used: 53_000,
                 size: 200_000,
-                cost: None
+                cost: None,
+                ..Default::default()
             })
         );
         assert!(completed, "the turn completes with a footer");
@@ -8255,6 +8321,7 @@ mod tests {
             used: 25,
             size: 100,
             cost: None,
+            ..Default::default()
         });
     }
 
@@ -8762,6 +8829,56 @@ mod tests {
         cx.simulate_click(point(px(10.0), px(10.0)), Modifiers::none());
         cx.run_until_parked();
         assert!(cx.debug_bounds("context-popover").is_none());
+    }
+
+    /// F-CHAT-18: `TokenUsageBreakdown` (the wire event carrying
+    /// PromptResponse.usage) merges into whatever `ContextUsage` is
+    /// already known -- the breakdown rows appear without disturbing the
+    /// used/size percent that arrived over the separate `UsageUpdate`
+    /// event, and stay absent for an agent that never reports it.
+    #[gpui::test]
+    async fn context_popover_shows_token_breakdown_when_the_agent_reports_it(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            configure_test_chat(&mut chat);
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+
+        let ring = cx
+            .debug_bounds("context-ring")
+            .expect("context ring is rendered");
+        cx.simulate_click(ring.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("context-usage-breakdown").is_none(),
+            "no breakdown rows before the agent ever reports token usage"
+        );
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::TokenUsageBreakdown {
+                    input_tokens: 40,
+                    output_tokens: 12,
+                    cached_read_tokens: Some(8),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        assert!(cx.debug_bounds("context-usage-breakdown").is_some());
+        assert!(
+            cx.debug_bounds("context-usage-25-of-100").is_some(),
+            "the used/size percent from the earlier UsageUpdate survives the merge"
+        );
     }
 
     #[gpui::test]
