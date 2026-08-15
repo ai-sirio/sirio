@@ -183,6 +183,11 @@ pub struct TabBar {
     anchor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     on_new_tab: Option<Rc<dyn Fn(NewTabAction)>>,
     on_chat_agent: Option<Rc<dyn Fn(&'static str)>>,
+    /// F-TAB-08: the empty-state "Other agents…" card has nowhere else to
+    /// send a click — it is not a chat-agent row, so `on_chat_agent`
+    /// doesn't fit. A separate channel mirrors `on_new_tab`/`on_chat_agent`'s
+    /// own callback pattern rather than growing either of their payloads.
+    on_open_agent_settings: Option<Rc<dyn Fn()>>,
     chat_agents: Vec<AgentAvailability>,
 }
 
@@ -213,6 +218,7 @@ impl TabBar {
             anchor_bounds: Rc::new(Cell::new(None)),
             on_new_tab: None,
             on_chat_agent: None,
+            on_open_agent_settings: None,
             chat_agents: discover_availability(),
         }
     }
@@ -235,6 +241,15 @@ impl TabBar {
     /// enum without growing a cross-surface variant.
     pub fn on_chat_agent(mut self, callback: impl Fn(&'static str) + 'static) -> Self {
         self.on_chat_agent = Some(Rc::new(callback));
+        self
+    }
+
+    /// F-TAB-08: installs the callback the empty-state "Other agents…" card
+    /// fires when clicked, so the New Chat menu can hand the user straight
+    /// to the Settings screen's Agents section instead of leaving them with
+    /// a dead-end static label.
+    pub fn on_open_agent_settings(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_open_agent_settings = Some(Rc::new(callback));
         self
     }
 
@@ -282,6 +297,15 @@ impl TabBar {
         self.chat_picker_open = false;
         if let Some(callback) = &self.on_chat_agent {
             callback(id);
+        }
+        cx.notify();
+    }
+
+    fn emit_open_agent_settings(&mut self, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.chat_picker_open = false;
+        if let Some(callback) = &self.on_open_agent_settings {
+            callback();
         }
         cx.notify();
     }
@@ -432,7 +456,13 @@ impl TabBar {
             .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
     }
 
-    fn render_chat_empty(theme: Theme) -> impl IntoElement {
+    /// F-TAB-08: this was a bare static label with no `entity`/`cx` capture
+    /// and no `.on_click` -- it could not emit an event to open Settings
+    /// even in principle. `entity` (already in scope at the render-time call
+    /// site, mirroring `render_chat_agent_item`'s identical parameter) lets
+    /// a click route through the same `on_open_agent_settings` callback
+    /// channel every other TabBar action uses.
+    fn render_chat_empty(entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
         div()
             .id("new-chat-empty")
             .debug_selector(|| "new-chat-empty".to_owned())
@@ -444,6 +474,10 @@ impl TabBar {
             .gap(theme.spacing.titlebar_control_spacing)
             .text_size(theme.typography.footnote)
             .text_color(theme.meta)
+            .hover(|style| style.bg(theme.row_hover))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
+            })
             .child("Other agents…")
             .child(
                 div()
@@ -477,7 +511,7 @@ impl Render for TabBar {
             .flex_col()
             .gap(theme.spacing.titlebar_control_spacing);
         if available_chat_agents.is_empty() {
-            chat_agent_menu = chat_agent_menu.child(Self::render_chat_empty(theme));
+            chat_agent_menu = chat_agent_menu.child(Self::render_chat_empty(entity.clone(), theme));
         } else {
             for agent in available_chat_agents {
                 chat_agent_menu = chat_agent_menu.child(Self::render_chat_agent_item(
@@ -866,6 +900,58 @@ mod tests {
         assert!(cx.debug_bounds("new-chat-agent-menu").is_some());
         assert!(cx.debug_bounds("new-chat-empty").is_some());
         assert!(cx.debug_bounds("new-tab-chat-agent-codex").is_none());
+    }
+
+    /// F-TAB-08: clicking the "Other agents…" empty-state card, drawn when
+    /// no supported agent is on PATH, must reach a real callback rather than
+    /// being a dead static label.
+    #[gpui::test]
+    async fn clicking_the_no_agent_card_opens_agent_settings(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let opened_for_callback = opened.clone();
+        let window = cx.add_window(|_window, cx| {
+            TabBar::new(cx)
+                .with_chat_agents(vec![AgentAvailability {
+                    id: "codex",
+                    display_name: "Codex",
+                    executable: None,
+                }])
+                .on_open_agent_settings(move || {
+                    *opened_for_callback.borrow_mut() = true;
+                })
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let plus = cx.debug_bounds("new-tab-button").expect("plus is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        let new_chat = cx
+            .debug_bounds("new-tab-item-new-chat")
+            .expect("New Chat is drawn");
+        cx.simulate_click(new_chat.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let empty_card = cx
+            .debug_bounds("new-chat-empty")
+            .expect("the no-agent card is drawn");
+        assert!(
+            !*opened.borrow(),
+            "the callback has not fired before the click"
+        );
+        cx.simulate_click(empty_card.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            *opened.borrow(),
+            "clicking the no-agent card reaches on_open_agent_settings"
+        );
     }
 
     #[gpui::test]
