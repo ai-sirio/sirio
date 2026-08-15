@@ -197,15 +197,18 @@ const BROWSER_METHODS: [&str; 10] = [
     "browser.console",
     "browser.errors",
 ];
-// F-CTRL-BROWSER-03/05: browser.get and browser.wait are real, implemented
-// read/status methods (see handle_browser_action) — they must not be turned
-// away here as "not implemented" before ever reaching that dispatch.
-const BROWSER_CAPABILITIES: [&str; 5] = [
+// F-CTRL-BROWSER-03/05/06: browser.get, browser.wait, browser.eval and
+// browser.console are real, implemented methods (see handle_browser_action)
+// — they must not be turned away here as "not implemented" before ever
+// reaching that dispatch.
+const BROWSER_CAPABILITIES: [&str; 7] = [
     "browser.open",
     "browser.navigate",
     "browser.act",
     "browser.get",
     "browser.wait",
+    "browser.eval",
+    "browser.console",
 ];
 
 type ControlReply = Sender<Result<Vec<(String, String)>, String>>;
@@ -237,6 +240,14 @@ fn browser_request_error(method: &str, params: &BTreeMap<String, String>) -> Opt
                 .is_none_or(|url| url.trim().is_empty()) =>
         {
             Some("browser.navigate requires a non-empty url".to_string())
+        }
+        "browser.eval"
+            if params
+                .get("script")
+                .or_else(|| params.get("expression"))
+                .is_none_or(|script| script.trim().is_empty()) =>
+        {
+            Some("browser.eval requires a non-empty script".to_string())
         }
         "browser.act"
             if !params.contains_key("driving") && !params.contains_key("agentDriving") =>
@@ -11660,12 +11671,15 @@ mod tests {
                 "browser.act",
                 "browser.get",
                 "browser.wait",
+                "browser.eval",
+                "browser.console",
             ]
         );
 
-        // F-CTRL-BROWSER-03/05: browser.get and browser.wait are now real,
-        // implemented methods (see handle_browser_action) and must not be
-        // pre-rejected as unsupported the way the remaining stubs are.
+        // F-CTRL-BROWSER-03/05/06: browser.get, browser.wait, browser.eval
+        // and browser.console are now real, implemented methods (see
+        // handle_browser_action) and must not be pre-rejected as
+        // unsupported the way the remaining stubs are.
         for method in ["browser.get", "browser.wait"] {
             assert_eq!(
                 browser_request_error(method, &BTreeMap::new()),
@@ -11673,14 +11687,16 @@ mod tests {
                 "{method} must be accepted, not pre-rejected as unsupported"
             );
         }
+        assert_eq!(
+            browser_request_error(
+                "browser.eval",
+                &BTreeMap::from([("script".to_string(), "1+1".to_string())])
+            ),
+            None,
+            "browser.eval must be accepted with a script param, not pre-rejected as unsupported"
+        );
 
-        for method in [
-            "browser.screenshot",
-            "browser.snapshot",
-            "browser.eval",
-            "browser.console",
-            "browser.errors",
-        ] {
+        for method in ["browser.screenshot", "browser.snapshot", "browser.errors"] {
             let response = handler.handle(&ControlRequest {
                 id: method.to_string(),
                 method: method.to_string(),
