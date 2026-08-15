@@ -3848,7 +3848,7 @@ impl TillerWorkspace {
                     .any(|worktree| worktree.path == self.working_directory)
             })
             .map(|project| project.name.as_str());
-        let Some(payload) = self.activity.build_payload(
+        let Some(mut payload) = self.activity.build_payload(
             &transition.pane_id,
             transition.new,
             agent_display_name,
@@ -3859,6 +3859,15 @@ impl TillerWorkspace {
         ) else {
             return;
         };
+        // F-CORE-ACT-19: the title is `<agent> — <human worktree label>`,
+        // not `<agent> — <status>` — the pane's transition status already
+        // drives which notification fires at all (`NotificationPolicy`
+        // above); it does not belong in the title text a second time.
+        // `AgentActivityModel::build_payload` (tiller_activity, not owned by
+        // this file) still emits the status-suffixed title, so it is
+        // corrected here rather than left for the desktop notifier to show
+        // verbatim.
+        payload.title = format!("{agent_display_name} — {}", context.activity_label);
         post_desktop_notification(&payload);
     }
 
