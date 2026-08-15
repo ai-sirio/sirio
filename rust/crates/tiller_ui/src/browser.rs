@@ -5,7 +5,7 @@
 //! whether a WebKitGTK child window can coexist with GPUI's X11 surface.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeSet,
     ffi::c_ulong,
     ops::Range,
@@ -716,6 +716,20 @@ enum PageLoadEventKind {
 
 type SharedWebView = Rc<RefCell<Option<WebView>>>;
 type SharedWebEvents = Rc<RefCell<Vec<WebEvent>>>;
+/// F-BRW-01: `set_bounds`'s own `Rect` conversion (`native_webview_rect`) is
+/// a verified no-op — GPUI's bounds are already logical and wry's
+/// `to_logical` on an already-`Logical` value does not rescale. The
+/// remaining shrink (reproduced live, ~0.857x = 1/1.1667, matching a
+/// 112/96 DPI ratio) happens *below* that call, inside GTK/GDK's own
+/// geometry plumbing for the foreign X11 window `set_bounds` moves — wry
+/// exposes no hook to see or disable it. `webview.bounds()` reads the
+/// window's real on-screen geometry straight from `XGetWindowAttributes`,
+/// so comparing a requested size against that readback measures GTK's
+/// silent factor directly, with no assumption about *why* GTK applies it.
+/// `None` means "not yet calibrated"; `Some(factor)` is the multiplier
+/// applied to every future request so the requested and actual rects
+/// converge.
+type SharedScaleCorrection = Rc<Cell<Option<f64>>>;
 
 /// F-CTRL-BROWSER-06: shadows `console.log/warn/error/info/debug` with
 /// wrappers that append to `window.__tillerConsole` before calling through
@@ -805,6 +819,9 @@ pub struct BrowserSurface {
     /// selection the user is actively editing.
     address_focused: bool,
     webview: SharedWebView,
+    /// F-BRW-01: GTK/GDK-side geometry correction, calibrated once against
+    /// real X11 window attributes; see [`SharedScaleCorrection`].
+    webview_scale_correction: SharedScaleCorrection,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
     pump_task: Option<Task<()>>,
@@ -882,6 +899,7 @@ impl BrowserSurface {
             address_dragging: false,
             address_focused: false,
             webview,
+            webview_scale_correction: Rc::new(Cell::new(None)),
             web_events,
             events: Vec::new(),
             pump_task,
@@ -1317,7 +1335,10 @@ impl Render for BrowserSurface {
         self.address_focused = self.address_focus.is_focused(window);
         let entity = cx.entity();
         let permission = self.state.permission_prompt().cloned();
-        let webview = NativeWebViewElement::new(self.webview.clone());
+        let webview = NativeWebViewElement::new(
+            self.webview.clone(),
+            self.webview_scale_correction.clone(),
+        );
 
         div()
             .id("browser-surface")
@@ -1658,13 +1679,40 @@ fn native_webview_rect(bounds: Bounds<Pixels>) -> Rect {
     }
 }
 
+/// Reads the raw numeric width/height out of a `wry::Rect`'s `Size`,
+/// regardless of whether it is tagged `Physical` or `Logical`. Passing
+/// `scale_factor: 1.0` makes both variants' `to_logical` a no-op (see
+/// `dpi::PixelUnit::to_logical`), so this returns exactly the numbers
+/// stored, unscaled — including the mislabeled-but-real physical pixels
+/// `WebView::bounds()` reads back from `XGetWindowAttributes`.
+fn rect_size(rect: &Rect) -> (f64, f64) {
+    let size = rect.size.to_logical::<f64>(1.0);
+    (size.width, size.height)
+}
+
+/// Scales a `Rect`'s position and size uniformly by `factor`, reusing
+/// [`rect_size`]'s tag-independent readout so this composes with rects
+/// built by [`native_webview_rect`] or read back from `WebView::bounds()`.
+fn scale_rect(rect: &Rect, factor: f64) -> Rect {
+    let position = rect.position.to_logical::<f64>(1.0);
+    let (width, height) = rect_size(rect);
+    Rect {
+        position: LogicalPosition::new(position.x * factor, position.y * factor).into(),
+        size: LogicalSize::new((width * factor).max(1.0), (height * factor).max(1.0)).into(),
+    }
+}
+
 struct NativeWebViewElement {
     webview: SharedWebView,
+    scale_correction: SharedScaleCorrection,
 }
 
 impl NativeWebViewElement {
-    fn new(webview: SharedWebView) -> Self {
-        Self { webview }
+    fn new(webview: SharedWebView, scale_correction: SharedScaleCorrection) -> Self {
+        Self {
+            webview,
+            scale_correction,
+        }
     }
 }
 
@@ -1711,7 +1759,47 @@ impl Element for NativeWebViewElement {
         _: &mut App,
     ) -> Self::PrepaintState {
         if let Some(webview) = self.webview.borrow().as_ref() {
-            let _ = webview.set_bounds(native_webview_rect(bounds));
+            let requested = native_webview_rect(bounds);
+
+            // F-BRW-01: `native_webview_rect` is a verified no-op pass-through
+            // (see its doc comment) yet the child window still lands shrunk
+            // toward the origin, live-reproduced twice at the exact same
+            // ~1/1.1667 ratio -- proof the divide happens inside GTK/GDK's
+            // own geometry call, below anything wry's public API exposes.
+            // Rather than guess at *why* (a specific DPI setting, a GDK
+            // scale-factor query, a compositor transform), calibrate against
+            // reality: ask the same window what actually landed and correct
+            // future requests by the ratio actually observed.
+            let corrected = match self.scale_correction.get() {
+                Some(factor) => scale_rect(&requested, factor),
+                None => requested.clone(),
+            };
+            let _ = webview.set_bounds(corrected);
+
+            if self.scale_correction.get().is_none() {
+                if let Ok(actual) = webview.bounds() {
+                    let (requested_w, requested_h) = rect_size(&requested);
+                    let (actual_w, actual_h) = rect_size(&actual);
+                    // Guard against the 1x1 startup stub and any transient
+                    // zero reading -- only calibrate once both dimensions
+                    // are large enough to measure a ratio meaningfully.
+                    if requested_w > 8.0 && requested_h > 8.0 && actual_w > 8.0 && actual_h > 8.0 {
+                        let factor_w = requested_w / actual_w;
+                        let factor_h = requested_h / actual_h;
+                        // The observed bug is a uniform scale, not an
+                        // independent per-axis one; average the two
+                        // measurements to damp noise from integer pixel
+                        // rounding on either side.
+                        let factor = (factor_w + factor_h) / 2.0;
+                        if (factor - 1.0).abs() > 0.01 {
+                            self.scale_correction.set(Some(factor));
+                            let _ = webview.set_bounds(scale_rect(&requested, factor));
+                        } else {
+                            self.scale_correction.set(Some(1.0));
+                        }
+                    }
+                }
+            }
         }
         ()
     }
@@ -1862,6 +1950,44 @@ mod tests {
         let rect = native_webview_rect(bounds);
 
         assert_eq!(rect.size, wry::dpi::LogicalSize::new(1.0, 1.0).into());
+    }
+
+    #[test]
+    fn scale_correction_recovers_the_exact_shrink_d_p1_measured_live() {
+        // F-BRW-01: the D-P1 critic requested a webview at x=386,y=133,
+        // 850x792 and read back real X server geometry (`webview.bounds()`)
+        // spanning only x=331..1059 -- 728px wide, at position 331, not
+        // 386. That is GTK/GDK silently applying ~1/1.1667 below anything
+        // `native_webview_rect` touches. `scale_rect` must recover the
+        // exact corrective factor from that observed pair, in both
+        // dimensions, without hardcoding the ratio anywhere.
+        let requested = native_webview_rect(Bounds::new(
+            gpui::point(gpui::px(386.0), gpui::px(133.0)),
+            gpui::size(gpui::px(850.0), gpui::px(792.0)),
+        ));
+        let observed_shrink = 1.0 / 1.1667_f64;
+        let actual = scale_rect(&requested, observed_shrink);
+
+        let (actual_w, actual_h) = rect_size(&actual);
+        // Matches the critic's live pixel scan (728px content span) to
+        // within a pixel of rounding.
+        assert!((actual_w - 728.0).abs() < 1.0, "actual_w = {actual_w}");
+
+        let (requested_w, requested_h) = rect_size(&requested);
+        let factor_w = requested_w / actual_w;
+        let factor_h = requested_h / actual_h;
+        let recovered_factor = (factor_w + factor_h) / 2.0;
+
+        // The correction loop: re-request at `requested * recovered_factor`
+        // and let GTK's own (unknown, unmodeled) shrink apply again, the
+        // same way it did on the frame we calibrated from. The result must
+        // land back at what was originally requested -- the actual
+        // real-world invariant `prepaint`'s calibration branch relies on.
+        let corrected_request = scale_rect(&requested, recovered_factor);
+        let corrected_real_geometry = scale_rect(&corrected_request, observed_shrink);
+        let (final_w, final_h) = rect_size(&corrected_real_geometry);
+        assert!((final_w - requested_w).abs() < 1.0, "final_w = {final_w}");
+        assert!((final_h - requested_h).abs() < 1.0, "final_h = {final_h}");
     }
 
     #[test]
