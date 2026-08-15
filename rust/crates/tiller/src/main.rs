@@ -3963,7 +3963,14 @@ impl TillerWorkspace {
                 tab_states: Vec::new(),
                 diagnostics: Vec::new(),
             };
-            let saved_session_refs = self.session.load_session_refs();
+            // F-SET-04: resume_agent_sessions gates whether a saved native
+            // session ref is honored on restore -- with it off, restored
+            // agent panes must start fresh rather than silently resuming.
+            let saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions {
+                self.session.load_session_refs()
+            } else {
+                BTreeMap::new()
+            };
             let (tabs, _) = restore_tabs_in_workspace(
                 &restored,
                 &self.working_directory,
@@ -8873,6 +8880,15 @@ fn main() {
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
+        // F-SET-04: only honor saved native session refs for the initial
+        // restore when the resume_agent_sessions setting is on; the shared
+        // `session_refs` above stays populated for the control server
+        // (session.ref), which is a separate concern from restore-time use.
+        let saved_session_refs_for_restore = if saved_settings.resume_agent_sessions {
+            saved_session_refs.clone()
+        } else {
+            BTreeMap::new()
+        };
         let control_environment: BTreeMap<String, String> = std::env::vars().collect();
         let socket_path = PathBuf::from(tiller_control::default_socket_path(&control_environment));
         let socket_info = ControlSocketInfo::new(socket_path);
@@ -8928,7 +8944,7 @@ fn main() {
                     &working_directory,
                     Some(window),
                     &mut activity_model,
-                    &saved_session_refs,
+                    &saved_session_refs_for_restore,
                     cx,
                 );
                 let activity = tabs
