@@ -2116,6 +2116,14 @@ fn settings_report_pairs(report: &SettingsReport) -> Result<Vec<(String, String)
             theme_mode_name(snapshot.theme).to_string(),
         ),
         (
+            // F-SET-20: every other SettingsSnapshot field the Appearance
+            // section reports here had an entry; translucency did not, so
+            // toggling it never showed up in the surface.settings.select
+            // payload even though the underlying field flips correctly.
+            "translucency".to_string(),
+            snapshot.translucency.to_string(),
+        ),
+        (
             "interfaceFontSize".to_string(),
             snapshot.interface_font_size.to_string(),
         ),
@@ -4174,6 +4182,17 @@ impl TillerWorkspace {
                 cx,
             );
             Self::bind_terminal_tabs(&tabs, cx);
+            // F-CHAT-14: Workspace::new binds every freshly-created Chat tab's
+            // ChatEvent::OpenFile to add_file_tab via bind_chat; restored chat
+            // tabs need the same binding or a restored session's Edit-tool file
+            // opens silently no-op even with Follow on.
+            for tab in &tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Chat(chat) = content {
+                        Self::bind_chat(chat, cx);
+                    }
+                });
+            }
             self.next_tab_id += tabs.len();
             self.tabs.extend(tabs);
             self.next_pane_id = next_pane_id(&self.tabs);
