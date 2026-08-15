@@ -372,9 +372,33 @@ impl AppDatabase {
     /// Replaces the tabs of one worktree in a single transaction, assigning
     /// `order_idx` from the slice order and normalizing the active flag: at
     /// most one tab per worktree is active, the first marked active wins.
+    ///
+    /// Tabs that are still present in `tabs` are updated in place (upsert on
+    /// `id`) rather than deleted-and-reinserted: `chat_turn.tab_id` has
+    /// `ON DELETE CASCADE` to `tab(id)`, so a delete/insert pair — even for
+    /// the *same* tab id within the same transaction — wipes any persisted
+    /// chat transcript for that tab. Only tabs no longer present in `tabs`
+    /// are deleted, which cascades their transcripts away deliberately.
     pub fn save_tabs(&self, worktree_id: &str, tabs: &[TabRecord]) -> Result<(), PersistenceError> {
         let transaction = self.conn.unchecked_transaction()?;
-        transaction.execute("DELETE FROM tab WHERE worktree_id = ?1", [worktree_id])?;
+        let keep_ids: std::collections::HashSet<&str> =
+            tabs.iter().map(|t| t.id.as_str()).collect();
+        let stale_ids: Vec<String> = {
+            let mut statement =
+                transaction.prepare("SELECT id FROM tab WHERE worktree_id = ?1")?;
+            let mut rows = statement.query([worktree_id])?;
+            let mut stale = Vec::new();
+            while let Some(row) = rows.next()? {
+                let id: String = row.get(0)?;
+                if !keep_ids.contains(id.as_str()) {
+                    stale.push(id);
+                }
+            }
+            stale
+        };
+        for id in &stale_ids {
+            transaction.execute("DELETE FROM tab WHERE id = ?1", [id])?;
+        }
         let mut active_seen = false;
         for (index, tab) in tabs.iter().enumerate() {
             let mut tab = tab.clone();
@@ -386,7 +410,7 @@ impl AppDatabase {
                     active_seen = true;
                 }
             }
-            insert_tab(&transaction, &tab)?;
+            upsert_tab(&transaction, &tab)?;
         }
         transaction.commit()?;
         Ok(())
@@ -1415,10 +1439,21 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
     Ok(())
 }
 
-fn insert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<()> {
+/// Inserts a tab row, or updates it in place if `id` already exists.
+/// Deliberately never deletes: deleting and reinserting a `tab` row —
+/// even within the same transaction — cascades away `chat_turn` rows via
+/// `ON DELETE CASCADE`, silently wiping persisted chat transcripts.
+fn upsert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO tab (id, worktree_id, title, kind, agent_id, order_idx, is_active)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             worktree_id = excluded.worktree_id,
+             title = excluded.title,
+             kind = excluded.kind,
+             agent_id = excluded.agent_id,
+             order_idx = excluded.order_idx,
+             is_active = excluded.is_active",
         params![
             tab.id,
             tab.worktree_id,
@@ -1453,6 +1488,56 @@ fn parse_bool_setting(value: &str, default: bool) -> bool {
         "true" => true,
         "false" => false,
         _ => default,
+    }
+}
+
+#[cfg(test)]
+mod save_tabs_tests {
+    use super::*;
+    use crate::model::{ChatEntry, ProjectRecord, WorktreeRecord};
+
+    /// Regression for F-CHAT-34: `save_tabs` used to delete+reinsert every
+    /// tab row of the worktree on each autosave. `tab(id)` is the parent of
+    /// `chat_turn(tab_id)` with `ON DELETE CASCADE`, so even reinserting the
+    /// same tab id inside the same transaction cascaded away its persisted
+    /// transcript. An ordinary autosave triggered by e.g. `tab.select` must
+    /// not wipe a chat session that was already saved.
+    #[test]
+    fn resaving_the_same_tabs_does_not_wipe_chat_transcripts() {
+        let db = AppDatabase::in_memory().expect("open");
+        db.save_project(&ProjectRecord::new("project", "Project", "/tmp/project"))
+            .expect("project");
+        db.save_worktree(&WorktreeRecord::new(
+            "worktree",
+            "project",
+            "main",
+            "/tmp/project",
+        ))
+        .expect("worktree");
+        let chat = TabRecord::new("chat-1", "worktree", "Chat", "chat");
+        db.save_tabs("worktree", std::slice::from_ref(&chat))
+            .expect("initial tabs");
+        db.save_chat_transcript(&ChatTranscript {
+            tab_id: "chat-1".into(),
+            turns: vec![ChatTurn {
+                entries: vec![ChatEntry::UserMessage {
+                    text: "hello".into(),
+                }],
+            }],
+        })
+        .expect("save transcript");
+
+        // Simulate an ordinary autosave (e.g. `tab.select`) that re-saves
+        // the same worktree's tabs with no structural change.
+        db.save_tabs("worktree", std::slice::from_ref(&chat))
+            .expect("re-save tabs");
+
+        let sessions = db.chat_sessions("worktree").expect("list sessions");
+        let session = sessions
+            .iter()
+            .find(|s| s.tab_id == "chat-1")
+            .expect("chat session must survive an ordinary tab autosave");
+        assert_eq!(session.turn_count, 1);
     }
 }
 
