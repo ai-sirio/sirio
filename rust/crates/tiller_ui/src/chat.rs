@@ -34,6 +34,13 @@ use tiller_theme::Theme;
 use crate::composer::{Composer, ComposerChip, ComposerPart};
 use crate::sidebar::icons::{Icon, IconElement};
 
+/// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
+/// callers (File Preview) that want to try resolving the link as a local
+/// file before falling back to opening it externally. `None` keeps the
+/// default of every link opening via `cx.open_url`, which is right for
+/// assistant-authored chat prose.
+pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// The transcript's content column — waku's measured `CONTENT_MAX_WIDTH`
 /// 720 (`docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` §A.2).
 pub(crate) const TRANSCRIPT_WIDTH: f32 = 720.0;
@@ -3401,6 +3408,7 @@ impl Chat {
         theme: &Theme,
         interaction: Option<TranscriptInteraction>,
         source_start: usize,
+        link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
         div()
             .w_full()
@@ -3416,6 +3424,7 @@ impl Chat {
                         format!("assistant-block-{index}"),
                         interaction.as_ref(),
                         *block_start,
+                        link_click.clone(),
                     );
                     *block_start += block.plain_text().len() + 2;
                     Some(rendered)
@@ -3424,12 +3433,24 @@ impl Chat {
             .into_any_element()
     }
 
-    /// Shared markdown renderer used by both assistant replies and file tabs.
-    /// Keeping this entry point on `Chat` means file tabs use the same
-    /// structured `tiller_markdown` tree and styling as the transcript rather
-    /// than growing a second markdown renderer.
-    pub(crate) fn render_markdown_document(document: Document, theme: &Theme) -> AnyElement {
-        Self::render_markdown(document, theme, None, 0)
+    /// Shared markdown renderer used by file tabs. Keeping this entry point
+    /// on `Chat` means file tabs use the same structured `tiller_markdown`
+    /// tree and styling as the transcript rather than growing a second
+    /// markdown renderer.
+    ///
+    /// Every rendered link's click is routed through `link_click` instead of
+    /// the transcript's default `cx.open_url` (F-CORE-FILE-04). File Preview
+    /// mode uses this so a relative link resolves against the open file's
+    /// directory and opens as a tab, the same way the Code-mode +
+    /// platform-click path already does — Preview is the file view's
+    /// default mode, so it must not fall back to unconditionally handing
+    /// every link to `cx.open_url`.
+    pub(crate) fn render_markdown_document_with_link_override(
+        document: Document,
+        theme: &Theme,
+        link_click: LinkClickOverride,
+    ) -> AnyElement {
+        Self::render_markdown(document, theme, None, 0, Some(link_click))
     }
 
     fn render_markdown_block(
@@ -3438,6 +3459,7 @@ impl Chat {
         id: String,
         interaction: Option<&TranscriptInteraction>,
         source_start: usize,
+        link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -3456,6 +3478,7 @@ impl Chat {
                     id,
                     interaction,
                     source_start,
+                    link_click.clone(),
                 ))
                 .into_any_element(),
             Block::Paragraph { inline } => div()
@@ -3469,11 +3492,19 @@ impl Chat {
                     id,
                     interaction,
                     source_start,
+                    link_click.clone(),
                 ))
                 .into_any_element(),
-            Block::List { kind, items, .. } => {
-                Self::render_markdown_list(kind, items, theme, id, 0, source_start, interaction)
-            }
+            Block::List { kind, items, .. } => Self::render_markdown_list(
+                kind,
+                items,
+                theme,
+                id,
+                0,
+                source_start,
+                interaction,
+                link_click.clone(),
+            ),
             Block::BlockQuote { blocks } => div()
                 .w_full()
                 .flex()
@@ -3483,13 +3514,14 @@ impl Chat {
                 .child(div().w_full().flex().flex_col().gap(px(7.0)).children(
                     blocks.into_iter().enumerate().scan(
                         source_start,
-                        |block_start, (index, block)| {
+                        move |block_start, (index, block)| {
                             let rendered = Self::render_markdown_block(
                                 block.clone(),
                                 theme,
                                 format!("{id}-quote-{index}"),
                                 interaction,
                                 *block_start,
+                                link_click.clone(),
                             );
                             *block_start += block.plain_text().len() + 2;
                             Some(rendered)
@@ -3603,6 +3635,7 @@ impl Chat {
                 id,
                 interaction,
                 source_start,
+                link_click,
             ),
             Block::ThematicBreak => div()
                 .w_full()
@@ -3656,6 +3689,7 @@ impl Chat {
         depth: usize,
         source_start: usize,
         interaction: Option<&TranscriptInteraction>,
+        link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -3697,6 +3731,7 @@ impl Chat {
                                     depth + 1,
                                     *block_start,
                                     interaction,
+                                    link_click.clone(),
                                 ),
                                 block => Self::render_markdown_block(
                                     block,
@@ -3704,6 +3739,7 @@ impl Chat {
                                     format!("{id}-{index}-{block_index}"),
                                     interaction,
                                     *block_start,
+                                    link_click.clone(),
                                 ),
                             };
                             *block_start += block.plain_text().len() + 1;
@@ -3751,6 +3787,7 @@ impl Chat {
         id: String,
         interaction: Option<&TranscriptInteraction>,
         source_start: usize,
+        link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
@@ -3787,6 +3824,7 @@ impl Chat {
                             format!("{row_id}-cell-{index}"),
                             interaction,
                             *cell_start,
+                            link_click.clone(),
                         ));
                         *cell_start += cell_text.len() + 1;
                         Some(cell_view.into_any_element())
@@ -3834,6 +3872,7 @@ impl Chat {
         id: String,
         interaction: Option<&TranscriptInteraction>,
         source_start: usize,
+        link_click: Option<LinkClickOverride>,
     ) -> AnyElement {
         let mut builder = InlineBuilder::default();
         for inline in &inline {
@@ -3868,9 +3907,16 @@ impl Chat {
             styled.into_any_element()
         } else {
             InteractiveText::new(ElementId::Name(id.into()), styled)
-                .on_click(link_ranges, move |index, _, cx| {
+                .on_click(link_ranges, move |index, window, cx| {
                     if let Some(target) = link_targets.get(index) {
-                        cx.open_url(target);
+                        // F-CORE-FILE-04: File Preview supplies an override
+                        // that tries to resolve the link as another local
+                        // file first; assistant-authored prose (no override)
+                        // keeps opening every link externally.
+                        match &link_click {
+                            Some(handler) => handler(target, window, cx),
+                            None => cx.open_url(target),
+                        }
                     }
                 })
                 .into_any_element()
@@ -4224,6 +4270,7 @@ impl Chat {
                         theme,
                         Some(interaction),
                         source_start,
+                        None,
                     ))
                     .child(copy)
                     .into_any_element()

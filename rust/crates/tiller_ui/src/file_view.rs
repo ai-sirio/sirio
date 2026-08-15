@@ -26,12 +26,13 @@ use gpui::{
 };
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 use tiller_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use tiller_project::resolve_file_link;
 use tiller_theme::Theme;
 
-use crate::chat::Chat;
+use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at};
 
 /// The rendered-markdown column: the frozen 720px content column (waku
@@ -1007,6 +1008,27 @@ fn render_content(
     if is_markdown && mode == MarkdownMode::Preview && !editor.preview_locked() {
         let document = markdown_document(editor.path(), editor.buffer())
             .expect("markdown render path implies a markdown document");
+        // F-CORE-FILE-04: Preview is the file view's *default* mode, so its
+        // rendered links must resolve against the open file's directory the
+        // same way the Code-mode + platform-click path does — not fall
+        // through to Chat::render_markdown_document's plain cx.open_url,
+        // which never routes back to FileViewEvent::OpenFile at all.
+        let base = editor
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let link_entity = entity.clone();
+        let link_click: LinkClickOverride = Rc::new(move |target, _window, cx| {
+            match resolve_file_link(target, &base) {
+                Some(resolved) => {
+                    link_entity.update(cx, |_, cx| {
+                        cx.emit(FileViewEvent::OpenFile(resolved.path));
+                    });
+                }
+                None => cx.open_url(target),
+            }
+        });
         return div()
             .id("file-markdown-scroll")
             .debug_selector(|| "file-markdown-scroll".into())
@@ -1018,7 +1040,11 @@ fn render_content(
                     .max_w(px(MARKDOWN_COLUMN_WIDTH))
                     .mx_auto()
                     .p(px(24.0))
-                    .child(Chat::render_markdown_document(document.clone(), &theme)),
+                    .child(Chat::render_markdown_document_with_link_override(
+                        document.clone(),
+                        &theme,
+                        link_click,
+                    )),
             )
             .into_any_element();
     }
@@ -2411,6 +2437,74 @@ mod tests {
             "a relative link resolves against the open file's directory and \
              asks the shell to open it, the same OpenFile path RightPanel \
              and Chat already use"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression for F-CORE-FILE-04: the previous test above only proved
+    /// `open_markdown_link` resolves correctly — it never proved the
+    /// *rendered* link in Preview (the file view's default mode) actually
+    /// calls it. Preview renders through `Chat::render_inline`, whose
+    /// on_click used to call `cx.open_url` unconditionally, so a real click
+    /// on a real rendered link in Preview never emitted `FileViewEvent`.
+    /// This test drives an actual click through the drawn frame, the same
+    /// gesture wayland-drive used live.
+    #[gpui::test]
+    async fn clicking_a_rendered_link_in_preview_mode_emits_open_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-file-view-preview-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create worktree dir");
+        let note = dir.join("note.md");
+        // The whole first (only) paragraph is the link, so a click near the
+        // top-left of the rendered document — inside the padded content
+        // column, no text-layout math required — always lands on it.
+        std::fs::write(&note, "[setup](setup.md)\n").expect("write file");
+        std::fs::write(dir.join("setup.md"), "# setup\n").expect("write target file");
+
+        let (mut cx, view) = mounted_file_view(cx, note.clone());
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.markdown_mode()),
+            MarkdownMode::Preview,
+            "Markdown opens in Preview by default"
+        );
+
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &FileViewEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let scroll = cx
+            .debug_bounds("file-markdown-scroll")
+            .expect("Preview renders the markdown document");
+        // The rendered content sits in a `max_w(MARKDOWN_COLUMN_WIDTH)`
+        // column, `mx_auto`-centered inside the (wider, maximized-test-
+        // window) scroll container, with 24px of its own padding — account
+        // for both so the click lands on the link glyphs themselves rather
+        // than on the container's own left edge.
+        let column_left =
+            scroll.origin.x + ((scroll.size.width - px(MARKDOWN_COLUMN_WIDTH)) / 2.0).max(px(0.0));
+        let click_point = gpui::point(column_left + px(30.0), scroll.origin.y + px(30.0));
+        cx.simulate_click(click_point, Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [FileViewEvent::OpenFile(dir.join("setup.md"))],
+            "a real click on the rendered Preview link must resolve and \
+             emit FileViewEvent::OpenFile, not fall through to cx.open_url"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
