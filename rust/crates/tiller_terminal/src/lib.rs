@@ -2872,6 +2872,87 @@ mod view_tests {
         assert!(cx.update(|_, cx| terminal.read(cx).is_failed()));
     }
 
+    /// F-TERM-06: "Copy Pane ID" and "Paste" were only ever proven by
+    /// inspecting the render tree and the clipboard-write call site — never
+    /// by actually clicking through the menu and reading back what a real
+    /// clipboard held. This drives both context-menu items through the same
+    /// real mouse gesture the split test above uses, and closes the loop
+    /// through a live `cat` PTY: `Copy Pane ID` must write a real clipboard
+    /// entry, and `Paste` must feed that exact entry back into the terminal,
+    /// where the shell echoes it into the scrollback.
+    #[gpui::test]
+    async fn copy_pane_id_then_paste_round_trips_through_the_context_menu(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-clipboard-roundtrip-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec cat".to_string()],
+        };
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let window_handle = window.into();
+        let mut cx = VisualTestContext::from_window(window_handle, cx);
+        cx.run_until_parked();
+
+        let terminal = cx.update(|window, _cx| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+                .clone()
+        });
+
+        let click = point(px(40.0), px(40.0));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        let copy_pane_id = cx
+            .debug_bounds("terminal-context-item-4")
+            .expect("Copy Pane ID item must be drawn");
+        cx.simulate_click(copy_pane_id.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let clipboard_text = cx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .expect("Copy Pane ID must write a real clipboard entry");
+        assert!(
+            clipboard_text.starts_with("pane-"),
+            "clipboard held {clipboard_text:?}, not a pane id"
+        );
+
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+        let paste = cx
+            .debug_bounds("terminal-context-item-1")
+            .expect("Paste item must be drawn");
+        cx.simulate_click(paste.center(), Modifiers::none());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut captured = String::new();
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            captured = cx.update(|_, cx| {
+                String::from_utf8_lossy(&terminal.read(cx).capture_scrollback()).into_owned()
+            });
+            if captured.contains(&clipboard_text) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            captured.contains(&clipboard_text),
+            "Paste did not feed the clipboard's pane id back into the terminal: {captured:?}"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
     /// A dropped diff is delivered through the same real mouse gesture GPUI
     /// uses for payload drags, and the terminal entity records the exact
     /// payload for the host to consume.
