@@ -4794,6 +4794,20 @@ impl TillerWorkspace {
                 .ok_or_else(|| format!("unknown worktree: {selector}"))?;
             if path != self.working_directory {
                 self.select_worktree(path, cx)?;
+            } else if !self.has_current_worktree() {
+                // The requested worktree is already the live shell's
+                // directory, but a prior `worktree.close` cleared
+                // `ControlState::current` without navigating this shell
+                // anywhere else. An explicit, valid selector for exactly
+                // this worktree re-marks it current rather than being
+                // rejected as if no worktree existed — the full
+                // `select_worktree` teardown (status bar, right panel,
+                // pane eviction) is unneeded and would wrongly evict this
+                // worktree's own live panes.
+                self.control_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .select_worktree(&path);
             }
         }
         if !self.has_current_worktree() {
