@@ -24,6 +24,11 @@ tiller_control.workspace = true
 tiller_git.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# F-CTRL-BROWSER-05: browser.wait pumps the same process-global GTK main
+# loop tiller_ui's BrowserSurface drives from its 16ms timer, so a bounded
+# wait here can make WebKit's async load actually progress instead of
+# spinning uselessly until timeout.
+gtk = "0.18.2"
 
 [dev-dependencies]
 # For tests that hand-corrupt a database (e.g. bumping user_version).
