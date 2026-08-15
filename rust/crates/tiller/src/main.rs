@@ -518,6 +518,11 @@ enum ControlAction {
         action: ChatControlAction,
         reply: ControlReply,
     },
+    /// F-SID-11: `worktree.set`'s comment mutates the shared `ControlState`
+    /// directly from the control-server thread, which the sidebar entity
+    /// never observes on its own — nothing re-renders it without this
+    /// action nudging the GPUI-thread poll loop to call `refresh_sidebar`.
+    RefreshSidebar,
 }
 
 enum ChatControlAction {
@@ -1831,6 +1836,13 @@ impl ControlHandler for AppControlHandler {
                 };
                 if comment.is_some() {
                     self.persist_worktree_comment(&workspace.path, &workspace.comment);
+                    // F-SID-11: nudge the GPUI-thread poll loop so the
+                    // materialized Sidebar entity picks up the new comment;
+                    // the shared ControlState mutation above is otherwise
+                    // invisible to it.
+                    if let Ok(mut actions) = self.control_actions.lock() {
+                        actions.push(ControlAction::RefreshSidebar);
+                    }
                 }
                 let mut result = vec![
                     ("id".to_string(), workspace.id),
@@ -2938,6 +2950,9 @@ impl TillerWorkspace {
                                 ControlAction::Chat { action, reply } => {
                                     let result = workspace.handle_chat_action(action, cx);
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::RefreshSidebar => {
+                                    workspace.refresh_sidebar(cx);
                                 }
                             }
                         }
