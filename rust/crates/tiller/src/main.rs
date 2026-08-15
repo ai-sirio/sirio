@@ -448,6 +448,9 @@ enum WorkspaceAction {
     InstallSkill(tiller_project::SkillInstallCommand),
     OpenSettings,
     CloseSettings,
+    /// F-BRW-09: a plain (non-Cmd+Shift) click on an HTTP(S) link in chat
+    /// opens Tiller's internal browser tab instead of the system browser.
+    OpenBrowserLink(String),
 }
 
 #[derive(Clone)]
@@ -2482,6 +2485,9 @@ impl TillerWorkspace {
                                     workspace.restore_focus_pending = true;
                                     cx.notify();
                                 }
+                                WorkspaceAction::OpenBrowserLink(url) => {
+                                    workspace.add_browser_tab(url, window, cx);
+                                }
                             }
                         }
                         for action in pending_control {
@@ -2887,9 +2893,18 @@ impl TillerWorkspace {
     /// workspace owns the editor tab and routes that intent through the same
     /// de-duplicating path used by the file tree and Changes surface.
     fn bind_chat(chat: &Entity<Chat>, cx: &mut Context<Self>) {
-        cx.subscribe(chat, |workspace, _, event: &ChatEvent, cx| {
-            let ChatEvent::OpenFile(path) = event;
-            workspace.add_file_tab(path.clone(), cx);
+        cx.subscribe(chat, |workspace, _, event: &ChatEvent, cx| match event {
+            ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+            // F-BRW-09: this subscription predates a Window-aware callback
+            // (see `bind_chat`'s two call sites, one of which has no
+            // Window), so queue the browser-tab creation for the
+            // update_in-based action loop the same way NewTab/OpenSettings
+            // already do.
+            ChatEvent::OpenLink(url) => {
+                if let Ok(mut actions) = workspace.pending_actions.lock() {
+                    actions.push(WorkspaceAction::OpenBrowserLink(url.clone()));
+                }
+            }
         })
         .detach();
     }
