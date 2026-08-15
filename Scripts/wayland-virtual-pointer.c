@@ -68,7 +68,38 @@ static void move_pointer(struct zwlr_virtual_pointer_v1 *pointer,
     zwlr_virtual_pointer_v1_frame(pointer);
 }
 
+/* Linux input-event-codes.h button values; hardcoded rather than pulling in the header, matching
+ * how BTN_LEFT (0x110) was already spelled out below before this file grew a second button. */
+#define BTN_LEFT_CODE 0x110u
+#define BTN_RIGHT_CODE 0x111u
+
+static void press_button(struct zwlr_virtual_pointer_v1 *pointer, uint32_t button) {
+    zwlr_virtual_pointer_v1_button(pointer, milliseconds(), button, WL_POINTER_BUTTON_STATE_PRESSED);
+    zwlr_virtual_pointer_v1_frame(pointer);
+}
+
+static void release_button(struct zwlr_virtual_pointer_v1 *pointer, uint32_t button) {
+    zwlr_virtual_pointer_v1_button(pointer, milliseconds(), button, WL_POINTER_BUTTON_STATE_RELEASED);
+    zwlr_virtual_pointer_v1_frame(pointer);
+}
+
+/* One wheel "click" conventionally reports 15 libinput units per notch (matches a real mouse
+ * wheel / what wlroots' own pointer emulation uses); `steps` may be negative for the opposite
+ * direction. axis_source/axis_discrete are sent alongside axis so a client reading discrete wheel
+ * steps (rather than raw continuous scroll) sees the same event a physical wheel would produce. */
+static void scroll_axis(struct zwlr_virtual_pointer_v1 *pointer, int32_t steps) {
+    uint32_t time = milliseconds();
+    wl_fixed_t value = wl_fixed_from_int(steps * 15);
+    zwlr_virtual_pointer_v1_axis_source(pointer, WL_POINTER_AXIS_SOURCE_WHEEL);
+    zwlr_virtual_pointer_v1_axis(pointer, time, WL_POINTER_AXIS_VERTICAL_SCROLL, value);
+    zwlr_virtual_pointer_v1_axis_discrete(pointer, time, WL_POINTER_AXIS_VERTICAL_SCROLL, value, steps);
+    zwlr_virtual_pointer_v1_frame(pointer);
+}
+
 int main(int argc, char **argv) {
+    /* Commands arrive one per line on the fifo: "<op> <id> <x> <y> <width> <height> [<extra>]"
+     * where op is move/click/rightclick/down/up/scroll and extra is scroll's signed step count.
+     * See wayland-drive.sh's pointer_command() for the writer side. */
     if (argc != 4) {
         fprintf(stderr, "usage: %s <ready-file> <command-fifo> <ack-file>\n", argv[0]);
         return 2;
@@ -117,11 +148,17 @@ int main(int argc, char **argv) {
 
     char line[128];
     while (fgets(line, sizeof(line), commands) != NULL) {
-        char operation[8] = {0};
+        /* op id x y width height [extra] — extra is signed (scroll steps); every other op
+         * ignores it. %d tolerates a leading '-' that %u would reject. */
+        char operation[16] = {0};
         unsigned id = 0, x = 0, y = 0, width = 0, height = 0;
-        if (sscanf(line, "%7s %u %u %u %u %u", operation, &id, &x, &y, &width, &height) != 6 ||
-            (strcmp(operation, "move") != 0 && strcmp(operation, "click") != 0) ||
-            width == 0 || height == 0) {
+        int extra = 0;
+        int n = sscanf(line, "%15s %u %u %u %u %u %d", operation, &id, &x, &y, &width, &height, &extra);
+        int known = strcmp(operation, "move") == 0 || strcmp(operation, "click") == 0 ||
+                    strcmp(operation, "rightclick") == 0 || strcmp(operation, "down") == 0 ||
+                    strcmp(operation, "up") == 0 || strcmp(operation, "scroll") == 0;
+        if (n < 6 || !known || width == 0 || height == 0 ||
+            (strcmp(operation, "scroll") == 0 && n != 7)) {
             fprintf(stderr, "invalid pointer command: %s", line);
             continue;
         }
@@ -129,14 +166,29 @@ int main(int argc, char **argv) {
         wl_display_flush(display);
         if (strcmp(operation, "click") == 0) {
             sleep_ms(25);
-            zwlr_virtual_pointer_v1_button(pointer, milliseconds(), 0x110,
-                                            WL_POINTER_BUTTON_STATE_PRESSED);
-            zwlr_virtual_pointer_v1_frame(pointer);
+            press_button(pointer, BTN_LEFT_CODE);
             wl_display_flush(display);
             sleep_ms(25);
-            zwlr_virtual_pointer_v1_button(pointer, milliseconds(), 0x110,
-                                            WL_POINTER_BUTTON_STATE_RELEASED);
-            zwlr_virtual_pointer_v1_frame(pointer);
+            release_button(pointer, BTN_LEFT_CODE);
+            wl_display_flush(display);
+        } else if (strcmp(operation, "rightclick") == 0) {
+            sleep_ms(25);
+            press_button(pointer, BTN_RIGHT_CODE);
+            wl_display_flush(display);
+            sleep_ms(25);
+            release_button(pointer, BTN_RIGHT_CODE);
+            wl_display_flush(display);
+        } else if (strcmp(operation, "down") == 0) {
+            sleep_ms(25);
+            press_button(pointer, BTN_LEFT_CODE);
+            wl_display_flush(display);
+        } else if (strcmp(operation, "up") == 0) {
+            sleep_ms(25);
+            release_button(pointer, BTN_LEFT_CODE);
+            wl_display_flush(display);
+        } else if (strcmp(operation, "scroll") == 0) {
+            sleep_ms(25);
+            scroll_axis(pointer, extra);
             wl_display_flush(display);
         }
         acknowledge(ack_path, id);

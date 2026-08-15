@@ -19,8 +19,19 @@
 #   ctl <method> [k=v ...]   send a ControlRequest, print the JSON reply
 #   click <x> <y>            left-click absolute nested-output coordinates
 #   move <x> <y>             move to absolute nested-output coordinates
+#   rightclick <x> <y>       right-click absolute nested-output coordinates (opens context menus)
+#   down <x> <y>             press and hold the left button at this position (no release)
+#   up <x> <y>               move here and release the left button — pair with `down` for a drag
+#   drag <x1> <y1> <x2> <y2> [steps]   press at (x1,y1), move through <steps> waypoints (default
+#                            4), release at (x2,y2) — composes down/move/up for you
+#   scroll <x> <y> <steps>  move to (x,y), then send <steps> wheel notches (negative = opposite
+#                            direction) as a real axis event, not a synthesized keypress
 #   type <text>              type text through wtype (click a text target first)
 #   key <name>               type a named key through wtype, e.g. key Tab
+#   chord <mod> <key>        modifier-held named key, e.g. chord shift F10 (mod: shift, ctrl,
+#                            alt, logo, altgr, capslock — see `man wtype`)
+#   modclick <mod> <x> <y>   hold <mod> while left-clicking (x,y) — e.g. modclick ctrl 400 300
+#                            for the platform-modifier+click convention on terminal links
 #   title <text>             set the focused terminal pane's title via OSC 0 (click the pane
 #                            first). Use this rather than writing the escape sequence inline —
 #                            its bare `;` splits the eval'd action block in half.
@@ -191,10 +202,12 @@ start_virtual_keyboard() {
   kill -0 "$VK_PID" 2>/dev/null || { cat "$VK_LOG" >&2; return 1; }
 }
 
-if grep -Eq '(^|[;[:space:]])(click|move)([;[:space:]]|$)' <<<"$ACTIONS"; then
+# modclick needs BOTH devices pre-created: the pointer for the click itself, the keyboard because
+# it holds a modifier around it. It appears in both guards below.
+if grep -Eq '(^|[;[:space:]])(click|move|rightclick|down|up|drag|scroll|modclick)([;[:space:]]|$)' <<<"$ACTIONS"; then
   start_virtual_pointer || exit 3
 fi
-if grep -Eq '(^|[;[:space:]])(type|key|title)([;[:space:]]|$)' <<<"$ACTIONS"; then
+if grep -Eq '(^|[;[:space:]])(type|key|title|chord|modclick)([;[:space:]]|$)' <<<"$ACTIONS"; then
   start_virtual_keyboard || exit 3
 fi
 
@@ -254,13 +267,17 @@ PY
 }
 
 pointer_command() {
-  local operation="$1" x="$2" y="$3" id
+  # $4 (extra) is optional and signed — only `scroll` uses it, as wheel-notch count.
+  local operation="$1" x="$2" y="$3" extra="${4:-}" id
   [ "$POINTER_ENABLED" = 1 ] || { echo "FAIL: $operation needs the pre-app virtual pointer" >&2; return 1; }
   [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]] || { echo "FAIL: coordinates must be non-negative integers" >&2; return 1; }
+  if [ -n "$extra" ]; then
+    [[ "$extra" =~ ^-?[0-9]+$ ]] || { echo "FAIL: $operation's extra value must be an integer" >&2; return 1; }
+  fi
   verify_nested_sway || return 1
   POINTER_COMMAND_ID=$((POINTER_COMMAND_ID + 1))
   id="$POINTER_COMMAND_ID"
-  printf '%s %s %s %s %s %s\n' "$operation" "$id" "$x" "$y" "$OUTPUT_W" "$OUTPUT_H" >"$VP_FIFO"
+  printf '%s %s %s %s %s %s %s\n' "$operation" "$id" "$x" "$y" "$OUTPUT_W" "$OUTPUT_H" "${extra:-0}" >"$VP_FIFO"
   for _ in $(seq 1 50); do
     grep -qx "$id" "$VP_ACK" 2>/dev/null && return 0
     sleep 0.02
@@ -271,6 +288,38 @@ pointer_command() {
 
 move() { pointer_command move "$1" "$2"; }
 click() { pointer_command click "$1" "$2"; }
+
+# Right-click: same persistent device as click/move, BTN_RIGHT (0x111) instead of BTN_LEFT.
+# See wayland-virtual-pointer.c's `rightclick` branch.
+rightclick() { pointer_command rightclick "$1" "$2"; }
+
+# Button-held drag, composed from three virtual-pointer primitives that did not exist before:
+# down (press, no release), plain move (motion only, already existed), up (release, no press-first).
+down() { pointer_command down "$1" "$2"; }
+up() { pointer_command up "$1" "$2"; }
+
+# drag <x1> <y1> <x2> <y2> [steps] — press at the start, walk <steps> waypoints (default 4) to the
+# end so the target sees real intermediate motion (not a teleport many drop targets ignore), then
+# release. This is the "compose one by hand from move" the pointer primitives could not do before.
+drag() {
+  local x1="$1" y1="$2" x2="$3" y2="$4" steps="${5:-4}" i sx sy
+  down "$x1" "$y1" || return 1
+  sleep 0.05
+  for ((i = 1; i <= steps; i++)); do
+    sx=$(( x1 + (x2 - x1) * i / steps ))
+    sy=$(( y1 + (y2 - y1) * i / steps ))
+    move "$sx" "$sy" || return 1
+    sleep 0.03
+  done
+  sleep 0.05
+  up "$x2" "$y2"
+}
+
+# scroll <x> <y> <steps> — move to (x,y) then send <steps> wheel notches as a real
+# zwlr_virtual_pointer axis+axis_discrete event (15 libinput units/notch, matching a physical
+# wheel), not a synthesized PageUp/Down keypress. Negative <steps> scrolls the other way; sign
+# convention is unverified until driven against a live control — record what you observed.
+scroll() { pointer_command scroll "$1" "$2" "$3"; }
 
 type() {
   verify_nested_sway || return 1
@@ -283,6 +332,40 @@ key() {
   verify_nested_sway || return 1
   command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
   wtype -k "$1"
+}
+
+# chord <mod> <key> — modifier-held named key, e.g. `chord shift F10`. One wtype invocation
+# (-M press, -k the key while held, -m release) is enough: the keyboard's wl_keyboard binding
+# already happened during start_virtual_keyboard's pre-app dance, so this one-shot process is not
+# racing a first bind (see trap 3) — the same reason plain `key`/`type` are safe as one-shot calls.
+# <mod> is whatever `man wtype` accepts: shift, ctrl, alt, logo, altgr, capslock.
+chord() {
+  [ "$#" = 2 ] || { echo "usage: chord <mod> <key>" >&2; return 2; }
+  verify_nested_sway || return 1
+  command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
+  wtype -M "$1" -k "$2" -m "$1"
+}
+
+# modclick <mod> <x> <y> — hold <mod> across a left-click, e.g. `modclick ctrl 400 300` for the
+# platform-modifier+click convention on a terminal hyperlink. wtype only holds a modifier for as
+# long as its own process lives ("modifiers get released automatically once the program
+# terminates" — man wtype), so the click must happen DURING that process's lifetime: -M presses
+# and holds, -s sleeps 400ms holding it, -m releases and the process exits. We background it, give
+# the press 50ms to land before clicking (same settle reasoning as trap 3), then wait for the
+# release so a second modclick never overlaps this one's hold.
+modclick() {
+  [ "$#" = 3 ] || { echo "usage: modclick <mod> <x> <y>" >&2; return 2; }
+  local mod="$1" x="$2" y="$3" wpid
+  verify_nested_sway || return 1
+  command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
+  wtype -M "$mod" -s 400 -m "$mod" &
+  wpid=$!
+  sleep 0.05
+  if ! click "$x" "$y"; then
+    wait "$wpid" 2>/dev/null
+    return 1
+  fi
+  wait "$wpid"
 }
 
 # Set the FOCUSED TERMINAL PANE's title, by typing a printf that emits OSC 0 into its shell.
@@ -335,7 +418,7 @@ shot() {
   fi
   echo "SHOT $path ($res · $colors colours)"
 }
-export -f ctl pointer_command move click type key shot verify_nested_sway
+export -f ctl pointer_command move click rightclick down up drag scroll type key chord modclick shot verify_nested_sway
 
 sleep "$SETTLE"
 shot baseline || { echo "FAIL: first frame is blank — presentation is broken, not layout. See $APP_LOG" >&2; exit 5; }
