@@ -4673,6 +4673,15 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         if method == "browser.open" {
+            // F-CTRL-BROWSER-02: every other surface-opening control method
+            // (surface.changes.open, chat.open, settings.open) refuses to
+            // create a surface without a current workspace; browser.open
+            // must not be the one exception that leaves a live browser tab
+            // behind while workspace.current still reports "no current
+            // workspace".
+            if !self.has_current_worktree() {
+                return Err("no current workspace".to_string());
+            }
             let initial_url = params
                 .get("url")
                 .or_else(|| params.get("address"))
