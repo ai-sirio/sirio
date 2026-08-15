@@ -101,3 +101,42 @@ the cursor still over it, directly after the click.
 **howToExercise**: get any fenced code block into the transcript (assistant markdown, or a tool
 result), the code block's header row always shows "Copy" on the right — click it, the label
 changes to "Copied ✓".
+
+## F-CHAT-25 / F-CHAT-26 / F-CHAT-27 — permission-gated turn (blocked, not attempted successfully)
+
+These three rows all need the same precondition: a live ACP turn that raises a real
+`Entry::Permission` (`chat.rs:196-212`) — F-CHAT-25 tests `AskUserQuestion`-style structured
+questions (`render_question_answer_row`, `chat.rs` ~2748), F-CHAT-26 the plain permission bar's
+pending visual state, F-CHAT-27 `surface.chat.stop` cancelling a pending permission (the
+"No answer — the turn ended" card, `chat.rs:4154-4160`/`4285`).
+
+Every live turn driven this pass — under the real Claude Code CLI, in the session's default mode
+(the composer's mode pill reads "Auto" once a turn completes, confirming a real, non-fallback
+`mode_catalog` from the CLI) — auto-completed without ever emitting a permission request, for
+subagent dispatch, file writes, and plain replies alike. That is consistent with "Auto" being
+Claude Code's accept-edits-or-bypass-permissions style mode rather than its default "ask" mode.
+
+I tried to switch modes through the UI: the composer's mode pill (`id("chat-status")`,
+`chat.rs:4869-4887`) is wired to open a mode picker on click
+(`toggle_mode_picker`, `chat.rs:1970-1984`), gated only on `has_completed_turn &&
+mode_catalog.is_some()` — both true here (the pill shows the chevron and a live mode name, not
+the "Ask" fallback, which only appears when `mode_catalog` is `None`). A calibrated click
+directly on the pill (verified on-target by cursor position in the capture,
+`f26c1/06-04-mode-picker.png`) did not open the picker in either attempt this pass. I could not
+determine, in the time available, whether that is a real defect in the click handler/hit-testing
+versus a timing issue with when `cx.notify()` repaints relative to the forced-resize repaint the
+drive lane uses — I did not find a code-level bug on inspection (the gating conditions all
+evaluate true), so I'm not filing it as a defect, just as unresolved.
+
+**Not fixed this pass; no code change made.** The underlying ACP wiring
+(`tiller_acp/src/lib.rs`'s `RequestPermissionRequest` handler, `~line 994` onward, and
+`respond_permission`/`cancel_permission`, `~line 765-787`) looks structurally correct — a prior
+pass's data-model tests already exercise it — but I could not get a live CLI turn to actually call
+it this pass, so the render half of all three rows stays unretested live.
+
+**What's owed**: either (a) find the real trigger for the CLI's "ask" mode (perhaps a
+worktree-local CLI config the `prepare()` step should be writing, per `AgentAdapter` conventions
+in `TillerAgents`/its Rust equivalent — outside this slice's owned files) so a normal turn raises
+a permission, or (b) debug why the mode-picker click doesn't open the popup live (it works in the
+unit tests at `chat.rs:6823` and neighbors, so this may be lane-specific, not a real user-facing
+bug).
