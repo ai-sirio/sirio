@@ -51,3 +51,35 @@ Wayland-side and invisible to X captures" and the Wayland lane's own headless `s
 harness this project has, not a defect in the app. `UNREACHABLE` (not `NOT EXERCISED`, since the
 popover half was actively driven and found working; not `FAILED`, since there is no instrument
 available anywhere in this project that can observe the picker succeed or fail).
+
+### `F-CORE-DOM-07` — verdict: **NOT EXERCISED** (unchanged)
+
+Re-grepped `AutoNamingThrottle`/`should_request`/`record_request` workspace-wide: definition and
+impl in `tiller_project/src/domain.rs`, the `pub use` re-export in `tiller_project/src/lib.rs`,
+its own unit test in `domain.rs`, and its own integration test
+`tiller_project/tests/p99_naming_throttle.rs`. No caller in `main.rs` or anywhere else. Unchanged
+since the prior pass; no wave-C commit touched `domain.rs` or `p99_naming_throttle.rs`. Kept as
+`NOT EXERCISED` rather than reclassified to `FAILED — absent`: unlike ACT-25/26 (where a live
+restart affirmatively observed zero evictions happening), nobody has driven a real transcript
+past the 200-char/30s growth gate through the actual auto-naming UI flow to watch it fail to
+fire — the zero-caller grep proves the wiring is missing, not that a live drive was attempted and
+came up empty. I did not attempt that live drive this pass either (no obvious socket verb exists
+to grow a chat transcript and observe a rename); recording the gap plainly rather than promoting
+a static-analysis inference to a `FAILED` finding.
+
+### `F-CORE-FILE-04` — verdict: **FAILED — defective** (unchanged)
+
+Re-grepped `FileViewEvent` workspace-wide: emitted at `file_view.rs:379`
+(`cx.emit(FileViewEvent::OpenFile(...))` from `open_markdown_link`), and the only `cx.subscribe`
+of it is inside `file_view.rs`'s own `#[gpui::test]` at line 2398 — the module proving its own
+event fires, not a real subscriber. `main.rs` has zero references to `FileViewEvent` (grep
+confirmed); it does wire the sibling `RightPanelEvent::OpenFile` (line 2812) and
+`ChatEvent::OpenFile` (line 2831) to `add_file_tab`, exactly as the prior record described. I
+attempted a live click-through today (create `note.md` with a `[setup](setup.md)` link in a
+throwaway repo, open it via the Files tree, click the in-content link) but lost state twice to
+`wayland-drive.sh`'s own-label kill-on-relaunch behavior and a "Loading files…" race before
+completing the sequence in one shot; did not spend further budget chasing the live click given
+the grep evidence is unambiguous and unchanged from the recorded finding (an emitted event with a
+self-test subscriber and zero real ones is a clean, direct proof of "wired but not connected,"
+matching this same ledger's own bar for ACT-25/26). Verdict and reasoning stand on re-confirmed
+code.
