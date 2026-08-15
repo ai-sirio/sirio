@@ -500,8 +500,13 @@ pub fn color_picker(
     callback: impl Fn(&'static str, &mut App) + 'static,
 ) -> impl IntoElement {
     let callback: Rc<dyn Fn(&'static str, &mut App)> = Rc::new(callback);
+    // `flex_wrap` so a swatch row that doesn't fit its host's width (the
+    // project-settings sheet is narrower than 8 swatches at their fixed
+    // 20px + gap) wraps onto a second line instead of being clipped by the
+    // panel edge (F-PRJ-13).
     let mut row = div()
         .flex()
+        .flex_wrap()
         .items_center()
         .gap(px(theme.cosmic.spacing.xxs as f32));
     for (key, color) in options.iter().copied() {
