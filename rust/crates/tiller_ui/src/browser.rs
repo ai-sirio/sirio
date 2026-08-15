@@ -4,7 +4,16 @@
 //! `browser_spike` example includes it directly so the experiment can answer
 //! whether a WebKitGTK child window can coexist with GPUI's X11 surface.
 
-use std::{cell::RefCell, collections::BTreeSet, ffi::c_ulong, ops::Range, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::BTreeSet,
+    ffi::c_ulong,
+    ops::Range,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::Duration,
+    time::Instant,
+};
 
 use gpui::{
     App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle,
@@ -708,6 +717,31 @@ enum PageLoadEventKind {
 type SharedWebView = Rc<RefCell<Option<WebView>>>;
 type SharedWebEvents = Rc<RefCell<Vec<WebEvent>>>;
 
+/// F-CTRL-BROWSER-06: shadows `console.log/warn/error/info/debug` with
+/// wrappers that append to `window.__tillerConsole` before calling through
+/// to the original method, so page output keeps working in devtools while
+/// `browser.console` can read the buffer back via `evaluate_script`.
+const CONSOLE_CAPTURE_SCRIPT: &str = r#"(function () {
+  window.__tillerConsole = window.__tillerConsole || [];
+  var levels = ["log", "warn", "error", "info", "debug"];
+  levels.forEach(function (level) {
+    var original = console[level] ? console[level].bind(console) : function () {};
+    console[level] = function () {
+      try {
+        var parts = Array.prototype.map.call(arguments, function (arg) {
+          try {
+            return typeof arg === "string" ? arg : JSON.stringify(arg);
+          } catch (e) {
+            return String(arg);
+          }
+        });
+        window.__tillerConsole.push({ level: level, message: parts.join(" ") });
+      } catch (e) {}
+      original.apply(console, arguments);
+    };
+  });
+})();"#;
+
 fn build_production_webview<W: HasWindowHandle>(
     parent: &W,
     initial_url: &str,
@@ -719,6 +753,12 @@ fn build_production_webview<W: HasWindowHandle>(
     let title_events = events.clone();
     WebViewBuilder::new()
         .with_url(initial_url)
+        // F-CTRL-BROWSER-06: wry exposes no cross-platform console-message
+        // hook, so `browser.console` captures by shadowing the console
+        // methods before any page script runs (this init script executes
+        // on every navigation, ahead of the document's own scripts) and
+        // reading the buffer back with `evaluate_script`.
+        .with_initialization_script(CONSOLE_CAPTURE_SCRIPT)
         .with_navigation_handler(move |url| {
             navigation_events
                 .borrow_mut()
@@ -925,6 +965,41 @@ impl BrowserSurface {
     /// Updates the F-BRW-05 activity marker.
     pub fn set_agent_driving(&mut self, driving: bool) {
         self.state.set_agent_driving(driving);
+    }
+
+    /// F-CTRL-BROWSER-06: runs `script` in the page and returns its result
+    /// (JSON-serialized by WebKit) as a string, or an error if the page
+    /// throws or the timeout elapses first. wry's callback fires off a
+    /// WebKit-internal GLib callback that only runs while something pumps
+    /// the process-global GTK main loop, so this drives it directly rather
+    /// than trusting the surface's own 16ms pump timer to win the race
+    /// before `timeout` expires — the same approach `browser.wait` uses.
+    pub fn evaluate_script(&self, script: &str, timeout: Duration) -> Result<String, String> {
+        let webview_ref = self.webview.borrow();
+        let webview = webview_ref
+            .as_ref()
+            .ok_or_else(|| "Browser child is unavailable".to_string())?;
+        let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let result_slot = result.clone();
+        webview
+            .evaluate_script_with_callback(script, move |value| {
+                *result_slot.lock().unwrap() = Some(value);
+            })
+            .map_err(|error| format!("evaluate_script failed: {error}"))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            if result.lock().unwrap().is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("evaluate_script timed out".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(result.lock().unwrap().clone().unwrap_or_default())
     }
 
     fn load_url(&mut self, address: &str) -> Result<(), BrowserError> {
