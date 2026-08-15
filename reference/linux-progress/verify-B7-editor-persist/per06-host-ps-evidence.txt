@@ -1,0 +1,51 @@
+Host-side evidence for F-PER-06 (process-group termination on pane close).
+
+Sequence:
+1. Opened a fresh Terminal pane in an isolated fixture project/worktree
+   (/tmp/verify-b7/fixture), confirmed via `swaymsg -t get_tree` the app
+   window filled the compositor output at (0,0) 1715x972 (no coordinate
+   ambiguity).
+2. Typed `sh /tmp/verify-b7/spawn.sh` into the live pane and pressed Return.
+   spawn.sh: `setsid sleep 300 &` then `echo $! > detached.pid`.
+3. Host confirmed the process is real and detached into its own session
+   and process group, reparented to init:
+
+     $ ps -p 2483640 -o pid,ppid,pgid,comm
+         PID    PPID    PGID COMMAND
+     2483640       1 2483640 sleep
+
+4. Drove the exact real user gesture the row's howToExercise names: clicked
+   the Terminal tab's own close 'x', got the app's real "Close dirty tab? /
+   Discard unsaved work in Terminal?" confirmation dialog, clicked "Close".
+   Screenshot per06-tab-closed-in-ui.png confirms the Terminal tab is fully
+   gone from both the tab strip and the sidebar (only Chat remains) --
+   the close genuinely completed in the UI, not just the confirm dialog.
+5. Host re-checked the same PID 22+ seconds after the UI-confirmed close:
+
+     $ ps -p 2483640 -o pid,ppid,pgid,comm,etimes
+         PID    PPID    PGID COMMAND         ELAPSED
+     2483640       1 2483640 sleep                22
+
+   Still alive. `ps aux | grep "sleep 300"` confirms it independently.
+
+Root cause read from source: tiller/src/main.rs's Workspace::close_tab
+(the function actually invoked by the tab-close-button -> confirm-dialog
+path, via close_tab_by_id <- request_close_tab_by_id) never calls
+TerminalView::shutdown() at all. It only writes Ctrl-C/Ctrl-D
+(`terminal.input([3, 4])`) to the PTY and relies on the shell exiting on
+its own:
+
+    // TerminalView exposes PTY input but not a public shutdown method.
+    // Interrupt first, then send EOF so the login shell exits and the
+    // alacritty event loop observes child exit and reaps the PTY.
+    terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+
+`TerminalView::shutdown()` (which does call the new, correctly-implemented
+`terminate_descendant_process_groups`) is real and does exist as a public
+method (tiller_terminal/src/lib.rs:1047), and IS correctly wired into the
+whole-app-quit path (`Workspace::shutdown_terminals`, called from
+`cx.on_app_quit`) -- but that is a different gesture (quitting the whole
+app), not "close the pane/tab" as the row's howToExercise names. Ctrl-C/
+Ctrl-D sent to the pane's own foreground shell does not reach a
+setsid-detached background job at all -- that immunity to the controlling
+terminal is the entire point of setsid.
