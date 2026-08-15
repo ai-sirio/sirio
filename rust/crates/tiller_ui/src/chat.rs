@@ -515,6 +515,10 @@ enum ErrorKind {
     /// of band, then retry": the agent has already exited by the time this
     /// reaches the caller, so there is no live prompt to authenticate on.
     AuthRequired,
+    /// An MCP-configuration-flavored stderr line observed during the turn
+    /// (F-CHAT-33) — informational, not a transport failure: the session is
+    /// still live, so this is never retryable and never clears the client.
+    McpWarning,
 }
 
 /// A mid-session `TransportError` never carries the typed `AcpError` that
@@ -859,6 +863,11 @@ pub struct Chat {
     connecting: bool,
     retry_pending_send: bool,
     has_completed_turn: bool,
+    /// F-CHAT-33: how many of `AcpClient::mcp_warnings()` have already been
+    /// surfaced as transcript entries. `mcp_warnings()` returns the whole
+    /// running list each call (it doesn't drain), so this is the cursor
+    /// that keeps a warning from being re-posted on every later turn.
+    mcp_warnings_shown: usize,
     available_models: Vec<ModelOption>,
     model_config_id: Option<String>,
     selected_model: Option<String>,
@@ -1012,6 +1021,7 @@ impl Chat {
             connecting: false,
             retry_pending_send: false,
             has_completed_turn: false,
+            mcp_warnings_shown: 0,
             available_models: Vec::new(),
             model_config_id: None,
             selected_model: None,
@@ -1055,6 +1065,29 @@ impl Chat {
         if following_tail {
             self.list_state.set_follow_mode(FollowMode::Tail);
         }
+    }
+
+    /// F-CHAT-33: append any MCP-configuration-flavored stderr lines the
+    /// live client has observed since the last time this ran, as
+    /// non-retryable transcript errors. Called once per turn end so a
+    /// misconfigured MCP server the agent silently ignored isn't invisible
+    /// to the user just because the turn itself "succeeded".
+    fn surface_mcp_warnings(&mut self) {
+        let Some(client) = &self.client else {
+            return;
+        };
+        let warnings = client.mcp_warnings();
+        if warnings.len() <= self.mcp_warnings_shown {
+            return;
+        }
+        for warning in &warnings[self.mcp_warnings_shown..] {
+            self.push_entry(Entry::Error {
+                message: warning.clone(),
+                retryable: false,
+                kind: ErrorKind::McpWarning,
+            });
+        }
+        self.mcp_warnings_shown = warnings.len();
     }
 
     fn remeasure_entry(&self, index: usize) {
@@ -1540,6 +1573,7 @@ impl Chat {
                     reason => format!("{time} · {}", turn_end_label(reason)),
                 };
                 self.expire_unanswered();
+                self.surface_mcp_warnings();
                 self.push_entry(Entry::TurnFooter(label));
                 self.streaming = false;
                 self.has_completed_turn = true;
