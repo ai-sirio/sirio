@@ -600,25 +600,50 @@ fn catalog_project(root_path: &Path, discovered: DiscoveredProject) -> CatalogPr
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| root_path.to_string_lossy().into_owned());
     let id = project_id(&root_path);
-    let worktrees = discovered
-        .worktrees
-        .into_iter()
-        .map(|worktree| CatalogWorktree {
-            branch: worktree.branch.unwrap_or_else(|| {
-                if worktree.is_primary {
-                    "main".into()
-                } else {
-                    worktree
-                        .head
-                        .as_deref()
-                        .map(|head| head.chars().take(7).collect())
-                        .unwrap_or_else(|| "HEAD".into())
-                }
-            }),
-            path: canonical_path(&worktree.path),
-            is_primary: worktree.is_primary,
-        })
-        .collect();
+    // F-SID-11: a plain (non-git) folder project has no git worktrees to
+    // discover, so `discovered.worktrees` is empty and the sidebar had no
+    // row at all to display branch/path/Primary/status/comment for it --
+    // unlike a git project, which always has at least its primary
+    // worktree. Synthesize one so a folder project gets the same baseline
+    // row a git project's primary worktree gets.
+    //
+    // A bare repository (`git init --bare`) also has `is_git: false` here
+    // (`is_git_repository` only checks for a nested `.git` entry, which a
+    // bare repo's root doesn't have) and an empty worktree list, but its
+    // root is not a usable checkout -- synthesizing a "primary worktree"
+    // pointing at it would tell the sidebar to treat the bare repo's
+    // internal object store as a working directory. `HEAD` + `objects/` at
+    // the root is the cheap, no-shell-out signature every bare repo has
+    // (and a plain folder essentially never does), so it is excluded.
+    let looks_like_bare_git_repo =
+        root_path.join("HEAD").is_file() && root_path.join("objects").is_dir();
+    let worktrees = if !discovered.is_git && discovered.worktrees.is_empty() && !looks_like_bare_git_repo {
+        vec![CatalogWorktree {
+            branch: String::new(),
+            path: root_path.to_path_buf(),
+            is_primary: true,
+        }]
+    } else {
+        discovered
+            .worktrees
+            .into_iter()
+            .map(|worktree| CatalogWorktree {
+                branch: worktree.branch.unwrap_or_else(|| {
+                    if worktree.is_primary {
+                        "main".into()
+                    } else {
+                        worktree
+                            .head
+                            .as_deref()
+                            .map(|head| head.chars().take(7).collect())
+                            .unwrap_or_else(|| "HEAD".into())
+                    }
+                }),
+                path: canonical_path(&worktree.path),
+                is_primary: worktree.is_primary,
+            })
+            .collect()
+    };
     CatalogProject {
         id,
         name,
@@ -1949,7 +1974,19 @@ mod tests {
         assert!(catalog.projects()[0].is_git);
         assert!(!catalog.projects()[0].worktrees.is_empty());
         assert!(!catalog.projects()[1].is_git);
-        assert!(catalog.projects()[1].worktrees.is_empty());
+        // F-SID-11: a plain folder has no git worktrees to discover, but the
+        // sidebar still needs a row to show branch/path/Primary/status/
+        // comment for it, matching the git project's baseline -- so a
+        // single synthetic primary "worktree" (the folder root itself) is
+        // synthesized rather than leaving the project with none at all.
+        assert_eq!(
+            catalog.projects()[1].worktrees,
+            vec![CatalogWorktree {
+                branch: String::new(),
+                path: canonical_path(&plain_root),
+                is_primary: true,
+            }]
+        );
     }
 
     /// F-SID-12 (catalog half): setting one worktree primary clears its
