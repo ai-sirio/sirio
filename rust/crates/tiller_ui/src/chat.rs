@@ -6176,6 +6176,23 @@ impl Chat {
                         .child("Type to queue for the next turn…")
                         .into_any_element(),
                 ]
+            } else if self.client.is_none() && !self.connecting {
+                // F-CHAT-05: sweep E03 drove the composer from the real
+                // `● offline` state (client died / never connected) and
+                // found typing + Enter genuinely inert -- `send()` routes an
+                // offline Enter into a silent reconnect-and-retry instead of
+                // submitting -- but nothing on screen said why nothing
+                // happened; the generic "Message…" placeholder gave no
+                // signal the agent was unreachable. Name the actual state,
+                // matching the permission-wait and queue placeholders above.
+                vec![
+                    div()
+                        .id("offline-placeholder")
+                        .debug_selector(|| "offline-placeholder".into())
+                        .text_color(colors.meta)
+                        .child("Agent offline — reconnecting when you send…")
+                        .into_any_element(),
+                ]
             } else {
                 vec![
                     div()
@@ -7891,6 +7908,48 @@ mod tests {
         assert!(
             cx.debug_bounds("permission-wait-placeholder").is_some(),
             "the placeholder survives the blocked keystrokes"
+        );
+    }
+
+    /// F-CHAT-05: sweep E03 drove a real offline composer (agent process
+    /// never came up) and found typing + Enter genuinely inert -- `send()`
+    /// already routes an offline Enter into a silent reconnect instead of
+    /// submitting -- but nothing on screen said why, since the empty
+    /// composer fell back to the same generic "Message…" placeholder used
+    /// once connected. This is the missing half: a distinct placeholder
+    /// names the offline state, the way permission-wait and queueing above
+    /// already do.
+    #[gpui::test]
+    async fn offline_composer_shows_its_own_placeholder(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        // ACP owns a real worker thread and subprocess; permit its wakeups
+        // to cross the deterministic test scheduler boundary (same as
+        // `failed_launch_can_retry_and_complete` above).
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.client.is_none(), "the missing binary must fail to launch");
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("offline-placeholder").is_some(),
+            "an empty, disconnected composer must name the offline state"
+        );
+        assert!(
+            cx.debug_bounds("queue-placeholder").is_none(),
+            "offline must not read as ordinary mid-turn queueing"
+        );
+        assert!(
+            cx.debug_bounds("permission-wait-placeholder").is_none(),
+            "offline must not read as a pending permission"
         );
     }
 
