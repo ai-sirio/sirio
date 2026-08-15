@@ -807,6 +807,20 @@ pub struct Settings {
     /// confirmation line under the button naming where the install is
     /// running. Cleared the next time the button is clicked again.
     skill_install_launched: bool,
+    /// Host callback for an agent row's Install button (F-SET-18): the
+    /// provider id and its documented install command
+    /// ([`AgentAvailability::install_command`]). Unset, an agent with a
+    /// known install command still renders the button muted and inert —
+    /// the same dead-control-avoidance convention `on_install_skill` uses
+    /// — rather than looking wired and reaching nothing. An agent with no
+    /// known install command (`install_command` returns `None`) renders no
+    /// button at all: there is nothing honest to offer.
+    on_install_agent: Option<Rc<dyn Fn(&'static str, &'static str)>>,
+    /// Agent ids whose Install button has been clicked (F-SET-18) — mirrors
+    /// [`Self::skill_install_launched`]: the actual install runs in a
+    /// spawned terminal this crate cannot watch finish, so the click must
+    /// still leave its own visible trace on this screen.
+    agent_install_launched: std::collections::HashSet<&'static str>,
     /// Optional host override for a provider card's Add Account button
     /// (F-SET-14). The payload is the provider's stable id (`"claude"`,
     /// `"codex"`, `"opencode"` — [`UsageProvider::id`]'s own convention),
@@ -984,6 +998,8 @@ impl Settings {
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             skill_install_launched: false,
+            on_install_agent: None,
+            agent_install_launched: std::collections::HashSet::new(),
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
@@ -1113,6 +1129,18 @@ impl Settings {
     /// muted and inert — see the field doc on [`Settings::on_install_skill`].
     pub fn on_install_skill(mut self, callback: impl Fn(SkillInstallCommand) + 'static) -> Self {
         self.on_install_skill = Some(Rc::new(callback));
+        self
+    }
+
+    /// Installs the host callback that runs an agent row's Install command
+    /// (F-SET-18). Unset, an agent with a known install command still
+    /// renders the button muted and inert — see the field doc on
+    /// [`Settings::on_install_agent`].
+    pub fn on_install_agent(
+        mut self,
+        callback: impl Fn(&'static str, &'static str) + 'static,
+    ) -> Self {
+        self.on_install_agent = Some(Rc::new(callback));
         self
     }
 
@@ -1400,6 +1428,24 @@ impl Settings {
         cx.notify();
         if let Some(handler) = self.on_install_skill.clone() {
             handler(tiller_project::agent_skill_install_command());
+        }
+    }
+
+    /// Handles an agent row's Install button (F-SET-18): reaches the wired
+    /// host callback with the provider id and its documented install
+    /// command, and flips the row's `agent_install_launched` flag so the
+    /// click leaves a visible confirmation on this screen — mirrors
+    /// [`Self::install_skill_clicked`].
+    fn install_agent_clicked(
+        &mut self,
+        agent_id: &'static str,
+        command: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent_install_launched.insert(agent_id);
+        cx.notify();
+        if let Some(handler) = self.on_install_agent.clone() {
+            handler(agent_id, command);
         }
     }
 
@@ -2828,21 +2874,66 @@ impl Settings {
                                 )),
                         ),
                 );
-            agent_rows = agent_rows.child(
-                div()
-                    .id(("settings-agent-row", index))
-                    .debug_selector(move || format!("settings-agent-row-{index}"))
-                    .child(controls::row_view(
-                        label,
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(Self::render_provider_status(availability, theme))
-                            .child(Self::render_acp_badge(availability, theme)),
-                        theme,
-                    )),
-            );
+            // F-SET-18: a not-installed agent with a known install command
+            // gets a real Install control, not just a red status pill —
+            // clicking it hands the command to the host (a spawned
+            // terminal, mirroring the Agent Skill card) and leaves a
+            // confirmation line under the row so the click's effect is
+            // visible on this screen even though this crate cannot watch
+            // the spawned install finish.
+            let agent_id = availability.id;
+            let install_button = availability
+                .install_command()
+                .filter(|_| !availability.is_available())
+                .map(|command| {
+                    let install_entity = entity.clone();
+                    div()
+                        .id(("settings-agent-install", index))
+                        .debug_selector(move || format!("settings-agent-install-{index}"))
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(theme.radii.row_card)
+                        .text_size(theme.typography.caption2)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.title)
+                        .bg(theme.primary_pill_bg)
+                        .hover(|style| style.bg(theme.row_hover))
+                        .on_click(move |_, _, cx| {
+                            install_entity.update(cx, |settings, cx| {
+                                settings.install_agent_clicked(agent_id, command, cx);
+                            });
+                        })
+                        .child(text!(id = ("settings-agent-install-label", index), "Install"))
+                });
+            let install_launched = self.agent_install_launched.contains(agent_id);
+            let mut row_container = div()
+                .id(("settings-agent-row", index))
+                .debug_selector(move || format!("settings-agent-row-{index}"))
+                .flex()
+                .flex_col()
+                .child(controls::row_view(
+                    label,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(Self::render_provider_status(availability, theme))
+                        .child(Self::render_acp_badge(availability, theme))
+                        .children(install_button),
+                    theme,
+                ));
+            if install_launched {
+                row_container = row_container.child(
+                    div()
+                        .id(("settings-agent-install-status", index))
+                        .debug_selector(move || format!("settings-agent-install-status-{index}"))
+                        .px(px(theme.cosmic.spacing.xs as f32))
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.subtitle)
+                        .child(text!("Installing… running in a new terminal tab.")),
+                );
+            }
+            agent_rows = agent_rows.child(row_container);
         }
 
         let search_focus = self.agent_search_focus.clone();
@@ -3999,6 +4090,73 @@ mod tests {
         assert_eq!(
             rendered, expected,
             "the surface renders exactly what discovery returned"
+        );
+    }
+
+    /// F-SET-18: a not-installed agent with a known install command
+    /// (`AgentAvailability::install_command`) offers a real Install button
+    /// that reaches the wired host callback with the exact command, and
+    /// leaves a visible confirmation on the row. An agent with no known
+    /// install command (omp, in this fixture) offers no button at all —
+    /// never a fabricated one.
+    #[gpui::test]
+    async fn agent_install_click_reaches_host_and_confirms_on_the_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let fixture = vec![
+            AgentAvailability {
+                id: "opencode",
+                display_name: "OpenCode",
+                executable: None,
+            },
+            AgentAvailability {
+                id: "omp",
+                display_name: "Oh-My-Pi",
+                executable: None,
+            },
+        ];
+        let calls = Rc::new(RefCell::new(Vec::<(&'static str, &'static str)>::new()));
+        let recorder = calls.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_availability(fixture)
+                .on_install_agent(move |agent_id, command| {
+                    recorder.borrow_mut().push((agent_id, command));
+                })
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let agents = cx
+            .debug_bounds("settings-category-Agents")
+            .expect("Agents category is offered");
+        cx.simulate_click(agents.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("settings-agent-install-0").is_some(),
+            "opencode has a known install command, so its row offers Install"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-1").is_none(),
+            "omp has no known install command, so its row offers no button"
+        );
+
+        let install = cx
+            .debug_bounds("settings-agent-install-0")
+            .expect("Install renders for opencode");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [("opencode", "npm install -g opencode-ai@latest")],
+            "the click hands the host the provider id and its exact install command"
+        );
+        assert!(
+            cx.debug_bounds("settings-agent-install-status-0").is_some(),
+            "a confirmation line appears on the row once the install is handed off"
         );
     }
 

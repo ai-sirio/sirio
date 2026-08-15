@@ -470,6 +470,13 @@ enum WorkspaceAction {
     NewTab(NewTabAction),
     NewChatAgent(&'static str),
     InstallSkill(tiller_project::SkillInstallCommand),
+    /// F-SET-18: an agent row's Install button was clicked. `command` is
+    /// [`tiller_agents::AgentAvailability::install_command`]'s documented
+    /// shell line for `agent_id`.
+    InstallAgent {
+        agent_id: &'static str,
+        command: &'static str,
+    },
     OpenSettings,
     CloseSettings,
     /// F-BRW-09: a plain (non-Cmd+Shift) click on an HTTP(S) link in chat
@@ -1846,6 +1853,17 @@ fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> Terminal
     }
 }
 
+/// Builds the shell that runs an agent row's Install command (F-SET-18) —
+/// the documented `install_command` string, executed through the user's
+/// shell exactly like [`skill_install_shell`] runs the skill provisioner.
+fn agent_install_shell(command: &str) -> TerminalShell {
+    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    TerminalShell::WithArguments {
+        program: shell_program,
+        args: vec!["-lc".to_string(), command.to_string()],
+    }
+}
+
 fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
 }
@@ -2591,6 +2609,14 @@ impl TillerWorkspace {
                                     workspace.add_terminal_tab_with_shell(
                                         "Install Skill",
                                         skill_install_shell(command),
+                                        None,
+                                        cx,
+                                    );
+                                }
+                                WorkspaceAction::InstallAgent { agent_id, command } => {
+                                    workspace.add_terminal_tab_with_shell(
+                                        format!("Install {agent_id}"),
+                                        agent_install_shell(command),
                                         None,
                                         cx,
                                     );
@@ -9005,6 +9031,17 @@ fn main() {
                             move |command| {
                                 if let Ok(mut actions) = pending_actions.lock() {
                                     actions.push(WorkspaceAction::InstallSkill(command));
+                                }
+                            }
+                        })
+                        .on_install_agent({
+                            let pending_actions = pending_for_settings.clone();
+                            move |agent_id, command| {
+                                if let Ok(mut actions) = pending_actions.lock() {
+                                    actions.push(WorkspaceAction::InstallAgent {
+                                        agent_id,
+                                        command,
+                                    });
                                 }
                             }
                         })
