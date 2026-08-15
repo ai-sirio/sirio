@@ -3729,6 +3729,11 @@ impl TillerWorkspace {
                 }
             }
             (_, SidebarContextAction::RemoveProject) => {}
+            // F-SID-15: RemoveWorktree is intercepted inside
+            // Sidebar::dispatch_context_action (confirm-gated there, the
+            // same way RemoveProject is) and never reaches this event --
+            // this arm exists only so the match stays exhaustive.
+            (_, SidebarContextAction::RemoveWorktree) => {}
             (_, SidebarContextAction::SetPrimary | SidebarContextAction::UnsetPrimary) => {}
             (_, SidebarContextAction::NewTab(_)) => {}
             (

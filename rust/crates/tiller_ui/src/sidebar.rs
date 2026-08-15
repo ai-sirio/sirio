@@ -175,6 +175,10 @@ pub enum SidebarContextAction {
     RemoveProject,
     SetPrimary,
     UnsetPrimary,
+    /// F-SID-15: the context menu's confirm-gated counterpart to the
+    /// hover-x button, which used to call `remove_worktree_row` (a
+    /// real on-disk deletion) directly with no confirmation at all.
+    RemoveWorktree,
     NewTab(NewTabAction),
 }
 
@@ -812,6 +816,18 @@ impl Sidebar {
                         true,
                         None,
                     ),
+                    // F-SID-15: the only other removal path was the row's
+                    // hover-x button, which had no confirmation state at
+                    // all and deleted the on-disk worktree immediately.
+                    // The context menu route is confirm-gated in
+                    // dispatch_context_action; the hover-x button now goes
+                    // through the same gate instead of bypassing it.
+                    item(
+                        "Remove Worktree",
+                        SidebarContextAction::RemoveWorktree,
+                        true,
+                        None,
+                    ),
                 ]);
                 items
             }
@@ -1022,6 +1038,21 @@ impl Sidebar {
         if action == SidebarContextAction::RemoveProject {
             if let SidebarContextTarget::Project { id, .. } = target {
                 self.request_remove_project(id, window, cx);
+            }
+            return;
+        }
+        if action == SidebarContextAction::RemoveWorktree {
+            if let SidebarContextTarget::Worktree { path, .. } = &target {
+                if let Some(row_id) = self
+                    .rows
+                    .iter()
+                    .find(|row| {
+                        row.kind == RowKind::Worktree && row.path.as_deref() == Some(path.as_path())
+                    })
+                    .map(|row| row.id)
+                {
+                    self.request_remove_worktree_row(row_id, window, cx);
+                }
             }
             return;
         }
@@ -1573,6 +1604,34 @@ impl Sidebar {
         self.notice = None;
     }
 
+    /// F-SID-15: confirm-gated entry point for worktree removal. Both the
+    /// context menu's "Remove Worktree" and the row's hover-x button route
+    /// through this instead of calling `remove_worktree_row` (a real
+    /// on-disk deletion, spawned immediately) with no safety confirmation.
+    fn request_remove_worktree_row(
+        &mut self,
+        row_id: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = window.prompt(
+            PromptLevel::Warning,
+            "Remove worktree?",
+            Some(
+                "This permanently deletes the worktree's directory and branch on disk. \
+                 This cannot be undone.",
+            ),
+            &["Remove Worktree", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |sidebar, cx| {
+            if receiver.await.unwrap_or(1) == 0 {
+                let _ = sidebar.update(cx, |sidebar, cx| sidebar.remove_worktree_row(row_id, cx));
+            }
+        })
+        .detach();
+    }
+
     /// Removes a worktree on the background executor and drops its rows.
     fn remove_worktree_row(&mut self, row_id: usize, cx: &mut Context<Self>) {
         let Some(repo_root) = self.project_root(row_id) else {
@@ -1839,6 +1898,7 @@ impl Sidebar {
             SidebarContextAction::RemoveProject => "remove-project",
             SidebarContextAction::SetPrimary => "set-primary",
             SidebarContextAction::UnsetPrimary => "unset-primary",
+            SidebarContextAction::RemoveWorktree => "remove-worktree-context",
             SidebarContextAction::NewTab(NewTabAction::NewTerminal) => "new-terminal",
             SidebarContextAction::NewTab(NewTabAction::ClaudeCode) => "claude-code",
             SidebarContextAction::NewTab(NewTabAction::Codex) => "codex",
@@ -2554,10 +2614,10 @@ impl Sidebar {
                         .hover(|style| style.bg(theme.row_hover))
                         .invisible()
                         .group_hover(hover_group.clone(), |style| style.visible())
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             remove_entity.update(cx, |sidebar, cx| {
-                                sidebar.remove_worktree_row(row_id, cx);
+                                sidebar.request_remove_worktree_row(row_id, window, cx);
                             });
                         })
                         .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.meta)),
@@ -3132,6 +3192,93 @@ mod tests {
         )));
     }
 
+    /// F-SID-15: the context menu's "Remove Worktree" is confirm-gated the
+    /// same way the hover-x button is -- nothing is deleted until the user
+    /// answers the prompt, and it routes to a real removal (not just an
+    /// event nobody outside sidebar.rs would act on) once they do.
+    #[gpui::test]
+    async fn right_click_context_menu_remove_worktree_confirms_before_removing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // See remove_button_removes_the_worktree's identical comment: widen
+        // the git-call timeout so a loaded machine can't turn this into a
+        // flake.
+        // SAFETY: test process; the only reader is the crate's per-call
+        // `TILLER_GIT_TIMEOUT_MS` lookup.
+        unsafe { std::env::set_var("TILLER_GIT_TIMEOUT_MS", "120000") };
+        let repo = scratch_repo("context-menu-remove");
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // The repo's sole (primary) worktree can't be git-worktree-removed;
+        // create a second one through the prompt, matching
+        // remove_button_removes_the_worktree's setup, and remove that one.
+        let new_worktree_row = cx.debug_bounds("new-worktree-row").expect("row rendered");
+        cx.simulate_click(new_worktree_row.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("to-remove");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let row_id = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && row.title == "to-remove")
+                    .map(|row| row.id)
+            })
+            .expect("the new worktree row exists");
+        let row_selector: &'static str = Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the new worktree row is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: row.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let remove = cx
+            .debug_bounds("sidebar-context-item-remove-worktree-context")
+            .expect("the context menu exposes Remove Worktree");
+        cx.simulate_click(remove.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+
+        assert!(
+            sidebar_entity.read_with(&cx, |sidebar, _| sidebar
+                .rows
+                .iter()
+                .any(|row| row.id == row_id)),
+            "nothing is removed before the user answers"
+        );
+
+        cx.simulate_prompt_answer("Remove Worktree");
+        cx.condition(&sidebar_entity, |sidebar, _cx| {
+            !sidebar
+                .rows
+                .iter()
+                .any(|row| row.kind == RowKind::Worktree && row.title == "to-remove")
+        })
+        .await;
+    }
+
     #[gpui::test]
     async fn new_worktree_prompt_creates_a_real_worktree(cx: &mut gpui::TestAppContext) {
         let repo = scratch_repo("create");
@@ -3242,6 +3389,12 @@ mod tests {
         cx.simulate_mouse_move(remove_button, None, Modifiers::none());
         cx.run_until_parked();
         cx.simulate_click(remove_button, Modifiers::none());
+        cx.run_until_parked();
+
+        // F-SID-15: the hover-x button is confirm-gated now instead of
+        // deleting the on-disk worktree immediately on click.
+        assert!(cx.has_pending_prompt(), "removal asks for confirmation");
+        cx.simulate_prompt_answer("Remove Worktree");
 
         let sidebar_entity =
             cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
