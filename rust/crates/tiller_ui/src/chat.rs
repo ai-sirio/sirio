@@ -27,7 +27,7 @@ use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, pa
 use tiller_git::{GitActions, status as git_status};
 use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
-    ChatTranscript, ChatTurn,
+    ChatSessionSummary, ChatTranscript, ChatTurn,
 };
 use tiller_theme::Theme;
 
@@ -550,6 +550,10 @@ fn classify_connection_error(message: String) -> (String, ErrorKind) {
 struct ChatPersistence {
     database_path: PathBuf,
     tab_id: String,
+    /// F-CHAT-34: the worktree this tab's transcripts are scoped to, so the
+    /// Chat History menu can list every past chat in the worktree, not just
+    /// this one tab's own transcript.
+    worktree_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -937,9 +941,17 @@ pub struct Chat {
     attach_error: Option<String>,
     /// In-flight native file picker.
     attach_task: Option<Task<()>>,
-    /// Overflow menu (Follow Edited Files / New Conversation).
+    /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
     overflow_focus: FocusHandle,
+    /// F-CHAT-34/35: the Chat History popover — every persisted session in
+    /// this tab's worktree, loaded on open. `None` renders "No past chats"
+    /// (F-CHAT-35). `history_open` gates rendering; `history_delete_confirm`
+    /// holds the tab_id awaiting a second click before it is really deleted.
+    history_open: bool,
+    history_sessions: Vec<ChatSessionSummary>,
+    history_delete_confirm: Option<String>,
+    history_focus: FocusHandle,
     /// Follow Edited Files toggle state.
     following_edited_files: bool,
     /// F-CHAT-14: throttles `maybe_follow_location` the same 500ms window
@@ -1000,16 +1012,45 @@ impl Chat {
         cwd: PathBuf,
         database_path: PathBuf,
         tab_id: String,
+        worktree_id: String,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut chat = Self::new(command, cwd, cx);
         chat.persistence = Some(ChatPersistence {
             database_path,
             tab_id,
+            worktree_id,
         });
         chat.restore_persisted_transcript();
         chat.start_connection(cx, false);
         chat
+    }
+
+    /// [`Self::launch`] with persistence: the same default-agent command,
+    /// but wired to save/restore its transcript and to browse the
+    /// worktree's Chat History (F-CHAT-34).
+    pub fn launch_with_persistence(
+        database_path: PathBuf,
+        tab_id: String,
+        worktree_id: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let cwd = default_agent_cwd();
+        let command = std::env::var_os("TILLER_ACP_PROGRAM")
+            .map(PathBuf::from)
+            .map(AgentCommand::new)
+            .unwrap_or_else(|| {
+                AgentCommand::new("npx")
+                    .args(["-y", "@agentclientprotocol/claude-agent-acp@latest"])
+            });
+        Self::launch_with_command_and_persistence(
+            command,
+            cwd,
+            database_path,
+            tab_id,
+            worktree_id,
+            cx,
+        )
     }
 
     fn new(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
@@ -1066,6 +1107,10 @@ impl Chat {
             attach_error: None,
             attach_task: None,
             overflow_open: false,
+            history_open: false,
+            history_sessions: Vec::new(),
+            history_delete_confirm: None,
+            history_focus: cx.focus_handle().tab_stop(true),
             following_edited_files: false,
             last_follow_at: None,
             effort: None,
@@ -1832,6 +1877,123 @@ impl Chat {
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
+    }
+
+    /// F-CHAT-34: toggles the Chat History popover, loading every persisted
+    /// session in this tab's worktree from the durable database on open.
+    /// A tab with no persistence (never launched with a database/tab_id, or
+    /// the DB failed to open) still opens the popover so F-CHAT-35's "No
+    /// past chats" empty state is reachable rather than the control
+    /// silently doing nothing.
+    fn toggle_chat_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.overflow_open = false;
+        self.history_open = !self.history_open;
+        self.history_delete_confirm = None;
+        if self.history_open {
+            self.history_sessions = self.load_chat_history();
+            let focus = self.history_focus.clone();
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn load_chat_history(&self) -> Vec<ChatSessionSummary> {
+        let Some(persistence) = self.persistence.as_ref() else {
+            return Vec::new();
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!(
+                    "[chat] failed to open transcript database {}: {error}",
+                    persistence.database_path.display()
+                );
+                return Vec::new();
+            }
+        };
+        match database.chat_sessions(&persistence.worktree_id) {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                eprintln!("[chat] failed to list chat sessions: {error}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Opens a past session into this tab: loads its transcript from the
+    /// database, replaces the live entries with it, and repoints this tab's
+    /// own persistence at the opened session so a new turn appends there
+    /// rather than silently writing back into the tab the popover was
+    /// opened from.
+    fn open_chat_history_session(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        let Some(persistence) = self.persistence.as_mut() else {
+            return;
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!(
+                    "[chat] failed to open transcript database {}: {error}",
+                    persistence.database_path.display()
+                );
+                return;
+            }
+        };
+        let transcript = match database.load_chat_transcript(&tab_id) {
+            Ok(Some(transcript)) => transcript,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("[chat] failed to load transcript: {error}");
+                return;
+            }
+        };
+        persistence.tab_id = tab_id;
+        self.entries.clear();
+        for turn in transcript.turns {
+            for entry in turn.entries {
+                self.push_entry(restored_entry(entry));
+            }
+        }
+        self.has_completed_turn = !self.entries.is_empty();
+        self.history_open = false;
+        cx.notify();
+    }
+
+    /// F-CHAT-34's delete-with-confirmation half: the first click arms
+    /// `history_delete_confirm`; a second click on the same row's Confirm
+    /// control actually removes the transcript and drops it from the
+    /// visible list.
+    fn request_delete_chat_session(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        self.history_delete_confirm = Some(tab_id);
+        cx.notify();
+    }
+
+    fn confirm_delete_chat_session(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        self.history_delete_confirm = None;
+        let Some(persistence) = self.persistence.as_ref() else {
+            return;
+        };
+        let database = match AppDatabase::open(&persistence.database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!(
+                    "[chat] failed to open transcript database {}: {error}",
+                    persistence.database_path.display()
+                );
+                return;
+            }
+        };
+        if let Err(error) = database.delete_chat_session(&tab_id) {
+            eprintln!("[chat] failed to delete chat session: {error}");
+            return;
+        }
+        self.history_sessions.retain(|session| session.tab_id != tab_id);
+        cx.notify();
+    }
+
+    fn cancel_delete_chat_session(&mut self, cx: &mut Context<Self>) {
+        self.history_delete_confirm = None;
+        cx.notify();
     }
 
     fn persist_settled_transcript(&self) {
@@ -5722,7 +5884,159 @@ impl Chat {
                                 this.new_conversation(cx);
                             }))
                             .child("New Conversation"),
+                    )
+                    .child(
+                        div()
+                            .id("overflow-chat-history")
+                            .debug_selector(|| "overflow-chat-history".into())
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(theme.radii.control)
+                            .text_size(typography.footnote)
+                            .text_color(colors.title)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_chat_history(window, cx);
+                            }))
+                            .child("Chat History"),
                     ),
+            )
+        } else {
+            None
+        };
+
+        // F-CHAT-34/35: the Chat History popover — a session list with
+        // Open/Delete per row, or the "No past chats" empty state.
+        let chat_history_menu = if self.history_open {
+            let rows: Vec<AnyElement> = if self.history_sessions.is_empty() {
+                vec![
+                    div()
+                        .id("chat-history-empty")
+                        .debug_selector(|| "chat-history-empty".into())
+                        .px(px(8.0))
+                        .py(px(10.0))
+                        .text_size(typography.footnote)
+                        .text_color(colors.subtitle)
+                        .child("No past chats")
+                        .into_any_element(),
+                ]
+            } else {
+                self.history_sessions
+                    .iter()
+                    .map(|session| {
+                        let tab_id = session.tab_id.clone();
+                        let confirming = self.history_delete_confirm.as_deref() == Some(&tab_id);
+                        let open_tab_id = tab_id.clone();
+                        let row_id = SharedString::from(format!("chat-history-row-{tab_id}"));
+                        let title = if session.title.is_empty() {
+                            "Untitled chat".to_string()
+                        } else {
+                            session.title.clone()
+                        };
+                        div()
+                            .id(row_id)
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.0))
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(theme.radii.control)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("chat-history-open-{tab_id}")))
+                                    .flex_1()
+                                    .text_size(typography.footnote)
+                                    .text_color(colors.title)
+                                    .child(title)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_chat_history_session(open_tab_id.clone(), cx);
+                                    })),
+                            )
+                            .child(if confirming {
+                                let confirm_tab_id = tab_id.clone();
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "chat-history-confirm-{tab_id}"
+                                    )))
+                                    .flex()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "chat-history-confirm-delete-{tab_id}"
+                                            )))
+                                            .text_size(typography.footnote)
+                                            .text_color(colors.tab_error)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.confirm_delete_chat_session(
+                                                    confirm_tab_id.clone(),
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("Confirm"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "chat-history-cancel-delete-{tab_id}"
+                                            )))
+                                            .text_size(typography.footnote)
+                                            .text_color(colors.subtitle)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cancel_delete_chat_session(cx);
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                let delete_tab_id = tab_id.clone();
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "chat-history-delete-{tab_id}"
+                                    )))
+                                    .text_size(typography.footnote)
+                                    .text_color(colors.subtitle)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request_delete_chat_session(
+                                            delete_tab_id.clone(),
+                                            cx,
+                                        );
+                                    }))
+                                    .child("Delete")
+                                    .into_any_element()
+                            })
+                            .into_any_element()
+                    })
+                    .collect()
+            };
+            Some(
+                div()
+                    .id("chat-history-menu")
+                    .debug_selector(|| "chat-history-menu".into())
+                    .key_context("ChatHistoryMenu")
+                    .track_focus(&self.history_focus)
+                    .on_action(cx.listener(Self::cancel))
+                    .absolute()
+                    .right(px(60.0))
+                    .bottom(px(43.0))
+                    .w(px(260.0))
+                    .max_h(px(320.0))
+                    .overflow_y_scroll()
+                    .p(px(6.0))
+                    .rounded(theme.radii.toast)
+                    .bg(colors.card_fill)
+                    .border_1()
+                    .border_color(colors.hairline)
+                    .shadow_lg()
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.history_open = false;
+                        cx.notify();
+                    }))
+                    .children(rows),
             )
         } else {
             None
@@ -6048,6 +6362,7 @@ impl Chat {
             .children(slash_popup)
             .children(mention_popup)
             .children(overflow_menu)
+            .children(chat_history_menu)
             .children(model_picker)
             .children(mode_picker)
             .children(context_popover)

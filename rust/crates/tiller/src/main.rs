@@ -4326,6 +4326,12 @@ impl TillerWorkspace {
     ) {
         let (title, agent_icon, agent_id) = chat_tab_identity(adapter);
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        // F-CHAT-34/F-PER-01: every chat tab is launched with durable
+        // transcript persistence (database path + this tab's own id + its
+        // worktree id) so completed turns are saved as they settle and the
+        // Chat History menu has real sessions to list.
+        let database_path = session::database_path();
+        let worktree_id = session::persisted_worktree_id(&self.working_directory);
         let chat = match adapter {
             Some(adapter) => {
                 let Some(program) = adapter.acp_program() else {
@@ -4337,9 +4343,22 @@ impl TillerWorkspace {
                 };
                 let command = acp_agent_command(program);
                 let cwd = self.working_directory.clone();
-                cx.new(|cx| Chat::launch_with_command(command, cwd, cx))
+                let tab_id = persistence_id.clone();
+                cx.new(|cx| {
+                    Chat::launch_with_command_and_persistence(
+                        command,
+                        cwd,
+                        database_path,
+                        tab_id,
+                        worktree_id,
+                        cx,
+                    )
+                })
             }
-            None => cx.new(Chat::launch),
+            None => {
+                let tab_id = persistence_id.clone();
+                cx.new(|cx| Chat::launch_with_persistence(database_path, tab_id, worktree_id, cx))
+            }
         };
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
