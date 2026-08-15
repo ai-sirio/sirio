@@ -267,6 +267,12 @@ pub struct ChangesTab {
     diff_errors: HashMap<PathBuf, String>,
     /// One polling loop per tab, armed on first render.
     refresh_started: bool,
+    /// F-CHG-13: a `focus_path` request that arrived before `entries` had
+    /// been populated by the first `refresh()` (the common case — `new()`
+    /// starts that refresh asynchronously, so a caller that opens the tab
+    /// and asks it to focus a path in the same tick always races it).
+    /// Replayed once the next snapshot lands, then cleared either way.
+    pending_focus: Option<PathBuf>,
 }
 
 impl ChangesTab {
@@ -285,6 +291,7 @@ impl ChangesTab {
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
+            pending_focus: None,
         };
         // Menu and socket openings both construct this same surface, so the
         // first report is always produced by the surface's own refresh path.
@@ -348,6 +355,13 @@ impl ChangesTab {
         self.stats = snapshot.stats;
         self.diffs = snapshot.diffs;
         self.diff_errors = snapshot.diff_errors;
+        // F-CHG-13: replay a focus_path request that raced this snapshot.
+        // Applied at most once — if the path still isn't present (e.g. it
+        // was reverted before the snapshot came back), there is nothing
+        // further to wait for.
+        if let Some(path) = self.pending_focus.take() {
+            self.apply_focus(&path);
+        }
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -558,9 +572,25 @@ impl ChangesTab {
     /// the file's diff is immediately visible instead of needing a second
     /// manual expand click.
     pub fn focus_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        // If entries hasn't been populated yet (the caller raced the async
+        // refresh new() kicked off), there is nothing to match against yet:
+        // remember the request and replay it once a snapshot lands in
+        // apply_snapshot, rather than silently no-op'ing.
+        if self.entries.is_empty() && self.git_task.is_some() {
+            self.pending_focus = Some(path.to_path_buf());
+            return;
+        }
+        self.apply_focus(path);
+        cx.notify();
+    }
+
+    /// Expands and un-collapses every section containing `path`. Returns
+    /// whether any section matched, so callers can decide whether to defer.
+    fn apply_focus(&mut self, path: &Path) -> bool {
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
+        let mut matched = false;
         for section in ChangeSection::ORDER {
             let entries = match section {
                 ChangeSection::Staged => snapshot.staged(),
@@ -570,9 +600,10 @@ impl ChangesTab {
             if entries.iter().any(|entry| entry.path == path) {
                 self.collapsed_sections.remove(&section);
                 self.expanded_changes.insert((section, path.to_path_buf()));
+                matched = true;
             }
         }
-        cx.notify();
+        matched
     }
 
     fn is_expanded(&self, section: ChangeSection, path: &Path) -> bool {
@@ -1865,6 +1896,42 @@ mod tests {
         });
     }
 
+    /// Regression for F-CHG-13: `add_changes_tab` calls `ChangesTab::new`
+    /// and then `focus_path` in the same tick, before the `new`-triggered
+    /// async refresh has populated `entries`. focus_path must not silently
+    /// no-op against the still-empty entries — it must defer and replay
+    /// once the first snapshot lands.
+    #[gpui::test]
+    async fn focus_path_called_before_the_first_refresh_lands_still_expands_once_it_does(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify tracked");
+
+        // Mirrors add_changes_tab: focus_path is called synchronously right
+        // after ChangesTab::new, with no pump in between, so entries is
+        // still empty and the background git_task is still in flight.
+        let tab = cx.new(|cx| {
+            let mut tab = ChangesTab::new(dir.0.clone(), cx);
+            tab.focus_path(Path::new("tracked.txt"), cx);
+            tab
+        });
+
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.entries.iter().any(|entry| entry.path == *"tracked.txt")
+            })
+        });
+
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                tab.is_expanded(ChangeSection::Changed, Path::new("tracked.txt")),
+                "the deferred focus_path request is replayed once the snapshot lands"
+            );
+        });
+    }
+
     /// An empty bucket gets no section at all — the panel never renders a
     /// header that says zero.
     #[gpui::test]
@@ -2651,6 +2718,7 @@ mod tests {
             git_task: None,
             git_error: None,
             refresh_started: false,
+            pending_focus: None,
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
@@ -2893,6 +2961,7 @@ mod tests {
             git_error: None,
             diff_errors: HashMap::new(),
             refresh_started: false,
+            pending_focus: None,
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let tab = cx.update(|window, _| {
