@@ -62,6 +62,13 @@ pub struct Titlebar {
     on_back: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     on_forward: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     on_new_tab: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// F-WIN-07: this app draws no in-window menu bar by design (see the
+    /// module docs), so this cluster button is the surface's stand-in for
+    /// the reference app's "History > Restore Previous Launch" menu entry.
+    /// Unwired (the default), it renders muted like `on_back`/`on_forward`/
+    /// `on_new_tab` above, for the same "no live-looking dead control"
+    /// reason.
+    on_history: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     title: Option<SharedString>,
     subtitle: Option<SharedString>,
 }
@@ -91,6 +98,7 @@ impl Titlebar {
             on_back: None,
             on_forward: None,
             on_new_tab: None,
+            on_history: None,
             title: None,
             subtitle: None,
         }
@@ -133,6 +141,15 @@ impl Titlebar {
     /// same reason as [`Self::on_back`].
     pub fn on_new_tab(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_new_tab = Some(Rc::new(handler));
+        self
+    }
+
+    /// Wires the History seam (F-WIN-07) — this app's stand-in for the
+    /// reference "History > Restore Previous Launch" menu entry, since no
+    /// in-window menu bar is drawn here. Unset, it renders muted like the
+    /// other cluster seams.
+    pub fn on_history(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_history = Some(Rc::new(handler));
         self
     }
 
@@ -234,6 +251,7 @@ impl Render for Titlebar {
         let on_back = self.on_back.clone();
         let on_forward = self.on_forward.clone();
         let on_new_tab = self.on_new_tab.clone();
+        let on_history = self.on_history.clone();
         let title = self.title.clone();
         let subtitle = self.subtitle.clone();
 
@@ -368,6 +386,15 @@ impl Render for Titlebar {
                     .pr(trailing_inset)
                     .flex()
                     .items_center()
+                    .gap(chrome.cluster_button_gap)
+                    .child(cluster_button(
+                        "titlebar-history",
+                        Icon::RefreshCw,
+                        button_size,
+                        control_radius,
+                        icon_button,
+                        on_history,
+                    ))
                     .child(cluster_button(
                         "titlebar-right-panel",
                         Icon::PanelRight,
@@ -558,6 +585,41 @@ mod tests {
             cx.simulate_click(bounds.center(), Modifiers::none());
             cx.run_until_parked();
         }
+    }
+
+    /// F-WIN-07: the History seam is the same "unwired renders muted, wired
+    /// invokes the handler" contract as back/forward/`+` above — see
+    /// [`the_cluster_seams_invoke_their_wired_handlers`] and
+    /// [`unwired_cluster_seams_render_but_do_not_panic_on_click`].
+    #[gpui::test]
+    async fn the_history_seam_invokes_its_wired_handler(cx: &mut TestAppContext) {
+        let called = Rc::new(RefCell::new(false));
+        let spy = called.clone();
+        let window =
+            cx.add_window(|_window, cx| Titlebar::new(cx).on_history(move |_, _| *spy.borrow_mut() = true));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let history = cx
+            .debug_bounds("titlebar-history")
+            .expect("history control is drawn");
+        cx.simulate_click(history.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(*called.borrow(), "titlebar-history invoked its wired handler");
+    }
+
+    #[gpui::test]
+    async fn unwired_history_seam_renders_but_does_not_panic_on_click(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_window, cx| Titlebar::new(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let history = cx
+            .debug_bounds("titlebar-history")
+            .expect("history control is drawn even unwired");
+        cx.simulate_click(history.center(), Modifiers::none());
+        cx.run_until_parked();
     }
 
     #[gpui::test]

@@ -230,6 +230,17 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             Some("Ctrl+Shift+I"),
             context,
         ),
+        // F-WIN-07: this app draws no in-window menu bar by design, so the
+        // command palette is the "History" surface -- the Linux stand-in
+        // for the reference app's History > Restore Previous Launch menu
+        // entry, routed through the same `WindowCommand` typed dispatch as
+        // every other palette row above.
+        window_entry(
+            WindowCommand::RestoreLaunchSnapshot,
+            "History: Restore Previous Launch",
+            Some("Ctrl+Shift+O"),
+            context,
+        ),
         PaletteEntry::enabled(
             PaletteCommand::Tab(TabCommand::FocusPane(SplitDirection::Horizontal, false)),
             "Focus Pane Left",
