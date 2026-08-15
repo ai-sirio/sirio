@@ -17,7 +17,14 @@ propagation to the sidebar row occupying the same pixels) — worth a follow-up 
 not violate this row's own pass condition (dialog appeared centred, menu closed), so this row
 itself is PASSED.
 
-## `F-TAB-01` — pending (verifying)
+## `F-TAB-01` — PASSED
+
+Live drive (`TILLER_WL_LABEL=ecfourtab01c`): `project.add` this repo, clicked the `docs` row
+(1367,331) to expand it — `linux-rewrite`/`superpowers`/`visual-reviews` appeared as children.
+Then a real 4s `sleep` (spanning 4 periodic 1s refresh ticks, confirmed by the status-bar clock
+advancing 21:42:33 -> 21:42:42 between the two captures) and a second forced-repaint `shot`: `docs`
+was still expanded with the same three children visible. Discriminates cleanly — the pre-fix
+symptom was exactly this state reverting to collapsed on the next tick.
 
 ## `F-TAB-11` — FAILED — absent
 
