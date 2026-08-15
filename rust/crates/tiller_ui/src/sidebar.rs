@@ -1770,15 +1770,23 @@ impl Sidebar {
     /// One text field in the New Worktree prompt: branch, base branch
     /// (F-PRJ-17), or checkout location (F-PRJ-18). The focused field draws
     /// the selection-ring border the single branch field used to own alone;
-    /// unfocused fields fall back to a hairline so only one field reads as
-    /// "live" at a time (Tab, not click, moves focus — see `on_prompt_key`).
+    /// unfocused fields fall back to a hairline. Both Tab (`on_prompt_key`)
+    /// and a direct click switch which field keystrokes target — Tab alone
+    /// is not trusted here because GPUI's own tab-stop focus traversal
+    /// (every field's `focus` handle is `tab_stop(true)`, matching the
+    /// convention `chat.rs`'s composer already flags as host-dependent) can
+    /// consume the keypress before `on_prompt_key` ever sees it, stranding
+    /// the prompt with no live field at all.
     fn render_worktree_prompt_field(
         id: &'static str,
         placeholder: &'static str,
         value: &str,
+        field: WorktreePromptField,
         focused: bool,
+        entity: &gpui::Entity<Self>,
         theme: Theme,
     ) -> impl IntoElement {
+        let click_entity = entity.clone();
         div()
             .id(id)
             .debug_selector(move || id.to_string())
@@ -1795,11 +1803,21 @@ impl Sidebar {
             } else {
                 theme.hairline
             })
+            .cursor(gpui::CursorStyle::IBeam)
             .text_size(theme.typography.footnote)
             .text_color(if value.is_empty() {
                 theme.meta
             } else {
                 theme.title
+            })
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                click_entity.update(cx, |sidebar, cx| {
+                    if let Some(prompt) = sidebar.prompt.as_mut() {
+                        prompt.focused_field = field;
+                        prompt.focus.focus(window, cx);
+                    }
+                    cx.notify();
+                });
             })
             .child(if value.is_empty() {
                 placeholder.to_owned()
@@ -2757,21 +2775,27 @@ impl Render for Sidebar {
                                     "worktree-prompt-branch",
                                     "branch name",
                                     &prompt.draft,
+                                    WorktreePromptField::Branch,
                                     prompt.focused_field == WorktreePromptField::Branch,
+                                    &prompt_owner,
                                     theme,
                                 ))
                                 .child(Self::render_worktree_prompt_field(
                                     "worktree-prompt-base",
                                     "base branch (optional, defaults to HEAD)",
                                     &prompt.base_draft,
+                                    WorktreePromptField::Base,
                                     prompt.focused_field == WorktreePromptField::Base,
+                                    &prompt_owner,
                                     theme,
                                 ))
                                 .child(Self::render_worktree_prompt_field(
                                     "worktree-prompt-location",
                                     "location (optional, defaults next to project)",
                                     &prompt.location_draft,
+                                    WorktreePromptField::Location,
                                     prompt.focused_field == WorktreePromptField::Location,
+                                    &prompt_owner,
                                     theme,
                                 ))
                                 .when(prompt.error.is_some(), |this| {
