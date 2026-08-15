@@ -1064,6 +1064,28 @@ impl Chat {
         Self::bind_keys(cx);
         let list_state = ListState::new(0, ListAlignment::Top, px(2048.0));
         list_state.set_follow_mode(FollowMode::Tail);
+        // F-CHAT-20: scrolling away from the tail mid-stream (a real
+        // GPUI `ScrollWheelEvent`, not this app's code) already flips
+        // `FollowMode` off inside `ListState::scroll` — that half needed no
+        // fix. But nothing ever turned it back on, so once a user scrolled
+        // away the transcript stayed pinned to that spot forever, even after
+        // manually scrolling back down to the last entry — there was no way
+        // to "re-pin". Re-enable Tail-follow whenever a scroll leaves the
+        // list sitting exactly at its end.
+        //
+        // Must `cx.defer`: the scroll handler runs while `ListState`'s own
+        // `RefCell` is still mutably borrowed inside `scroll()`, so calling
+        // `set_follow_mode` (which borrows it again) from here directly
+        // would double-borrow and panic.
+        let scroll_list_state = list_state.clone();
+        list_state.set_scroll_handler(move |_event, _window, cx| {
+            let list_state = scroll_list_state.clone();
+            cx.defer(move |_cx| {
+                if list_state.is_scrolled_to_end() == Some(true) {
+                    list_state.set_follow_mode(FollowMode::Tail);
+                }
+            });
+        });
 
         Self {
             client: None,
