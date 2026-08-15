@@ -959,6 +959,74 @@ fn session_references_upsert_load_and_delete() {
 }
 
 #[test]
+fn account_identity_upserts_one_row_per_provider_and_survives_a_relaunch() {
+    // F-PERSIST-DB-06: discover_claude_identity/discover_codex_identity had
+    // nowhere to persist a successful shell-out, so the display line could
+    // not survive a restart or a slow/offline CLI. Same upsert contract as
+    // save_session_ref: an unknown provider reads back None, a saved
+    // identity replaces wholesale rather than accumulating history, and the
+    // row survives closing and reopening the database file.
+    let dir = TempDir::new();
+    let path = dir.db_path("account-identity-lifecycle");
+
+    {
+        let db = AppDatabase::open(&path).expect("open writer database");
+        assert_eq!(
+            db.account_identity("claude").expect("query unknown provider"),
+            None,
+            "no identity has been saved for claude yet"
+        );
+
+        db.save_account_identity("claude", "signed in as dev@example.com")
+            .expect("insert claude identity");
+        let (identity, first_detected_at) = db
+            .account_identity("claude")
+            .expect("load claude identity")
+            .expect("a row exists after saving");
+        assert_eq!(identity, "signed in as dev@example.com");
+
+        db.save_account_identity("claude", "signed in as dev2@example.com")
+            .expect("replace claude identity");
+        let (identity, replaced_detected_at) = db
+            .account_identity("claude")
+            .expect("load replaced claude identity")
+            .expect("still exactly one row for claude");
+        assert_eq!(
+            identity, "signed in as dev2@example.com",
+            "a second save replaces the row wholesale rather than appending history"
+        );
+        assert!(
+            replaced_detected_at >= first_detected_at,
+            "detected_at advances on replace"
+        );
+
+        db.save_account_identity("codex", "signed in as ops@example.com")
+            .expect("insert codex identity");
+        assert_eq!(
+            db.account_identity("claude")
+                .expect("claude row")
+                .map(|(identity, _)| identity),
+            Some("signed in as dev2@example.com".to_string()),
+            "a different provider's row does not disturb claude's"
+        );
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen database after relaunch");
+    assert_eq!(
+        db.account_identity("claude")
+            .expect("claude survives relaunch")
+            .map(|(identity, _)| identity),
+        Some("signed in as dev2@example.com".to_string())
+    );
+    assert_eq!(
+        db.account_identity("codex")
+            .expect("codex survives relaunch")
+            .map(|(identity, _)| identity),
+        Some("signed in as ops@example.com".to_string())
+    );
+}
+
+#[test]
 fn browser_origin_grants_survive_relaunch_and_revoke() {
     let dir = TempDir::new();
     let path = dir.db_path("browser-origins");
