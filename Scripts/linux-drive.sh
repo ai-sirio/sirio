@@ -8,8 +8,10 @@
 #
 # You supply a snippet of shell run against the live window. Inside it you get:
 #     $WID    the app window id        $DISP   the X display
-#     key / type / click / rclick / shot   helpers, defined below
+#     key / type / click / rclick / drag / shot   helpers, defined below
 #                                          (rclick = right-click, button 3)
+#                                          (drag x1 y1 x2 y2 [steps] = mousedown, several
+#                                           intermediate mousemoves, mouseup)
 #
 # Example — open the second tab, type a message, send it, wait, and capture:
 #   Scripts/linux-drive.sh out.png '
@@ -220,8 +222,28 @@ click() { timeout 10 env DISPLAY="$DISP" xdotool mousemove --sync $(( WIN_X + $1
 # route and lands, and XWayland does not discriminate by button for a focused
 # X client, so the same mousemove-then-XTEST sequence is used verbatim.
 rclick() { timeout 10 env DISPLAY="$DISP" xdotool mousemove --sync $(( WIN_X + $1 )) $(( WIN_Y + $2 )); sleep 0.2; timeout 10 env DISPLAY="$DISP" xdotool click 3; sleep 0.4; }
+# Drag from (x1,y1) to (x2,y2), window-relative, same coordinate convention as click/rclick.
+# GPUI (and most toolkits) tell a real drag from a click by motion while the button stays down,
+# so this is button-down, several intermediate mousemove --sync steps (not one jump — a
+# same-frame down-then-up-elsewhere is indistinguishable from a click-then-click to the
+# recipient), then button-up. Steps default to 8, which was enough to carry a drag payload
+# (e.g. a Files-panel row's path) onto a drop target in manual verification; override with a
+# 5th argument if a particular drag needs finer-grained motion.
+drag()  {
+  local x1=$1 y1=$2 x2=$3 y2=$4 steps="${5:-8}"
+  timeout 10 env DISPLAY="$DISP" xdotool mousemove --sync $(( WIN_X + x1 )) $(( WIN_Y + y1 )); sleep 0.2
+  timeout 10 env DISPLAY="$DISP" xdotool mousedown 1; sleep 0.2
+  local i sx sy
+  for i in $(seq 1 "$steps"); do
+    sx=$(( x1 + (x2 - x1) * i / steps ))
+    sy=$(( y1 + (y2 - y1) * i / steps ))
+    timeout 10 env DISPLAY="$DISP" xdotool mousemove --sync $(( WIN_X + sx )) $(( WIN_Y + sy )); sleep 0.05
+  done
+  sleep 0.2
+  timeout 10 env DISPLAY="$DISP" xdotool mouseup 1; sleep 0.4
+}
 shot()  { timeout 30 env DISPLAY="$DISP" import -window "$WID" "${1:-$OUT}" 2>>"$LOG"; }
-export -f key type click rclick shot
+export -f key type click rclick drag shot
 
 if [ -n "$ACTIONS" ]; then
   echo "--- driving ---"
