@@ -387,6 +387,7 @@ enum ControlAction {
     },
     SplitPane {
         direction: SplitDirection,
+        placement: SplitPlacement,
         reply: ControlReply,
     },
     ClosePane {
@@ -1481,9 +1482,11 @@ impl ControlHandler for AppControlHandler {
                 let Some(direction) = request.params.get("direction") else {
                     return ControlResponse::failure(&request.id, "pane.split requires direction");
                 };
-                let direction = match direction.as_str() {
-                    "right" | "left" => SplitDirection::Horizontal,
-                    "down" | "up" => SplitDirection::Vertical,
+                let (direction, placement) = match direction.as_str() {
+                    "right" => (SplitDirection::Horizontal, SplitPlacement::After),
+                    "left" => (SplitDirection::Horizontal, SplitPlacement::Before),
+                    "down" => (SplitDirection::Vertical, SplitPlacement::After),
+                    "up" => (SplitDirection::Vertical, SplitPlacement::Before),
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
@@ -1493,6 +1496,7 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::SplitPane {
                     direction,
+                    placement,
                     reply,
                 })
             }
@@ -2746,8 +2750,14 @@ impl TillerWorkspace {
                                     workspace.focus_neighbor(direction, forward, None, cx);
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
-                                ControlAction::SplitPane { direction, reply } => {
-                                    workspace.split_focused_terminal(direction, None, cx);
+                                ControlAction::SplitPane {
+                                    direction,
+                                    placement,
+                                    reply,
+                                } => {
+                                    workspace.split_focused_terminal_with_placement(
+                                        direction, placement, None, cx,
+                                    );
                                     let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::ClosePane { reply } => {
@@ -5629,6 +5639,29 @@ impl TillerWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        self.split_focused_terminal_with_placement(
+            direction,
+            SplitPlacement::After,
+            window,
+            cx,
+        );
+    }
+
+    /// F-TERM-SPLIT-01: the control socket's `pane.split` used to always
+    /// call the placement-less `split_focused_terminal`, so `direction:
+    /// "left"`/`"up"` silently landed the new pane on the opposite side
+    /// (`SplitPlacement::After`, the only placement that path could ever
+    /// produce) despite the direction itself parsing correctly. This mirrors
+    /// `split_focused_terminal` but threads the placement through to
+    /// `split_terminal_at_with_placement`, the same call the terminal
+    /// context menu already uses correctly.
+    fn split_focused_terminal_with_placement(
+        &mut self,
+        direction: SplitDirection,
+        placement: SplitPlacement,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let Some((tab_id, focused_pane)) = self
             .tabs
             .get(self.active_tab)
@@ -5636,22 +5669,11 @@ impl TillerWorkspace {
         else {
             return;
         };
-        self.split_terminal_at(tab_id, focused_pane, direction, window, cx);
-    }
-
-    fn split_terminal_at(
-        &mut self,
-        tab_id: usize,
-        focused_pane: usize,
-        direction: SplitDirection,
-        window: Option<&mut Window>,
-        cx: &mut Context<Self>,
-    ) {
         self.split_terminal_at_with_placement(
             tab_id,
             focused_pane,
             direction,
-            SplitPlacement::After,
+            placement,
             window,
             cx,
         );
