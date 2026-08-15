@@ -38,6 +38,14 @@ builder's own report correctly declines to file a partial/fake wire-up. Unexerci
 because the behaviour does not exist; verdict is FAILED — absent (not UNREACHABLE), since the code
 path is confirmed missing rather than merely hard to drive.
 
-## `F-TERM-08` — pending (verifying)
+## `F-TERM-08` — PASSED
+
+Live drive (`TILLER_WL_LABEL=ecfourterm08d`): `project.add`, clicked the Terminal pane (pane-1
+from `panel.list`), `ctl notify session=pane-1 status=running` (confirmed by the red tab dot and
+"1 running" in the Activity footer — a discriminating marker, since a fresh pane never shows
+either). First `rightclick` silently dropped (documented lane trap, reproduced); a second
+`rightclick` opened the 12-item menu. Clicked "Close Terminal…" — the real "This pane has running
+work. Close anyway?" banner appeared with Close Anyway/Cancel, not an immediate close. Did not
+click through.
 
 ## `F-TERM-UI-01` — pending (verifying)
