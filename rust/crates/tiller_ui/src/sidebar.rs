@@ -130,6 +130,10 @@ pub struct SidebarRow {
     pub tab_kind: Option<TabKind>,
     /// The running agent's brand mark for a real tab row, if any.
     pub agent_icon: Option<Icon>,
+    /// F-SID-11: the worktree's durable comment annotation, carried through
+    /// from `SidebarWorktree::comment`. Only meaningful for
+    /// `RowKind::Worktree`.
+    pub comment: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,6 +153,11 @@ pub struct SidebarWorktree {
     pub branch: String,
     pub path: PathBuf,
     pub is_primary: bool,
+    /// F-SID-11: the durable `worktree.comment` annotation (`worktree.set`
+    /// over the control socket), already persisted and read by the status
+    /// bar — the worktree row itself never rendered it. `None` when no
+    /// comment has ever been set for this path.
+    pub comment: Option<String>,
 }
 
 /// Stable target carried by a sidebar context action. Paths and catalog ids
@@ -387,6 +396,7 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
+                comment: None,
             }
         }
 
@@ -475,6 +485,7 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
+                comment: None,
             });
             let worktree_count = project.worktrees.len();
             for (worktree_index, worktree) in project.worktrees.into_iter().enumerate() {
@@ -494,6 +505,7 @@ impl Sidebar {
                     tab_id: None,
                     tab_kind: None,
                     agent_icon: None,
+                    comment: worktree.comment,
                 });
             }
             if project_is_git {
@@ -511,6 +523,7 @@ impl Sidebar {
                     tab_id: None,
                     tab_kind: None,
                     agent_icon: None,
+                    comment: None,
                 });
             }
         }
@@ -1398,6 +1411,7 @@ impl Sidebar {
             tab_id: Some(tab.id),
             tab_kind: Some(tab.kind),
             agent_icon: tab.agent_icon,
+            comment: None,
         });
         self.rows.splice(insert_at..existing_end, new_rows);
         cx.notify();
@@ -1598,6 +1612,7 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
+                comment: None,
             },
         );
         self.select_row(id, cx);
@@ -2676,7 +2691,27 @@ impl Sidebar {
                                 .text_size(px(10.0))
                                 .child("Primary"),
                         )
-                    }),
+                    })
+                    // F-SID-11: the durable `worktree.comment` annotation
+                    // (`worktree.set` over the control socket) was already
+                    // persisted and read by the status bar; the worktree
+                    // row itself never rendered it.
+                    .when_some(
+                        row.comment.filter(|comment| !comment.is_empty()),
+                        |this, comment| {
+                            this.child(
+                                div()
+                                    .id(("sidebar-worktree-comment", row_id))
+                                    .debug_selector(move || {
+                                        format!("sidebar-worktree-comment-{row_id}")
+                                    })
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.meta)
+                                    .child(comment),
+                            )
+                        },
+                    ),
             )
         });
 
@@ -3063,6 +3098,7 @@ mod tests {
             tab_id: Some(1),
             tab_kind: Some(TabKind::Terminal),
             agent_icon: None,
+            comment: None,
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::SquareTerminal);
@@ -3084,6 +3120,7 @@ mod tests {
             tab_id: Some(2),
             tab_kind: Some(TabKind::Terminal),
             agent_icon: Some(Icon::ClaudeCode),
+            comment: None,
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::ClaudeCode);
@@ -3691,6 +3728,7 @@ mod tests {
                     branch: "main".into(),
                     path: PathBuf::from("/repo/first"),
                     is_primary: true,
+                    comment: None,
                 }],
             },
             SidebarProject {
@@ -3702,6 +3740,7 @@ mod tests {
                     branch: "main".into(),
                     path: PathBuf::from("/repo/second"),
                     is_primary: true,
+                    comment: None,
                 }],
             },
         ];
@@ -3771,6 +3810,7 @@ mod tests {
                     branch: format!("branch-{index}"),
                     path: PathBuf::from(format!("/repo/project-{index}")),
                     is_primary: index == 0,
+                    comment: None,
                 })
                 .collect(),
         };
@@ -3844,6 +3884,7 @@ mod tests {
                     branch: format!("branch-{index}"),
                     path: PathBuf::from(format!("/repo/project-{index}")),
                     is_primary: index == 0,
+                    comment: None,
                 })
                 .collect(),
         };
@@ -3919,6 +3960,7 @@ mod tests {
                 branch: "main".into(),
                 path: PathBuf::from("/repo/project"),
                 is_primary: true,
+                comment: None,
             }],
         };
         let window = cx.add_window(|_window, cx| Sidebar::from_projects(vec![project], cx));
