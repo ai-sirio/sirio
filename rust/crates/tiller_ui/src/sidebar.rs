@@ -1635,10 +1635,15 @@ impl Sidebar {
                         .iter()
                         .position(|row| row.kind == RowKind::Project)
                         .map_or(self.rows.len(), |offset| project_index + 1 + offset);
-                    let mut section = vec![project.clone()];
+                    let children = &self.rows[project_index + 1..next_project];
+                    let mut project_row = project.clone();
+                    if !project.expanded {
+                        project_row.agent_status = Self::collapsed_project_status(children);
+                    }
+                    let mut section = vec![project_row];
                     if project.expanded {
                         section.extend(
-                            self.rows[project_index + 1..next_project]
+                            children
                                 .iter()
                                 .filter(|row| {
                                     // The New Worktree row is only offered
@@ -1674,7 +1679,11 @@ impl Sidebar {
                 .any(|row| row.title.to_lowercase().contains(&query));
 
             if project_matches || section_matches {
-                filtered.push(project.clone());
+                let mut project_row = project.clone();
+                if !project.expanded {
+                    project_row.agent_status = Self::collapsed_project_status(section);
+                }
+                filtered.push(project_row);
                 if project.expanded || section_matches {
                     let mut worktree: Option<SidebarRow> = None;
                     let mut tabs = Vec::new();
@@ -1731,6 +1740,30 @@ impl Sidebar {
             project_index = next_project;
         }
         filtered
+    }
+
+    /// F-SID-06: a collapsed project hides its worktree rows, so the status
+    /// dot they'd otherwise show has nowhere to draw. This picks the single
+    /// most urgent status among a project's worktree children so the
+    /// collapsed project row can badge it instead — the same "a dot only
+    /// appears for a notable status" rule `render_row` already applies to
+    /// an expanded worktree row, just aggregated up one level.
+    fn collapsed_project_status(children: &[SidebarRow]) -> Option<ActivityStatus> {
+        fn urgency(status: ActivityStatus) -> u8 {
+            match status {
+                ActivityStatus::Running => 0,
+                ActivityStatus::Done => 1,
+                ActivityStatus::Idle => 2,
+                ActivityStatus::NeedsInput => 3,
+                ActivityStatus::Error => 4,
+            }
+        }
+        children
+            .iter()
+            .filter(|row| row.kind == RowKind::Worktree)
+            .filter_map(|row| row.agent_status)
+            .filter(|status| urgency(*status) > 0)
+            .max_by_key(|status| urgency(*status))
     }
 
     fn row_icon(row: &SidebarRow) -> Icon {
@@ -2239,7 +2272,11 @@ impl Sidebar {
             _ => None,
         };
         // A dot only appears for a notable status — matching the reference.
-        let status_dot_color = (kind == RowKind::Worktree)
+        // A collapsed project also gets one (F-SID-06): its worktree rows
+        // are hidden, so `row.agent_status` was pre-aggregated onto the
+        // project row itself in `visible_rows`.
+        let status_dot_color = (kind == RowKind::Worktree
+            || (kind == RowKind::Project && !row.expanded))
             .then_some(row.agent_status)
             .flatten()
             .and_then(|status| match status {
@@ -4054,6 +4091,62 @@ mod tests {
                 "project row {id} returns after the filter is cleared"
             );
         }
+    }
+
+    /// F-SID-06: a collapsed project has no visible worktree row to carry
+    /// the status dot, so the project row itself badges the most urgent
+    /// status among its (hidden) worktree children; expanding the project
+    /// hands the dot back to the worktree row and clears the badge.
+    #[gpui::test]
+    async fn collapsed_project_badges_the_worst_child_worktree_status(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        // Project row 4 (the long fixture name) starts collapsed with
+        // worktree row 5 as its only child.
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_status(5, Some(ActivityStatus::Error), cx);
+        });
+        cx.run_until_parked();
+
+        let project_status = entity.update(&mut cx, |sidebar, _cx| {
+            sidebar
+                .visible_rows()
+                .into_iter()
+                .find(|row| row.id == 4)
+                .and_then(|row| row.agent_status)
+        });
+        assert_eq!(
+            project_status,
+            Some(ActivityStatus::Error),
+            "a collapsed project badges its most urgent child worktree status"
+        );
+
+        // Expanding the project stops the aggregate badge; the now-visible
+        // worktree row carries its own dot instead (render_row's existing
+        // RowKind::Worktree gate).
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.toggle_project(4, cx);
+        });
+        cx.run_until_parked();
+        let expanded_status = entity.update(&mut cx, |sidebar, _cx| {
+            sidebar
+                .visible_rows()
+                .into_iter()
+                .find(|row| row.id == 4)
+                .and_then(|row| row.agent_status)
+        });
+        assert_eq!(
+            expanded_status, None,
+            "an expanded project row does not carry the aggregated badge"
+        );
     }
 
     /// F-SID-04: clicking a project row's chevron reveals a collapsed
