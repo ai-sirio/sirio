@@ -146,7 +146,6 @@ impl TabMachinery {
         self.group(group_id).map(|group| group.tabs.as_slice())
     }
 
-    #[cfg(test)]
     pub(crate) fn add_group(&mut self, group_id: usize) -> bool {
         if self.group(group_id).is_some() {
             return false;
