@@ -84,3 +84,40 @@ point — once with `Modifiers::none()` (asserts no `TerminalLinkEvent`), once w
   has no modifier-held-click primitive and the lane's keyboard-keeper stays unmodified after
   startup (per prior evidence). Instrument-blocked, not platform-impossible.
 - Commit: `b177b53` — `test(terminal): prove platform-modifier click opens a terminal link`
+
+## F-GIT-REMOTE-01 — partial fix; needs one foreign-file line to fully land
+
+`github_owner` (the owner-parsing half of remote parsing) had zero callers outside
+`tiller_git` — only a re-export, an internal wrapper, and its own tests. `project_name` (the
+project-naming half) was already genuinely reachable at `project_forms.rs`'s `destination_for`
+(used to compute the clone destination folder), so only the owner half was the actual gap.
+
+Added `ProjectIconPicker::with_value_and_repo(value, repo, cx)` in `project_identity.rs`: same
+as `with_value`, but pre-fills the Avatar tab's GitHub field from `tiller_git::github_owner(repo)`
+when the checkout has a GitHub `origin` remote. Purely additive — `value`/`mode` are untouched,
+so it behaves exactly like `with_value` for a non-GitHub or remote-less checkout, and an
+already-chosen icon survives unchanged. Covered by `a_github_origin_remote_prefills_the_avatar_field`,
+a `gpui::test` against a real `git init` + `git remote add origin git@github.com:...` checkout,
+asserting "Use GitHub Avatar" commits the pre-filled owner with zero typing.
+
+This makes `github_owner` reachable from `tiller_ui`, but not yet from the running app: the
+picker is actually mounted in `sidebar.rs`'s `open_project_settings` (not an owned file for this
+slice), which currently calls `ProjectIconPicker::with_value(icon.borrow().clone(), cx)`. That
+same function already resolves `row.path` — the exact project's checkout path — a few lines
+earlier, so the one-line fix is:
+
+```rust
+ProjectIconPicker::with_value_and_repo(icon.borrow().clone(), &path, cx)
+```
+
+in place of the current `with_value(...)` call (`sidebar.rs` around line 976).
+
+- `wantedForeignFiles`: `rust/crates/tiller_ui/src/sidebar.rs` — apply the one-line
+  `with_value` → `with_value_and_repo` swap described above at `open_project_settings`
+  (~line 976) to make `github_owner` reachable end-to-end from the running app's Project
+  Settings gear.
+- `howToExercise` (once the sidebar.rs line lands): open a project whose checkout has a
+  GitHub `origin` remote, click its sidebar gear → Project Settings, switch the icon picker to
+  the Avatar tab — the GitHub field should already show the parsed owner instead of being
+  empty; clicking "Use GitHub Avatar" with no typing commits it.
+- Commit: `1f9f860` — `feat(ui): pre-fill GitHub avatar field from the repo's origin remote`
