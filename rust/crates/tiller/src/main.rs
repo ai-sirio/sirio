@@ -3113,7 +3113,9 @@ impl TillerWorkspace {
         cx.subscribe(
             right_panel,
             |workspace, _, event: &RightPanelActionEvent, cx| match event {
-                RightPanelActionEvent::OpenDiff(_path) => workspace.add_changes_tab(cx),
+                RightPanelActionEvent::OpenDiff(path) => {
+                    workspace.add_changes_tab(Some(path.clone()), cx)
+                }
             },
         )
         .detach();
@@ -4470,7 +4472,9 @@ impl TillerWorkspace {
         cx.subscribe(
             tab,
             |workspace, _, event: &ChangesTabActionEvent, cx| match event {
-                ChangesTabActionEvent::OpenDiff(_path) => workspace.add_changes_tab(cx),
+                ChangesTabActionEvent::OpenDiff(path) => {
+                    workspace.add_changes_tab(Some(path.clone()), cx)
+                }
                 ChangesTabActionEvent::ResolveInTerminal(path) => {
                     workspace.add_conflict_terminal_tab(path.clone(), cx)
                 }
@@ -4990,9 +4994,15 @@ impl TillerWorkspace {
         cx.notify();
     }
 
-    fn add_changes_tab(&mut self, cx: &mut Context<Self>) {
+    fn add_changes_tab(&mut self, focus_path: Option<PathBuf>, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| ChangesTab::new(self.working_directory.clone(), cx));
         Self::subscribe_changes_tab(&changes, cx);
+        // F-CHG-13: OpenDiff(path) expects the Changes tab to do something
+        // path-specific with that file, not just open the generic multi-file
+        // view -- expand (and un-collapse) whichever section carries it.
+        if let Some(path) = focus_path {
+            changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
+        }
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
@@ -5399,7 +5409,7 @@ impl TillerWorkspace {
         match action {
             NewTabAction::NewChat => self.add_chat_tab(window, None, cx),
             NewTabAction::NewTerminal => self.add_terminal_tab("Terminal", cx),
-            NewTabAction::NewChanges => self.add_changes_tab(cx),
+            NewTabAction::NewChanges => self.add_changes_tab(None, cx),
             NewTabAction::ClaudeCode
             | NewTabAction::Codex
             | NewTabAction::OpenCode
@@ -5488,7 +5498,7 @@ impl TillerWorkspace {
             return Err("no current workspace".to_string());
         }
         // This is the same typed action used by the New-tab UI callback.
-        self.add_changes_tab(cx);
+        self.add_changes_tab(None, cx);
         self.control_read_changes(cx)
     }
 
@@ -9683,7 +9693,7 @@ mod tests {
         let right_panel = workspace.right_panel.clone();
         TillerWorkspace::subscribe_right_panel(&right_panel, cx);
         if with_changes_tab {
-            workspace.add_changes_tab(cx);
+            workspace.add_changes_tab(None, cx);
         }
         workspace
     }

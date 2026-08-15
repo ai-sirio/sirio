@@ -548,6 +548,33 @@ impl ChangesTab {
         cx.notify();
     }
 
+    /// F-CHG-13: `RightPanelActionEvent::OpenDiff(path)` and
+    /// `ChangesTabActionEvent::OpenDiff(path)` both expect the receiver to
+    /// do something path-specific with the diff, not just open the generic
+    /// multi-file tab. Expands whichever section(s) currently carry `path`
+    /// (a partially-staged file can appear in more than one) and makes sure
+    /// none of them are collapsed, reusing the same `expanded_changes` /
+    /// `collapsed_sections` state manual expand/collapse already drives, so
+    /// the file's diff is immediately visible instead of needing a second
+    /// manual expand click.
+    pub fn focus_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let snapshot = StatusSnapshot {
+            entries: self.entries.clone(),
+        };
+        for section in ChangeSection::ORDER {
+            let entries = match section {
+                ChangeSection::Staged => snapshot.staged(),
+                ChangeSection::Changed => snapshot.changes(),
+                ChangeSection::Untracked => snapshot.untracked(),
+            };
+            if entries.iter().any(|entry| entry.path == path) {
+                self.collapsed_sections.remove(&section);
+                self.expanded_changes.insert((section, path.to_path_buf()));
+            }
+        }
+        cx.notify();
+    }
+
     fn is_expanded(&self, section: ChangeSection, path: &Path) -> bool {
         self.expanded_changes
             .contains(&(section, path.to_path_buf()))
@@ -1284,6 +1311,25 @@ impl ChangesTab {
                 .into_any_element();
         }
         let sections = self.section_rows();
+        if sections.is_empty() {
+            // F-CHG-02: a clean repo (or a worktree that was just closed and
+            // reopened with nothing to show) fell through to an empty
+            // "changes-list" with no message -- a blank panel that looks
+            // broken rather than confirming there is genuinely nothing to
+            // show.
+            return div()
+                .id("changes-empty")
+                .debug_selector(|| "changes-empty".into())
+                .flex_1()
+                .min_h(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(theme.typography.headline)
+                .text_color(theme.subtitle)
+                .child("No changes")
+                .into_any_element();
+        }
         let row_entity = entity;
         div()
             .id("changes-list")
@@ -1775,6 +1821,50 @@ mod tests {
         assert_eq!(counts, vec![1, 1, 1], "each section states its own size");
     }
 
+    /// F-CHG-13: `focus_path` expands the section(s) carrying the given
+    /// path and un-collapses them, so a caller that just opened the Changes
+    /// tab for one specific file sees its diff immediately.
+    #[gpui::test]
+    async fn focus_path_expands_and_uncollapses_the_owning_sections(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("staged.txt"), "s\n").expect("seed staged");
+        git(&dir.0, &["add", "staged.txt"]);
+        std::fs::write(dir.0.join("staged.txt"), "s2\n").expect("also modify after staging");
+
+        let tab = cx.new(|cx| ChangesTab::new(dir.0.clone(), cx));
+        pump_until(cx, || {
+            tab.read_with(cx, |tab, _| {
+                tab.entries.iter().any(|entry| entry.path == *"staged.txt")
+            })
+        });
+
+        tab.update(cx, |tab, cx| {
+            tab.collapsed_sections.insert(ChangeSection::Staged);
+            tab.collapsed_sections.insert(ChangeSection::Changed);
+            tab.focus_path(Path::new("staged.txt"), cx);
+        });
+
+        tab.read_with(cx, |tab, _| {
+            assert!(
+                !tab.collapsed_sections.contains(&ChangeSection::Staged),
+                "the Staged section (which carries this file) is un-collapsed"
+            );
+            assert!(
+                !tab.collapsed_sections.contains(&ChangeSection::Changed),
+                "the Changed section (which also carries this partially-staged file) is un-collapsed"
+            );
+            assert!(
+                tab.is_expanded(ChangeSection::Staged, Path::new("staged.txt")),
+                "the Staged row for the file is expanded"
+            );
+            assert!(
+                tab.is_expanded(ChangeSection::Changed, Path::new("staged.txt")),
+                "the Changed row for the file is expanded"
+            );
+        });
+    }
+
     /// An empty bucket gets no section at all — the panel never renders a
     /// header that says zero.
     #[gpui::test]
@@ -1800,6 +1890,35 @@ mod tests {
                 .iter()
                 .all(|section| section.section != ChangeSection::Untracked),
             "an empty Untracked bucket must not render a section"
+        );
+    }
+
+    /// F-CHG-02: a clean repo (or a worktree just closed and reopened with
+    /// nothing to show) must draw a real "No changes" message instead of
+    /// silently falling through to a blank `changes-list` with zero
+    /// children — a blank panel looks broken, not confirmed-clean.
+    #[gpui::test]
+    async fn a_clean_repo_draws_a_no_changes_message_not_a_blank_panel(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        cx.cx.update(|app| tab.update(app, |tab, cx| tab.refresh(cx)));
+        wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none());
+        cx.cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("changes-empty").is_some(),
+            "a clean repo draws the empty-state message"
+        );
+        assert!(
+            cx.debug_bounds("changes-list").is_none(),
+            "the empty-state message replaces the (otherwise childless) list, not both"
         );
     }
 
