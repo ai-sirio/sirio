@@ -206,7 +206,7 @@ pub struct ModelCatalog {
 }
 
 /// Context usage reported by the agent for the current session.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ContextUsage {
     /// Tokens currently in the context window.
     pub used: u64,
@@ -214,6 +214,14 @@ pub struct ContextUsage {
     pub size: u64,
     /// Cumulative cost when the agent reports it.
     pub cost: Option<ContextCost>,
+    /// Cumulative input tokens, when the agent reports end-of-turn usage
+    /// (F-CHAT-18; requires `unstable_end_turn_token_usage`, so it stays
+    /// `None` against agents that never send a `PromptResponse.usage`).
+    pub input_tokens: Option<u64>,
+    /// Cumulative output tokens, same source and caveat as `input_tokens`.
+    pub output_tokens: Option<u64>,
+    /// Cumulative cache-read tokens, same source and caveat as `input_tokens`.
+    pub cached_read_tokens: Option<u64>,
 }
 
 /// Cumulative cost attached to an ACP usage update.
@@ -435,6 +443,18 @@ pub enum AcpEvent {
     Effort(EffortOption),
     /// The agent reported current context-window usage.
     ContextUsage(ContextUsage),
+    /// The agent reported an input/output/cache token breakdown for the
+    /// turn that just ended (F-CHAT-18; requires the ACP-agent-side
+    /// `unstable_end_turn_token_usage` extension, so this fires only for
+    /// agents that opt in).
+    TokenUsageBreakdown {
+        /// Cumulative input tokens across the session.
+        input_tokens: u64,
+        /// Cumulative output tokens across the session.
+        output_tokens: u64,
+        /// Cumulative cache-read tokens across the session, when reported.
+        cached_read_tokens: Option<u64>,
+    },
     /// The agent is waiting for a caller decision.
     PermissionRequest {
         /// Handle passed to [`AcpClient::respond_permission`].
@@ -1128,6 +1148,16 @@ fn run_connection(
                                     active_prompt_for_result.store(0, Ordering::Release);
                                     match result {
                                         Ok(response) => {
+                                            if let Some(usage) = response.usage {
+                                                let _ = event_tx
+                                                    .send(AcpEvent::TokenUsageBreakdown {
+                                                        input_tokens: usage.input_tokens,
+                                                        output_tokens: usage.output_tokens,
+                                                        cached_read_tokens: usage
+                                                            .cached_read_tokens,
+                                                    })
+                                                    .await;
+                                            }
                                             let _ = event_tx
                                                 .send(AcpEvent::TurnEnded {
                                                     stop_reason: format!(
@@ -1643,6 +1673,9 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                 amount: cost.amount,
                 currency: cost.currency,
             }),
+            input_tokens: None,
+            output_tokens: None,
+            cached_read_tokens: None,
         })],
         SessionUpdate::AvailableCommandsUpdate(update) => {
             vec![AcpEvent::AvailableCommands(
@@ -1990,6 +2023,9 @@ mod tests {
                     amount: 0.045,
                     currency: "USD".into(),
                 }),
+                input_tokens: None,
+                output_tokens: None,
+                cached_read_tokens: None,
             })]
         );
     }

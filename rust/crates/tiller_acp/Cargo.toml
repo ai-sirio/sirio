@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-agent-client-protocol = "2"
+agent-client-protocol = { version = "2", features = ["unstable_end_turn_token_usage"] }
 async-io = "2"
 async-channel = "2"
 async-process = "2"

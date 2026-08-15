@@ -650,6 +650,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
         | AcpEvent::AvailableCommands(_)
         | AcpEvent::Effort(_)
         | AcpEvent::ContextUsage(_)
+        | AcpEvent::TokenUsageBreakdown { .. }
         | AcpEvent::OtherSessionUpdate { .. } => EventFold::default(),
     }
 }
