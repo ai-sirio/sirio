@@ -799,6 +799,14 @@ pub struct Settings {
     /// uses: a click that reaches nothing is exactly the defect this brief
     /// exists to close, so an unwired button must not look wired.
     on_install_skill: Option<Rc<dyn Fn(SkillInstallCommand)>>,
+    /// Set the instant Install Skill is clicked and reaches a wired
+    /// `on_install_skill` (F-SET-09). The button hands the actual install
+    /// off to the host (a spawned terminal), which this crate cannot watch
+    /// finish — but the click itself must leave a visible trace on this
+    /// screen rather than looking identical to a no-op, so this renders a
+    /// confirmation line under the button naming where the install is
+    /// running. Cleared the next time the button is clicked again.
+    skill_install_launched: bool,
     /// Optional host override for a provider card's Add Account button
     /// (F-SET-14). The payload is the provider's stable id (`"claude"`,
     /// `"codex"`, `"opencode"` — [`UsageProvider::id`]'s own convention),
@@ -975,6 +983,7 @@ impl Settings {
             ollama_show_in_bar: initial.ollama_show_in_bar,
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
+            skill_install_launched: false,
             on_manage_account: None,
             account_action_error: None,
             account_login_pending: None,
@@ -1381,6 +1390,19 @@ impl Settings {
     /// state, so a refresh is a fresh read — a user who just ran
     /// `claude login` in a terminal gets the card to match without a
     /// relaunch (F-SET-10).
+    /// Handles the Agent Skill card's Install button (F-SET-09): reaches
+    /// the wired host callback with the provisioner's command, and — click
+    /// or no host wired to actually run it — flips `skill_install_launched`
+    /// so the screen shows a real, notified state change rather than
+    /// nothing happening.
+    fn install_skill_clicked(&mut self, cx: &mut Context<Self>) {
+        self.skill_install_launched = true;
+        cx.notify();
+        if let Some(handler) = self.on_install_skill.clone() {
+            handler(tiller_project::agent_skill_install_command());
+        }
+    }
+
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
         self.provider_accounts = ProviderAccountStates::discovered();
         self.sync_account_identity_cache();
@@ -3232,12 +3254,13 @@ impl Settings {
         // the resulting command to whoever the host wires as
         // `on_install_skill` — running it (terminal or background) is the
         // host's call, not this crate's.
-        let install_skill_handler = self.on_install_skill.clone().map(|handler| {
-            move |_: &gpui::ClickEvent, _: &mut Window, _: &mut App| {
-                handler(tiller_project::agent_skill_install_command());
+        let install_skill_entity = entity.clone();
+        let install_skill_handler = self.on_install_skill.clone().map(|_| {
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                install_skill_entity.update(cx, |settings, cx| settings.install_skill_clicked(cx));
             }
         });
-        let skill = controls::card(theme).child(controls::action_row(
+        let mut skill = controls::card(theme).child(controls::action_row(
             controls::button_maybe(
                 "general-install-skill",
                 "Install Skill",
@@ -3246,6 +3269,23 @@ impl Settings {
             ),
             theme,
         ));
+        // F-SET-09: a visible confirmation that the click reached the host
+        // and an install command was actually handed off — not just that
+        // the button is wired, but that this click did something.
+        if self.skill_install_launched {
+            skill = skill.child(
+                div()
+                    .id("general-install-skill-status")
+                    .debug_selector(|| "general-install-skill-status".into())
+                    .px(px(theme.cosmic.spacing.xs as f32))
+                    .py(px(theme.cosmic.spacing.xxxs as f32))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.subtitle)
+                    .child(text!(
+                        "Installing… running in a new terminal tab."
+                    )),
+            );
+        }
 
         div()
             .w(px(CONTENT_WIDTH))
@@ -5369,6 +5409,14 @@ mod tests {
             recorded.as_slice(),
             [tiller_project::agent_skill_install_command()],
             "the click hands the host the exact provisioned command"
+        );
+
+        // F-SET-09: the click must also leave a visible trace on this
+        // screen — a confirmation line, not just a callback nobody watching
+        // the settings surface can see fired.
+        assert!(
+            cx.debug_bounds("general-install-skill-status").is_some(),
+            "a confirmation line appears once the install is handed off"
         );
     }
 
