@@ -8471,6 +8471,9 @@ fn main() {
         let session_store_for_browser_revoke = session_store.clone();
         let control_socket_for_settings = control_socket.clone();
         let browser_origins_for_settings = session_store.load_browser_origin_grants();
+        // F-PERSIST-DB-06: the account-identity cache lives in the same
+        // database file the session store already opened above.
+        let database_path_for_settings = database_path.clone();
         // Route the resolved socket path into the settings snapshot so the
         // General screen can display the path the live socket listens on
         // (P23: the socket row must show the real path, not a template).
@@ -8545,6 +8548,7 @@ fn main() {
                 let settings = cx.new(|cx| {
                     Settings::with_snapshot(cx, settings_snapshot)
                         .with_browser_origins(browser_origins_for_settings.clone())
+                        .with_database_path(database_path_for_settings.clone())
                         .on_install_skill({
                             let pending_actions = pending_for_settings.clone();
                             move |command| {
