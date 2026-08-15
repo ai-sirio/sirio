@@ -61,3 +61,43 @@ child tool-call rows render inside. Read the header's y-coordinate off a screens
 immediately before clicking; it moves with the length of the assistant's preceding text.
 
 No commit needed for this row either — nothing in `chat.rs` required a change.
+
+## F-CHAT-29 — assistant-message hover Copy control (DONE, no code change needed)
+
+Prior evidence: control confirmed live in source (`chat.rs:3628-3670`, since renumbered — the
+hover-only Copy button now sits inside `Entry::Assistant` rendering around `chat.rs:3944-3980`),
+but the only live-click attempt used a miscalibrated guess and landed in the Files panel.
+
+Drove it live this pass (label `f29c1`): sent a prompt engineered to produce a plain-text
+`Entry::Assistant` response ("The answer is Four.") followed by a fenced code block in the same
+turn, then — keeping the instance alive with `TILLER_WL_KEEP=1` rather than guessing coordinates
+blind — read the exact button position off the just-captured frame before clicking.
+
+Live proof: `02-assistantcopy-clicked.png` shows the button reading "Copied" after the click. The
+hover-reveal itself needed no separate `move`: a synthetic `click`'s underlying pointer motion
+passes through the target first, and — non-obviously — the earlier click on the code-block Copy
+button (inside the same `Entry::Assistant`'s markdown document, same `group()` container) had
+already left the assistant-copy button visible, because the hover group wraps the whole entry
+(text *and* any embedded code blocks), not just the plain-text line.
+
+**howToExercise**: get any plain-text assistant reply into the transcript, hover the response
+text (or simply click near its top-right corner — the whole entry, including any code block
+inside it, shares one hover group), a "Copy" pill appears at the top-right of the block; clicking
+it copies the text and the pill reads "Copied" for a few seconds.
+
+## F-CHAT-30 — code-block Copy control (DONE, no code change needed)
+
+Prior evidence: control confirmed live in source (`code-block-copy-{entry}-{id}`,
+`chat.rs:2968-2974` at the time, now `render_markdown_block`'s `Block::CodeBlock` arm around
+`chat.rs:3278-3310`), never live-clicked.
+
+Same drive as F-CHAT-29 (label `f29c1`): the code block's Copy button is **not** hover-gated
+(unlike the assistant-message one) — it renders unconditionally in the code block's header row
+next to the language label, so no hover step was needed, just a correctly-aimed click.
+
+Live proof: `01-codecopy-clicked.png` shows the button's label mid-transition to "Copied ✓" with
+the cursor still over it, directly after the click.
+
+**howToExercise**: get any fenced code block into the transcript (assistant markdown, or a tool
+result), the code block's header row always shows "Copy" on the right — click it, the label
+changes to "Copied ✓".
