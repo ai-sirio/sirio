@@ -1161,9 +1161,28 @@ impl TerminalView {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, _: &mut gpui::Context<Self>) {
+    fn on_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        // F-CORE-TERM-02: the context menu previously opened only from
+        // MouseButton::Right, with no keyboard-reachable path at all. The
+        // conventional keyboard equivalents for "open context menu" are the
+        // dedicated Menu key and Shift+F10; either opens the menu anchored
+        // near the terminal's origin, since a keyboard event carries no
+        // pointer position to anchor to.
+        let key = event.keystroke.key.to_ascii_lowercase();
+        let is_menu_key = key == "menu" || key == "contextmenu";
+        let is_shift_f10 = key == "f10" && event.keystroke.modifiers.shift;
+        if is_menu_key || is_shift_f10 {
+            self.focus_handle.focus(window, cx);
+            self.context_menu = Some(Point::new(px(20.0), px(20.0)));
+            cx.notify();
+            return;
+        }
         if let TerminalState::Running(terminal) = &self.terminal {
-            let key = event.keystroke.key.to_ascii_lowercase();
             let scroll = match key.as_str() {
                 "pageup" | "page_up" => Some(Scroll::PageUp),
                 "pagedown" | "page_down" => Some(Scroll::PageDown),
@@ -2846,6 +2865,61 @@ mod view_tests {
             Some(payload),
             "the terminal keeps the dropped diff available to its host"
         );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    /// F-CORE-TERM-02: the context menu must also open from the keyboard,
+    /// not only from a right-click. Shift+F10 is the conventional
+    /// keyboard-context-menu chord; this drives it through the real
+    /// `on_key_down` dispatch path on a focused, drawn terminal.
+    #[gpui::test]
+    async fn shift_f10_opens_the_context_menu_from_the_keyboard(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-keyboard-menu-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create terminal directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+        };
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.context_menu.is_none()),
+            "menu starts closed"
+        );
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is drawn");
+        cx.simulate_click(target.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        cx.simulate_keystrokes("shift-f10");
+        cx.run_until_parked();
+
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.context_menu.is_some()),
+            "Shift+F10 opens the context menu with no mouse click involved"
+        );
+        assert!(
+            cx.debug_bounds("terminal-context-item-0").is_some(),
+            "the keyboard-opened menu actually draws its items"
+        );
+
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
     }
