@@ -13164,6 +13164,58 @@ mod tests {
         // crate's own gpui test: `failed_pane_renders_and_retry_recovers`.)
     }
 
+    /// F-SET-04: `restored_agent_shell` is the exact site that decides
+    /// whether a restored agent pane resumes a saved native session or
+    /// starts fresh -- it is what both `resume_agent_sessions` gates (main.rs
+    /// initial-restore and `restore_launch_snapshot`) funnel into via the
+    /// `resumable` map. Previously only traced by reading; this proves the
+    /// two call shapes it actually receives produce different shell
+    /// commands, without needing a fabricated on-disk Claude/Codex
+    /// transcript (this layer never reads one -- it only decides which
+    /// command string to launch).
+    #[test]
+    fn restored_agent_shell_resumes_only_when_a_session_ref_is_supplied() {
+        let worktree = std::env::temp_dir().join(format!(
+            "tiller-f-set-04-restored-shell-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&worktree);
+
+        // Gate ON shape: `resumable` carries this pane's saved session ref
+        // (mirrors `saved_session_refs_for_restore` / `load_session_refs()`
+        // when `resume_agent_sessions` is true).
+        let mut resumable = BTreeMap::new();
+        resumable.insert("pane-9".to_string(), "sess-abc123".to_string());
+        let with_gate_on =
+            restored_agent_shell(Some("claude"), "pane-9", &worktree, &resumable)
+                .expect("claude adapter resolves a shell");
+        let TerminalShell::WithArguments { args: on_args, .. } = with_gate_on else {
+            panic!("expected a program+args shell");
+        };
+        assert!(
+            on_args.iter().any(|arg| arg.contains("--resume")
+                && arg.contains("sess-abc123")),
+            "gate on must launch with --resume <ref>, got {on_args:?}"
+        );
+
+        // Gate OFF shape: exactly what both call sites pass when
+        // `resume_agent_sessions` is false -- an empty map, never the saved
+        // refs.
+        let empty = BTreeMap::new();
+        let with_gate_off =
+            restored_agent_shell(Some("claude"), "pane-9", &worktree, &empty)
+                .expect("claude adapter resolves a shell");
+        let TerminalShell::WithArguments { args: off_args, .. } = with_gate_off else {
+            panic!("expected a program+args shell");
+        };
+        assert!(
+            off_args.iter().all(|arg| !arg.contains("--resume")),
+            "gate off must never launch with --resume, got {off_args:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&worktree);
+    }
+
     #[gpui::test]
     async fn restore_tabs_registers_restored_agent_identity(cx: &mut TestAppContext) {
         let working_directory = std::env::temp_dir();
