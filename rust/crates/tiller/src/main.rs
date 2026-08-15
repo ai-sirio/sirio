@@ -8921,6 +8921,16 @@ fn main() {
         let settings_snapshot = {
             let mut snapshot = settings_snapshot_from_app_settings(saved_settings);
             snapshot.socket_path = socket_info.path.to_string_lossy().into_owned();
+            // F-SET-22: AppSettings has no agent_colors column yet, so the
+            // persisted choices are overlaid from the session store's
+            // key-value table (see SessionStore::load_agent_color_ids)
+            // rather than round-tripping through settings_snapshot_from_app_settings.
+            let saved_colors = session_store.load_agent_color_ids();
+            for (index, slot) in snapshot.agent_colors.iter_mut().enumerate() {
+                if let Some(id) = saved_colors.get(&index) {
+                    *slot = tiller_ui::settings::AgentAccentColor::parse(id);
+                }
+            }
             snapshot
         };
         let panes_for_window = panes.clone();
@@ -9001,6 +9011,14 @@ fn main() {
                         .on_change(move |snapshot| {
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
+                            // F-SET-22: persist the per-agent accent colours
+                            // alongside the rest of the settings snapshot;
+                            // app_settings_from_snapshot still drops them
+                            // (no AppSettings column yet).
+                            for (index, color) in snapshot.agent_colors.iter().enumerate() {
+                                session_store_for_settings
+                                    .save_agent_color_id(index, color.id());
+                            }
                             session_store_for_settings
                                 .save_settings(&app_settings_from_snapshot(snapshot));
                         })

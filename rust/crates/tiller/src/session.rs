@@ -124,6 +124,12 @@ impl SessionTabState {
 /// polling a mutex every 25 ms costs nothing.
 const FLUSH_POLL: Duration = Duration::from_millis(25);
 
+/// Key prefix used to smuggle F-SET-22's per-agent accent-colour ids
+/// through the session-refs key-value table (see
+/// [`SessionStore::load_agent_color_ids`]) until `AppSettings` grows a real
+/// column for them.
+const AGENT_COLOR_KEY_PREFIX: &str = "agent-color:";
+
 /// Where this process's session database lives.
 ///
 /// Resolution order:
@@ -1247,6 +1253,30 @@ impl SessionStore {
                 eprintln!("[session] failed to persist session reference: {error}");
             }
         }
+    }
+
+    /// Loads the persisted per-agent accent-colour ids (F-SET-22), keyed by
+    /// the agent's index in `SummarizerChoice::ALL` order. `AppSettings` has
+    /// no dedicated column for this yet, so the values ride on the same
+    /// session-refs key-value table `save_session_ref` uses, under a prefix
+    /// that never collides with a `pane-*` content id. Missing or
+    /// unparseable entries are simply absent from the returned map, and the
+    /// caller falls back to its own default palette for those indices.
+    pub fn load_agent_color_ids(&self) -> BTreeMap<usize, String> {
+        self.load_session_refs()
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let index = key.strip_prefix(AGENT_COLOR_KEY_PREFIX)?;
+                let index: usize = index.parse().ok()?;
+                Some((index, value))
+            })
+            .collect()
+    }
+
+    /// Persists one agent's accent-colour id (F-SET-22). See
+    /// [`SessionStore::load_agent_color_ids`] for how this is stored.
+    pub fn save_agent_color_id(&self, index: usize, color_id: &str) {
+        self.save_session_ref(&format!("{AGENT_COLOR_KEY_PREFIX}{index}"), color_id);
     }
 
     /// Loads browser-origin grants for new browser surfaces.
