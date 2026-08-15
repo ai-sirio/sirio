@@ -2718,6 +2718,102 @@ mod view_tests {
         cx.run_until_parked();
     }
 
+    /// F-TERM-UI-02: a platform-modifier (Super on Linux) left click on a
+    /// URL opens the link; a plain left click on the same text does not.
+    /// Driven through the real `on_left_mouse_down` dispatch on a live PTY
+    /// with a real URL rendered into the emulator grid — the Wayland lane's
+    /// pointer driver has no modifier-click primitive, so this is proven as
+    /// a unit test instead.
+    #[gpui::test]
+    async fn platform_modifier_click_opens_a_terminal_link(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-link-click-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'https://example.test/docs\\n'; exec sleep 60".to_string(),
+            ],
+        };
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&terminal, move |_, event: &TerminalLinkEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if terminal.read_with(&cx.cx, |terminal, _| {
+                terminal
+                    .running_terminal()
+                    .and_then(|t| t.link_at(0, 0))
+                    .is_some()
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the URL never rendered into the emulator grid"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is drawn");
+        let link_point = point(target.origin.x + px(4.0), target.origin.y + px(9.0));
+
+        // A plain left click on the URL does not open it.
+        cx.simulate_mouse_down(link_point, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            events.borrow().is_empty(),
+            "a plain click must not open a terminal link: {:?}",
+            events.borrow()
+        );
+
+        // The same click held with the platform modifier (Super on Linux)
+        // opens it.
+        cx.simulate_mouse_down(
+            link_point,
+            MouseButton::Left,
+            Modifiers {
+                platform: true,
+                ..Modifiers::none()
+            },
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().last().map(|event| event.url.clone()),
+            Some("https://example.test/docs".to_string()),
+            "a platform-modifier click on the URL opens it"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
     #[gpui::test]
     async fn right_click_resolves_this_terminal_and_draws_all_context_actions(
         cx: &mut gpui::TestAppContext,
