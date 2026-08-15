@@ -571,6 +571,12 @@ enum CopyTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
     OpenFile(PathBuf),
+    /// F-BRW-09: a plain click on an HTTP(S) link in the transcript. The
+    /// workspace owns tab creation, so it decides whether to open Tiller's
+    /// internal browser tab; the human Cmd+Shift bypass to the system
+    /// browser is handled locally (see [`TranscriptSelectableText`]'s mouse
+    /// handler) and never reaches this event.
+    OpenLink(String),
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -810,7 +816,19 @@ impl Element for TranscriptSelectableText {
                         && let Some((_, target)) =
                             links.iter().find(|(range, _)| range.contains(&index))
                     {
-                        cx.open_url(target);
+                        // F-BRW-09: the human Cmd+Shift chord bypasses
+                        // Tiller's internal browser and opens the link in
+                        // the system browser directly; a plain click routes
+                        // through ChatEvent::OpenLink so the workspace can
+                        // open it in an internal browser tab instead.
+                        if event.modifiers.platform && event.modifiers.shift {
+                            cx.open_url(target);
+                        } else {
+                            let target = target.clone();
+                            interaction.chat.update(cx, |_, cx| {
+                                cx.emit(ChatEvent::OpenLink(target));
+                            });
+                        }
                     }
                 }
                 interaction.chat.update(cx, |chat, cx| {
@@ -7204,8 +7222,9 @@ mod tests {
         let opened_events = opened.clone();
         cx.update(|_, cx| {
             cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
-                let ChatEvent::OpenFile(path) = event;
-                opened_events.borrow_mut().push(path.clone());
+                if let ChatEvent::OpenFile(path) = event {
+                    opened_events.borrow_mut().push(path.clone());
+                }
             })
             .detach();
         });
