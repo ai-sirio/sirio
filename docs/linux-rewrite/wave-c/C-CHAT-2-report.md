@@ -34,10 +34,30 @@ between `shot` calls, or read pixel positions off the just-captured frame before
 No commit needed for this row — nothing in `chat.rs` required a change, only the drive gesture was
 missing. Row was already `half-proven`; the render/trigger half was already landed by a prior pass.
 
-## F-CHAT-28 — subagent card click-to-expand
+## F-CHAT-28 — subagent card click-to-expand (DONE, no code change needed)
 
-In progress — reusing the same drive pattern (Task tool dispatch -> click on the card header) to
-prove the expand/collapse gesture. Source at `render_subagent_task_card`
-(`rust/crates/tiller_ui/src/chat.rs:4412`) wires `on_click` -> `toggle_subagent_task_expanded`
-correctly; no code defect found on inspection. See continuation below once the live drive
-completes.
+Prior evidence: render half proven live (purple "Subagent" card with rail border and collapsed
+chevron appears after a real Task-tool round trip); click-to-expand + nested-tool-call visibility
+never attempted.
+
+Drove it live this pass (label `f28c3`): sent "Use the Task tool to dispatch a subagent that runs
+pwd and reports back. Do it now." to a real Claude Code ACP session, waited for the Subagent card
+(`render_subagent_task_card`, `chat.rs:4412`), then clicked its header row. Two earlier attempts
+in this same pass (`f28c1`, `f28c2`) missed the header because the assistant's preamble text
+before the card varies in length turn to turn, shifting the card's y-position — the fix was to
+read the card's exact y off the just-captured `04-turn75s` screenshot before clicking, rather than
+reuse a coordinate from a previous turn's layout.
+
+Live proof: `07-05-expand-clicked.png` shows the chevron flipped from collapsed (`>`) to expanded
+(`v`) and a nested `Execute pwd — Completed` tool-call row now rendered inside the card — both the
+click-to-expand gesture and the nested-tool-call render are proven. No code defect found on
+inspection or in the drive; `on_click` -> `toggle_subagent_task_expanded` (`chat.rs:4463-4467`)
+was already correct.
+
+**howToExercise**: open the Chat tab, send a message that makes the agent use the Task tool (e.g.
+"Use the Task tool to dispatch a subagent that runs pwd and reports back. Do it now."), wait for
+the purple "Subagent" card, click anywhere on its full-width header row — the chevron flips and
+child tool-call rows render inside. Read the header's y-coordinate off a screenshot taken
+immediately before clicking; it moves with the length of the assistant's preceding text.
+
+No commit needed for this row either — nothing in `chat.rs` required a change.
