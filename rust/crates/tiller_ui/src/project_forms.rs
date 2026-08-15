@@ -756,7 +756,141 @@ fn ensure_theme(cx: &mut Context<impl Sized>) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{CloneFormState, CloneStatus, CreateFormState, CreateStatus};
+    use super::{
+        CloneForm, CloneFormState, CloneStatus, CreateForm, CreateFormState, CreateStatus,
+    };
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::time::Duration;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "tiller-project-forms-{tag}-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed in {dir:?}");
+    }
+
+    /// F-PRJ-06: the "cannot be started twice" guard is proven through the
+    /// real drawn Clone button, clicked twice back to back, against a real
+    /// local repository -- not only at the pure `CloneFormState` layer.
+    /// `begin()` flips to `Running` synchronously inside the first click's
+    /// `submit()`, before any worker thread runs, so the second click's
+    /// `submit()` call deterministically sees `Running` and no-ops; a
+    /// broken guard would instead race two real `git clone` processes into
+    /// the same destination folder and surface as a `Failed` status.
+    #[gpui::test]
+    async fn the_drawn_clone_button_cannot_start_a_second_clone(cx: &mut TestAppContext) {
+        let source = TempDir::new("clone-source");
+        std::fs::write(source.0.join("file.txt"), "hello\n").expect("seed source file");
+        git(&source.0, &["init", "-q"]);
+        git(&source.0, &["config", "user.email", "test@example.test"]);
+        git(&source.0, &["config", "user.name", "Test"]);
+        git(&source.0, &["add", "file.txt"]);
+        git(&source.0, &["commit", "-q", "-m", "seed"]);
+
+        let parent = TempDir::new("clone-parent");
+        let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| {
+            window.root::<CloneForm>().flatten().expect("form root")
+        });
+        form.update(&mut cx.cx, |form, cx| {
+            form.set_url(source.0.display().to_string(), cx)
+        });
+        cx.run_until_parked();
+
+        let submit = cx
+            .debug_bounds("clone-submit")
+            .expect("the Clone button is drawn");
+        cx.simulate_click(submit.center(), Modifiers::none());
+        cx.simulate_click(submit.center(), Modifiers::none());
+
+        cx.cx.executor().allow_parking();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.cx
+                .executor()
+                .advance_clock(Duration::from_millis(25));
+            cx.run_until_parked();
+            if !matches!(
+                form.read_with(&cx.cx, |form, _| form.status().clone()),
+                CloneStatus::Running { .. }
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let status = form.read_with(&cx.cx, |form, _| form.status().clone());
+        assert!(
+            matches!(status, CloneStatus::Complete(_)),
+            "two real clicks must produce exactly one successful clone, not a destination-exists \
+             failure from a second racing clone: {status:?}"
+        );
+    }
+
+    /// F-PRJ-09: the equivalent guard for Create, against a real drawn
+    /// button and a real filesystem destination.
+    #[gpui::test]
+    async fn the_drawn_create_button_cannot_start_a_second_creation(cx: &mut TestAppContext) {
+        let parent = TempDir::new("create-parent");
+        let window = cx.add_window(|_, cx| CreateForm::new(parent.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| {
+            window.root::<CreateForm>().flatten().expect("form root")
+        });
+        form.update(&mut cx.cx, |form, cx| form.set_name("new-project", cx));
+        cx.run_until_parked();
+
+        let submit = cx
+            .debug_bounds("create-submit")
+            .expect("the Create button is drawn");
+        cx.simulate_click(submit.center(), Modifiers::none());
+        cx.simulate_click(submit.center(), Modifiers::none());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            if !matches!(
+                form.read_with(&cx.cx, |form, _| form.status().clone()),
+                CreateStatus::Running
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let status = form.read_with(&cx.cx, |form, _| form.status().clone());
+        assert!(
+            matches!(status, CreateStatus::Complete(_)),
+            "two real clicks must produce exactly one successful creation, not a \
+             destination-exists failure from a second racing create: {status:?}"
+        );
+    }
 
     #[test]
     fn clone_state_disables_empty_url_and_double_submission() {
