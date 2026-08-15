@@ -121,13 +121,37 @@ and an upstream agent that actually populates it, which is outside what any
 file in this slice (or arguably this repo) controls. `wantedForeignFiles`:
 none — this isn't a file-ownership gap, it's a protocol-data gap.
 
-## F-CHAT-02 — no dedicated AuthRequired banner
+## F-CHAT-02 — dedicated AuthRequired banner with CLI login guidance
 
-Not attempted this pass (ran out of budget after F-CHAT-15/14/18). The
-existing `ErrorKind::Connection` card is what a caller sees today; a
-dedicated `AuthRequired` variant with CLI login-argv guidance would need a
-new `ErrorKind` case plus a distinct render arm in `chat.rs` — both inside
-files this slice owns, genuinely buildable, just not reached.
+Fixed. `crates/tiller_ui/src/chat.rs`. Added `ErrorKind::AuthRequired`
+alongside the existing `ErrorKind::Connection`, and a `classify_connection_error`
+helper both the launch-failure path (`AcpClient::launch`'s `Err`, an
+`anyhow::Error` wrapping the typed `AcpError`) and the mid-session
+`AcpEvent::TransportError(String)` path route through — the latter only
+ever carries a string (per `AcpEvent::TransportError`'s own doc comment,
+it deliberately relies on `AcpError::AuthRequired`'s `Display` text staying
+the shared recovery signal across that boundary), so both paths detect the
+same `"requires authentication"` substring and both now get: an amber
+banner (`chat-auth-required-banner` debug selector, distinct from the red
+`diff_deletion` connection-error styling) plus an appended "Sign in from a
+terminal using this agent's own CLI (for example, its `login` subcommand),
+then Retry" guidance line, rather than the bare protocol string alone.
+
+**howToExercise**: launch (or use `retry` on) a Chat tab against an ACP
+agent that requires authentication — the evidence on record used a real
+`claude-agent-acp` session with no prior login. The card should now render
+amber, not red, and its text should include a "sign in ... then Retry"
+sentence beyond the raw "ACP agent requires authentication (...)" message.
+Driven end-to-end in the new test
+`chat::tests::auth_required_launch_gets_a_dedicated_banner_with_login_guidance`
+against a real (fixture shell-script) ACP agent process that rejects
+`session/new` with wire code -32000 — same fixture shape as `tiller_acp`'s
+own `session_creation_auth_required_error_becomes_typed_auth_required` — so
+this isn't just a unit test of the string classifier, it drives the real
+launch failure path through to the rendered banner.
+
+Build/tests: `cargo build -p tiller_ui` green; `chat::` tests 58/58 passing.
+Commit: `391792e fix(chat): dedicated AuthRequired banner with CLI login guidance`
 
 ## F-CHAT-05, F-CHAT-13, F-CHAT-20 — not re-attempted
 
