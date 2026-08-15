@@ -24,7 +24,7 @@ use tiller_control::{
     PaneInfo, PaneRegistry, PaneStateSnapshot, base64_encode,
 };
 use tiller_git::{GitError, discard, discard_all, init_repository, stage, stage_all, unstage};
-use tiller_persistence::{AppSettings, AppearanceMode, FileIconTheme};
+use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{TabKind, current_branch, is_git_repository};
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
@@ -470,7 +470,10 @@ struct ControlWorkspace {
     path: String,
     selected: bool,
     mounted: bool,
-    /// Runtime annotation from `worktree.set`; intentionally not persisted.
+    /// Annotation from `worktree.set`. F-CTRL-WORK-01: persisted to the
+    /// `worktree.comment` column (via `AppControlHandler::persist_worktree_comment`)
+    /// and reloaded by `apply_persisted_comments` at startup, so it survives
+    /// a restart.
     comment: String,
     /// Runtime pane/session association from `worktree.set`; intentionally
     /// not persisted and rebuilt empty when the app restarts.
@@ -576,6 +579,20 @@ impl ControlState {
                 ])
             })
             .collect()
+    }
+
+    /// F-CTRL-WORK-01: seeds `comment` from the durable `worktree.comment`
+    /// column so a value set via `worktree.set` before the previous
+    /// shutdown survives a restart. `from_catalog` itself stays
+    /// database-free (it also builds throwaway states in tests), so this
+    /// runs as a separate step at real startup, after the database has been
+    /// opened.
+    fn apply_persisted_comments(&mut self, comments: &BTreeMap<String, String>) {
+        for workspace in &mut self.workspaces {
+            if let Some(comment) = comments.get(&workspace.path) {
+                workspace.comment = comment.clone();
+            }
+        }
     }
 
     fn current_workspace(&self) -> Option<&ControlWorkspace> {
@@ -747,6 +764,12 @@ struct AppControlHandler {
     session_refs: Arc<Mutex<BTreeMap<String, String>>>,
     session_store: Option<SessionStore>,
     socket_info: ControlSocketInfo,
+    /// F-CTRL-WORK-01: set at real startup so `worktree.set`'s comment can
+    /// be persisted immediately (a hook write, like `save_session_ref`, not
+    /// something worth waiting on the layout debounce for). `None` in most
+    /// tests, which matches the pre-existing "runtime only" behavior for
+    /// them.
+    database_path: Option<PathBuf>,
 }
 
 impl AppControlHandler {
@@ -768,6 +791,47 @@ impl AppControlHandler {
             session_refs,
             session_store,
             socket_info,
+            database_path: None,
+        }
+    }
+
+    /// F-CTRL-WORK-01: wires the database path used to persist
+    /// `worktree.set`'s comment. Real startup calls this; tests that don't
+    /// exercise persistence leave it unset.
+    fn with_database_path(mut self, database_path: PathBuf) -> Self {
+        self.database_path = Some(database_path);
+        self
+    }
+
+    /// Upserts the durable `worktree.comment` column for `path`. Best
+    /// effort: a missing row (the worktree hasn't been through
+    /// `schedule_catalog` yet) or a database error is logged and otherwise
+    /// ignored, matching the rest of this handler's persistence calls.
+    fn persist_worktree_comment(&self, path: &str, comment: &str) {
+        let Some(database_path) = &self.database_path else {
+            return;
+        };
+        let database = match AppDatabase::open(database_path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!("[control] cannot open {} ({error})", database_path.display());
+                return;
+            }
+        };
+        let existing = match database.worktree_by_path(path) {
+            Ok(existing) => existing,
+            Err(error) => {
+                eprintln!("[control] failed to read worktree row for {path}: {error}");
+                return;
+            }
+        };
+        let Some(mut record) = existing else {
+            eprintln!("[control] no persisted worktree row for {path}; comment not saved");
+            return;
+        };
+        record.comment = Some(comment.to_string());
+        if let Err(error) = database.save_worktree(&record) {
+            eprintln!("[control] failed to persist comment for {path}: {error}");
         }
     }
 
@@ -1596,6 +1660,9 @@ impl ControlHandler for AppControlHandler {
                 else {
                     return ControlResponse::failure(&request.id, "unknown worktree");
                 };
+                if comment.is_some() {
+                    self.persist_worktree_comment(&workspace.path, &workspace.comment);
+                }
                 let mut result = vec![
                     ("id".to_string(), workspace.id),
                     ("path".to_string(), workspace.path),
@@ -8689,10 +8756,24 @@ fn main() {
         let pending_for_status_bar = pending_actions.clone();
         let pending_for_settings = pending_actions.clone();
         let control_actions = Arc::new(Mutex::new(Vec::<ControlAction>::new()));
-        let control_state = Arc::new(Mutex::new(ControlState::from_catalog(
-            &project_catalog,
-            &working_directory,
-        )));
+        let mut control_state_seed = ControlState::from_catalog(&project_catalog, &working_directory);
+        // F-CTRL-WORK-01: a comment set via worktree.set before the
+        // previous shutdown must still be there after a restart.
+        if let Ok(database) = AppDatabase::open(&database_path) {
+            match database.worktrees() {
+                Ok(worktrees) => {
+                    let comments: BTreeMap<String, String> = worktrees
+                        .into_iter()
+                        .filter_map(|worktree| Some((worktree.path, worktree.comment?)))
+                        .collect();
+                    control_state_seed.apply_persisted_comments(&comments);
+                }
+                Err(error) => {
+                    eprintln!("[session] failed to load persisted worktree comments: {error}");
+                }
+            }
+        }
+        let control_state = Arc::new(Mutex::new(control_state_seed));
         let panes = Arc::new(PaneRegistry::new());
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
@@ -8708,7 +8789,8 @@ fn main() {
             session_refs,
             Some(session_store.clone()),
             socket_info.clone(),
-        ));
+        )
+        .with_database_path(database_path.clone()));
         let control_socket = Arc::new(ControlSocketController::new(
             socket_info.clone(),
             control_handler,
