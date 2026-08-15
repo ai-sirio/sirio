@@ -2261,6 +2261,17 @@ fn activity_status_for_agent(status: AgentStatus) -> ActivityStatus {
     }
 }
 
+/// Mirrors `tiller_activity::ActivityStatus::requires_close_confirmation`
+/// (F-TERM-08): `main.rs` renders activity through `tiller_ui`'s own
+/// `ActivityStatus` enum (identical shape, separate type), so the rule is
+/// duplicated here rather than pulled across that boundary.
+fn pane_close_needs_confirmation(status: ActivityStatus) -> bool {
+    matches!(
+        status,
+        ActivityStatus::Running | ActivityStatus::NeedsInput | ActivityStatus::Error
+    )
+}
+
 fn tab_status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
     match status {
         ActivityStatus::Idle => theme.meta,
@@ -2539,6 +2550,20 @@ struct TillerWorkspace {
     /// first frame mounts the terminal entities.
     restored_scrollback_scheduled: bool,
     browser_origins: BTreeSet<String>,
+    /// F-TERM-08: an interactive pane close (Cmd-W, right-click "Close
+    /// Terminal…") that would kill a pane whose `ActivityStatus` reports
+    /// `requires_close_confirmation()` is held here instead of closing
+    /// immediately, and rendered as a dismissible banner over that pane.
+    /// Headless closes (the control socket's `ClosePane`) intentionally
+    /// bypass this — same precedent as `project.add`: no user is present to
+    /// answer a prompt.
+    pending_pane_close: Option<PendingPaneClose>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingPaneClose {
+    tab_id: usize,
+    pane_id: usize,
 }
 
 impl TillerWorkspace {
@@ -2881,6 +2906,7 @@ impl TillerWorkspace {
             browser_origins,
             show_settings: false,
             restore_focus_pending: false,
+            pending_pane_close: None,
         };
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
@@ -3122,7 +3148,7 @@ impl TillerWorkspace {
                         );
                     }
                     Some(TerminalContextCommand::Close) => {
-                        workspace.close_terminal_at(tab_id, pane_id, None, cx);
+                        workspace.request_close_terminal_at(tab_id, pane_id, cx);
                     }
                     None => {}
                 }
@@ -3610,6 +3636,94 @@ impl TillerWorkspace {
             }
         });
         status
+    }
+
+    /// Same evidence `tab_status` uses to pick the tab's worst-status pane,
+    /// narrowed to one specific pane. Used to decide whether *closing this
+    /// pane* would kill live work (F-TERM-08).
+    fn pane_activity_status(&self, tab: &OpenTab, pane_id: usize, cx: &App) -> ActivityStatus {
+        let mut found = ActivityStatus::Idle;
+        tab.panes.for_each(&mut |id, content| {
+            if id != pane_id {
+                return;
+            }
+            found = match content {
+                TabContent::Chat(chat) => {
+                    let chat = chat.read(cx);
+                    if chat.is_streaming() {
+                        ActivityStatus::Running
+                    } else if chat.has_completed_turn() {
+                        ActivityStatus::Done
+                    } else {
+                        ActivityStatus::Idle
+                    }
+                }
+                TabContent::Terminal { view } => {
+                    let terminal = view.read(cx);
+                    if terminal.is_failed() {
+                        ActivityStatus::Error
+                    } else if let Some(exit_status) = terminal.exit_status() {
+                        match exit_status {
+                            TerminalExitStatus::Success => ActivityStatus::Done,
+                            TerminalExitStatus::Code(_)
+                            | TerminalExitStatus::Signal(_)
+                            | TerminalExitStatus::Unknown => ActivityStatus::Error,
+                        }
+                    } else {
+                        let pane_status = self
+                            .activity
+                            .status(&format!("pane-{pane_id}"))
+                            .or_else(|| self.activity.status(&format!("tab-{}", tab.id)));
+                        pane_status.map_or(ActivityStatus::Idle, activity_status_for_agent)
+                    }
+                }
+                TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
+                    ActivityStatus::Idle
+                }
+            };
+        });
+        found
+    }
+
+    /// The interactive entry point for closing the focused pane (Cmd-W /
+    /// Ctrl-W). Gated by F-TERM-08: a pane doing live work is not closed
+    /// silently, it is held in `pending_pane_close` and rendered as a
+    /// confirm-or-cancel banner over the pane instead.
+    fn request_close_focused_pane(&mut self, cx: &mut Context<Self>) {
+        let Some((tab_id, focused_pane)) = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| (tab.id, tab.focused_pane))
+        else {
+            return;
+        };
+        self.request_close_terminal_at(tab_id, focused_pane, cx);
+    }
+
+    /// The interactive entry point for closing a specific pane, e.g. the
+    /// terminal context menu's "Close Terminal…" item. See
+    /// `request_close_focused_pane` for the gating rule.
+    fn request_close_terminal_at(&mut self, tab_id: usize, pane_id: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if pane_close_needs_confirmation(self.pane_activity_status(tab, pane_id, cx)) {
+            self.pending_pane_close = Some(PendingPaneClose { tab_id, pane_id });
+            cx.notify();
+            return;
+        }
+        self.close_terminal_at(tab_id, pane_id, None, cx);
+    }
+
+    fn confirm_pending_pane_close(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_pane_close.take() {
+            self.close_terminal_at(pending.tab_id, pending.pane_id, None, cx);
+        }
+    }
+
+    fn cancel_pending_pane_close(&mut self, cx: &mut Context<Self>) {
+        self.pending_pane_close = None;
+        cx.notify();
     }
 
     fn terminal_exit_label(tab: &OpenTab, cx: &App) -> Option<String> {
@@ -5793,6 +5907,66 @@ impl TillerWorkspace {
                 let tab_id = self.tabs[tab_index].id;
                 let entity_for_click = entity.clone();
                 let entity_for_close = entity.clone();
+                let close_confirm_target = PendingPaneClose { tab_id, pane_id };
+                let confirm_banner = (self.pending_pane_close == Some(close_confirm_target))
+                    .then(|| {
+                        let confirm_entity = entity.clone();
+                        let cancel_entity = entity.clone();
+                        div()
+                            .id(format!("pane-close-confirm-{pane_id}"))
+                            .debug_selector(|| "pane-close-confirm".into())
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(10.0))
+                            .bg(gpui::black().opacity(0.82))
+                            .child(
+                                div()
+                                    .text_color(gpui::white())
+                                    .child("This pane has running work. Close anyway?"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .id("pane-close-confirm-close")
+                                            .debug_selector(|| "pane-close-confirm-close".into())
+                                            .px(px(12.0))
+                                            .py(px(6.0))
+                                            .rounded(px(6.0))
+                                            .bg(gpui::red())
+                                            .text_color(gpui::white())
+                                            .on_click(move |_, _, cx| {
+                                                confirm_entity.update(cx, |workspace, cx| {
+                                                    workspace.confirm_pending_pane_close(cx)
+                                                });
+                                            })
+                                            .child("Close Anyway"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("pane-close-confirm-cancel")
+                                            .debug_selector(|| "pane-close-confirm-cancel".into())
+                                            .px(px(12.0))
+                                            .py(px(6.0))
+                                            .rounded(px(6.0))
+                                            .bg(gpui::white().opacity(0.15))
+                                            .text_color(gpui::white())
+                                            .on_click(move |_, _, cx| {
+                                                cancel_entity.update(cx, |workspace, cx| {
+                                                    workspace.cancel_pending_pane_close(cx)
+                                                });
+                                            })
+                                            .child("Cancel"),
+                                    ),
+                            )
+                            .into_any_element()
+                    });
                 let surface = match content {
                     TabContent::Chat(chat) => div()
                         .id("pane-surface")
@@ -5834,6 +6008,7 @@ impl TillerWorkspace {
                         }
                     })
                     .child(surface)
+                    .when_some(confirm_banner, |this, banner| this.child(banner))
                     .into_any_element()
             }
             PaneNode::Split {
@@ -7188,8 +7363,8 @@ impl TillerWorkspace {
         self.split_focused_terminal(SplitDirection::Vertical, Some(window), cx);
     }
 
-    fn handle_close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_focused_pane(Some(window), cx);
+    fn handle_close_pane(&mut self, _: &ClosePane, _window: &mut Window, cx: &mut Context<Self>) {
+        self.request_close_focused_pane(cx);
     }
 
     fn handle_cycle_tab_forward(
