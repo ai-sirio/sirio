@@ -175,7 +175,60 @@ pub trait AgentAdapter {
     fn summarizer_command(&self, _prompt: &str) -> Option<String> {
         None
     }
+
+    /// The Tiller-authored skill markdown this adapter installs into the
+    /// worktree during `prepare` (F-AGENT-SAFE-01), or `None` when this
+    /// port installs no skill for it yet. Mirrors the `skillMarkdown`
+    /// argument `AgentAdapter.prepare` takes in the Swift app — there it is
+    /// supplied by the caller (a bundled resource); here each adapter that
+    /// has ported the install carries its own copy so `prepare` alone is
+    /// enough to exercise it.
+    fn skill_markdown(&self) -> Option<&'static str> {
+        None
+    }
 }
+
+/// Installs `markdown` as `agent_id`'s Tiller skill file inside
+/// `worktree_path`, refusing to overwrite a file that exists there but
+/// carries no Tiller managed-file marker — ported from
+/// `TillerSkillProvisioner.install` in the Swift app (F-AGENT-SAFE-01).
+pub fn install_skill(
+    markdown: &str,
+    agent_id: &str,
+    worktree_path: &str,
+) -> Result<(), PrepareError> {
+    if !markdown.contains(SKILL_MANAGED_MARKER) {
+        return Err(PrepareError::MissingSkillMarker);
+    }
+    let relative = match agent_id {
+        "claude" => ".claude/skills/tiller/SKILL.md",
+        "codex" | "opencode" | "pi" | "omp" => ".agents/skills/tiller/SKILL.md",
+        other => return Err(PrepareError::UnsupportedSkillAgent(other.to_string())),
+    };
+    let destination = Path::new(worktree_path).join(relative);
+    if destination.exists() {
+        let existing = std::fs::read_to_string(&destination)?;
+        if !existing.contains(SKILL_MANAGED_PREFIX) {
+            return Err(PrepareError::UnmanagedSkillFile(destination));
+        }
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&destination, markdown)?;
+    Ok(())
+}
+
+/// The exact sentinel every skill file Tiller writes carries in its
+/// content — matches `TillerSkillProvisioner.marker` verbatim.
+pub const SKILL_MANAGED_MARKER: &str =
+    "<!-- Machine-managed by Tiller. Do not edit this installed copy. -->";
+
+/// Stable prefix shared by every marker sentence Tiller has ever written.
+/// Recognizing an existing file by this prefix, rather than the exact
+/// current [`SKILL_MANAGED_MARKER`] string, lets the wording evolve across
+/// releases without locking out worktrees a previous build provisioned.
+const SKILL_MANAGED_PREFIX: &str = "<!-- Machine-managed by Tiller";
 
 /// Why an availability sweep could not produce an answer (F-SET-17).
 ///

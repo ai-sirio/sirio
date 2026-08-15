@@ -32,12 +32,22 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
         true
     }
 
+    fn skill_markdown(&self) -> Option<&'static str> {
+        // F-AGENT-SAFE-01: the bundled Tiller skill, marker included —
+        // `install_skill` refuses to write it over a same-path file that
+        // was not itself written by Tiller.
+        Some(include_str!("../../../../skills/tiller/SKILL.md"))
+    }
+
     fn prepare(
         &self,
         worktree_path: &str,
         pane_id: &str,
         tillerctl_path: &str,
     ) -> Result<(), PrepareError> {
+        if let Some(markdown) = self.skill_markdown() {
+            crate::install_skill(markdown, self.id(), worktree_path)?;
+        }
         let claude_dir = Path::new(worktree_path).join(".claude");
         std::fs::create_dir_all(&claude_dir)?;
 

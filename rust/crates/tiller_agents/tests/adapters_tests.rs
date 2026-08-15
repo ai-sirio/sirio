@@ -8,9 +8,9 @@ use std::time::SystemTime;
 
 use tiller_agents::{
     ALL, AgentAdapter, AgentAvailability, ClaudeCodeAdapter, CodexAdapter, DiscoveryError,
-    OhMyPiAdapter, OpenCodeAdapter, PiAdapter, discover_availability, find_executable_in_path,
-    find_executable_in_path_checked, json_string_literal, shell_quote,
-    try_discover_availability_in,
+    OhMyPiAdapter, OpenCodeAdapter, PiAdapter, PrepareError, SKILL_MANAGED_MARKER,
+    discover_availability, find_executable_in_path, find_executable_in_path_checked, install_skill,
+    json_string_literal, shell_quote, try_discover_availability_in,
 };
 
 const PANE_ID: &str = "12345678-1234-1234-1234-123456789abc";
@@ -547,7 +547,13 @@ fn each_adapter_prepare_creates_only_its_own_files() {
     assert_eq!(
         worktree.tree(),
         vec![
+            // OpenCode and OMP share the non-Claude skill destination
+            // (F-AGENT-SAFE-01); the second `prepare` to run overwrites the
+            // first's byte-identical file rather than being refused —
+            // `install_skill` only refuses a file lacking the marker.
+            PathBuf::from(".agents/skills/tiller/SKILL.md"),
             PathBuf::from(".claude/settings.local.json"),
+            PathBuf::from(".claude/skills/tiller/SKILL.md"),
             PathBuf::from(".opencode/plugin/tiller-session.js"),
             PathBuf::from(".tiller/omp-hook.ts"),
         ]
@@ -596,5 +602,132 @@ fn prepare_keeps_real_global_config_mtimes_unchanged() {
     assert_eq!(
         before, after,
         "prepare must not create or modify user-global agent config"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F-AGENT-SAFE-01: the skill provisioner refuses to overwrite a file it
+// did not itself write. Ported from `TillerSkillProvisionerTests` in the
+// Swift app.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn install_skill_writes_the_marker_bearing_file_for_claude() {
+    let worktree = TempDir::new();
+    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Tiller\n");
+    install_skill(&markdown, "claude", worktree.path().to_str().unwrap()).expect("install");
+
+    let written = std::fs::read_to_string(worktree.path().join(".claude/skills/tiller/SKILL.md"))
+        .expect("skill file written at claude's destination");
+    assert_eq!(written, markdown);
+}
+
+#[test]
+fn install_skill_shares_one_destination_across_codex_opencode_pi_and_omp() {
+    for id in ["codex", "opencode", "pi", "omp"] {
+        let worktree = TempDir::new();
+        let markdown = format!("{SKILL_MANAGED_MARKER}\n# Tiller\n");
+        install_skill(&markdown, id, worktree.path().to_str().unwrap())
+            .unwrap_or_else(|error| panic!("{id} install failed: {error}"));
+        assert!(
+            worktree.path().join(".agents/skills/tiller/SKILL.md").exists(),
+            "{id} installs to the shared .agents destination"
+        );
+    }
+}
+
+#[test]
+fn install_skill_refuses_markdown_missing_its_own_marker() {
+    let worktree = TempDir::new();
+    let error = install_skill("# Tiller\nno marker here\n", "claude", worktree.path().to_str().unwrap())
+        .expect_err("markdown without the marker must be refused");
+    assert!(matches!(error, PrepareError::MissingSkillMarker));
+    assert!(
+        !worktree.path().join(".claude/skills/tiller/SKILL.md").exists(),
+        "a refused install must not write anything"
+    );
+}
+
+#[test]
+fn install_skill_refuses_an_unsupported_agent_id() {
+    let worktree = TempDir::new();
+    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Tiller\n");
+    let error = install_skill(&markdown, "not-a-real-agent", worktree.path().to_str().unwrap())
+        .expect_err("an unknown agent id must be refused");
+    assert!(matches!(error, PrepareError::UnsupportedSkillAgent(id) if id == "not-a-real-agent"));
+}
+
+#[test]
+fn install_skill_refuses_to_overwrite_a_file_it_did_not_write() {
+    let worktree = TempDir::new();
+    let destination = worktree.path().join(".claude/skills/tiller/SKILL.md");
+    std::fs::create_dir_all(destination.parent().unwrap()).expect("dir");
+    std::fs::write(&destination, "hand-authored notes, not Tiller's\n").expect("seed file");
+
+    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Tiller\n");
+    let error = install_skill(&markdown, "claude", worktree.path().to_str().unwrap())
+        .expect_err("an unmanaged existing file must be refused");
+    assert!(matches!(error, PrepareError::UnmanagedSkillFile(path) if path == destination));
+
+    let untouched = std::fs::read_to_string(&destination).expect("still there");
+    assert_eq!(
+        untouched, "hand-authored notes, not Tiller's\n",
+        "the user's own file must survive a refused install byte for byte"
+    );
+}
+
+#[test]
+fn install_skill_overwrites_its_own_previously_installed_file() {
+    let worktree = TempDir::new();
+    let path = worktree.path().to_str().unwrap();
+    // Simulate a file an older Tiller build already installed: it carries
+    // the shared prefix but not today's exact marker sentence, the way a
+    // real prior release's wording would.
+    let destination = worktree.path().join(".claude/skills/tiller/SKILL.md");
+    std::fs::create_dir_all(destination.parent().unwrap()).expect("dir");
+    std::fs::write(
+        &destination,
+        "<!-- Machine-managed by Tiller (build 1). Do not edit. -->\nold content\n",
+    )
+    .expect("seed a prior-release install");
+
+    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Tiller v2\n");
+    install_skill(&markdown, "claude", path).expect(
+        "a file recognized by the shared managed-file prefix, even with older marker wording, \
+         is Tiller's own and may be overwritten",
+    );
+
+    let written = std::fs::read_to_string(worktree.path().join(".claude/skills/tiller/SKILL.md"))
+        .expect("rewritten");
+    assert_eq!(written, markdown);
+}
+
+#[test]
+fn claude_prepare_installs_the_bundled_skill_with_its_marker() {
+    let worktree = TempDir::new();
+    ClaudeCodeAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect("prepare");
+
+    let skill = std::fs::read_to_string(worktree.path().join(".claude/skills/tiller/SKILL.md"))
+        .expect("prepare installs the skill alongside the hook settings");
+    assert!(skill.contains(SKILL_MANAGED_MARKER));
+}
+
+#[test]
+fn claude_prepare_refuses_to_run_over_an_unmanaged_skill_file() {
+    let worktree = TempDir::new();
+    let destination = worktree.path().join(".claude/skills/tiller/SKILL.md");
+    std::fs::create_dir_all(destination.parent().unwrap()).expect("dir");
+    std::fs::write(&destination, "not Tiller's file\n").expect("seed file");
+
+    let error = ClaudeCodeAdapter
+        .prepare(worktree.path().to_str().unwrap(), PANE_ID, TILLERCTL)
+        .expect_err("prepare must refuse, not silently skip the skill and proceed");
+    assert!(matches!(error, PrepareError::UnmanagedSkillFile(_)));
+    assert!(
+        !worktree.path().join(".claude/settings.local.json").exists(),
+        "the skill install runs before hook settings, so a refusal must leave the worktree \
+         exactly as it found it"
     );
 }
