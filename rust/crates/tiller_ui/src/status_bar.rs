@@ -618,6 +618,65 @@ mod tests {
         );
     }
 
+    /// F-SET-10: the wave-D critic confirmed `on_refresh_clicked` sets all
+    /// four provider states to `Loading` and `cx.notify()`s synchronously,
+    /// before the background fetches are even spawned -- but could not
+    /// catch the transient pixels live under this session's shared-machine
+    /// contention (every capture round trip outlasted the fetch). This
+    /// proves the synchronous half directly: read the entity's state right
+    /// after calling the click handler and before `run_until_parked` lets
+    /// the spawned fetch task run at all, so there is no race to lose.
+    #[gpui::test]
+    async fn refresh_click_flips_every_provider_to_loading_before_the_fetch_runs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Let the constructor's own fetch loop settle so every segment
+        // starts from something other than Loading -- otherwise the test
+        // could pass by accident (never having left the constructor's
+        // initial state).
+        cx.run_until_parked();
+
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+        let settled = cx.update(|_window, cx| bar.read(cx).claude.clone());
+        assert!(
+            !matches!(settled, ProviderUsageState::Loading),
+            "the fetch loop must have settled to something other than \
+             Loading before the click, or this test cannot tell the click \
+             apart from the constructor's own initial state"
+        );
+
+        bar.update(&mut cx, |bar, cx| bar.on_refresh_clicked(cx));
+
+        // No `run_until_parked` here: the spawned fetch task has not been
+        // polled yet, so this reads exactly the synchronous state the
+        // click handler left behind.
+        let (claude, codex, opencode_go, ollama_cloud) = cx.update(|_window, cx| {
+            let bar = bar.read(cx);
+            (
+                bar.claude.clone(),
+                bar.codex.clone(),
+                bar.opencode_go.clone(),
+                bar.ollama_cloud.clone(),
+            )
+        });
+        assert!(matches!(claude, ProviderUsageState::Loading));
+        assert!(matches!(codex, ProviderUsageState::Loading));
+        assert!(matches!(opencode_go, ProviderUsageState::Loading));
+        assert!(matches!(ollama_cloud, ProviderUsageState::Loading));
+
+        // Let the detached fetch task finish so it does not outlive the
+        // test's executor.
+        cx.run_until_parked();
+    }
+
     /// P58, F-SET-10: `UsageBarPrefs::from_snapshot` is the single mapping
     /// from the persistence contract to the bar; it clamps the interval
     /// into the stepper's range so a stored out-of-range value cannot arm
