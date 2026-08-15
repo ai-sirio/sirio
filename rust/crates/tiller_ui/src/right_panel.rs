@@ -239,7 +239,17 @@ impl RightPanel {
                 match result {
                     Ok((changed, tree)) => {
                         panel.changed_paths = changed;
-                        panel.file_tree = tree;
+                        // F-TAB-01: the periodic 1s refresh loop
+                        // (`ensure_tree_refresh`) walks only the root
+                        // listing and used to replace `file_tree` wholesale,
+                        // so any folder a user had expanded (and its
+                        // already-loaded children) silently collapsed back
+                        // the instant the next tick landed — visible as a
+                        // "Loading files…" flash followed by the tree
+                        // reverting to fully collapsed. Preserve prior
+                        // expansion/children for any node the fresh walk
+                        // still reports at the same path.
+                        panel.file_tree = preserve_expansion(&panel.file_tree, tree);
                         panel.refresh_error = None;
                     }
                     Err(error) => panel.refresh_error = Some(error),
@@ -1136,6 +1146,28 @@ fn read_tree(
     Ok(nodes)
 }
 
+/// Carries a matching old node's `expanded` flag and already-loaded
+/// `children` forward onto a freshly-walked node at the same path. The
+/// periodic root-level refresh only re-lists the immediate directory, so it
+/// has no fresher data for a subdirectory's own contents; without this, the
+/// blind replacement in `refresh()` silently collapsed every expanded
+/// folder on the next 1s tick.
+fn preserve_expansion(old: &[FileNode], new: Vec<FileNode>) -> Vec<FileNode> {
+    new.into_iter()
+        .map(|mut node| {
+            if let Some(old_node) = old
+                .iter()
+                .find(|candidate| candidate.path == node.path && candidate.is_dir == node.is_dir)
+                && old_node.expanded
+            {
+                node.expanded = true;
+                node.children = old_node.children.clone();
+            }
+            node
+        })
+        .collect()
+}
+
 fn flatten_files(nodes: &[FileNode], depth: usize, rows: &mut Vec<FileRow>) {
     for node in nodes {
         rows.push(FileRow {
@@ -1348,6 +1380,55 @@ mod tests {
                     .unwrap_or(0)
                     == 2000
             })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_periodic_refresh_does_not_collapse_an_expanded_folder(cx: &mut TestAppContext) {
+        // F-TAB-01: `ensure_tree_refresh` reruns `refresh()` on every tick.
+        // Before the fix, that walk replaced `file_tree` wholesale, so a
+        // folder the user had just expanded (and its already-loaded
+        // children) silently reverted to collapsed the instant the next
+        // periodic refresh landed.
+        let dir = TempDir::new();
+        let subdir = dir.0.join("subdir");
+        seed_dir_with_files(&subdir, 5);
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir).is_some()
+            })
+        });
+
+        panel.update(cx, |panel, cx| panel.toggle_file(&subdir, cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir)
+                    .map(|node| node.expanded && node.children.len() == 5)
+                    .unwrap_or(false)
+            })
+        });
+
+        // Simulate the periodic loop's next tick: a fresh top-level refresh
+        // while the folder is still expanded.
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| !panel.refresh_started)
+        });
+
+        panel.read_with(cx, |panel, _| {
+            let node = find_node(&panel.file_tree, &subdir).expect("subdir node");
+            assert!(
+                node.expanded,
+                "a periodic refresh must not collapse a folder the user expanded"
+            );
+            assert_eq!(
+                node.children.len(),
+                5,
+                "the previously-loaded children must survive a periodic refresh"
+            );
         });
     }
 
