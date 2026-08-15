@@ -973,7 +973,7 @@ impl Sidebar {
         let sidebar_entity = cx.entity();
         let picker_project_id = project_id.to_string();
         let icon_picker = cx.new(|cx| {
-            ProjectIconPicker::with_value(icon.borrow().clone(), cx).on_change_with_context(
+            ProjectIconPicker::with_value_and_repo(icon.borrow().clone(), &path, cx).on_change_with_context(
                 move |value, cx| {
                     sidebar_entity.update(cx, |sidebar, cx| {
                         sidebar.apply_icon_change(picker_project_id.clone(), value, cx)
