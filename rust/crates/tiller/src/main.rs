@@ -207,11 +207,21 @@ const BROWSER_METHODS: [&str; 11] = [
     "browser.errors",
     "browser.permission",
 ];
-// F-CTRL-BROWSER-03/05/06/F-PER-08: browser.get, browser.wait, browser.eval,
-// browser.console and browser.permission are real, implemented methods (see
-// handle_browser_action) — they must not be turned away here as "not
-// implemented" before ever reaching that dispatch.
-const BROWSER_CAPABILITIES: [&str; 8] = [
+// F-CTRL-BROWSER-03/04/05/06/F-PER-08: browser.get, browser.wait,
+// browser.eval, browser.console, browser.snapshot and browser.permission
+// are real, implemented methods (see handle_browser_action) — they must not
+// be turned away here as "not implemented" before ever reaching that
+// dispatch.
+//
+// browser.screenshot stays out of this list on purpose: wry 0.56's public
+// WebView API (crates/tiller_ui/src/browser.rs's `build_webview`/
+// `build_production_webview`) has no pixel-capture entry point on the
+// webkitgtk backend, and there is no other dependency in this workspace
+// that reaches WebKitGTK's own `webkit_web_view_get_snapshot`. A true
+// screenshot needs a new `webkit2gtk` FFI dependency plus a GAsyncResult
+// callback bridged back into GPUI — out of this row's file list. See
+// F-CTRL-BROWSER-04's row in the wave report for the sketch.
+const BROWSER_CAPABILITIES: [&str; 9] = [
     "browser.open",
     "browser.navigate",
     "browser.act",
@@ -219,8 +229,37 @@ const BROWSER_CAPABILITIES: [&str; 8] = [
     "browser.wait",
     "browser.eval",
     "browser.console",
+    "browser.snapshot",
     "browser.permission",
 ];
+
+// F-CTRL-BROWSER-04: a lightweight structural snapshot — role, accessible
+// name and bounding box for interactive/labelled elements — serialized as
+// JSON text, the same shape browser.console already returns for console
+// messages. Deliberately not a full DOM dump: an agent driving the page
+// needs "what can I click and what does it say", not the raw markup.
+const BROWSER_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((() => {
+    const nodes = document.querySelectorAll(
+        "a,button,input,select,textarea,[role],[aria-label],h1,h2,h3"
+    );
+    const seen = [];
+    nodes.forEach((node) => {
+        const rect = node.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+        seen.push({
+            tag: node.tagName.toLowerCase(),
+            role: node.getAttribute("role") || node.tagName.toLowerCase(),
+            name: (node.getAttribute("aria-label") || node.innerText || node.value || "")
+                .trim()
+                .slice(0, 200),
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+        });
+    });
+    return { title: document.title, url: location.href, elements: seen.slice(0, 500) };
+})())"#;
 
 type ControlReply = Sender<Result<Vec<(String, String)>, String>>;
 
@@ -5369,6 +5408,25 @@ impl TillerWorkspace {
                     )
                     .map_err(|error| format!("{method} failed: {error}"))?;
                 Ok(vec![("messages".to_string(), result)])
+            }
+            // F-CTRL-BROWSER-04: a structural (accessibility-tree-shaped)
+            // snapshot of the page, distinct from a pixel screenshot (which
+            // this build has no capture path for — see the comment on
+            // BROWSER_CAPABILITIES above). Reuses the same
+            // evaluate_script/GTK-pump plumbing browser.eval and
+            // browser.console already rely on, so it inherits their real
+            // "Browser child is unavailable" failure mode rather than a
+            // blanket pre-rejection.
+            "browser.snapshot" => {
+                let timeout = params
+                    .get("timeoutMs")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_secs(5));
+                let result = surface
+                    .evaluate_script(BROWSER_SNAPSHOT_SCRIPT, timeout)
+                    .map_err(|error| format!("{method} failed: {error}"))?;
+                Ok(vec![("snapshot".to_string(), result)])
             }
             "browser.act" => {
                 if let Some(driving) = params.get("driving").or_else(|| params.get("agentDriving"))
@@ -12381,15 +12439,16 @@ mod tests {
                 "browser.wait",
                 "browser.eval",
                 "browser.console",
+                "browser.snapshot",
                 "browser.permission",
             ]
         );
 
-        // F-CTRL-BROWSER-03/05/06: browser.get, browser.wait, browser.eval
-        // and browser.console are now real, implemented methods (see
-        // handle_browser_action) and must not be pre-rejected as
-        // unsupported the way the remaining stubs are.
-        for method in ["browser.get", "browser.wait"] {
+        // F-CTRL-BROWSER-03/04/05/06: browser.get, browser.wait,
+        // browser.eval, browser.console and browser.snapshot are now real,
+        // implemented methods (see handle_browser_action) and must not be
+        // pre-rejected as unsupported the way the remaining stubs are.
+        for method in ["browser.get", "browser.wait", "browser.snapshot"] {
             assert_eq!(
                 browser_request_error(method, &BTreeMap::new()),
                 None,
@@ -12405,7 +12464,7 @@ mod tests {
             "browser.eval must be accepted with a script param, not pre-rejected as unsupported"
         );
 
-        for method in ["browser.screenshot", "browser.snapshot", "browser.errors"] {
+        for method in ["browser.screenshot", "browser.errors"] {
             let response = handler.handle(&ControlRequest {
                 id: method.to_string(),
                 method: method.to_string(),
