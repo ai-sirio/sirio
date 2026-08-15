@@ -35,7 +35,7 @@ use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
-    file_view::FileView,
+    file_view::{FileView, FileViewEvent},
     right_panel::{
         ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
@@ -2889,6 +2889,17 @@ impl TillerWorkspace {
         .detach();
     }
 
+    /// F-CORE-FILE-04: a link click inside a file view resolves a path but
+    /// can only open it through the workspace, which owns tab identity.
+    /// Routes through the same de-duplicating `add_file_tab` path as the
+    /// Files panel and chat transcript link clicks.
+    fn subscribe_file_view(file_view: &Entity<FileView>, cx: &mut Context<Self>) {
+        cx.subscribe(file_view, |workspace, _, event: &FileViewEvent, cx| match event {
+            FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+        })
+        .detach();
+    }
+
     /// Chat-local edit summaries emit only an intent to open a file; the
     /// workspace owns the editor tab and routes that intent through the same
     /// de-duplicating path used by the file tree and Changes surface.
@@ -4553,6 +4564,7 @@ impl TillerWorkspace {
             |name| name.to_string_lossy().into_owned(),
         );
         let view = cx.new(|cx| FileView::new(path, cx));
+        Self::subscribe_file_view(&view, cx);
         let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
         self.tabs.push(OpenTab {
             id: self.next_tab_id,
