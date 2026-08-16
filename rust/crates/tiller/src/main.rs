@@ -1075,6 +1075,23 @@ impl AppControlHandler {
         request: &ControlRequest,
         action: impl FnOnce(ControlReply) -> ControlAction,
     ) -> ControlResponse {
+        // P126: the dispatch-level wait must never be shorter than a caller-
+        // supplied `timeoutMs` (e.g. browser.wait), or the request's own
+        // timeout is silently truncated by this outer bound and the caller
+        // sees "control action timed out" — a message that reads as "the
+        // awaited condition never happened" when the real cause is "the
+        // dispatch bound fired first". Derive the dispatch bound from the
+        // request's own timeout, plus a margin for the worker to notice its
+        // deadline and reply, so the two bounds can never disagree.
+        const DISPATCH_MARGIN: Duration = Duration::from_secs(2);
+        let dispatch_timeout = request
+            .params
+            .get("timeoutMs")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .map(|requested| (requested + DISPATCH_MARGIN).max(CONTROL_ACTION_TIMEOUT))
+            .unwrap_or(CONTROL_ACTION_TIMEOUT);
+
         let (reply, result) = mpsc::channel();
         let Ok(mut actions) = self.control_actions.lock() else {
             return ControlResponse::failure(&request.id, "control action queue unavailable");
@@ -1082,12 +1099,18 @@ impl AppControlHandler {
         actions.push(action(reply));
         drop(actions);
 
-        match result.recv_timeout(CONTROL_ACTION_TIMEOUT) {
+        match result.recv_timeout(dispatch_timeout) {
             Ok(Ok(pairs)) => Self::success(&request.id, pairs),
             Ok(Err(error)) => ControlResponse::failure(&request.id, error),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                ControlResponse::failure(&request.id, "control action timed out")
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => ControlResponse::failure(
+                &request.id,
+                format!(
+                    "control action dispatch bound ({:.1}s) fired before the worker replied; \
+                     this means the dispatcher itself stalled, not that the awaited condition \
+                     never occurred",
+                    dispatch_timeout.as_secs_f64()
+                ),
+            ),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 ControlResponse::failure(&request.id, "control action worker stopped")
             }
