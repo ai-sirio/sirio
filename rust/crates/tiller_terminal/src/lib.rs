@@ -574,7 +574,7 @@ fn terminate_process_group(process_group: u32) {
 /// each thread's `children` file only lists the children *that thread*
 /// directly spawned, so every tid must be read to see the whole process's
 /// children.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
     let mut discovered = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -600,6 +600,24 @@ fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
         }
     }
     discovered
+}
+
+/// macOS/BSD stand-in for [`descendant_pids`]. There is no `/proc` here, so the
+/// Linux walk cannot run at all.
+///
+/// This was originally gated `cfg(unix)`, which silently gave macOS the Linux
+/// implementation: every `read_dir("/proc/<pid>/task")` fails, the loop falls through,
+/// and it returns an empty vec — indistinguishable from "this shell has no
+/// descendants". That is the exact failure mode the seam rules exist to prevent, and it
+/// was caught by a critic rather than by a compiler, because it type-checks perfectly.
+///
+/// The counterpart is libproc's `proc_listchildpids`/`proc_name`, which the Swift
+/// original already implements (`App/ForegroundProcessAgent.swift`). Until that is
+/// ported, [`terminate_descendant_process_groups`] says out loud that it is only
+/// tearing down the shell's own group.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn descendant_pids(_root: libc::pid_t) -> Vec<libc::pid_t> {
+    Vec::new()
 }
 
 /// The distinct process groups spanning the shell (`shell_pid`) and every
@@ -631,6 +649,22 @@ fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
 /// SIGKILL handling via [`terminate_process_group`].
 #[cfg(unix)]
 fn terminate_descendant_process_groups(shell_pid: u32) {
+    // On macOS/BSD `descendant_pids` cannot walk /proc, so the groups below collapse to
+    // the shell's own. That still tears down the common case correctly via `getpgid` +
+    // `killpg`, but a job-control child that detached into its own group survives —
+    // partial teardown, not full. Say so once per process rather than degrading quietly:
+    // the whole point of F-PER-06 is that the detached-child case is the one that leaks.
+    #[cfg(not(target_os = "linux"))]
+    {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "tiller: descendant process discovery is unimplemented on this platform \
+                 (needs libproc proc_listchildpids); terminating only the shell's own \
+                 process group, so a detached job-control child may survive."
+            );
+        });
+    }
     for group in descendant_process_groups(shell_pid as libc::pid_t) {
         terminate_process_group(group as u32);
     }

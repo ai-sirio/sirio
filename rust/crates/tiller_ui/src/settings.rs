@@ -661,7 +661,7 @@ enum ProviderKind {
 /// from the launcher's own, `getpgid(child) != getpgid(launcher)`), so a
 /// single pgid recorded at spawn time never covers it; only a walk done now
 /// does.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn descendant_pids(root: u32) -> Vec<u32> {
     let mut discovered = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -689,6 +689,23 @@ fn descendant_pids(root: u32) -> Vec<u32> {
     discovered
 }
 
+/// macOS/BSD stand-in for [`descendant_pids`]. No `/proc` here, so the Linux walk
+/// cannot run.
+///
+/// Gating this `cfg(unix)` — as it briefly was — handed macOS the Linux body, where
+/// every `read_dir("/proc/<pid>/task")` fails and the function returns empty. That is
+/// not a harmless degradation for this particular caller: an empty descendant list
+/// reduces [`terminate_login_process_group`] to `kill <launcher>`, which is *precisely*
+/// the failure F-SET-14's evidence recorded (the login command survived). The bug would
+/// have reappeared on macOS wearing the fix's own comment explaining why it was fixed.
+///
+/// Counterpart: libproc `proc_listchildpids`, already implemented in the Swift original
+/// (`App/ForegroundProcessAgent.swift`).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn descendant_pids(_root: u32) -> Vec<u32> {
+    Vec::new()
+}
+
 /// Kills the login terminal and every process it has spawned since launch
 /// (F-SET-14). `kill <pid>` on the launcher alone only ever reaches the
 /// launcher itself — the interactive login command it runs lands in its own
@@ -701,6 +718,20 @@ fn descendant_pids(root: u32) -> Vec<u32> {
 /// without depending on process-group membership at all.
 #[cfg(unix)]
 fn terminate_login_process_group(pid: u32) {
+    // See `descendant_pids`' non-Linux twin: without /proc the target list collapses to
+    // the launcher alone, which is the F-SET-14 failure itself. Announce the gap rather
+    // than shipping a kill that looks thorough and is not.
+    #[cfg(not(target_os = "linux"))]
+    {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!(
+                "tiller: descendant process discovery is unimplemented on this platform \
+                 (needs libproc proc_listchildpids); a canceled login may leave its \
+                 login command running."
+            );
+        });
+    }
     let mut targets = vec![pid];
     targets.extend(descendant_pids(pid));
     for target in &targets {

@@ -282,8 +282,29 @@ run_root_stage "test-visual-sweep.sh" env PYTHONDONTWRITEBYTECODE=1 \
 #  a missing `cfg` branch anywhere in our own code -- matches neither signature above and DOES
 #  fail the gate. That is the failure this pair of stages exists to catch, and it stays a hard
 #  failure the same as any other stage's FAILED above.
+# This box has no MSVC toolchain and no macOS SDK, so a handful of C/asm-building
+# dependencies cannot compile for the cross targets no matter what our source says.
+# Those failures are environmental and must not read as a code regression.
 CROSS_TARGET_KNOWN_WALL='error occurred in cc-rs:'
+# The packages that wall stops, plus what cascades behind them. Anything *else* that
+# fails is ours.
+CROSS_TARGET_WALL_PKGS='psm|stacker|libsqlite3-sys|rusqlite'
 
+# Cross-target compile check, classified into PASS / BLOCKED / FAILED.
+#
+# The classification used to be `grep -q <wall>` -> BLOCKED, which had a hole a critic
+# demonstrated: cargo's default fail-fast aborts the build at the first failure, so
+# whether an injected regression or the pre-existing wall surfaced first was a
+# scheduling race. Reintroducing `gtk` as an unconditional dependency was correctly
+# caught 6 times out of 7 and silently absorbed as BLOCKED on the 7th. A gate that
+# misses the defect it exists to catch one time in seven is worse than no gate, because
+# it is trusted.
+#
+# Two changes close it. `--keep-going` makes cargo compile every independent unit
+# instead of stopping at the first error, so the wall can no longer pre-empt anything.
+# And BLOCKED now requires that *every* error be attributable to the wall: any residual
+# error — including `could not compile <one of our crates>` — fails the stage even when
+# the wall is also present.
 run_cross_target_stage() {
     local stage=$1
     local triple=$2
@@ -295,20 +316,31 @@ run_cross_target_stage() {
         return 0
     fi
 
-    if (cd "$ROOT/rust" && cargo check --target "$triple" --workspace) >"$log" 2>&1; then
+    if (cd "$ROOT/rust" && cargo check --target "$triple" --workspace --keep-going) >"$log" 2>&1; then
         echo "PASS: $stage"
         tail -5 "$log" || true
         return 0
     fi
 
-    if grep -qE "$CROSS_TARGET_KNOWN_WALL" "$log"; then
+    local residual
+    residual=$(grep -E '^error' "$log" \
+        | grep -vE "$CROSS_TARGET_KNOWN_WALL" \
+        | grep -vE "could not compile \`($CROSS_TARGET_WALL_PKGS)\`" \
+        | grep -vE "failed to run custom build command for \`($CROSS_TARGET_WALL_PKGS)\`" \
+        || true)
+
+    if [[ -z "$residual" ]] && grep -qE "$CROSS_TARGET_KNOWN_WALL" "$log"; then
         echo "BLOCKED: $stage — known SDK/cross-toolchain wall, not a code regression"
         echo "  no MSVC toolchain / macOS SDK / cross-linker on this box; see docs/linux-rewrite/PORTABILITY.md"
         tail -15 "$log" || true
         return 0
     fi
 
-    fail_stage "$stage" "$log" "(cd rust && cargo check --target $triple --workspace)"
+    if [[ -n "$residual" ]]; then
+        echo "  (errors not attributable to the known SDK wall:)"
+        echo "$residual" | sed -n '1,20p'
+    fi
+    fail_stage "$stage" "$log" "(cd rust && cargo check --target $triple --workspace --keep-going)"
 }
 
 echo "==> Cross-platform compile checks (macOS, Windows)"
