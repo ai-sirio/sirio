@@ -40,3 +40,33 @@ for no attributable reason — collateral compositor oddity, not evidence either
 further given the standing "a null result from modclick is inconclusive" rule. Leaving at
 half-proven: the test's discriminating power is now independently confirmed (stronger than the
 builder's own claim), but the real user gesture remains unproven in either direction.
+
+## `F-CHG-18` — drag a changed-file row to a terminal pane ("drag-to-pill") — **half-proven**
+
+Read the owned code first: `receive_diff_drop` (`tiller_terminal/src/lib.rs:839`), the
+`.on_drop::<(PathBuf, String)>` wiring and the `terminal-diff-drop` pill render block, and the
+`(PathBuf, String)` `.on_drag` source in `tiller_ui/src/changes.rs` — all read correct and are
+unit-tested (`a_drawn_change_row_drags_its_diff_payload_to_a_drop_target`). No defect found in
+G5's own drop-receiving code.
+
+Live: created a real uncommitted file (`CRITIC_SCRATCH_DRAG_TEST.md`, deleted after, tree clean —
+`git status --porcelain` confirms) so "Local changes (1)" had a real row to drag. `surface.changes.
+open` correctly opened a live Changes tab showing it (`Local changes (1) > Untracked (1) >
+CRITIC_SCRA...`), so the Changes-side rendering is real and live.
+
+**The prerequisite step is where this pass differs sharply from the builder's report.** Across 5
+independent live attempts — 2x "Move to New Pane", 1x "Rename", 1x "Close", 1x an x-offset probe —
+right-clicking the Terminal tab and clicking an item in the drawn tab-context-menu (`main.rs`'s
+`TabContextAction` menu, not the terminal-pane's own context menu) never closed the menu or
+performed the action, 0/5, even though a subsequent click *outside* the menu correctly dismissed it
+every time (proving synthetic clicks are reaching the app in general). This is a stronger, more
+specific negative signal than the builder's "second attempt showed the split itself was not
+reliably reproduced" — I got zero splits, not an intermittent one. For comparison, the identical
+rightclick→click→shot technique worked cleanly for `F-TERM-UI-01`'s Set Title in the terminal
+pane's *own* context menu, so this isn't a generic tool/timing problem — something specific to the
+tab-strip's `TabContextItem` menu is not delivering clicks to its rows, a pattern matching the
+already-documented P123 mis-positioned-popover class of bug. Never reached the drag step or the
+`terminal-diff-drop` pill this pass. Leaving at half-proven (owned code reads correct and is
+tested; live end-to-end proof still owed) but flagging this specific, reproducible tab-menu
+click-through failure as a harder blocker than previously recorded, for whoever owns
+`main.rs`'s tab-strip context-menu dispatch.
