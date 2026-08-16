@@ -29,6 +29,13 @@ serde_json.workspace = true
 # wait here can make WebKit's async load actually progress instead of
 # spinning uselessly until timeout.
 gtk = "0.18.2"
+# F-USE-04/F-USE-05/F-WIN-08: the StatusNotifierItem tray (`src/tray.rs`).
+# "blocking" runs the D-Bus service on its own OS thread with a synchronous
+# `spawn()`/`Handle::update()`, so it needs no tokio runtime wired through
+# GPUI's own executor -- default features already pull tokio in just to
+# drive that background thread's zbus connection, which is what "blocking"
+# builds on top of.
+ksni = { version = "0.3.6", features = ["blocking"] }
 
 [dev-dependencies]
 # For tests that hand-corrupt a database (e.g. bumping user_version).
