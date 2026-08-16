@@ -44,7 +44,7 @@ pub use context_menu::{
 };
 pub use domain::{SplitAxis, SplitDirection, SplitTree, TerminalKey};
 pub use lifecycle::{CachedTerminalPane, TerminalPaneCache, TerminalSurfaceHost};
-pub use link_router::{opens_terminal_link, url_at_column};
+pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
 const LINE_HEIGHT: Pixels = px(18.0);
@@ -1092,10 +1092,14 @@ impl TerminalView {
             .lock()
             .map(|bounds| bounds.origin)
             .unwrap_or_default();
-        let local_x = (f32::from(event.position.x) - f32::from(origin.x)).max(0.0);
-        let local_y = (f32::from(event.position.y) - f32::from(origin.y)).max(0.0);
-        let column = (local_x / 8.0).floor().max(0.0) as usize;
-        let row = (local_y / f32::from(LINE_HEIGHT)).floor().max(0.0) as usize;
+        let (row, column) = link_router::resolve_click_cell(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+            f32::from(origin.x),
+            f32::from(origin.y),
+            8.0,
+            f32::from(LINE_HEIGHT),
+        );
         if let Some(url) = terminal.link_at(row, column) {
             cx.emit(TerminalLinkEvent {
                 target: self.identity.clone(),

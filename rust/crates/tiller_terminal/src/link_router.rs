@@ -5,6 +5,28 @@ pub fn opens_terminal_link(platform_modifier: bool) -> bool {
     platform_modifier
 }
 
+/// Maps a click position (window coordinates) to a terminal grid cell,
+/// undoing the pane's own on-screen offset first. Every pane but the one
+/// flush against the window's top-left corner has a non-zero origin — see
+/// `TerminalView::on_left_mouse_down` (F-TERM-UI-02) for the paint-side
+/// counterpart this must invert. Pulled out as a pure function so the
+/// origin subtraction itself can be unit-tested with a non-zero origin,
+/// which a click fired against a window rooted at (0,0) cannot discriminate.
+pub fn resolve_click_cell(
+    event_x: f32,
+    event_y: f32,
+    origin_x: f32,
+    origin_y: f32,
+    cell_width: f32,
+    line_height: f32,
+) -> (usize, usize) {
+    let local_x = (event_x - origin_x).max(0.0);
+    let local_y = (event_y - origin_y).max(0.0);
+    let column = (local_x / cell_width).floor().max(0.0) as usize;
+    let row = (local_y / line_height).floor().max(0.0) as usize;
+    (row, column)
+}
+
 pub fn url_at_column(line: &str, column: usize) -> Option<String> {
     let starts = ["https://", "http://", "file://"];
     let bytes = line.as_bytes();
@@ -42,6 +64,32 @@ mod tests {
     fn linux_link_gesture_is_platform_modifier_only() {
         assert!(opens_terminal_link(true));
         assert!(!opens_terminal_link(false));
+    }
+
+    #[test]
+    fn click_cell_undoes_a_non_zero_pane_origin() {
+        // A pane flush against the window's top-left corner (origin 0,0)
+        // cannot distinguish "subtracted the origin" from "ignored it" --
+        // both produce the same cell. A second pane, offset by a prior
+        // split, cannot: at origin (400, 100) a click at (404, 109) is cell
+        // (0, 0) once the offset is undone, but would misresolve to a wild
+        // cell (50, 6) if the offset were never subtracted (F-TERM-UI-02).
+        assert_eq!(
+            resolve_click_cell(404.0, 109.0, 400.0, 100.0, 8.0, 18.0),
+            (0, 0)
+        );
+        assert_ne!(
+            resolve_click_cell(404.0, 109.0, 0.0, 0.0, 8.0, 18.0),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn click_cell_clamps_above_and_left_of_origin() {
+        assert_eq!(
+            resolve_click_cell(10.0, 10.0, 400.0, 100.0, 8.0, 18.0),
+            (0, 0)
+        );
     }
 
     #[test]
