@@ -2,7 +2,7 @@
 //! "state" is its captured transcript, and the parser must read it from
 //! disk exactly as the app would. No mocked readers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -231,7 +231,7 @@ fn the_fetch_is_bounded_and_single_attempts_do_not_hang() {
 /// A `PATH` containing only `dir`, so the fake (or absent) `claude` in it is
 /// all the spawned shell can find — the real `claude` on this machine's
 /// normal `PATH` never enters the picture.
-fn isolated_path(dir: &PathBuf) -> String {
+fn isolated_path(dir: &Path) -> String {
     dir.to_string_lossy().into_owned()
 }
 
@@ -265,7 +265,7 @@ fn not_installed_is_reachable_through_the_real_shell_when_claude_is_absent_from_
 
 /// Writes an executable `claude` shell script into `dir` and returns its
 /// path.
-fn fake_claude(dir: &PathBuf, script_body: &str) -> PathBuf {
+fn fake_claude(dir: &Path, script_body: &str) -> PathBuf {
     let path = dir.join("claude");
     std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("write fake claude");
     let mut perms = std::fs::metadata(&path)

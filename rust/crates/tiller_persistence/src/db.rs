@@ -1509,6 +1509,29 @@ fn parse_bool_setting(value: &str, default: bool) -> bool {
     }
 }
 
+/// Maps an open-time SQLite failure onto [`PersistenceError::Corrupt`] when
+/// SQLite says the file is not a database.
+fn classify_open_error(error: PersistenceError, path: &Path) -> PersistenceError {
+    match error {
+        PersistenceError::Sqlite(rusqlite::Error::SqliteFailure(ffi_error, _))
+            if matches!(
+                ffi_error.code,
+                rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+            ) =>
+        {
+            PersistenceError::Corrupt {
+                path: path.to_path_buf(),
+                message: if ffi_error.code == rusqlite::ErrorCode::NotADatabase {
+                    "file is not a database".to_string()
+                } else {
+                    "SQLite reported a corrupt database".to_string()
+                },
+            }
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod save_tabs_tests {
     use super::*;
@@ -1556,28 +1579,5 @@ mod save_tabs_tests {
             .find(|s| s.tab_id == "chat-1")
             .expect("chat session must survive an ordinary tab autosave");
         assert_eq!(session.turn_count, 1);
-    }
-}
-
-/// Maps an open-time SQLite failure onto [`PersistenceError::Corrupt`] when
-/// SQLite says the file is not a database.
-fn classify_open_error(error: PersistenceError, path: &Path) -> PersistenceError {
-    match error {
-        PersistenceError::Sqlite(rusqlite::Error::SqliteFailure(ffi_error, _))
-            if matches!(
-                ffi_error.code,
-                rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
-            ) =>
-        {
-            PersistenceError::Corrupt {
-                path: path.to_path_buf(),
-                message: if ffi_error.code == rusqlite::ErrorCode::NotADatabase {
-                    "file is not a database".to_string()
-                } else {
-                    "SQLite reported a corrupt database".to_string()
-                },
-            }
-        }
-        other => other,
     }
 }
