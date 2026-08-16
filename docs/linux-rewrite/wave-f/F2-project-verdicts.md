@@ -33,3 +33,47 @@ this slice): the name field also dropped keystrokes this attempt (4 of 16 chars 
 the same defect class documented for the Clone form's URL field under `F-PRJ-06` -- `F-PRJ-09`'s
 "landed in full" evidence may not be perfectly repeatable across attempts.
 
+## `F-SID-07` — ledger line 76
+
+**Verdict: PASSED** (`heldUp: true`, now on independent live provenance instead of a critic reading
+`P104-report`)
+
+Live re-drive, one continuous drive (right-click "tiller" -> Project Settings -> edit -> Close), never
+reading the prior report: right-click on the project row opened the 4-item context menu (Project
+Settings / Initialize Git repository / Show in File Manager / Remove Project); Project Settings opened
+a full settings view (Display name field, Project icon picker, Colour swatches, Reset, Remove Project,
+Close). Typed `F2CRIT-RENAMED` into Display name -- landed in full, and the view's own header
+live-updated to `Project Settings · F2CRIT-RENAMED`
+(`reference/linux-progress/wave-f2-critic/05-83-name-typed.png`). Clicked a different icon (terminal
+glyph) -- the header's icon swapped live too
+(`reference/linux-progress/wave-f2-critic/06-84-icon-clicked.png`). Discriminator: after navigating
+back to the sidebar, the project row itself now reads `F2CRIT-RENAMED` with the new terminal icon,
+not `tiller` with the default folder icon -- proving the edit persisted into the sidebar, not just the
+settings header (`reference/linux-progress/wave-f2-critic/02-90-check-sidebar-after-reset.png`).
+
+## `F-SID-08` — ledger line 77
+
+**Verdict: PASSED** (`heldUp: true`, now on independent live provenance)
+
+Live re-drive against a genuinely non-git folder created for this pass (`/tmp/f2crit-nongit-proj`,
+confirmed no `.git` before the test): added it as a project, right-clicked its row -- "Initialize Git
+repository" was enabled (not greyed, unlike the already-git `tiller` project's menu) -- and clicked it.
+Instrument: real filesystem read-back and `git status`, not just the UI. `ls /tmp/f2crit-nongit-proj/.git`
+now shows a real git admin directory (`branches`, `config`, ...) and
+`git -C /tmp/f2crit-nongit-proj status` reports `On branch master / No commits yet` -- a genuine `git
+init` ran. The sidebar's own worktree row also updated live from a bare path to a `master` branch row
+(`reference/linux-progress/wave-f2-critic/03-103-after-init-git.png`). A second right-click afterward
+confirmed the menu item now reads "Git is already initialized" and is disabled again, matching the new
+state.
+
+## `F-SID-09` — ledger line 78
+
+**Verdict: PASSED** (`heldUp: true`, now on independent live provenance)
+
+Live re-drive: right-clicked the non-git-turned-git test project's row and clicked "Show in File
+Manager". Instrument: the host process tree, not a screenshot -- `ps aux` immediately showed a new
+process `/usr/bin/cosmic-files /tmp/f2crit-nongit-proj`, i.e. COSMIC Files launched with exactly the
+selected project's directory as its argument. Killed the spawned process afterward as cleanup. This is
+stronger than the original evidence (a critic reading `P104-report`'s description of the same
+behaviour) since it captures the real subprocess argv, not a rendered window.
+
