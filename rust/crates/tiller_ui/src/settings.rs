@@ -661,6 +661,7 @@ enum ProviderKind {
 /// from the launcher's own, `getpgid(child) != getpgid(launcher)`), so a
 /// single pgid recorded at spawn time never covers it; only a walk done now
 /// does.
+#[cfg(unix)]
 fn descendant_pids(root: u32) -> Vec<u32> {
     let mut discovered = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -698,6 +699,7 @@ fn descendant_pids(root: u32) -> Vec<u32> {
 /// one directly — SIGTERM first, SIGKILL after a short grace period for
 /// anything that ignored it — reaches the login command wherever it landed,
 /// without depending on process-group membership at all.
+#[cfg(unix)]
 fn terminate_login_process_group(pid: u32) {
     let mut targets = vec![pid];
     targets.extend(descendant_pids(pid));
@@ -715,6 +717,19 @@ fn terminate_login_process_group(pid: u32) {
             .status();
     }
 }
+
+/// Windows stand-in for [`terminate_login_process_group`]. `/proc/<pid>/task/<tid>/children`
+/// and the `kill` binary are both Unix-only; the Windows counterpart is the same pairing
+/// used elsewhere in this wave — Toolhelp32 (`CreateToolhelp32Snapshot`, walking
+/// `th32ParentProcessID`) to find descendants, `TerminateProcess` to end each one — or,
+/// more idiomatically, a Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) created at
+/// launch so closing the job kills the whole tree without an enumerate step at all.
+/// Neither is implemented; this is a real no-op; the caller (`cancel_account_login`) only
+/// fires it from a detached background task with no return value to observe, so the only
+/// user-visible effect of the gap is that a canceled login's terminal process is not
+/// force-killed on Windows yet.
+#[cfg(not(unix))]
+fn terminate_login_process_group(_pid: u32) {}
 
 /// Small settings view model. The real application can replace these values
 /// with its persistence layer without changing the reusable settings UI.

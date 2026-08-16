@@ -81,6 +81,20 @@ impl DoubleClickAction {
     /// whenever the binary is missing, the schema isn't installed (sway,
     /// COSMIC, and other non-GNOME compositors need not ship it), or the
     /// call otherwise fails; this is a graceful default; not an error.
+    ///
+    /// No `#[cfg]` seam needed here, unlike the rest of this wave's Linux-only
+    /// call sites: `Command::new("gsettings")` fails to spawn on any platform
+    /// without that binary and is already caught by the `_ =>` arm below, so
+    /// this compiles and degrades safely everywhere. That fallback happens to
+    /// be exactly right on both other platforms, for different reasons: on
+    /// Windows there is no user-configurable double-click action at all
+    /// (double-click always maximizes — PORTABILITY.md), which *is*
+    /// `ToggleMaximize`, so nothing further is needed; on macOS the
+    /// counterpart is a real, distinct system preference,
+    /// `AppleActionOnDoubleClick` (readable via `defaults read -g
+    /// AppleActionOnDoubleClick`, the same preference the Swift original
+    /// reads), which a future macOS implementation should read instead of
+    /// silently accepting the GNOME-shaped default.
     pub fn from_system() -> Self {
         match std::process::Command::new("gsettings")
             .args([
