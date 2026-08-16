@@ -195,7 +195,31 @@ run_cargo_stage "cargo clippy (owned crates)" cargo clippy --workspace --all-tar
     --exclude tiller --exclude tiller_ui -- -D warnings
 
 run_cargo_stage "cargo build" cargo build -p tiller -p tiller_control
-run_cargo_stage "cargo test --workspace" cargo test --workspace
+# Per-crate, not `cargo test --workspace`.
+#
+# Two tests are timing-sensitive and fail only when cargo runs every crate's test binary
+# concurrently: `shutdown_terminates_a_job_control_child_that_detached_into_its_own_process_group`
+# (tiller_terminal) and `chat_session_expires_a_permission_left_open_by_a_dead_transport`
+# (tiller_acp). Both pass reliably per-crate and both predate this gate. Measured over
+# three consecutive runs, `--workspace` went red twice on a tree whose per-crate tests
+# were all green — so the gate was reporting a defect that did not exist.
+#
+# Every agent working in this repo is already told to run tests per crate for exactly
+# this reason; the gate was the last place still doing the thing the house rule forbids.
+# A gate that cries wolf two times in three teaches people to ignore it, which costs more
+# than the real failures it would otherwise catch.
+#
+# This is a workaround, not a fix: the two races are real and still worth fixing at the
+# source. Sequencing here only stops them from being attributed to whatever change
+# happens to be in the tree.
+WORKSPACE_CRATES=(
+    tiller tiller_acp tiller_persistence tiller_activity tiller_agents tiller_control
+    tiller_git tiller_project tiller_terminal tiller_theme tiller_ui tiller_markdown
+    tiller_usage
+)
+for crate in "${WORKSPACE_CRATES[@]}"; do
+    run_cargo_stage "cargo test -p $crate" cargo test -p "$crate"
+done
 
 # The project's acceptance test is "connect a real workspace agent over ACP, send
 # messages, verify streaming and replies". The tree has exactly one test that does
@@ -334,10 +358,18 @@ run_cross_target_stage() {
     # Every top-level error except the allowlisted build-script walls. `could not compile
     # <crate>` is the reliable marker for one of ours failing to build — it is what caught
     # the 30 real tiller_control errors the previous classifier was masking.
+    # Second environmental shape, macOS only: Zed's vendored `media` crate generates its
+    # CoreVideo/CoreMedia bindings from a build script gated on a real macOS *host*. On
+    # this Linux host the script runs but writes no `bindings.rs`, so `media` fails at
+    # compile time rather than at its build script. Allowlisted by name because we do not
+    # author that crate — we cannot introduce an error in it — and the missing-bindings
+    # line is quoted too, so the pair is unambiguous.
     local residual
     residual=$(grep -E '^error' "$log" \
         | grep -vE "$CROSS_TARGET_KNOWN_WALL" \
         | grep -vE "^error: failed to run custom build command for \`($CROSS_TARGET_WALL_PKGS) v" \
+        | grep -vE "^error: could not compile \`media\` " \
+        | grep -vE "^error: couldn't read .*/out/bindings\.rs" \
         || true)
 
     if [[ -z "$residual" ]] && grep -qE "$CROSS_TARGET_KNOWN_WALL|^error: failed to run custom build command for" "$log"; then
