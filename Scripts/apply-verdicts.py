@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -50,8 +51,22 @@ VALID = {
 
 
 def clean(cell: str) -> str:
-    """Make a string safe to sit in one markdown table cell."""
-    return " ".join(cell.replace("|", "\\|").split())
+    """Make a string safe to sit in one markdown table cell.
+
+    Two hazards, both of which have broken the totals gate:
+
+    * A raw ``|`` shifts every column after it, so it is escaped.
+    * An *odd* number of backticks silently swallows the next ``|``. ``split_cells`` honours
+      backtick spans when splitting, so a cell containing a fenced-block marker (```` ```bash ````
+      — three backticks) leaves the parser inside a code span, and the row is read with one cell
+      too few. Runs are collapsed to a single backtick and an unpaired one is closed, which keeps
+      symbol names readable without leaving the span open.
+    """
+    text = " ".join(cell.replace("|", "\\|").split())
+    text = re.sub(r"`{2,}", "`", text)
+    if text.count("`") % 2:
+        text += "`"
+    return text
 
 
 def main() -> int:
