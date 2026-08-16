@@ -268,7 +268,9 @@ fn not_installed_is_reachable_through_the_real_shell_when_claude_is_absent_from_
 fn fake_claude(dir: &PathBuf, script_body: &str) -> PathBuf {
     let path = dir.join("claude");
     std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).expect("write fake claude");
-    let mut perms = std::fs::metadata(&path).expect("stat fake claude").permissions();
+    let mut perms = std::fs::metadata(&path)
+        .expect("stat fake claude")
+        .permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
     std::fs::set_permissions(&path, perms).expect("chmod fake claude");
     path

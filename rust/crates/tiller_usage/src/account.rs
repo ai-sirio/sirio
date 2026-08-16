@@ -116,9 +116,9 @@ impl UsageProvider {
             UsageProvider::OpenCodeGo => opencode_go_account_state(),
             // F-SET-13: same store, same rule as OpenCode Go — the
             // cookie's presence is the account state.
-            UsageProvider::OllamaCloud => state_from_cookie_presence(
-                crate::ollama::ollama_cloud_local_cookie().is_some(),
-            ),
+            UsageProvider::OllamaCloud => {
+                state_from_cookie_presence(crate::ollama::ollama_cloud_local_cookie().is_some())
+            }
         }
     }
 }

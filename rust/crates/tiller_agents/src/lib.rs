@@ -543,7 +543,9 @@ mod tests {
             OhMyPiAdapter.summarizer_command("summarize this"),
             Some("oh-my-pi --print --no-tools 'summarize this'".to_string())
         );
-        let command = OhMyPiAdapter.summarizer_command("x").expect("has a summarizer");
+        let command = OhMyPiAdapter
+            .summarizer_command("x")
+            .expect("has a summarizer");
         assert!(
             command.starts_with(OhMyPiAdapter.executable_name()),
             "the summarizer must spawn the executable name, not the adapter id: {command}"

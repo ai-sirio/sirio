@@ -37,7 +37,11 @@ impl fmt::Display for PrepareError {
             }
             PrepareError::UnsupportedSkillAgent(id) => write!(f, "unsupported Tiller agent: {id}"),
             PrepareError::UnmanagedSkillFile(path) => {
-                write!(f, "refusing to overwrite unmanaged skill at {}", path.display())
+                write!(
+                    f,
+                    "refusing to overwrite unmanaged skill at {}",
+                    path.display()
+                )
             }
         }
     }

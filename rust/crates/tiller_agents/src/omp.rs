@@ -103,6 +103,9 @@ impl super::AgentAdapter for OhMyPiAdapter {
         // The Swift original spells the program `omp`; the distribution
         // ships only `oh-my-pi` (no alias), so this follows the same
         // executable-name discipline as `command`/`resume_command` above.
-        Some(format!("oh-my-pi --print --no-tools {}", shell_quote(prompt)))
+        Some(format!(
+            "oh-my-pi --print --no-tools {}",
+            shell_quote(prompt)
+        ))
     }
 }

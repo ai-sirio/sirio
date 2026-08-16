@@ -1970,7 +1970,8 @@ mod tests {
         clean_git_repo(&dir.0);
 
         let (mut cx, tab) = changes_view(cx, dir.0.clone());
-        cx.cx.update(|app| tab.update(app, |tab, cx| tab.refresh(cx)));
+        cx.cx
+            .update(|app| tab.update(app, |tab, cx| tab.refresh(cx)));
         wait_for_tab(&cx, &tab, |tab| tab.git_task.is_none());
         cx.cx.run_until_parked();
         cx.update(|window, cx| {

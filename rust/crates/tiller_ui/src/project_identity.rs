@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, PathPromptOptions,
-    Render, Window, div, prelude::*, px, text,
+    ClickEvent, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, PathPromptOptions, Render,
+    Window, div, prelude::*, px, text,
 };
 use tiller_theme::Theme;
 use unicode_segmentation::UnicodeSegmentation;
@@ -1631,7 +1631,8 @@ mod tests {
             "clicking Open Emoji Picker with an empty field opens the grid overlay"
         );
         assert!(
-            cx.debug_bounds("project-icon-emoji-grid-choice-🚀").is_some(),
+            cx.debug_bounds("project-icon-emoji-grid-choice-🚀")
+                .is_some(),
             "the unfiltered grid offers its curated choices"
         );
 
@@ -1644,11 +1645,13 @@ mod tests {
         cx.run_until_parked();
         refresh_frame(cx);
         assert!(
-            cx.debug_bounds("project-icon-emoji-grid-choice-🚀").is_some(),
+            cx.debug_bounds("project-icon-emoji-grid-choice-🚀")
+                .is_some(),
             "searching \"rocket\" keeps the matching swatch"
         );
         assert!(
-            cx.debug_bounds("project-icon-emoji-grid-choice-🐍").is_none(),
+            cx.debug_bounds("project-icon-emoji-grid-choice-🐍")
+                .is_none(),
             "searching \"rocket\" filters out unrelated swatches"
         );
 

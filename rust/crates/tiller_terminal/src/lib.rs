@@ -1633,13 +1633,7 @@ impl gpui::Render for TerminalView {
             // (P129). `anchored().position(...)` takes a window coordinate
             // as-is, the same idiom already used correctly by
             // `tab_bar.rs`'s "+" menu, `right_panel.rs`, and `sidebar.rs`.
-            deferred(
-                anchored()
-                    .position(position)
-                    .snap_to_window()
-                    .child(menu),
-            )
-            .priority(1)
+            deferred(anchored().position(position).snap_to_window().child(menu)).priority(1)
         });
         match &self.terminal {
             TerminalState::Pending => {
@@ -2921,10 +2915,8 @@ mod view_tests {
     #[gpui::test]
     async fn platform_modifier_click_opens_a_terminal_link(cx: &mut gpui::TestAppContext) {
         cx.set_global(Theme::light());
-        let working_directory = std::env::temp_dir().join(format!(
-            "tiller-terminal-link-click-{}",
-            std::process::id()
-        ));
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-terminal-link-click-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create PTY directory");
         let shell = TerminalShell::WithArguments {
             program: "/bin/sh".to_string(),

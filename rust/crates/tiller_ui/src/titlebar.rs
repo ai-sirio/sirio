@@ -582,9 +582,7 @@ mod tests {
     /// the render-site comment) directly at the drag area's own drawn
     /// bounds, and asserts each configured action reaches its real seam.
     #[gpui::test]
-    async fn double_click_on_the_drag_area_applies_the_configured_action(
-        cx: &mut TestAppContext,
-    ) {
+    async fn double_click_on_the_drag_area_applies_the_configured_action(cx: &mut TestAppContext) {
         let maximized = Rc::new(RefCell::new(false));
         let minimized = Rc::new(RefCell::new(false));
         let (maximize_spy, minimize_spy) = (maximized.clone(), minimized.clone());
@@ -716,9 +714,7 @@ mod tests {
     /// the default `TestWindow::zoom`/`::minimize` would panic
     /// (`unimplemented!()`) if this regressed to calling either.
     #[gpui::test]
-    async fn double_click_configured_to_none_invokes_no_window_control(
-        cx: &mut TestAppContext,
-    ) {
+    async fn double_click_configured_to_none_invokes_no_window_control(cx: &mut TestAppContext) {
         let window = cx.add_window(|_window, cx| {
             Titlebar::new(cx).with_double_click_action(DoubleClickAction::None)
         });
@@ -928,8 +924,9 @@ mod tests {
     async fn the_history_seam_invokes_its_wired_handler(cx: &mut TestAppContext) {
         let called = Rc::new(RefCell::new(false));
         let spy = called.clone();
-        let window =
-            cx.add_window(|_window, cx| Titlebar::new(cx).on_history(move |_, _| *spy.borrow_mut() = true));
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx).on_history(move |_, _| *spy.borrow_mut() = true)
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
@@ -939,7 +936,10 @@ mod tests {
         cx.simulate_click(history.center(), Modifiers::none());
         cx.run_until_parked();
 
-        assert!(*called.borrow(), "titlebar-history invoked its wired handler");
+        assert!(
+            *called.borrow(),
+            "titlebar-history invoked its wired handler"
+        );
     }
 
     #[gpui::test]

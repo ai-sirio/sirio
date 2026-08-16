@@ -88,20 +88,14 @@ fn auth_file_precedence_load_refresh_and_missing_at_both_locations() {
 
     // An empty $CODEX_HOME falls back to ~/.codex/auth.json.
     unsafe { std::env::set_var("CODEX_HOME", "") };
-    assert_eq!(
-        codex_auth_file_path(),
-        home.path().join(".codex/auth.json")
-    );
+    assert_eq!(codex_auth_file_path(), home.path().join(".codex/auth.json"));
     let fallback = load_codex_credentials(&codex_auth_file_path()).expect("loads from home");
     assert_eq!(fallback.access_token, "a2");
     assert_eq!(fallback.account_id, None);
 
     // An unset $CODEX_HOME falls back the same way.
     unsafe { std::env::remove_var("CODEX_HOME") };
-    assert_eq!(
-        codex_auth_file_path(),
-        home.path().join(".codex/auth.json")
-    );
+    assert_eq!(codex_auth_file_path(), home.path().join(".codex/auth.json"));
 
     // Missing file: presence is false and the load is an IO error.
     unsafe { std::env::set_var("CODEX_HOME", empty_codex_home.path()) };

@@ -624,33 +624,34 @@ fn catalog_project(root_path: &Path, discovered: DiscoveredProject) -> CatalogPr
     // (and a plain folder essentially never does), so it is excluded.
     let looks_like_bare_git_repo =
         root_path.join("HEAD").is_file() && root_path.join("objects").is_dir();
-    let worktrees = if !discovered.is_git && discovered.worktrees.is_empty() && !looks_like_bare_git_repo {
-        vec![CatalogWorktree {
-            branch: String::new(),
-            path: root_path.to_path_buf(),
-            is_primary: true,
-        }]
-    } else {
-        discovered
-            .worktrees
-            .into_iter()
-            .map(|worktree| CatalogWorktree {
-                branch: worktree.branch.unwrap_or_else(|| {
-                    if worktree.is_primary {
-                        "main".into()
-                    } else {
-                        worktree
-                            .head
-                            .as_deref()
-                            .map(|head| head.chars().take(7).collect())
-                            .unwrap_or_else(|| "HEAD".into())
-                    }
-                }),
-                path: canonical_path(&worktree.path),
-                is_primary: worktree.is_primary,
-            })
-            .collect()
-    };
+    let worktrees =
+        if !discovered.is_git && discovered.worktrees.is_empty() && !looks_like_bare_git_repo {
+            vec![CatalogWorktree {
+                branch: String::new(),
+                path: root_path.to_path_buf(),
+                is_primary: true,
+            }]
+        } else {
+            discovered
+                .worktrees
+                .into_iter()
+                .map(|worktree| CatalogWorktree {
+                    branch: worktree.branch.unwrap_or_else(|| {
+                        if worktree.is_primary {
+                            "main".into()
+                        } else {
+                            worktree
+                                .head
+                                .as_deref()
+                                .map(|head| head.chars().take(7).collect())
+                                .unwrap_or_else(|| "HEAD".into())
+                        }
+                    }),
+                    path: canonical_path(&worktree.path),
+                    is_primary: worktree.is_primary,
+                })
+                .collect()
+        };
     CatalogProject {
         id,
         name,
@@ -876,11 +877,11 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
         // clone, ...) would blow away a comment set via `worktree.set`,
         // even though that write went through `persist_worktree_comment`
         // moments earlier.
-        let existing_by_id: std::collections::HashMap<String, WorktreeRecord> =
-            db.worktrees_of_project(&project.id)?
-                .into_iter()
-                .map(|worktree| (worktree.id.clone(), worktree))
-                .collect();
+        let existing_by_id: std::collections::HashMap<String, WorktreeRecord> = db
+            .worktrees_of_project(&project.id)?
+            .into_iter()
+            .map(|worktree| (worktree.id.clone(), worktree))
+            .collect();
         if project.is_git {
             for worktree in existing_by_id.values() {
                 if !desired_worktree_ids.contains(&worktree.id) {
@@ -945,9 +946,7 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
                             icon_kind: record.icon_kind.clone(),
                             icon_value: record.icon_value.clone(),
                             default_worktree_base: record.default_worktree_base.clone(),
-                            worktree_location_override: record
-                                .worktree_location_override
-                                .clone(),
+                            worktree_location_override: record.worktree_location_override.clone(),
                         },
                     );
                     projects.push(project);

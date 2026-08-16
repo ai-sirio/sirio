@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tiller_git::{
-    DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, GitRunner,
-    diff_entry, directory_statuses, list_branches, run_streaming, status,
+    DEFAULT_CONTEXT_LINES, DiffOrigin, DirectoryGitStatus, GitBranches, GitRunner, diff_entry,
+    directory_statuses, list_branches, run_streaming, status,
 };
 
 struct TempDir(PathBuf);
@@ -28,10 +28,8 @@ impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tiller-p99-git-{}-{unique}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("tiller-p99-git-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&path).expect("create temp dir");
         let path = std::fs::canonicalize(&path).expect("canonicalize temp dir");
         Self(path)
@@ -131,7 +129,10 @@ fn streaming_lines_arrive_incrementally_before_completion() {
     let finished = Instant::now();
 
     assert_eq!(
-        arrivals.iter().map(|(line, _)| line.as_str()).collect::<Vec<_>>(),
+        arrivals
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>(),
         ["alpha", "beta", "gamma", "delta"],
         "lines split on LF and CR alike, in emission order"
     );
@@ -214,11 +215,7 @@ fn branch_listing_returns_exact_names_and_git_refuses_spaced_names() {
         .current_dir(repo.path())
         .output()
         .unwrap();
-    std::fs::write(
-        repo.path().join(".git/refs/heads/has space"),
-        head.stdout,
-    )
-    .unwrap();
+    std::fs::write(repo.path().join(".git/refs/heads/has space"), head.stdout).unwrap();
     let mut names = list_branches(repo.path()).expect("listing still succeeds");
     names.sort();
     assert_eq!(
@@ -268,7 +265,11 @@ fn directory_statuses_mark_every_ancestor_with_precedence_and_both_rename_sides(
     write(repo.path(), "src/app/deep/mod.rs", "mod deep; // edited\n");
     write(repo.path(), "src/zz_new.txt", "untracked\n"); // untracked next to a modification
     write(repo.path(), "docs/guide/notes.txt", "untracked only\n");
-    write(repo.path(), "conflict/also_mod.txt", "modified next to a conflict\n");
+    write(
+        repo.path(),
+        "conflict/also_mod.txt",
+        "modified next to a conflict\n",
+    );
     write(repo.path(), "root_note.txt", "root edited\n");
     // A staged rename: original and destination ancestors both count.
     std::fs::create_dir_all(repo.path().join("moved_dest")).unwrap();
@@ -379,10 +380,16 @@ fn side_by_side_rows_pair_context_zip_replacements_and_pad_pure_runs() {
     );
     let deletion = rows[6].left.as_ref().unwrap();
     assert_eq!(deletion.origin, DiffOrigin::Deletion);
-    assert_eq!((deletion.old_line_number, deletion.new_line_number), (Some(5), None));
+    assert_eq!(
+        (deletion.old_line_number, deletion.new_line_number),
+        (Some(5), None)
+    );
     let addition = rows[8].right.as_ref().unwrap();
     assert_eq!(addition.origin, DiffOrigin::Addition);
-    assert_eq!((addition.old_line_number, addition.new_line_number), (None, Some(7)));
+    assert_eq!(
+        (addition.old_line_number, addition.new_line_number),
+        (None, Some(7))
+    );
 
     // Metadata lines are omitted from every row.
     for row in &rows {

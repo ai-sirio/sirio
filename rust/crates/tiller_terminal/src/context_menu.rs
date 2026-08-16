@@ -165,8 +165,9 @@ pub fn items_with_split_availability(
     sole_tab_in_group: bool,
 ) -> Vec<TerminalContextItem> {
     let sole_tab_reason = sole_tab_in_group.then(|| SOLE_TAB_IN_GROUP_REASON.to_owned());
-    let horizontal_reason =
-        sole_tab_reason.clone().or_else(|| split_disabled_reason(true, pane_width, pane_height));
+    let horizontal_reason = sole_tab_reason
+        .clone()
+        .or_else(|| split_disabled_reason(true, pane_width, pane_height));
     let vertical_reason =
         sole_tab_reason.or_else(|| split_disabled_reason(false, pane_width, pane_height));
     items()
@@ -218,7 +219,9 @@ pub struct TerminalContextEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalContextAction, TerminalContextRoute, items, items_with_split_availability};
+    use super::{
+        TerminalContextAction, TerminalContextRoute, items, items_with_split_availability,
+    };
 
     #[test]
     fn menu_contains_every_terminal_and_app_action_in_stable_order() {
@@ -294,11 +297,11 @@ mod tests {
             .filter(|item| item.disabled_reason.is_some())
             .collect();
         assert_eq!(
-            disabled
-                .iter()
-                .map(|item| item.action)
-                .collect::<Vec<_>>(),
-            vec![TerminalContextAction::SplitLeft, TerminalContextAction::SplitRight]
+            disabled.iter().map(|item| item.action).collect::<Vec<_>>(),
+            vec![
+                TerminalContextAction::SplitLeft,
+                TerminalContextAction::SplitRight
+            ]
         );
         for item in &disabled {
             let reason = item.disabled_reason.as_deref().unwrap();
@@ -317,11 +320,11 @@ mod tests {
             .filter(|item| item.disabled_reason.is_some())
             .collect();
         assert_eq!(
-            disabled
-                .iter()
-                .map(|item| item.action)
-                .collect::<Vec<_>>(),
-            vec![TerminalContextAction::SplitAbove, TerminalContextAction::SplitDown]
+            disabled.iter().map(|item| item.action).collect::<Vec<_>>(),
+            vec![
+                TerminalContextAction::SplitAbove,
+                TerminalContextAction::SplitDown
+            ]
         );
         for item in &disabled {
             assert!(item.disabled_reason.as_deref().unwrap().contains("short"));

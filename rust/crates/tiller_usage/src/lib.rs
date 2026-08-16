@@ -41,7 +41,6 @@ mod ollama;
 mod opencode_go;
 
 pub use account::{AgentAccountIdentity, LocalAccountState, parse_codex_identity};
-pub use credentials::{CredentialStore, CredentialStoreError};
 pub use claude::{
     ClaudeUsageFetcher, classify_failure, claude_config_dir, claude_has_credentials_at,
     parse_claude_usage,
@@ -51,6 +50,7 @@ pub use codex::{
     classify_token_refresh_failure, codex_auth_file_path, codex_has_credentials_at,
     load_codex_credentials,
 };
+pub use credentials::{CredentialStore, CredentialStoreError};
 pub use model::{
     ProviderUsage, ProviderUsageState, UsageFetchOutcome, UsageReason, UsageWindow, reduce,
 };

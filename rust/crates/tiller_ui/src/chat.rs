@@ -19,12 +19,12 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tiller_acp::{
-    AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage,
-    EffortOption, ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo,
-    ToolCallDiff, ToolCallLocationInfo,
+    AcpClient, AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ContextUsage, EffortOption,
+    ImageAttachment, ModeCatalog, ModelCatalog, ModelOption, ToolCallContentInfo, ToolCallDiff,
+    ToolCallLocationInfo,
 };
-use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_git::{GitActions, status as git_status};
+use tiller_markdown::{Alignment, Block, Document, Inline, ListItem, ListKind, parse};
 use tiller_persistence::{
     AppDatabase, ChatEntry, ChatPermissionOption, ChatPermissionOutcome, ChatPlanEntry,
     ChatSessionSummary, ChatTranscript, ChatTurn,
@@ -1657,11 +1657,13 @@ impl Chat {
                 // A plan is a running state: each update replaces the
                 // previous Plan card, so entries advance in place.
                 if let Some(Entry::Plan {
-                    entries: existing,
-                    ..
-                }) = self.entries.iter_mut().rev().find(|entry| {
-                    matches!(entry, Entry::Plan { .. })
-                }) {
+                    entries: existing, ..
+                }) = self
+                    .entries
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| matches!(entry, Entry::Plan { .. }))
+                {
                     *existing = entries;
                 } else {
                     self.push_entry(Entry::Plan {
@@ -1714,7 +1716,10 @@ impl Chat {
                 self.client.take();
                 self.expire_unanswered();
                 self.push_entry(Entry::Error {
-                    message: format!("{operation:?} timed out after {:.1}s", duration.as_secs_f32()),
+                    message: format!(
+                        "{operation:?} timed out after {:.1}s",
+                        duration.as_secs_f32()
+                    ),
                     retryable: true,
                     kind: ErrorKind::Connection,
                 });
@@ -2042,7 +2047,8 @@ impl Chat {
             eprintln!("[chat] failed to delete chat session: {error}");
             return;
         }
-        self.history_sessions.retain(|session| session.tab_id != tab_id);
+        self.history_sessions
+            .retain(|session| session.tab_id != tab_id);
         cx.notify();
     }
 
@@ -2553,7 +2559,11 @@ impl Chat {
     /// rides the same seam F-CHAT-32 already built. Throttled 500ms, same
     /// as the Swift original's `followThrottle`, so a burst of location
     /// patches on one tool call doesn't reopen the same file repeatedly.
-    fn maybe_follow_location(&mut self, locations: &[ToolCallLocationInfo], cx: &mut Context<Self>) {
+    fn maybe_follow_location(
+        &mut self,
+        locations: &[ToolCallLocationInfo],
+        cx: &mut Context<Self>,
+    ) {
         if !self.following_edited_files {
             return;
         }
@@ -3660,15 +3670,13 @@ impl Chat {
                             .text_size(typography.footnote)
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(colors.meta)
-                            .child(
-                                div().flex_1().child(Self::render_plain_text(
-                                    language_label.clone(),
-                                    theme,
-                                    format!("{id}-language"),
-                                    source_start,
-                                    interaction,
-                                )),
-                            )
+                            .child(div().flex_1().child(Self::render_plain_text(
+                                language_label.clone(),
+                                theme,
+                                format!("{id}-language"),
+                                source_start,
+                                interaction,
+                            )))
                             .children(code_copy),
                     )
                     .child(
@@ -4221,26 +4229,22 @@ impl Chat {
             let request_entity = entity.clone();
             let confirm_entity = entity.clone();
             let cancel_entity = entity.clone();
-            let mut row = div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .id(format!("edit-summary-open-{entry}-{index}"))
-                        .debug_selector(move || format!("edit-summary-open-{entry}-{index}"))
-                        .flex_1()
-                        .text_size(typography.footnote)
-                        .text_color(colors.accent)
-                        .cursor(CursorStyle::PointingHand)
-                        .hover(|style| style.text_color(colors.title))
-                        .on_click(move |_, _, cx| {
-                            open_entity.update(cx, |_, cx| {
-                                cx.emit(ChatEvent::OpenFile(open_path.clone()));
-                            });
-                        })
-                        .child(path.display().to_string()),
-                );
+            let mut row = div().flex().items_center().gap(px(8.0)).child(
+                div()
+                    .id(format!("edit-summary-open-{entry}-{index}"))
+                    .debug_selector(move || format!("edit-summary-open-{entry}-{index}"))
+                    .flex_1()
+                    .text_size(typography.footnote)
+                    .text_color(colors.accent)
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.text_color(colors.title))
+                    .on_click(move |_, _, cx| {
+                        open_entity.update(cx, |_, cx| {
+                            cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                        });
+                    })
+                    .child(path.display().to_string()),
+            );
             if reverted {
                 row = row.child(
                     div()
@@ -4295,7 +4299,11 @@ impl Chat {
                         .py(px(4.0))
                         .rounded(theme.radii.control)
                         .text_size(typography.footnote)
-                        .text_color(if reverting { colors.meta } else { colors.git_conflict })
+                        .text_color(if reverting {
+                            colors.meta
+                        } else {
+                            colors.git_conflict
+                        })
                         .hover(|style| style.bg(colors.chat_row_hover))
                         .on_click(move |_, _, cx| {
                             if !reverting {
@@ -4783,11 +4791,7 @@ impl Chat {
                 // should look like a different kind of problem.
                 let is_auth_required = kind == ErrorKind::AuthRequired;
                 let (banner_bg, banner_border, banner_text) = if is_auth_required {
-                    (
-                        rgb(0xf5a623).opacity(0.12),
-                        rgb(0xf5a623),
-                        colors.title,
-                    )
+                    (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), colors.title)
                 } else {
                     (
                         colors.diff_deletion_background,
@@ -5278,7 +5282,10 @@ impl Chat {
         } else if self.streaming {
             (rgb(0xf5a623), "working".to_string())
         } else if self.has_completed_turn {
-            (rgb(0x53c653), live_mode_name.unwrap_or_else(|| "Ask".into()))
+            (
+                rgb(0x53c653),
+                live_mode_name.unwrap_or_else(|| "Ask".into()),
+            )
         } else if self.client.is_some() {
             (rgb(0x53c653), "idle".to_string())
         } else {
@@ -5412,7 +5419,10 @@ impl Chat {
             // `recommendedId = models.first?.modelId` exactly. The search
             // filter runs over the full, unfiltered list order (`filter`,
             // not `sort`) so a query never reorders results.
-            let recommended_id = self.available_models.first().map(|option| option.id.clone());
+            let recommended_id = self
+                .available_models
+                .first()
+                .map(|option| option.id.clone());
             let filtered_models: Vec<ModelOption> = self
                 .available_models
                 .iter()
@@ -5659,7 +5669,8 @@ impl Chat {
                             .when(is_selected, |this| this.bg(colors.selection_fill))
                             .hover(|style| style.bg(colors.chat_row_hover))
                             .on_click(move |_, _, cx| {
-                                row_entity.update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
+                                row_entity
+                                    .update(cx, |chat, cx| chat.select_mode(mode.clone(), cx));
                             })
                             .child(mode_name)
                     })),
@@ -6190,16 +6201,11 @@ impl Chat {
                             } else {
                                 let delete_tab_id = tab_id.clone();
                                 div()
-                                    .id(SharedString::from(format!(
-                                        "chat-history-delete-{tab_id}"
-                                    )))
+                                    .id(SharedString::from(format!("chat-history-delete-{tab_id}")))
                                     .text_size(typography.footnote)
                                     .text_color(colors.subtitle)
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.request_delete_chat_session(
-                                            delete_tab_id.clone(),
-                                            cx,
-                                        );
+                                        this.request_delete_chat_session(delete_tab_id.clone(), cx);
                                     }))
                                     .child("Delete")
                                     .into_any_element()
@@ -7698,26 +7704,32 @@ mod tests {
             ["config", "user.email", "test@example.invalid"].as_slice(),
             ["config", "user.name", "Tiller Test"].as_slice(),
         ] {
-            assert!(std::process::Command::new("git")
-                .args(args)
-                .current_dir(&dir.0)
-                .status()
-                .expect("run git setup")
-                .success());
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&dir.0)
+                    .status()
+                    .expect("run git setup")
+                    .success()
+            );
         }
         std::fs::write(dir.0.join("edited.rs"), "old\n").expect("seed tracked file");
-        assert!(std::process::Command::new("git")
-            .args(["add", "edited.rs"])
-            .current_dir(&dir.0)
-            .status()
-            .expect("stage seed file")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args(["commit", "-m", "seed"])
-            .current_dir(&dir.0)
-            .status()
-            .expect("commit seed file")
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "edited.rs"])
+                .current_dir(&dir.0)
+                .status()
+                .expect("stage seed file")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "-m", "seed"])
+                .current_dir(&dir.0)
+                .status()
+                .expect("commit seed file")
+                .success()
+        );
         std::fs::write(dir.0.join("edited.rs"), "new\n").expect("modify tracked file");
 
         cx.update(Theme::init);
@@ -7727,21 +7739,40 @@ mod tests {
                 dir.0.clone(),
                 cx,
             );
-            let diff = |path: &str| ToolCallContentInfo::Diff(ToolCallDiff {
-                path: PathBuf::from(path),
-                old_text: Some("old\n".into()),
-                new_text: "new\n".into(),
+            let diff = |path: &str| {
+                ToolCallContentInfo::Diff(ToolCallDiff {
+                    path: PathBuf::from(path),
+                    old_text: Some("old\n".into()),
+                    new_text: "new\n".into(),
+                })
+            };
+            chat.push_entry(Entry::ToolCall {
+                id: "edit-ok".into(),
+                title: "Edit file".into(),
+                status: "Completed".into(),
+                kind: "Edit".into(),
+                content: vec![diff("edited.rs")],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: false,
+                group_expanded: false,
+            });
+            chat.push_entry(Entry::Assistant {
+                text: "done".into(),
+                document: parse("done"),
             });
             chat.push_entry(Entry::ToolCall {
-                id: "edit-ok".into(), title: "Edit file".into(), status: "Completed".into(),
-                kind: "Edit".into(), content: vec![diff("edited.rs")], locations: vec![],
-                raw_input: None, raw_output: None, expanded: false, group_expanded: false,
-            });
-            chat.push_entry(Entry::Assistant { text: "done".into(), document: parse("done") });
-            chat.push_entry(Entry::ToolCall {
-                id: "edit-stale".into(), title: "Edit missing file".into(), status: "Completed".into(),
-                kind: "Edit".into(), content: vec![diff("missing.rs")], locations: vec![],
-                raw_input: None, raw_output: None, expanded: false, group_expanded: false,
+                id: "edit-stale".into(),
+                title: "Edit missing file".into(),
+                status: "Completed".into(),
+                kind: "Edit".into(),
+                content: vec![diff("missing.rs")],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: false,
+                group_expanded: false,
             });
             chat
         });
@@ -7757,28 +7788,52 @@ mod tests {
         });
         refresh_frame(cx);
 
-        let open = cx.debug_bounds("edit-summary-open-0-0").expect("Open file is drawn");
+        let open = cx
+            .debug_bounds("edit-summary-open-0-0")
+            .expect("Open file is drawn");
         cx.simulate_click(open.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(opened.borrow().as_slice(), [PathBuf::from("edited.rs")]);
 
-        let revert = cx.debug_bounds("edit-summary-revert-0-0").expect("Revert is drawn");
+        let revert = cx
+            .debug_bounds("edit-summary-revert-0-0")
+            .expect("Revert is drawn");
         cx.simulate_click(revert.center(), Modifiers::none());
         cx.run_until_parked();
-        let confirm = cx.debug_bounds("edit-summary-confirm-0-0").expect("Revert requires confirmation");
+        let confirm = cx
+            .debug_bounds("edit-summary-confirm-0-0")
+            .expect("Revert requires confirmation");
         cx.simulate_click(confirm.center(), Modifiers::none());
-        pump_chat_until(cx, &chat, |chat| chat.edit_summaries.get(&0).is_some_and(|state| !state.reverted_paths.is_empty()));
+        pump_chat_until(cx, &chat, |chat| {
+            chat.edit_summaries
+                .get(&0)
+                .is_some_and(|state| !state.reverted_paths.is_empty())
+        });
         refresh_frame(cx);
-        assert!(cx.debug_bounds("edit-summary-reverted-0-0").is_some(), "successful git discard is shown as reverted");
+        assert!(
+            cx.debug_bounds("edit-summary-reverted-0-0").is_some(),
+            "successful git discard is shown as reverted"
+        );
 
-        let revert = cx.debug_bounds("edit-summary-revert-2-0").expect("second Revert is drawn");
+        let revert = cx
+            .debug_bounds("edit-summary-revert-2-0")
+            .expect("second Revert is drawn");
         cx.simulate_click(revert.center(), Modifiers::none());
         cx.run_until_parked();
-        let confirm = cx.debug_bounds("edit-summary-confirm-2-0").expect("stale Revert also requires confirmation");
+        let confirm = cx
+            .debug_bounds("edit-summary-confirm-2-0")
+            .expect("stale Revert also requires confirmation");
         cx.simulate_click(confirm.center(), Modifiers::none());
-        pump_chat_until(cx, &chat, |chat| chat.edit_summaries.get(&2).is_some_and(|state| state.revert_error.is_some()));
+        pump_chat_until(cx, &chat, |chat| {
+            chat.edit_summaries
+                .get(&2)
+                .is_some_and(|state| state.revert_error.is_some())
+        });
         refresh_frame(cx);
-        assert!(cx.debug_bounds("edit-summary-error-2").is_some(), "failed git discard is shown on the card");
+        assert!(
+            cx.debug_bounds("edit-summary-error-2").is_some(),
+            "failed git discard is shown on the card"
+        );
     }
 
     /// F-CHAT-28: a protocol Task tool call becomes a subagent card; its
@@ -8067,7 +8122,10 @@ mod tests {
         cx.executor().allow_parking();
         cx.run_until_parked();
         chat.read_with(cx, |chat, _| {
-            assert!(chat.client.is_none(), "the missing binary must fail to launch");
+            assert!(
+                chat.client.is_none(),
+                "the missing binary must fail to launch"
+            );
         });
         refresh_frame(cx);
 
@@ -8138,7 +8196,10 @@ mod tests {
         cx.executor().allow_parking();
         cx.run_until_parked();
         chat.read_with(cx, |chat, _| {
-            assert!(chat.client.is_none(), "the missing binary must fail to launch");
+            assert!(
+                chat.client.is_none(),
+                "the missing binary must fail to launch"
+            );
         });
 
         chat.update(cx, |chat, _| {
@@ -9290,7 +9351,10 @@ mod tests {
                 )
             });
             let Some(Entry::Error { message, .. }) = auth_entry else {
-                panic!("expected an AuthRequired error entry, got {:?}", chat.entries);
+                panic!(
+                    "expected an AuthRequired error entry, got {:?}",
+                    chat.entries
+                );
             };
             assert!(
                 message.contains("Login"),
@@ -9356,7 +9420,9 @@ mod tests {
         );
         _chat.read_with(cx, |chat, _| {
             assert_eq!(
-                chat.mode_catalog.as_ref().map(|catalog| catalog.current_id.as_str()),
+                chat.mode_catalog
+                    .as_ref()
+                    .map(|catalog| catalog.current_id.as_str()),
                 Some("plan"),
                 "selecting a mode updates the live catalog's current id"
             );
@@ -9371,9 +9437,7 @@ mod tests {
     /// bound action, not a raw key — it has to reach the search field
     /// through its own guard, not the composer's.
     #[gpui::test]
-    async fn model_picker_search_filters_and_badges_the_recommended_model(
-        cx: &mut TestAppContext,
-    ) {
+    async fn model_picker_search_filters_and_badges_the_recommended_model(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
@@ -9444,9 +9508,7 @@ mod tests {
 
         // Backspace is a bound action — it must still reach the search
         // field, not silently corrupt the composer's own draft.
-        cx.simulate_keystrokes(
-            "backspace backspace backspace backspace backspace backspace",
-        );
+        cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("model-option-opus").is_some(),
@@ -10354,8 +10416,11 @@ mod tests {
     ) {
         let dir = TempDir::new();
         let png = dir.0.join("photo.png");
-        std::fs::write(&png, b"not really a png but the type check is extension-based")
-            .expect("write png");
+        std::fs::write(
+            &png,
+            b"not really a png but the type check is extension-based",
+        )
+        .expect("write png");
         std::fs::create_dir_all(dir.0.join("src")).expect("create src dir");
         let txt = dir.0.join("src/notes.txt");
         std::fs::write(&txt, b"todo").expect("write txt");
@@ -10377,7 +10442,11 @@ mod tests {
             "the drop target exists (invisibly) whenever the composer can accept input"
         );
 
-        let paths = ExternalPaths(vec![png.clone(), txt.clone(), huge.clone()].into_iter().collect());
+        let paths = ExternalPaths(
+            vec![png.clone(), txt.clone(), huge.clone()]
+                .into_iter()
+                .collect(),
+        );
         cx.simulate_event(FileDropEvent::Entered {
             position: composer.center(),
             paths,
@@ -10416,8 +10485,11 @@ mod tests {
     async fn dropping_external_files_is_refused_during_permission_wait(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let png = dir.0.join("photo.png");
-        std::fs::write(&png, b"not really a png but the type check is extension-based")
-            .expect("write png");
+        std::fs::write(
+            &png,
+            b"not really a png but the type check is extension-based",
+        )
+        .expect("write png");
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
@@ -10809,7 +10881,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_comment, "the comment line should highlight as a comment");
+        assert!(
+            saw_comment,
+            "the comment line should highlight as a comment"
+        );
         assert!(saw_keyword, "if/then/fi should highlight as keywords");
     }
 }

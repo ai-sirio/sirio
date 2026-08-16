@@ -33,7 +33,9 @@ use tiller_project::resolve_file_link;
 use tiller_theme::Theme;
 
 use crate::chat::{Chat, LinkClickOverride};
-use crate::editor::{Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at};
+use crate::editor::{
+    Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
+};
 
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
@@ -1019,16 +1021,17 @@ fn render_content(
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/"));
         let link_entity = entity.clone();
-        let link_click: LinkClickOverride = Rc::new(move |target, _window, cx| {
-            match resolve_file_link(target, &base) {
-                Some(resolved) => {
-                    link_entity.update(cx, |_, cx| {
-                        cx.emit(FileViewEvent::OpenFile(resolved.path));
-                    });
-                }
-                None => cx.open_url(target),
-            }
-        });
+        let link_click: LinkClickOverride =
+            Rc::new(
+                move |target, _window, cx| match resolve_file_link(target, &base) {
+                    Some(resolved) => {
+                        link_entity.update(cx, |_, cx| {
+                            cx.emit(FileViewEvent::OpenFile(resolved.path));
+                        });
+                    }
+                    None => cx.open_url(target),
+                },
+            );
         return div()
             .id("file-markdown-scroll")
             .debug_selector(|| "file-markdown-scroll".into())
@@ -1381,8 +1384,7 @@ impl EditableLine {
     /// line fully inside it — never a whole line that is only partly
     /// selected, which is what the old line-level background did.
     fn paint_selection(&self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let Some(selection) = self.selection.filter(|selection| !selection.is_collapsed())
-        else {
+        let Some(selection) = self.selection.filter(|selection| !selection.is_collapsed()) else {
             return;
         };
         let line_end = self.line_start + self.line_len;
@@ -2284,9 +2286,7 @@ mod tests {
     // ── F-EDIT-02: real mouse-driven caret placement + drag-select ─────
 
     #[gpui::test]
-    async fn mouse_click_formats_the_clicked_line_not_end_of_buffer(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn mouse_click_formats_the_clicked_line_not_end_of_buffer(cx: &mut gpui::TestAppContext) {
         // Two lines: a short first line and a much longer second one. The
         // old defect fell back to `Selection::point(buffer.len())` on any
         // mouse click, which lands inside the *second* line here — so a

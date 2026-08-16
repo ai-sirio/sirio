@@ -1335,10 +1335,8 @@ impl Render for BrowserSurface {
         self.address_focused = self.address_focus.is_focused(window);
         let entity = cx.entity();
         let permission = self.state.permission_prompt().cloned();
-        let webview = NativeWebViewElement::new(
-            self.webview.clone(),
-            self.webview_scale_correction.clone(),
-        );
+        let webview =
+            NativeWebViewElement::new(self.webview.clone(), self.webview_scale_correction.clone());
 
         div()
             .id("browser-surface")

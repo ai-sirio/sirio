@@ -1002,13 +1002,12 @@ impl Sidebar {
         let sidebar_entity = cx.entity();
         let picker_project_id = project_id.to_string();
         let icon_picker = cx.new(|cx| {
-            ProjectIconPicker::with_value_and_repo(icon.borrow().clone(), &path, cx).on_change_with_context(
-                move |value, cx| {
+            ProjectIconPicker::with_value_and_repo(icon.borrow().clone(), &path, cx)
+                .on_change_with_context(move |value, cx| {
                     sidebar_entity.update(cx, |sidebar, cx| {
                         sidebar.apply_icon_change(picker_project_id.clone(), value, cx)
                     });
-                },
-            )
+                })
         });
         let base_name = self
             .project_names
@@ -1114,8 +1113,7 @@ impl Sidebar {
                 // why instead of pretending nothing happened.
                 Ok(Err(error)) => {
                     let _ = sidebar.update(cx, |sidebar, cx| {
-                        sidebar.notice =
-                            Some(format!("could not open the folder picker: {error}"));
+                        sidebar.notice = Some(format!("could not open the folder picker: {error}"));
                         cx.notify();
                     });
                 }
@@ -2337,11 +2335,7 @@ impl Sidebar {
                     .hover(|style| style.bg(theme.row_hover))
                     .on_click(move |_, window, cx| {
                         remove_entity.update(cx, |sidebar, cx| {
-                            sidebar.request_remove_project(
-                                remove_project_id.clone(),
-                                window,
-                                cx,
-                            );
+                            sidebar.request_remove_project(remove_project_id.clone(), window, cx);
                         });
                     })
                     .child(IconElement::new(Icon::Close, px(13.0)).text_color(theme.diff_deletion))
@@ -3012,7 +3006,9 @@ impl Render for Sidebar {
                                     div()
                                         .text_size(theme.typography.caption2)
                                         .text_color(theme.meta)
-                                        .child("Tab to switch field · Enter to create · Esc to cancel"),
+                                        .child(
+                                            "Tab to switch field · Enter to create · Esc to cancel",
+                                        ),
                                 ),
                         ),
                 )
@@ -3288,7 +3284,8 @@ mod tests {
                     .map(|row| row.id)
             })
             .expect("the new worktree row exists");
-        let row_selector: &'static str = Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
 
         let row = cx
             .debug_bounds(row_selector)

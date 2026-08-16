@@ -814,9 +814,7 @@ mod tests {
         let parent = TempDir::new("clone-parent");
         let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let form = cx.update(|window, _| {
-            window.root::<CloneForm>().flatten().expect("form root")
-        });
+        let form = cx.update(|window, _| window.root::<CloneForm>().flatten().expect("form root"));
         form.update(&mut cx.cx, |form, cx| {
             form.set_url(source.0.display().to_string(), cx)
         });
@@ -832,9 +830,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             cx.run_until_parked();
-            cx.cx
-                .executor()
-                .advance_clock(Duration::from_millis(25));
+            cx.cx.executor().advance_clock(Duration::from_millis(25));
             cx.run_until_parked();
             if !matches!(
                 form.read_with(&cx.cx, |form, _| form.status().clone()),
@@ -860,9 +856,7 @@ mod tests {
         let parent = TempDir::new("create-parent");
         let window = cx.add_window(|_, cx| CreateForm::new(parent.0.clone(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let form = cx.update(|window, _| {
-            window.root::<CreateForm>().flatten().expect("form root")
-        });
+        let form = cx.update(|window, _| window.root::<CreateForm>().flatten().expect("form root"));
         form.update(&mut cx.cx, |form, cx| form.set_name("new-project", cx));
         cx.run_until_parked();
 

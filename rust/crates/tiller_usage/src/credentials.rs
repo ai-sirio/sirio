@@ -99,7 +99,10 @@ impl CredentialStore {
     /// replaced — its other entries were already unreadable.
     pub fn set(&self, key: &str, value: &str) -> Result<(), CredentialStoreError> {
         let mut map = self.entries();
-        map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        map.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
         self.write(&map)
     }
 
@@ -208,10 +211,8 @@ mod tests {
 
     impl TempStoreDir {
         fn new(label: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tiller-credentials-{label}-{}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("tiller-credentials-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             Self(path)
         }
@@ -245,7 +246,10 @@ mod tests {
             store.get("opencode-go-cookie").as_deref(),
             Some("auth=Fe26.2**abc")
         );
-        assert_eq!(store.get("ollama-cloud-cookie").as_deref(), Some("session=xyz"));
+        assert_eq!(
+            store.get("ollama-cloud-cookie").as_deref(),
+            Some("session=xyz")
+        );
 
         store.delete("opencode-go-cookie").expect("delete");
         assert_eq!(store.get("opencode-go-cookie"), None, "deleted key is gone");
@@ -292,7 +296,9 @@ mod tests {
             None,
             "a malformed store reads as absent, like a failed Keychain lookup"
         );
-        store.set("k", "v").expect("set replaces the malformed file");
+        store
+            .set("k", "v")
+            .expect("set replaces the malformed file");
         assert_eq!(store.get("k").as_deref(), Some("v"));
     }
 
