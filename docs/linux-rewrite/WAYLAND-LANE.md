@@ -522,3 +522,29 @@ Scripts/linux-drive.sh out.png '
 
 `Scripts/control-probe.py <socket> <method> [k=v ...]` sends one line-delimited control request and
 prints the reply — `linux-drive.sh` has no `ctl` action of its own.
+
+## Every frame is now captured at one fixed size (1715x972)
+
+`shot()` used to force the lazy repaint by **alternating** the output between 1715x972 and
+1400x900, leaving each capture at whichever size came next. That made the lane an instrument whose
+scale changed between observation and action: coordinates read off one frame were sent while the
+output was at the other size, `pointer_command` scaled them by the then-current `OUTPUT_W/OUTPUT_H`,
+the click landed in dead space, and the row got written up as a missing feature. It cost at least two
+false negatives in wave F (`F-EDIT-10`, `F-EDIT-11`, both later corrected to PASSED) and it spanned
+invocations, because the alternation counter resets every run while the compositor keeps the size the
+previous run left behind.
+
+`shot()` now nudges to the off-size and returns immediately, so the configure still fires but every
+captured frame — and every click, this run or the next — is in one coordinate space.
+
+Controls run when this changed, all three of which must keep holding if you touch `shot()`:
+
+- **Scale is fixed.** Four consecutive frames all reported `1715x972`.
+- **Frames are still fresh.** Those same four frames had four different md5 sums, with colour counts
+  tracking the real UI changes (6493 → 6771 → 8741 → 7958). A repaint fix that returns stale frames
+  is worse than the bug it replaces — check this, not just the size.
+- **Coordinates land.** With `Terminal` selected, a `click 378 51` read off the previous frame
+  selected the `Chat` tab: tab underline moved, sidebar highlight moved, composer rendered.
+
+Read coordinates off the most recent frame and they are valid. You no longer need to reason about
+which size a frame was taken at.
