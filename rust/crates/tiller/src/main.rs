@@ -58,6 +58,7 @@ mod command_palette;
 mod panes;
 mod session;
 mod tab_machinery;
+mod tray;
 
 use command_palette::{
     EMPTY_RESULT_LABEL, PaletteCommand, PaletteContext, SidebarPaletteAction, SidebarPaletteTarget,
@@ -2927,6 +2928,9 @@ impl TillerWorkspace {
         terminal_breadcrumb: String,
         launch_snapshot: RestoredSession,
         activity: AgentActivityModel,
+        tray_roster: Option<tray::SharedRoster>,
+        tray_requests: Option<tray::TrayRequestQueue>,
+        tray_handle: Option<tray::TrayHandle>,
         cx: &mut Context<Self>,
     ) -> Self {
         panes::bind_keys(cx);
@@ -2939,6 +2943,11 @@ impl TillerWorkspace {
         // small queue lets tab actions and shell navigation update the
         // workspace without changing the UI callback contracts.
         cx.spawn(async move |this, cx| {
+            // F-USE-04: the last roster ksni was actually told about --
+            // `TrayHandle::nudge` is a synchronous round trip to ksni's
+            // background thread, so this skips it on ticks where nothing
+            // moved rather than paying that cost every 40ms.
+            let mut last_tray_roster: Vec<tray::TrayRosterEntry> = Vec::new();
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(40))
@@ -2955,7 +2964,17 @@ impl TillerWorkspace {
                     };
                     std::mem::take(&mut *actions)
                 };
-                if pending.is_empty() && pending_control.is_empty() {
+                let pending_tray = tray_requests.as_ref().and_then(|queue| {
+                    queue
+                        .lock()
+                        .ok()
+                        .map(|mut requests| std::mem::take(&mut *requests))
+                });
+                if pending.is_empty()
+                    && pending_control.is_empty()
+                    && pending_tray.as_ref().is_none_or(Vec::is_empty)
+                    && tray_roster.is_none()
+                {
                     continue;
                 }
                 if this
@@ -3139,6 +3158,46 @@ impl TillerWorkspace {
                                 }
                                 ControlAction::RefreshSidebar => {
                                     workspace.refresh_sidebar(cx);
+                                }
+                            }
+                        }
+                        // F-USE-04: refresh the tray roster from the same
+                        // per-worktree pane/activity state
+                        // `evict_over_capacity_worktrees`'s `status_of`
+                        // closure already reads, every tick the tray is
+                        // registered -- cheap for a handful of worktrees,
+                        // and simpler than threading a change notification
+                        // through every call site that can move a status.
+                        if let Some(roster) = &tray_roster {
+                            let snapshot = workspace.tray_roster_snapshot();
+                            if snapshot != last_tray_roster {
+                                if let Ok(mut guard) = roster.lock() {
+                                    *guard = snapshot.clone();
+                                }
+                                last_tray_roster = snapshot;
+                                if let Some(handle) = &tray_handle {
+                                    handle.nudge();
+                                }
+                            }
+                        }
+                        // F-USE-05 / F-WIN-08: roster clicks and the tray
+                        // icon's own left click, drained the same way
+                        // `pending`/`pending_control` are above.
+                        for request in pending_tray.into_iter().flatten() {
+                            match request {
+                                tray::TrayRequest::ShowWindow => {
+                                    window.activate_window();
+                                }
+                                tray::TrayRequest::SelectWorktree(path) => {
+                                    if workspace.select_worktree(path, cx).is_ok()
+                                        && let Some(id) = workspace.worst_status_tab_id(cx)
+                                    {
+                                        workspace.select_tab(id, cx);
+                                    }
+                                    window.activate_window();
+                                }
+                                tray::TrayRequest::Quit => {
+                                    cx.quit();
                                 }
                             }
                         }
@@ -4145,6 +4204,53 @@ impl TillerWorkspace {
             .iter()
             .filter_map(|tab| self.tab_status(tab, cx))
             .min_by_key(|status| Self::status_priority(*status))
+    }
+
+    /// F-USE-04: the tray menu's roster, one row per worktree with a live
+    /// [`AgentStatus`], sorted by the same urgency rule the sidebar uses.
+    /// Reads `control_state` rather than `self.project_catalog` --
+    /// `project_catalog` is this window's own render-facing snapshot and
+    /// does not pick up a bare `project.add`/`worktree.set` the way
+    /// `evict_over_capacity_worktrees`'s `status_of` closure (which reads
+    /// the same `control_state.workspaces` this does) already relies on.
+    /// Pane status is tracked per pane id across the whole app, not scoped
+    /// to whichever worktree is selected in this window, so this covers
+    /// every mounted worktree, not just `self.tabs`.
+    fn tray_roster_snapshot(&self) -> Vec<tray::TrayRosterEntry> {
+        let state = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = Vec::new();
+        for workspace in &state.workspaces {
+            let Ok(panes) = self.panes.list_for(Path::new(&workspace.path)) else {
+                continue;
+            };
+            let pane_ids: Vec<String> = panes.into_iter().map(|pane| pane.id).collect();
+            let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
+            let Some(status) = self.activity.status_for_panes(&refs) else {
+                continue;
+            };
+            entries.push(tray::TrayRosterEntry {
+                path: PathBuf::from(&workspace.path),
+                branch: workspace.branch.clone(),
+                project_name: workspace.project.clone(),
+                status,
+            });
+        }
+        tiller_activity::AttentionSort::sorted(&entries, |entry| Some(entry.status))
+    }
+
+    /// F-USE-05: the tab a tray roster click jumps to once its worktree is
+    /// selected. Same priority order `worktree_status`'s aggregate dot
+    /// already uses (error > running/needs-input > idle > done); ties keep
+    /// tab order.
+    fn worst_status_tab_id(&self, cx: &App) -> Option<usize> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| self.tab_status(tab, cx).map(|status| (tab.id, status)))
+            .min_by_key(|(_, status)| Self::status_priority(*status))
+            .map(|(id, _)| id)
     }
 
     fn activity_surfaces(&self, cx: &App) -> Vec<ActivitySurface> {
@@ -9949,6 +10055,15 @@ fn main() {
         let workspace_for_quit = Arc::new(Mutex::new(None::<Entity<TillerWorkspace>>));
         let workspace_slot = workspace_for_quit.clone();
 
+        // F-USE-04/F-USE-05/F-WIN-08: registers the StatusNotifierItem
+        // once, for the process's lifetime. `None` (no SNI host answered
+        // -- headless CI, a WM with no tray applet) leaves the app running
+        // exactly as it did before this existed.
+        let (tray_roster, tray_requests, tray_handle) = match tray::spawn() {
+            Some((roster, requests, handle)) => (Some(roster), Some(requests), Some(handle)),
+            None => (None, None, None),
+        };
+
         let window_result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -10135,8 +10250,23 @@ fn main() {
                         terminal_breadcrumb.clone(),
                         restored.clone(),
                         activity_model,
+                        tray_roster.clone(),
+                        tray_requests.clone(),
+                        tray_handle,
                         cx,
                     )
+                });
+                // F-WIN-08: the Swift original hides the window on close
+                // via an `NSWindowDelegate` and reopens it from the Dock
+                // icon or the menu-bar roster. `PlatformWindow` exposes no
+                // hide/show pair on Linux, so this intercepts the close
+                // request and minimizes instead -- the window (and every
+                // pane's PTY) never actually closes either way.
+                // `window.activate_window()` (see `tray::TrayRequest`'s
+                // handlers above) is the re-show half.
+                window.on_window_should_close(cx, |window, _cx| {
+                    window.minimize_window();
+                    false
                 });
                 *workspace_slot
                     .lock()
@@ -10513,6 +10643,9 @@ mod tests {
                 diagnostics: Vec::new(),
             },
             AgentActivityModel::new(),
+            None,
+            None,
+            None,
             cx,
         )
     }
@@ -10602,6 +10735,9 @@ mod tests {
                 diagnostics: Vec::new(),
             },
             AgentActivityModel::new(),
+            None,
+            None,
+            None,
             cx,
         )
     }
@@ -14547,6 +14683,121 @@ mod tests {
                 vec![false, true, true],
                 "the oldest idle worktree (main) is evicted; the just-selected \
                  worktree (third) and the other still-open one (second) stay mounted"
+            );
+        });
+    }
+
+    /// F-USE-04: the tray roster only lists worktrees with a live agent
+    /// pane, sourced from `control_state` (populated here the same way
+    /// `project.add`/`worktree.set` populate it live) rather than
+    /// `project_catalog`, and orders them by [`AgentStatus`] priority --
+    /// the worse status leads regardless of insertion order.
+    #[gpui::test]
+    async fn tray_roster_lists_only_active_worktrees_sorted_by_urgency(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, _cx| {
+            let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "tiller-tray-roster-{}-{unique}",
+                std::process::id()
+            ));
+            let paths: Vec<PathBuf> = ["alpha", "beta", "gamma"]
+                .iter()
+                .map(|name| root.join(name))
+                .collect();
+            for path in &paths {
+                std::fs::create_dir_all(path).expect("create fixture worktree");
+            }
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "tray-roster-project".into(),
+                name: "Tray Roster Project".into(),
+                root_path: paths[0].clone(),
+                is_git: true,
+                worktrees: paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| session::CatalogWorktree {
+                        branch: format!("branch-{index}"),
+                        path: path.clone(),
+                        is_primary: index == 0,
+                    })
+                    .collect(),
+            }]);
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &paths[0],
+            )));
+
+            // alpha finishes, beta errors, gamma has a pane but no notified
+            // status yet -- only alpha and beta should reach the roster.
+            workspace
+                .panes
+                .set_external(
+                    &paths[0],
+                    vec![PaneInfo {
+                        id: "pane-alpha".into(),
+                        tab: "control".into(),
+                        title: "shell".into(),
+                        agent: String::new(),
+                        active: true,
+                    }],
+                )
+                .expect("register alpha pane");
+            workspace
+                .panes
+                .set_external(
+                    &paths[1],
+                    vec![PaneInfo {
+                        id: "pane-beta".into(),
+                        tab: "control".into(),
+                        title: "shell".into(),
+                        agent: String::new(),
+                        active: true,
+                    }],
+                )
+                .expect("register beta pane");
+            workspace
+                .panes
+                .set_external(
+                    &paths[2],
+                    vec![PaneInfo {
+                        id: "pane-gamma".into(),
+                        tab: "control".into(),
+                        title: "shell".into(),
+                        agent: String::new(),
+                        active: true,
+                    }],
+                )
+                .expect("register gamma pane");
+            workspace
+                .activity
+                .notify("pane-alpha", AgentStatus::Done, Instant::now());
+            workspace
+                .activity
+                .notify("pane-beta", AgentStatus::Error, Instant::now());
+
+            let roster = workspace.tray_roster_snapshot();
+            let summary: Vec<(String, AgentStatus)> = roster
+                .iter()
+                .map(|entry| (entry.branch.clone(), entry.status))
+                .collect();
+            assert_eq!(
+                summary,
+                vec![
+                    ("branch-1".to_string(), AgentStatus::Error),
+                    ("branch-0".to_string(), AgentStatus::Done),
+                ],
+                "gamma (no notified status) is absent; beta (Error) outranks \
+                 alpha (Done) despite being added second"
             );
         });
     }
