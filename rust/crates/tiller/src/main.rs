@@ -604,6 +604,10 @@ struct OpenTab {
     session_state: SessionTabState,
     panes: PaneNode<TabContent>,
     focused_pane: usize,
+    /// F-CORE-DOM-07: mirrors Swift's `tab.titleIsAutoNamed` — true until a
+    /// user-driven rename (`commit_tab_rename`) turns it off, which is the
+    /// only thing that permanently opts a tab out of automatic renaming.
+    title_is_auto_named: bool,
 }
 
 struct TabRename {
@@ -2103,6 +2107,91 @@ fn post_desktop_notification(payload: &NotificationPayload) {
     }
 }
 
+/// F-CORE-DOM-07: matches `AutoNamer.summarize`'s wide timeout — `claude -p`
+/// alone measured ~20s cold; 10s truncated every real pass.
+const AUTO_NAMING_TIMEOUT: Duration = Duration::from_secs(60);
+/// Matches `AutoNamer.maxTitleLength`.
+const AUTO_NAMING_MAX_TITLE_LEN: usize = 60;
+
+/// The exact prompt text from the Swift `AutoNamer.summarize`, unchanged so
+/// a summarizer tuned against the reference behaves the same here.
+fn auto_naming_prompt(transcript: &str) -> String {
+    format!(
+        "Summarize this coding-agent conversation into a short title, 2-5 words, in the conversation's own language, no quotes, no punctuation at the end. Reply with only the title.\n\n{transcript}"
+    )
+}
+
+/// Ordered summarize candidates for one auto-naming pass, ported from
+/// `SummarizerSelection.adapters`: the user-selected summarizer agent
+/// first, then the tab's own agent as a runtime fallback — each already
+/// resolved to a concrete shell command via `AgentAdapter::summarizer_command`,
+/// so a candidate with no summarizer support (an adapter this port has not
+/// yet ported one for) is dropped rather than attempted.
+fn summarizer_candidate_commands(
+    selected_id: &str,
+    tab_agent_id: Option<&str>,
+    prompt: &str,
+) -> Vec<String> {
+    let primary = AGENT_CATALOG.iter().find(|adapter| adapter.id() == selected_id);
+    let fallback = tab_agent_id.and_then(|id| AGENT_CATALOG.iter().find(|adapter| adapter.id() == id));
+    let mut adapters: Vec<&dyn tiller_agents::AgentAdapter> = Vec::new();
+    if let Some(primary) = primary {
+        adapters.push(*primary);
+    }
+    if let Some(fallback) = fallback
+        && Some(fallback.id()) != primary.map(|adapter| adapter.id())
+    {
+        adapters.push(*fallback);
+    }
+    adapters
+        .into_iter()
+        .filter_map(|adapter| adapter.summarizer_command(prompt))
+        .collect()
+}
+
+/// Runs one summarizer candidate through the user's shell exactly like a
+/// terminal-tab command does (`$SHELL`, falling back to `/bin/zsh -lc`),
+/// with its cwd set to the worktree. Every failure mode — missing binary,
+/// empty output, a hung process — returns `None` rather than surfacing an
+/// error, matching `AutoNamer.summarize`'s "never a visible error" contract.
+/// Blocking: callers run this on a background executor, never the UI thread.
+fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration) -> Option<String> {
+    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut child = std::process::Command::new(&shell_program)
+        .args(["-lc", command])
+        .current_dir(worktree_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buffer = String::new();
+        let _ = stdout.read_to_string(&mut buffer);
+        let _ = tx.send(buffer);
+    });
+    let output = match rx.recv_timeout(timeout) {
+        Ok(output) => {
+            let _ = child.wait();
+            output
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let title = output.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.chars().take(AUTO_NAMING_MAX_TITLE_LEN).collect())
+    }
+}
+
 /// Resolves persisted chat identity into the command and tab metadata that
 /// can actually be restored. Legacy rows and adapters without an ACP server
 /// use the default chat command but do not retain a misleading agent id.
@@ -2797,6 +2886,10 @@ struct TillerWorkspace {
     /// already replaced) can't clear a toast it doesn't own.
     toast: Option<Toast>,
     next_toast_id: u64,
+    /// F-CORE-DOM-07: one [`tiller_project::AutoNamingThrottle`] per tab id,
+    /// gating how often a running→done/needs-input transition is allowed to
+    /// spawn a real summarizer process and rewrite that tab's title.
+    auto_naming_throttle: BTreeMap<usize, tiller_project::AutoNamingThrottle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2931,6 +3024,7 @@ impl TillerWorkspace {
                                     let transition =
                                         workspace.activity.notify(&pane_id, status, Instant::now());
                                     workspace.post_activity_notification(&transition);
+                                    workspace.request_auto_rename(&transition, cx);
                                     workspace.sync_activity(cx);
                                 }
                                 ControlAction::SelectWorktree { selector, reply } => {
@@ -3180,6 +3274,7 @@ impl TillerWorkspace {
             pending_pane_close: None,
             toast: None,
             next_toast_id: 0,
+            auto_naming_throttle: BTreeMap::new(),
         };
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
@@ -3457,6 +3552,7 @@ impl TillerWorkspace {
                 );
                 if let Some(transition) = transition {
                     workspace.post_activity_notification(&transition);
+                    workspace.request_auto_rename(&transition, cx);
                 }
                 // Terminal exit status is stored on TerminalView even when
                 // no agent activity transition exists. Repaint the shell so
@@ -3501,6 +3597,7 @@ impl TillerWorkspace {
                     ) {
                         Ok(Some(transition)) => {
                             workspace.post_activity_notification(&transition);
+                            workspace.request_auto_rename(&transition, cx);
                             workspace.sync_activity(cx);
                         }
                         Ok(None) => workspace.sync_activity(cx),
@@ -4596,6 +4693,107 @@ impl TillerWorkspace {
         post_desktop_notification(&payload);
     }
 
+    /// F-CORE-DOM-07: on a running→done/needs-input transition, throttled
+    /// auto-naming re-titles the owning chat tab from its own transcript —
+    /// ported from `AppModel.requestAutoRename`. Scoped to chat tabs (the
+    /// `TabContent::Chat` transcript is a real, already-wired signal); a
+    /// terminal tab's file-based transcript source is a separate, larger
+    /// port (`resolveFileTranscriptSource` in the Swift original) left out
+    /// of this pass.
+    fn request_auto_rename(&mut self, transition: &Transition, cx: &mut Context<Self>) {
+        let Some(AgentStatus::Running) = transition.old else {
+            return;
+        };
+        if !matches!(transition.new, AgentStatus::Done | AgentStatus::NeedsInput) {
+            return;
+        }
+        if !self.settings.read(cx).snapshot().auto_naming {
+            return;
+        }
+        let Some(pane_id) = transition
+            .pane_id
+            .strip_prefix("pane-")
+            .and_then(|id| id.parse::<usize>().ok())
+        else {
+            return;
+        };
+        let Some(tab_index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.contains(pane_id))
+        else {
+            return;
+        };
+        if !self.tabs[tab_index].title_is_auto_named {
+            return;
+        }
+
+        let mut transcript = None;
+        self.tabs[tab_index].panes.for_each(&mut |leaf_id, content| {
+            if leaf_id == pane_id
+                && let TabContent::Chat(chat) = content
+            {
+                transcript = Some(chat.read(cx).transcript_for_resume());
+            }
+        });
+        let Some(transcript) = transcript else {
+            return;
+        };
+        if transcript.trim().is_empty() {
+            return;
+        }
+
+        let tab_id = self.tabs[tab_index].id;
+        let now = Instant::now();
+        let transcript_len = transcript.chars().count();
+        let throttle = self.auto_naming_throttle.entry(tab_id).or_default();
+        if !throttle.should_request(now, transcript_len) {
+            return;
+        }
+        throttle.record_request(now, transcript_len);
+
+        let selected_id = self.settings.read(cx).snapshot().summarizer_agent.id();
+        let tab_agent_id = self.tabs[tab_index].agent_id.clone();
+        let prompt = auto_naming_prompt(&transcript);
+        let commands = summarizer_candidate_commands(selected_id, tab_agent_id.as_deref(), &prompt);
+        if commands.is_empty() {
+            return;
+        }
+        let worktree_path = self.working_directory.to_string_lossy().into_owned();
+        cx.spawn(async move |this, cx| {
+            for command in commands {
+                let worktree_path = worktree_path.clone();
+                let title = cx
+                    .background_executor()
+                    .spawn(async move {
+                        run_summarizer_command(&command, &worktree_path, AUTO_NAMING_TIMEOUT)
+                    })
+                    .await;
+                let Some(title) = title else { continue };
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.apply_auto_title(tab_id, title, cx);
+                });
+                return;
+            }
+        })
+        .detach();
+    }
+
+    /// Applies a summarizer-generated title, unless the tab was renamed by
+    /// the user (or already auto-renamed) while the process was in flight.
+    fn apply_auto_title(&mut self, tab_id: usize, title: String, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if !tab.title_is_auto_named {
+            return;
+        }
+        tab.title = title;
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+        cx.notify();
+    }
+
     fn seam(&self) -> impl IntoElement {
         div().w(px(SEAM_WIDTH)).h_full().bg(gpui::black())
     }
@@ -5049,6 +5247,7 @@ impl TillerWorkspace {
             session_state: SessionTabState::with_root(self.next_pane_id),
             panes: PaneNode::leaf(self.next_pane_id, TabContent::Chat(chat)),
             focused_pane: self.next_pane_id,
+            title_is_auto_named: true,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -5102,6 +5301,7 @@ impl TillerWorkspace {
             session_state: SessionTabState::with_root(pane_id),
             panes: PaneNode::leaf(pane_id, TabContent::Chat(chat)),
             focused_pane: pane_id,
+            title_is_auto_named: true,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -5165,6 +5365,7 @@ impl TillerWorkspace {
             session_state: SessionTabState::with_root(pane_id),
             panes: PaneNode::leaf(pane_id, TabContent::Terminal { view: terminal }),
             focused_pane: pane_id,
+            title_is_auto_named: true,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -5245,6 +5446,7 @@ impl TillerWorkspace {
             session_state: SessionTabState::with_root(self.next_pane_id),
             panes: PaneNode::leaf(self.next_pane_id, TabContent::File { view }),
             focused_pane: self.next_pane_id,
+            title_is_auto_named: true,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -5276,6 +5478,7 @@ impl TillerWorkspace {
             session_state: SessionTabState::with_root(self.next_pane_id),
             panes: PaneNode::leaf(self.next_pane_id, TabContent::Changes(changes)),
             focused_pane: self.next_pane_id,
+            title_is_auto_named: true,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -5310,6 +5513,7 @@ impl TillerWorkspace {
             session_state: SessionTabState::with_root(pane_id),
             panes: PaneNode::leaf(pane_id, TabContent::Browser(browser.clone())),
             focused_pane: pane_id,
+            title_is_auto_named: true,
         });
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
@@ -7276,6 +7480,10 @@ impl TillerWorkspace {
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == rename.tab_id)
         {
             tab.title = title.to_owned();
+            // F-CORE-DOM-07: a user-driven rename permanently opts this tab
+            // out of automatic renaming, mirroring Swift's
+            // `tab.titleIsAutoNamed = false` on manual rename.
+            tab.title_is_auto_named = false;
             self.schedule_save(cx);
             self.sync_activity(cx);
         }
@@ -9092,6 +9300,7 @@ fn restore_tabs(
             session_state: tab_state,
             panes,
             focused_pane: pane_id,
+            title_is_auto_named: true,
         });
         if tab.active {
             active = id;
@@ -9220,6 +9429,7 @@ fn restore_tabs_in_workspace(
             session_state: tab_state,
             panes,
             focused_pane: pane_id,
+            title_is_auto_named: true,
         });
         if tab.active {
             active = id;
@@ -10177,6 +10387,7 @@ mod tests {
                     },
                 ),
                 focused_pane: id,
+                title_is_auto_named: true,
             })
             .collect();
         let pending_actions = Arc::new(Mutex::new(Vec::new()));
@@ -10274,6 +10485,7 @@ mod tests {
             session_state: SessionTabState::with_root(0),
             panes: PaneNode::leaf(0, TabContent::Terminal { view: terminal }),
             focused_pane: 0,
+            title_is_auto_named: true,
         }];
         let pending_actions = Arc::new(Mutex::new(Vec::new()));
         let control_actions = Arc::new(Mutex::new(Vec::new()));
@@ -10799,6 +11011,7 @@ mod tests {
                 session_state: SessionTabState::with_root(0),
                 panes: PaneNode::leaf(0, TabContent::Chat(chat)),
                 focused_pane: 0,
+                title_is_auto_named: true,
             };
             workspace.rebuild_tab_machinery();
             workspace
@@ -11108,6 +11321,7 @@ mod tests {
                 session_state: SessionTabState::with_root(1),
                 panes: PaneNode::leaf(1, TabContent::Chat(chat_for_tab)),
                 focused_pane: 1,
+                title_is_auto_named: true,
             });
             workspace.active_tab = 1;
             workspace.next_tab_id = 2;
@@ -14180,5 +14394,94 @@ mod tests {
             click_count: 1,
         });
         cx.run_until_parked();
+    }
+
+    // F-CORE-DOM-07: the real trigger-and-sink side of `AutoNamingThrottle`
+    // — the throttle's own gating logic already has a pure unit test in
+    // `tiller_project::domain`; these cover the production plumbing wired
+    // on top of it in this file.
+
+    #[test]
+    fn auto_naming_prompt_matches_the_reference_wording() {
+        let prompt = auto_naming_prompt("user: hi\nassistant: hello");
+        assert!(prompt.starts_with(
+            "Summarize this coding-agent conversation into a short title, 2-5 words"
+        ));
+        assert!(prompt.ends_with("user: hi\nassistant: hello"));
+    }
+
+    #[test]
+    fn summarizer_candidates_prefer_the_selected_agent_then_the_tab_agent() {
+        // opencode and omp both have a ported `summarizer_command`; claude
+        // does not yet (its own, separate inventory row) and must be
+        // dropped rather than guessed.
+        let commands = summarizer_candidate_commands("opencode", Some("omp"), "prompt");
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].starts_with("opencode run --pure"));
+        assert!(commands[1].starts_with("oh-my-pi --print --no-tools"));
+
+        // The unported primary is dropped, leaving only the fallback.
+        let commands = summarizer_candidate_commands("claude", Some("opencode"), "prompt");
+        assert_eq!(commands, vec!["opencode run --pure 'prompt'".to_string()]);
+
+        // Same agent selected and fallback: no duplicate entry.
+        let commands = summarizer_candidate_commands("omp", Some("omp"), "prompt");
+        assert_eq!(commands.len(), 1);
+
+        // Neither candidate has a ported summarizer: no attempt at all.
+        let commands = summarizer_candidate_commands("claude", Some("pi"), "prompt");
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn run_summarizer_command_trims_and_truncates_real_process_output() {
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let title = run_summarizer_command(
+            "printf '  Fix the login race  \\n'",
+            &cwd,
+            Duration::from_secs(5),
+        );
+        assert_eq!(title, Some("Fix the login race".to_string()));
+
+        let long = "x".repeat(200);
+        let title = run_summarizer_command(
+            &format!("printf '%s' '{long}'"),
+            &cwd,
+            Duration::from_secs(5),
+        );
+        assert_eq!(title.map(|title| title.len()), Some(AUTO_NAMING_MAX_TITLE_LEN));
+    }
+
+    #[test]
+    fn run_summarizer_command_returns_none_for_empty_output_or_missing_binary() {
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(
+            run_summarizer_command("true", &cwd, Duration::from_secs(5)),
+            None
+        );
+        assert_eq!(
+            run_summarizer_command(
+                "/definitely/not/a/real/binary --summarize",
+                &cwd,
+                Duration::from_secs(5)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn run_summarizer_command_kills_and_returns_none_on_timeout() {
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let start = std::time::Instant::now();
+        let title = run_summarizer_command(
+            "sleep 5 && printf too-late",
+            &cwd,
+            Duration::from_millis(200),
+        );
+        assert_eq!(title, None);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "a timed-out summarizer must not block the caller for the full sleep"
+        );
     }
 }
