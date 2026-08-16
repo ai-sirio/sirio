@@ -89,18 +89,115 @@ most `half-proven` on cross-compilation evidence, and `PASSED` only from a criti
 The seven rows in `P128-platform-exemptions-overstated.md` are the cautionary tale in one direction;
 signing off untested platforms would be the same error in the other.
 
-## Recommended order
+## What was actually done (wave J)
 
-1. Finish the Linux contract (wave I is closing the last 6 rows). Stopping mid-wave buys nothing.
-2. **Portability wave**, in this order:
-   a. Target-gate `gtk`/`ksni` in the binary crate and make the gpui/gpui_platform pin conditional.
-   b. `cargo check` both targets; fix what it reports until both are green.
-   c. Add both `cargo check` targets to the repo gate so the debt cannot silently return.
-   d. Introduce a platform seam for the tray and for process enumeration, with the Linux impl behind
-      it unchanged, so the macOS/Windows impls are additive rather than surgical.
-3. Only then, per-platform implementations — and they stay unverified until someone runs them on real
-   hardware.
+The plan this section used to lay out (target-gate the manifests, drive both `cargo check` targets
+green, add them to the gate, seam the tray/process-enumeration) was executed in that order across
+four slices — J1-gate, J2-windows, J3-macos, J4-ci — and this is the honest result, not the plan.
+**The debt this document originally worried about (item 1: unconditional `gtk`/`ksni` deps, item 2:
+the unconditional `wayland`/`x11` feature pin) is fully closed.** What is left is smaller, well
+understood, and split cleanly into two kinds: things blocked by *this box*, and things nobody has
+written yet.
 
-The cheapest insurance is step 2c. Every item in this document except the tray was introduced
-accidentally, by an agent solving a Linux problem with the nearest Linux tool; a compile gate on three
-targets makes that impossible to do silently.
+### Per-crate, per-target: what `cargo check` actually proves today
+
+13 workspace crates, checked bottom-up against both `x86_64-pc-windows-msvc` and
+`aarch64-apple-darwin`. **6 need no platform work at all and are compiler-verified clean on both:**
+
+| crate | Windows | macOS |
+|---|---|---|
+| `tiller_project`, `tiller_git`, `tiller_agents`, `tiller_activity`, `tiller_markdown`, `tiller_usage` | GREEN | GREEN |
+
+**The other 7 cannot be compiler-verified from this box, on either target, for a reason that has
+nothing to do with our source:**
+
+| crate | blocked by |
+|---|---|
+| `tiller_persistence`, `tiller_acp`, `tiller_control`, `tiller_ui`, `tiller` | Wall 1 — `rusqlite`'s bundled `sqlite3.c` needs a real MSVC/macOS SDK to compile against |
+| `tiller_theme`, `tiller_terminal`, `tiller_ui`, `tiller` | Wall 2 — `gpui`'s `stacker`/`psm` dependency needs a real cross-assembler/SDK for its per-target stack-probe stub |
+
+(`tiller_ui` and `tiller` hit both walls, being downstream of everything.) Both walls were confirmed
+*hard*, not shallow, by hand in J2/J3 — pointing `CC_<target>` at `clang` gets one step further in
+each case (clang has real `-target` cross-compilation support) but then dead-ends on a missing header
+(`windows.h`, or a glibc/musl `stdio.h` standing in for Apple's) that plain `clang` cannot conjure
+without an actual SDK. `cargo-xwin`, `cargo-zigbuild`, `osxcross`, and `zig` are all absent from this
+machine and installing one is real infrastructure work, not a `cfg` seam — explicitly out of scope
+for this wave (see "Scope discipline" in the wave brief). **On real hardware — a native Windows box
+with MSVC, or a native Mac with Xcode command line tools — neither wall exists**, since a native `cc`
+already understands `-arch`/`-mmacosx-version-min` and already has `windows.h`/Apple's libc headers.
+So this is a statement about what this Linux box can prove, not a statement about whether the 7
+crates are actually portable; they may well compile cleanly the first time someone runs the check on
+real hardware. Nobody has done that yet.
+
+### The `cfg` seams that exist, and what each one's non-Linux branch actually does
+
+J1 gated the manifests (`tiller/Cargo.toml`'s `gtk`/`ksni`, and the workspace's `gpui`/`gpui_platform`
+`wayland`/`x11` pin, moved to `[target.'cfg(target_os = "linux")'.dependencies]`, matching the shape
+`tiller_ui`/`tiller_theme` already used for `gtk`/`wry`/`raw-window-handle`). J2/J3 then swept the
+source for every site that used to assume Linux and gave each an honest non-Linux branch:
+
+| what | where | Linux | non-Linux branch today |
+|---|---|---|---|
+| GTK main-loop pump | `crates/tiller/src/main.rs` `browser.wait` | pumps `gtk::events_pending`/`main_iteration_do` | no-op; still polls `surface.state()` on the same deadline (WKWebView/WebView2 drive their own loop, so there is nothing to pump) |
+| StatusNotifierItem tray | `crates/tiller/src/tray.rs` | real `ksni`-backed tray | `TrayHandle` is a unit struct, `nudge()` no-ops, `spawn()` returns `None` after an `eprintln!` — the same shape the Linux branch already uses for "no SNI host answered", so `main.rs` needed zero new branches |
+| Process enumeration (Layer D / login-shell descendants) | `tiller_activity/src/process.rs`, `tiller_terminal/src/lib.rs`, `tiller_ui/src/settings.rs` | real `/proc` walk | `Err(Unsupported)` / no-op, same signature |
+| File-system watch | `tiller_markdown/src/file_events.rs` | real `inotify` | `Err(Unsupported)` |
+| Usage-fetch PTY | `tiller_usage/src/claude.rs` | real `openpty`/`fork` | `Unavailable(Error)` |
+| Control socket transport | `tiller_control/src/{server,client}.rs` | real Unix-domain socket | `ServerError::Unsupported` / `ClientError::Unsupported` |
+| `TIOCSCTTY` ioctl | `tiller_usage/src/claude.rs`, `tiller_control/src/panel.rs` | — | not a seam, a genuine cross-libc bug fix: `libc::TIOCSCTTY` is typed differently on glibc vs BSD/macOS libc; both call sites now cast `as _` so the same source compiles correctly on all three |
+
+None of these claim to *work* on macOS/Windows — each one compiles, and is honest about doing
+nothing (a log line, an `Err`, a `None`) rather than silently pretending. That is the bar the wave
+set, and every seam above was checked against it.
+
+### What is not seamed at all — the real, open gap
+
+Two things were deliberately left untouched rather than guessed at, and both are still exactly what
+they were before this wave:
+
+- **`tiller_control/src/panel.rs`** — the ~20-method `PaneRegistry` (create/split/write/close/
+  shutdown/…), built entirely on hand-rolled `openpty`/`fork`/`setsid`. A Windows counterpart is a
+  ConPTY-backed second backend reusing `alacritty_terminal`'s own `tty/windows/`, which is a real
+  second implementation, not a `cfg` branch on the existing one. Flagged explicitly in J2 rather than
+  half-built.
+- **`tiller_ui/src/browser.rs`** — the X11/XCB child-window attach (`XlibParent`, the whole
+  `raw_window_handle::RawWindowHandle::Xcb`/`Xlib` bridge wry needs for WebKitGTK). Unlike everything
+  in the table above, this file carries **no `cfg` at all** — it is Linux-only code with no
+  acknowledgment either way, and it has never actually been reached by a compile check on this box,
+  because `tiller_ui` is one of the 7 crates Wall 2 stops first. Its macOS/Windows shape (`NSView`/
+  `HWND` child windows) is a different wry API entirely, same category of work as `panel.rs`'s
+  ConPTY backend — a second implementation, not a seam. Whoever picks this up should not assume it
+  is "probably fine because everything else was" — it is the one item in this document that has had
+  zero attention.
+
+### The gate (`Scripts/ci-linux.sh`)
+
+J4 added `cargo check --target x86_64-pc-windows-msvc --workspace` and
+`cargo check --target aarch64-apple-darwin --workspace` as two more staged, `PASS:`/`FAILED:`-style
+gates, placed last (a cold `target/<triple>/` is tens of minutes and ~20 GB the first time). Missing
+`rust-std` for a triple SKIPs with the exact `rustup target add` fix; a failure that bottoms out in
+the `cc` crate's own compiler invocation (i.e. Wall 1/Wall 2 above, from *any* dependency, not just
+`psm`/`libsqlite3-sys` by name) is reported as `BLOCKED` — loud, logged, distinct from `PASS` — rather
+than failing a gate that cannot be made to pass from this box. Anything else, including a `cfg`
+regression in the 7 blocked crates that would only surface once Wall 1/2 are lifted, or a new
+unconditional Linux-only dependency in one of the 6 clean crates, still fails the gate hard. See the
+comment block above those two stages in the script for the full reasoning, including why this does
+not let the two gates (`Scripts/ci.sh` for Swift/macOS, `Scripts/ci-linux.sh` here) disagree about
+what "green" means.
+
+## What is next
+
+1. **Real hardware** for the 7 blocked crates — a native Windows box with MSVC, or a Mac with Xcode
+   command line tools, running the exact same two `cargo check --workspace` commands the gate now
+   runs. That is the next fact this project is missing, and no amount of further seam-writing from
+   this Linux box produces it.
+2. **The two unseamed items** — `tiller_control/src/panel.rs`'s ConPTY backend and
+   `tiller_ui/src/browser.rs`'s `NSView`/`HWND` child-window attach — are real second
+   implementations, not `cfg` branches, and each needs the platform they target to write and test
+   against.
+3. **The tray and process-enumeration seams** are stubs by design (see table above); the real
+   `NSStatusItem`/`Shell_NotifyIcon` and `libproc`/`Toolhelp32` implementations are additive work
+   behind seams that already exist, not surgery.
+4. Whatever lands from 1–3 stays at most `half-proven` in `INVENTORY-LEDGER.md` until a critic drives
+   the real app on real hardware and photographs it — a green `cargo check` on this box was never
+   evidence of that, only evidence that the code compiles for the target.
