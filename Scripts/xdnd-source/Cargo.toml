@@ -1,0 +1,18 @@
+[package]
+name = "xdnd-source"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A real wl_data_device_manager XDND drag SOURCE for driving Tiller's terminal file-drop under Scripts/wayland-drive.sh. Standalone crate, deliberately outside the rust/ workspace so it never touches the app's Cargo.lock or build."
+
+[[bin]]
+name = "xdnd-source"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 1

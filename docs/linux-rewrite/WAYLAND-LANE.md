@@ -571,3 +571,104 @@ instrument this task replaced. The likelier read of the original report is that 
 `UsageUpdate` cadence was coarser than the sampling interval, i.e. the value had genuinely not
 changed yet. Do not re-litigate a row as "harness staleness" without a P131-style driven-animation
 control of your own — a live stream cannot tell you which one you're looking at.
+
+## `xdnd` — a REAL compositor-delivered XDND drag source (P132, 2026-08-16)
+
+`F-CORE-FILE-03A` was `half-proven`: the app's side of a file drop was already traced correct end to
+end against the vendored pinned Zed `gpui_linux` checkout, and a pre-existing test
+(`a_drawn_terminal_accepts_a_real_external_paths_drop_with_several_files` in
+`tiller_terminal/src/lib.rs`) drives a real two-file ordered drop through GPUI's own simulated-drag
+harness and passes. What was missing was a genuine compositor-delivered `wl_data_device_manager`
+drag — not GPUI's in-process stand-in.
+
+**`Scripts/xdnd-source`** is that missing half: a standalone Rust crate (`wayland-client` +
+`wayland-protocols-wlr`), deliberately kept OUTSIDE `rust/`'s Cargo workspace so it never touches the
+app's `Cargo.lock` or build — it becomes a second Wayland client on the same nested-sway connection
+and acts as a real XDND drag **source**, offering `text/uri-list`. `wayland-drive.sh` wires it in as a
+new `xdnd <x1> <y1> <x2> <y2> <file...> [--delay-ms N]` action, built on first use
+(`cargo build -q` inside `Scripts/xdnd-source`, cached after that).
+
+Mechanics: `xdnd-source` maps a tiny (10x10px) `zwlr_layer_shell_v1` **overlay-layer** surface at
+`(x1,y1)` — deliberately not an `xdg_toplevel`, so sway's tiling never touches Tiller's own window or
+the coordinate space every other action in this script already relies on. It prints `READY` once that
+surface is configured and eligible for pointer focus. The driving function then presses the *same*
+persistent virtual pointer `click`/`drag` already use (P124) at `(x1,y1)` — a real `wl_pointer.button`
+press the compositor delivers, which is the only legitimate source of the serial `wl_data_device
+.start_drag` requires (a serial cannot be forged from a separate, unrelated process). `xdnd-source`
+prints `DRAG_STARTED` once that request is sent, the driver then walks `steps` real intermediate
+`move` waypoints to `(x2,y2)` and releases — the compositor delivers `wl_data_device.enter/motion
+/drop` to whatever surface is now under the pointer, i.e. Tiller's own window, exactly as a real file
+manager's drag would.
+
+**Proven live, ordinary speed**: two files
+(`/tmp/xdnd-test-a.txt`, `/tmp/xdnd-test-b.txt`) dragged from `xdnd-source`'s overlay onto a live
+Terminal pane landed, in order, shell-quoted and space-joined, in the pane's real prompt —
+`'/tmp/xdnd-test-a.txt' '/tmp/xdnd-test-b.txt'` — which is `tiller_project::terminal_file_drop`'s
+exact output shape, reached through the production `on_drop::<gpui::ExternalPaths>` handler at
+`tiller_terminal/src/lib.rs`, not a test-only fixture. `xdnd-source` itself reported the full
+protocol sequence — `DRAG_STARTED` → `TARGET text/uri-list` → `ACTION Copy` → `SEND` →
+`DROP_PERFORMED` → `FINISHED`. Screenshots:
+`reference/linux-progress/p132-xdnd/01-before-real-xdnd-drop.png` and
+`02-after-real-xdnd-drop-two-files.png`.
+
+### A real bug this instrument found and fixed in itself: destroying the self-offer cancels every drag
+
+The first working version of `xdnd-source` printed `DRAG_STARTED` and then `CANCELLED` within
+**tens of milliseconds**, before the driver script had sent a single `move` waypoint. `WAYLAND_DEBUG=1`
+on `xdnd-source`'s own connection explained it: the pointer is still over `xdnd-source`'s *own* tiny
+overlay for the first instant of every drag (`start_drag` fires before any motion), so the compositor
+self-delivers a `data_offer` + `enter` to `xdnd-source`'s own `wl_data_device`, treating it as a
+candidate drop target. The first version's `Dispatch<WlDataDevice>` handler called `id.destroy()` on
+that self-offer the moment it arrived; wlroots reads an unaccepted, destroyed offer on the *origin*
+surface as "no one will ever take this drag" and cancels it outright — visible on the wire as
+`wl_data_device.enter/motion` immediately followed by `leave` + `wl_data_source.cancelled`. The fix
+(now in `Scripts/xdnd-source/src/main.rs`) is to do nothing at all with that self-targeted offer —
+matching `gpui_linux`'s own `DataSourceKind::Drag` handler, which likewise treats `dnd_finished` and a
+trailing `cancelled` as interchangeable teardown signals and takes the first one it sees.
+
+### The "slow-resolving provider" clause — simulated, and it finds a real race
+
+On `text/uri-list` the whole file list arrives through **one pipe in one write** (that is the
+substance of the "one pipe in one background task" half of `F-CORE-FILE-03A`'s diagnosis) — there is
+no per-file async resolution to be slow about, unlike macOS's `NSItemProvider`, which resolves each
+dragged item independently and can race a UI timeout per item. `--delay-ms N` simulates the closest
+analogue this MIME type has: it delays `xdnd-source`'s write into the offer pipe until N ms after the
+target's `receive()` request triggers the `send` event. **Whether that is the same hazard the macOS
+clause was written for is not proven here** — it is a single-shot delay on the one and only write,
+not a per-item race, and that difference should be weighed by whoever reads this next.
+
+What it found instead is real: **at `--delay-ms 400` and `--delay-ms 2000`, the drop is silently
+lost.** No file paths ever reach the terminal prompt
+(`reference/linux-progress/p132-xdnd/03-slow-provider-400ms-drop-lost.png`, prompt empty), the app
+logs no error at all, and `xdnd-source` itself never receives `dnd_finished` *or* `cancelled` — it
+times out after its own 15s safety net. This is well inside the app's declared
+`PIPE_READ_TIMEOUT` (4s, `gpui_linux`'s `linux/platform.rs`), so that timeout is not what fires.
+Reading `client.rs`'s `wl_data_device::Event::Drop` handler explains it: it bails out immediately
+(`let Some(drag_window) = state.drag.window.clone() else { return; };`) unless `Enter`'s **async**
+pipe-read task has *already* completed and populated `state.drag.window` — and that task only starts
+reading once `Enter` fires, which in this drive happens roughly 150-350ms before the scripted
+button release (`Drop`) reaches the app, an interval this MIME type's normal (`--delay-ms 0`) case
+comfortably wins and a few hundred milliseconds of provider latency does not. Once `Drop` bails,
+`data_offer.finish()`/`destroy()` are never called, so the compositor has nothing to tell either side
+the transfer is over — the paths are silently discarded even after the async task eventually finishes
+reading them, because by then no `Drop` event will ever fire again to consume the result. This lives
+entirely in the vendored, pinned `zed-industries/zed` checkout (`crates/gpui_linux/src/linux/wayland
+/client.rs`), not in any file this repository owns, so it is recorded here rather than patched.
+
+### Using it
+
+```bash
+Scripts/wayland-drive.sh /tmp/shots '
+  ctl project.add path=/abs/path/to/a/project
+  xdnd 6 6 700 400 /tmp/some-file.txt /tmp/another-file.txt
+  shot after-drop
+'
+```
+
+`(x1,y1)` is where `xdnd-source`'s tiny overlay is anchored (top-left margin) and where the driver
+presses; `(x2,y2)` is the drop target — pick a point inside a live Terminal pane's `.size_full()`
+drop-target region to exercise `F-CORE-FILE-03A`/`F-TERM-PTY-06`'s `on_drop::<gpui::ExternalPaths>`
+path. Each `<file>` is turned into a `file://` URI. Add `--delay-ms N` to simulate a slow provider
+(see above — it currently loses the drop for any interval past roughly 350ms). `xdnd`'s own log lands
+in `<label>-input/xdnd-source.log` (same directory the persistent pointer/keyboard logs already use)
+and is echoed to the driver's own stdout on both success and failure.
