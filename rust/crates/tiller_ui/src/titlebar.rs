@@ -36,14 +36,67 @@
 //! these are plain closures, not a widened enum.
 
 use gpui::{
-    App, Context, EventEmitter, FontWeight, MouseButton, Render, SharedString, Window,
-    WindowControlArea, div, prelude::*, px,
+    App, Context, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render, SharedString,
+    Window, WindowControlArea, div, prelude::*, px,
 };
 use std::rc::Rc;
 use tiller_theme::Theme;
 use tiller_theme::cosmic::CosmicComponent;
 
 use crate::sidebar::icons::Icon;
+
+/// F-WIN-09: the Linux counterpart of macOS's `AppleActionOnDoubleClick`.
+/// GPUI's own `Window::titlebar_double_click`/`PlatformWindow::
+/// titlebar_double_click` is explicitly macOS-only (a no-op default
+/// everywhere else) -- there is no Linux platform implementation to defer
+/// to, so this app reads the GNOME preference and applies it to its own
+/// client-side-decorated titlebar itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DoubleClickAction {
+    /// `toggle-maximize` and the fallback for any unrecognized/absent
+    /// value -- matches GNOME's own documented default.
+    ToggleMaximize,
+    Minimize,
+    None,
+    /// Opens the platform's native title-bar context menu at the click
+    /// position (`Window::show_window_menu`).
+    Menu,
+}
+
+impl DoubleClickAction {
+    /// Parses `gsettings`' raw stdout for
+    /// `org.gnome.desktop.wm.preferences action-double-click-titlebar`,
+    /// which quotes its string value (e.g. `'toggle-maximize'\n`).
+    fn from_gsettings_output(raw: &str) -> Self {
+        match raw.trim().trim_matches('\'') {
+            "minimize" => Self::Minimize,
+            "none" => Self::None,
+            "menu" | "lower" => Self::Menu,
+            _ => Self::ToggleMaximize,
+        }
+    }
+
+    /// Reads the live system preference by shelling out to `gsettings`.
+    /// Degrades to [`Self::ToggleMaximize`] -- GNOME's own default --
+    /// whenever the binary is missing, the schema isn't installed (sway,
+    /// COSMIC, and other non-GNOME compositors need not ship it), or the
+    /// call otherwise fails; this is a graceful default; not an error.
+    pub fn from_system() -> Self {
+        match std::process::Command::new("gsettings")
+            .args([
+                "get",
+                "org.gnome.desktop.wm.preferences",
+                "action-double-click-titlebar",
+            ])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                Self::from_gsettings_output(&String::from_utf8_lossy(&output.stdout))
+            }
+            _ => Self::ToggleMaximize,
+        }
+    }
+}
 
 /// The small title-strip control set used by the window shell. Unrelated to
 /// the traffic lights and cluster buttons below, which act directly through
@@ -71,6 +124,16 @@ pub struct Titlebar {
     on_history: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     title: Option<SharedString>,
     subtitle: Option<SharedString>,
+    /// F-WIN-09: applied when the titlebar's own `on_mouse_up` sees
+    /// `click_count == 2`.
+    double_click_action: DoubleClickAction,
+    /// Backs [`DoubleClickAction::Menu`]. Defaults to the real
+    /// `Window::show_window_menu`, which calls into
+    /// `PlatformWindow::show_window_menu` -- `unimplemented!()` under
+    /// `TestWindow`, so a drawn test exercising `Menu` MUST override this
+    /// with [`Self::with_menu_handler`], the same constraint `new`'s docs
+    /// already state for minimize/maximize.
+    on_show_menu: Rc<dyn Fn(&mut Window, Point<Pixels>)>,
 }
 
 impl Titlebar {
@@ -101,7 +164,29 @@ impl Titlebar {
             on_history: None,
             title: None,
             subtitle: None,
+            double_click_action: DoubleClickAction::from_system(),
+            on_show_menu: Rc::new(|window, position| window.show_window_menu(position)),
         }
+    }
+
+    /// Test override for the double-click preference -- avoids shelling out
+    /// to `gsettings` from a drawn test, and lets each of the four values
+    /// be exercised deterministically regardless of what this box's
+    /// desktop environment actually has configured.
+    pub fn with_double_click_action(mut self, action: DoubleClickAction) -> Self {
+        self.double_click_action = action;
+        self
+    }
+
+    /// Test/host override for [`DoubleClickAction::Menu`] -- see the
+    /// `on_show_menu` field docs for why a drawn test exercising it MUST
+    /// supply one rather than exercise the real default.
+    pub fn with_menu_handler(
+        mut self,
+        handler: impl Fn(&mut Window, Point<Pixels>) + 'static,
+    ) -> Self {
+        self.on_show_menu = Rc::new(handler);
+        self
     }
 
     /// Test/host override for the close control.
@@ -248,6 +333,10 @@ impl Render for Titlebar {
         let on_close = self.on_close.clone();
         let on_minimize = self.on_minimize.clone();
         let on_maximize = self.on_maximize.clone();
+        let double_click_action = self.double_click_action;
+        let double_click_minimize = self.on_minimize.clone();
+        let double_click_maximize = self.on_maximize.clone();
+        let double_click_menu = self.on_show_menu.clone();
         let on_back = self.on_back.clone();
         let on_forward = self.on_forward.clone();
         let on_new_tab = self.on_new_tab.clone();
@@ -357,6 +446,7 @@ impl Render for Titlebar {
 
         div()
             .id("tiller-titlebar")
+            .debug_selector(|| "tiller-titlebar".to_owned())
             .window_control_area(WindowControlArea::Drag)
             .w_full()
             .h(chrome.bar_height)
@@ -371,6 +461,21 @@ impl Render for Titlebar {
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.should_move = false),
             )
+            // F-WIN-09: `MouseUpEvent::click_count` is GPUI's own
+            // double-click disambiguation (platform timing/threshold
+            // already applied), so no timer or distance bookkeeping is
+            // needed here -- just react on the second click.
+            .on_mouse_up(MouseButton::Left, move |event, window, _| {
+                if event.click_count != 2 {
+                    return;
+                }
+                match double_click_action {
+                    DoubleClickAction::ToggleMaximize => double_click_maximize(window),
+                    DoubleClickAction::Minimize => double_click_minimize(window),
+                    DoubleClickAction::None => {}
+                    DoubleClickAction::Menu => double_click_menu(window, event.position),
+                }
+            })
             .on_mouse_move(cx.listener(|this, _, window, _| {
                 if this.should_move {
                     this.should_move = false;
@@ -411,9 +516,223 @@ impl Render for Titlebar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, MouseDownEvent, MouseUpEvent, TestAppContext, VisualTestContext};
     use std::cell::RefCell;
     use tiller_theme::ThemeMode;
+
+    /// F-WIN-09: `gsettings`' own quoting convention for a string value
+    /// (`'toggle-maximize'\n`), plus the three other documented values and
+    /// an unrecognized/garbage one, which must degrade to the documented
+    /// default rather than panic or silently do nothing.
+    #[test]
+    fn double_click_action_parses_every_gsettings_value() {
+        assert_eq!(
+            DoubleClickAction::from_gsettings_output("'toggle-maximize'\n"),
+            DoubleClickAction::ToggleMaximize
+        );
+        assert_eq!(
+            DoubleClickAction::from_gsettings_output("'minimize'\n"),
+            DoubleClickAction::Minimize
+        );
+        assert_eq!(
+            DoubleClickAction::from_gsettings_output("'none'\n"),
+            DoubleClickAction::None
+        );
+        assert_eq!(
+            DoubleClickAction::from_gsettings_output("'menu'\n"),
+            DoubleClickAction::Menu
+        );
+        assert_eq!(
+            DoubleClickAction::from_gsettings_output("'not-a-real-value'\n"),
+            DoubleClickAction::ToggleMaximize,
+            "an unrecognized value must degrade to the documented default"
+        );
+    }
+
+    /// The row's own instruction: "check it resolves on this box before
+    /// building on it". `gsettings get
+    /// org.gnome.desktop.wm.preferences action-double-click-titlebar`
+    /// resolves to `'toggle-maximize'` on this dev box, which is also the
+    /// graceful-absence default -- so this assertion holds whether or not
+    /// the CI box that eventually runs it has the GNOME schema installed.
+    #[test]
+    fn double_click_action_from_system_resolves_without_panicking() {
+        assert_eq!(
+            DoubleClickAction::from_system(),
+            DoubleClickAction::ToggleMaximize
+        );
+    }
+
+    /// Fires the second half of a real double-click (`click_count == 2`,
+    /// GPUI's own platform-timing disambiguation already applied -- see
+    /// the render-site comment) directly at the drag area's own drawn
+    /// bounds, and asserts each configured action reaches its real seam.
+    #[gpui::test]
+    async fn double_click_on_the_drag_area_applies_the_configured_action(
+        cx: &mut TestAppContext,
+    ) {
+        let maximized = Rc::new(RefCell::new(false));
+        let minimized = Rc::new(RefCell::new(false));
+        let (maximize_spy, minimize_spy) = (maximized.clone(), minimized.clone());
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx)
+                .with_double_click_action(DoubleClickAction::ToggleMaximize)
+                .with_maximize_handler(move |_window| *maximize_spy.borrow_mut() = true)
+                .with_minimize_handler(move |_window| *minimize_spy.borrow_mut() = true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("tiller-titlebar")
+            .expect("titlebar is drawn");
+        // The row's own empty flex-filler, clear of the traffic lights,
+        // cluster buttons, and trailing icons -- an ordinary spot on the
+        // drag area, the way a user would actually double-click it.
+        let position = bar.center();
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            *maximized.borrow(),
+            "ToggleMaximize must invoke the wired maximize handler"
+        );
+        assert!(
+            !*minimized.borrow(),
+            "ToggleMaximize must not also invoke minimize"
+        );
+    }
+
+    /// The `Minimize` counterpart to the `ToggleMaximize` case above.
+    #[gpui::test]
+    async fn double_click_configured_to_minimize_invokes_the_minimize_handler(
+        cx: &mut TestAppContext,
+    ) {
+        let minimized = Rc::new(RefCell::new(false));
+        let spy = minimized.clone();
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx)
+                .with_double_click_action(DoubleClickAction::Minimize)
+                .with_minimize_handler(move |_window| *spy.borrow_mut() = true)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("tiller-titlebar")
+            .expect("titlebar is drawn");
+        let position = bar.center();
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            *minimized.borrow(),
+            "Minimize must invoke the wired minimize handler"
+        );
+    }
+
+    /// `Menu` reaches [`Titlebar::with_menu_handler`]'s seam rather than
+    /// the real `Window::show_window_menu` (`unimplemented!()` under
+    /// `TestWindow`), and is handed the click's own position.
+    #[gpui::test]
+    async fn double_click_configured_to_menu_opens_the_window_menu_at_the_click(
+        cx: &mut TestAppContext,
+    ) {
+        let opened_at = Rc::new(RefCell::new(None));
+        let spy = opened_at.clone();
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx)
+                .with_double_click_action(DoubleClickAction::Menu)
+                .with_menu_handler(move |_window, position| *spy.borrow_mut() = Some(position))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("tiller-titlebar")
+            .expect("titlebar is drawn");
+        let position = bar.center();
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            *opened_at.borrow(),
+            Some(position),
+            "Menu must open at the click's own position"
+        );
+    }
+
+    /// `None` is the one configuration that must invoke nothing at all --
+    /// the default `TestWindow::zoom`/`::minimize` would panic
+    /// (`unimplemented!()`) if this regressed to calling either.
+    #[gpui::test]
+    async fn double_click_configured_to_none_invokes_no_window_control(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_window, cx| {
+            Titlebar::new(cx).with_double_click_action(DoubleClickAction::None)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("tiller-titlebar")
+            .expect("titlebar is drawn");
+        let position = bar.center();
+        cx.simulate_event(MouseDownEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+        // No panic and no assertion target: the real `remove_window`/
+        // `unimplemented!()` defaults are left in place deliberately, so a
+        // regression to ToggleMaximize/Minimize/Menu would panic this test.
+    }
 
     #[gpui::test]
     async fn titlebar_controls_emit_shell_visibility_events(cx: &mut TestAppContext) {
