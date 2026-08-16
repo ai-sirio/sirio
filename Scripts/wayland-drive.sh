@@ -48,6 +48,11 @@
 #
 # Env: TILLER_WL_LABEL  names this instance and all its /tmp paths (default: wl-$$).
 #      TILLER_WL_KEEP=1 leaves the compositor and app running after the actions finish.
+#      TILLER_WL_PROTOCOL_LOG=1 adds WAYLAND_DEBUG=1 to the app's own environment, so APP_LOG
+#      carries the app's ONE Wayland connection's wire trace — every wl_keyboard/wl_pointer event
+#      in true arrival order. Off by default: it is verbose and only worth paying for when a
+#      question is specifically about event ORDER (e.g. was a modifier applied before a click's
+#      button event reached the app), which no screenshot can answer.
 #
 # Exit: 0 ok · 2 no binary · 3 compositor never came up · 4 app died · 5 first frame blank
 set -uo pipefail
@@ -213,11 +218,21 @@ fi
 
 # DISPLAY must be UNSET, not empty: with it set at all, GPUI takes the X11 path, which under
 # Xvfb/Xephyr has no DRI3 route and presents nothing. A blank frame here is almost always this.
+#
+# TILLER_WL_PROTOCOL_LOG=1 turns on libwayland's own wire tracer (WAYLAND_DEBUG=1) for the app
+# process only (never the injectors — their traces would dwarf the app's and bury the question
+# this exists to answer). It interleaves every event the app's ONE Wayland connection receives —
+# wl_keyboard.modifiers, wl_keyboard.key, wl_pointer.button, all of it — in true wire order, in
+# APP_LOG. That is the only ground truth for "was the modifier already applied when the click's
+# button event arrived", which no screenshot or ctl call can answer: a screenshot shows the
+# *result* of event processing, never the order events were delivered in. Built for P130's modclick
+# investigation; leave it available for the next primitive that needs the same question answered.
 env -u DISPLAY \
     XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     WAYLAND_DISPLAY="$WD" \
     VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
     TILLER_DB="$DB" TILLER_SOCKET="$SOCK" \
+    ${TILLER_WL_PROTOCOL_LOG:+WAYLAND_DEBUG=1} \
     "$BIN" >"$APP_LOG" 2>&1 &
 APP_PID=$!
 
