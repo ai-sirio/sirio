@@ -570,7 +570,12 @@ impl Pty {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(slave, libc::TIOCSCTTY, 0) < 0 {
+                // TIOCSCTTY's libc-crate type differs by platform: Linux
+                // glibc types it as the `ioctl` request's native c_ulong,
+                // but macOS/BSD libc types it as a narrower constant (still
+                // widened correctly at the ioctl(2) ABI level). `as _`
+                // makes this call correct on both without a cfg split.
+                if libc::ioctl(slave, libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
