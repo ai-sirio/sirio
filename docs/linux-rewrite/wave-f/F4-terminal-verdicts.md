@@ -64,4 +64,39 @@ independent live proof of the coalescing count itself is still owed.
 
 ## `F-TERM-PTY-05` — ledger line 530
 
-**Verdict:** (see follow-up commit — drive in progress)
+**Verdict: half-proven**
+
+Reached a real Codex CLI process through the actual UI path (`Ctrl+Shift+P` command palette ->
+typed "codex" -> Return; the tab-strip `+` button's mouse click never opened its menu across many
+coordinate attempts, so I used the keyboard path instead, which worked). One clean run
+(`/tmp/f4t-pty05i/04-after-enter.png`) shows Codex's real login TUI live in the pane (ASCII-art
+logo, "Sign in with ChatGPT / Device Code / API key" menu) with the Activity panel reading "1
+running" — not a stub. `ps --ppid <app_pid>` / `pstree -p` confirmed a genuine child process tree:
+`codex -c notify=["...tillerctl","notify","--session","pane-2","--status","needs-input"]` as a
+direct child of the app, matching the hook-wiring design in `CLAUDE.md` exactly, with real `{codex}`
+worker threads underneath.
+
+**Could not complete:** this host's `codex` CLI has no stored credentials (`codex login status` ->
+"Not logged in"; `opencode auth list` -> 0 credentials; `pi` hung waiting rather than replying) so I
+could not send a real prompt and observe a streamed reply — an environment/credentials gap, not a
+reproduction of the original pass's success or a refutation of it. I did not try `claude` given the
+documented `CLAUDECODE=1` nested-child confound.
+
+**Termination proof, real but via a different trigger than tab-close:** a follow-up drive under the
+same label tore down the previous instance (`Scripts/wayland-drive.sh` unconditionally
+`kill`s same-label leftovers at the top of every invocation) — a real SIGTERM-based app quit, not
+`SIGKILL`. The specific Codex child PID (590950 in that run) was confirmed alive and PTY-attached
+beforehand (`pstree`) and confirmed **fully gone** afterward: `ps -p 590950` empty, `kill -0 590950`
+fails "no such process" — not merely reparented. That proves the app's process-lifecycle cleanup
+reaches a live agent child on quit, which is the same code path tab-close uses
+(`TerminalHandle::shutdown` / `terminate_descendant_process_groups`), but I did not independently
+verify the tab-close button itself in isolation: three separate attempts to reach the "Codex" tab
+via the command-palette route were flaky — one of three fully succeeded, the other two silently
+produced no new tab with no error logged, so I could not reliably get to a stable Codex tab to click
+its own close (`x`) button and check the "Close dirty tab?" confirmation the original evidence
+describes.
+
+Downgrading from PASSED to `half-proven`: real agent process, real hook wiring, and real cleanup-on-quit
+are independently confirmed; the prompt/reply half is untestable here for credentials reasons, and
+the specific tab-close gesture (vs. app-quit) is unverified this pass, alongside a flaky launch path
+worth a look by whoever next owns this row.
