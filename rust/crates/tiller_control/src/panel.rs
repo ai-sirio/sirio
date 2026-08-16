@@ -705,7 +705,18 @@ fn child_exec(
         if libc::setsid() < 0 {
             libc::_exit(127);
         }
-        if libc::ioctl(slave, libc::TIOCSCTTY, 0) < 0 {
+        // TIOCSCTTY's libc-crate type differs by platform: Linux glibc
+        // types it as `ioctl`'s native c_ulong, but macOS/BSD libc types it
+        // narrower (still correct at the ioctl(2) ABI level once widened).
+        // `as _` makes this call correct on both without a cfg split --
+        // the identical fix already proven necessary (E0308 on
+        // `cargo check --target aarch64-apple-darwin`) for the same call
+        // in `tiller_usage::claude::Pty::spawn`; this crate's own
+        // `cargo check` for that target cannot run yet (blocked earlier by
+        // tiller_persistence's bundled sqlite3.c needing a real macOS C
+        // toolchain -- see the wave report), so this fix is applied by
+        // inspection rather than confirmed by the compiler.
+        if libc::ioctl(slave, libc::TIOCSCTTY as _, 0) < 0 {
             libc::_exit(127);
         }
         if libc::dup2(slave, libc::STDIN_FILENO) < 0
