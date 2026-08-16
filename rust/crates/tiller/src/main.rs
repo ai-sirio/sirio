@@ -9697,7 +9697,28 @@ fn main() {
                         )
                     })
                     .collect();
-                let catalog_for_sidebar = sidebar_projects(&project_catalog);
+                // F-SID-11: at real startup `control_state` was already
+                // seeded from the durable `worktree.comment` column above
+                // (`apply_persisted_comments`), but that seed only reached
+                // `ControlState` itself -- the initial `Sidebar` entity built
+                // a few lines below used to be constructed via bare
+                // `sidebar_projects`, which always passes an empty comment
+                // map (see `sidebar_projects`'s doc comment). That made a
+                // restored comment invisible until the next `worktree.set`
+                // triggered `refresh_sidebar` (which does look the comment up
+                // via `Workspace::sidebar_projects`). Look the persisted
+                // comments up here too so the very first paint already shows
+                // them.
+                let comments_for_sidebar: BTreeMap<String, String> = control_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .workspaces
+                    .iter()
+                    .filter(|workspace| !workspace.comment.is_empty())
+                    .map(|workspace| (workspace.path.clone(), workspace.comment.clone()))
+                    .collect();
+                let catalog_for_sidebar =
+                    sidebar_projects_with_comments(&project_catalog, &comments_for_sidebar);
                 let identities_for_sidebar = sidebar_project_identities(&project_catalog);
                 let pending_for_chat_agent = pending_for_tab_bar.clone();
                 let pending_for_agent_settings = pending_for_tab_bar.clone();
