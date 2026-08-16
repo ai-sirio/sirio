@@ -270,6 +270,23 @@ struct TerminalHandle {
     /// F-TERM-UI-02: without this, mouse clicks anywhere but the window's
     /// top-left corner map to the wrong row/column.
     last_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    /// The terminal grid's last-measured cell width, in the same window-space
+    /// pixels `last_bounds` uses. `TerminalElement::prepaint` measures this
+    /// from the real "MesloLGS Nerd Font Mono" glyph advance every frame
+    /// (`window.text_system().advance(..., 'm')`) and writes it here;
+    /// `TerminalView::on_left_mouse_down` reads it back to convert a click's
+    /// window-space x into a column the same way `prepaint` converted a
+    /// column into an x when painting cell rects (`bounds.origin.x +
+    /// cell_width * column`, line ~1380 below). Before this field existed,
+    /// hit-testing used a hardcoded `8.0` guess instead of the real
+    /// measurement `prepaint` already had on hand — a systematic,
+    /// column-accumulating error whenever the real glyph advance at
+    /// `FONT_SIZE` isn't exactly 8.0px (it generally is not), which grows
+    /// with how far right on the line a link sits and reproduces exactly
+    /// F-TERM-UI-02's "click on a real terminal URL never opens it" symptom
+    /// even though the origin-subtraction half of the same hit-test was
+    /// already correct and unit-tested.
+    last_cell_width: Arc<Mutex<Option<Pixels>>>,
 }
 
 impl TerminalHandle {
@@ -364,6 +381,7 @@ impl TerminalHandle {
                 shutdown_started: Arc::new(AtomicBool::new(false)),
                 resize_generation: Arc::new(AtomicU64::new(0)),
                 last_bounds: Arc::new(Mutex::new(None)),
+                last_cell_width: Arc::new(Mutex::new(None)),
             },
             wakeup_rx,
         ))
@@ -1092,12 +1110,21 @@ impl TerminalView {
             .lock()
             .map(|bounds| bounds.origin)
             .unwrap_or_default();
+        // The real measured glyph advance `prepaint` painted cells with, not
+        // a hardcoded guess (F-TERM-UI-02) -- see `last_cell_width`'s doc
+        // comment for why a mismatch here silently mis-hit-tests every link
+        // that isn't in the leftmost few columns.
+        let cell_width = terminal
+            .last_cell_width
+            .lock()
+            .map(f32::from)
+            .unwrap_or(8.0);
         let (row, column) = link_router::resolve_click_cell(
             f32::from(event.position.x),
             f32::from(event.position.y),
             f32::from(origin.x),
             f32::from(origin.y),
-            8.0,
+            cell_width,
             f32::from(LINE_HEIGHT),
         );
         if let Some(url) = terminal.link_at(row, column) {
@@ -1317,6 +1344,7 @@ impl Element for TerminalElement {
             .advance(font_id, FONT_SIZE, 'm')
             .map(|advance| advance.width)
             .unwrap_or(px(8.0));
+        *self.terminal.last_cell_width.lock() = Some(cell_width);
         let columns = (f32::from(bounds.size.width) / f32::from(cell_width))
             .floor()
             .max(1.0) as u16;
