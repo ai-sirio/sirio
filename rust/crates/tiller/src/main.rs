@@ -15428,25 +15428,41 @@ mod tests {
 
     #[test]
     fn summarizer_candidates_prefer_the_selected_agent_then_the_tab_agent() {
-        // opencode and omp both have a ported `summarizer_command`; claude
-        // does not yet (its own, separate inventory row) and must be
-        // dropped rather than guessed.
+        // I1-autoname: all five adapters now have a ported `summarizer_command`.
         let commands = summarizer_candidate_commands("opencode", Some("omp"), "prompt");
         assert_eq!(commands.len(), 2);
         assert!(commands[0].starts_with("opencode run --pure"));
         assert!(commands[1].starts_with("oh-my-pi --print --no-tools"));
 
-        // The unported primary is dropped, leaving only the fallback.
+        // Selected + fallback, both ported: two candidates in priority order.
         let commands = summarizer_candidate_commands("claude", Some("opencode"), "prompt");
-        assert_eq!(commands, vec!["opencode run --pure 'prompt'".to_string()]);
+        assert_eq!(
+            commands,
+            vec![
+                "claude -p 'prompt'".to_string(),
+                "opencode run --pure 'prompt'".to_string(),
+            ]
+        );
 
         // Same agent selected and fallback: no duplicate entry.
         let commands = summarizer_candidate_commands("omp", Some("omp"), "prompt");
         assert_eq!(commands.len(), 1);
 
-        // Neither candidate has a ported summarizer: no attempt at all.
+        // Default chat tab: default selected agent (claude) and no tab
+        // agent (`agent_id: None`) — the exact route this row's regression
+        // named. This must no longer be empty.
+        let commands = summarizer_candidate_commands("claude", None, "prompt");
+        assert_eq!(commands, vec!["claude -p 'prompt'".to_string()]);
+
+        // Both candidates ported but distinct: still two, in order.
         let commands = summarizer_candidate_commands("claude", Some("pi"), "prompt");
-        assert!(commands.is_empty());
+        assert_eq!(
+            commands,
+            vec![
+                "claude -p 'prompt'".to_string(),
+                "pi --print --no-tools 'prompt'".to_string(),
+            ]
+        );
     }
 
     #[test]

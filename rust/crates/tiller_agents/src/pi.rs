@@ -50,4 +50,8 @@ impl super::AgentAdapter for PiAdapter {
         // for it.
         None
     }
+
+    fn summarizer_command(&self, prompt: &str) -> Option<String> {
+        Some(format!("pi --print --no-tools {}", shell_quote(prompt)))
+    }
 }
