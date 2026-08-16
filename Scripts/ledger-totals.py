@@ -161,7 +161,13 @@ def main() -> int:
                 continue
             cells = split_cells(line)
             j = cells[3] if len(cells) > 3 else ""
-            judged["critic pass" if CRITIC_PASS.fullmatch(j) else j or "<empty>"] += 1
+            # `search`, not `fullmatch`: real stamps annotate the pass they name
+            # ("pass 19 (P92 live drive)", "fable drive, 2026-08-14, pass 18"). Requiring the
+            # marker to be the *whole* cell rejected 21 rows that a numbered pass had in fact
+            # judged, which overstated the never-judged count by ~80% (47 reported vs 26 real).
+            # A cell with no pass marker at all is still never-judged, so this credits
+            # provenance without admitting orchestrator- or builder-sourced rows.
+            judged["critic pass" if CRITIC_PASS.search(j) else j or "<empty>"] += 1
         never = sum(v for k, v in judged.items() if k != "critic pass")
         print(f"\nnever independently judged by a critic pass: {never}")
         for key, n in judged.most_common():
