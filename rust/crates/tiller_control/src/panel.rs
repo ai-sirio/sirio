@@ -39,17 +39,17 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
+use std::io::Write;
 #[cfg(unix)]
 use std::io::{self, Read};
-use std::io::Write;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use std::time::Duration;
 
 #[cfg(unix)]
 const SCROLLBACK_CAPACITY: usize = 256 * 1024;
@@ -678,21 +678,28 @@ fn spawn_process(
     let mut slave: RawFd = -1;
     // `termp`/`winp` are typed `*const` on Linux/glibc but `*mut` on
     // macOS/BSD libc (same split already handled for `TIOCSCTTY` below).
-    // `null_mut()`/`&mut window` coerce to either mutability at the call
-    // site, so this one call compiles unchanged on both.
+    // Pass an explicit `*mut`, which coerces to `*const` on Linux and matches
+    // natively on macOS — so this one call compiles unchanged on both.
+    //
+    // The pointer is spelled out rather than passing `&mut window` directly:
+    // against Linux's `*const` parameter clippy fires
+    // `unnecessary_mut_passed` ("doesn't need a mutable reference"), which is
+    // denied by the gate. A raw pointer satisfies both libc signatures without
+    // claiming a mutability Linux does not want.
     let mut window = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    let window_ptr: *mut libc::winsize = &mut window;
     let result = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut window,
+            window_ptr,
         )
     };
     if result != 0 {
