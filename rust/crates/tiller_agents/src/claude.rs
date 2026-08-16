@@ -138,6 +138,10 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
             &["-y", "@agentclientprotocol/claude-agent-acp@latest"],
         ))
     }
+
+    fn summarizer_command(&self, prompt: &str) -> Option<String> {
+        Some(format!("claude -p {}", shell_quote(prompt)))
+    }
 }
 
 /// Writes `contents` to `path` atomically: a unique temp file in the same

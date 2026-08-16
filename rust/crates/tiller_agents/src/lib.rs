@@ -550,14 +550,27 @@ mod tests {
         );
     }
 
-    /// The other three adapters' summarizers are their own inventory rows
-    /// and are not yet ported; until they are, the honest answer is `None`
-    /// — never a guessed argv for a CLI whose contract nobody checked.
+    /// I1-autoname: Claude Code, Codex and Pi's summarizer invocations,
+    /// ported from `ClaudeCodeAdapter.swift`/`CodexAdapter.swift`/
+    /// `PiAdapter.swift`'s `summarizerCommand` — matching the Swift
+    /// reference's exact argv, not a guess. The default chat tab
+    /// (`agent_id: None`, default `summarizer_agent: Claude`) depends on
+    /// this returning `Some` rather than falling through to the trait
+    /// default.
     #[test]
-    fn unported_summarizers_answer_none_rather_than_guessing() {
-        assert_eq!(ClaudeCodeAdapter.summarizer_command("p"), None);
-        assert_eq!(CodexAdapter.summarizer_command("p"), None);
-        assert_eq!(PiAdapter.summarizer_command("p"), None);
+    fn claude_codex_pi_summarizer_commands_match_the_swift_reference() {
+        assert_eq!(
+            ClaudeCodeAdapter.summarizer_command("p"),
+            Some("claude -p 'p'".to_string())
+        );
+        assert_eq!(
+            CodexAdapter.summarizer_command("p"),
+            Some("codex exec --output-last-message /dev/stdout 'p'".to_string())
+        );
+        assert_eq!(
+            PiAdapter.summarizer_command("p"),
+            Some("pi --print --no-tools 'p'".to_string())
+        );
     }
 
     #[test]

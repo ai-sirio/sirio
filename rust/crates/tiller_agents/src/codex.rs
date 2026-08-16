@@ -62,6 +62,13 @@ impl super::AgentAdapter for CodexAdapter {
             &["-y", "@agentclientprotocol/codex-acp@latest"],
         ))
     }
+
+    fn summarizer_command(&self, prompt: &str) -> Option<String> {
+        Some(format!(
+            "codex exec --output-last-message /dev/stdout {}",
+            shell_quote(prompt)
+        ))
+    }
 }
 
 impl CodexAdapter {
