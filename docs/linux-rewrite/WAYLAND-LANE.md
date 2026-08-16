@@ -476,3 +476,49 @@ genuine stderr (`git: 'remote-tps' is not a git command`) rendered in the popove
 click → handler → subprocess → error-surfaced round trip completes. Full evidence, screenshots and
 the discriminators run: `docs/linux-rewrite/tasks/P123-popover-click-routing.md`. Not fixed here —
 this task owns no Rust.
+
+## The embedded browser cannot be exercised on this lane at all
+
+`wry`'s `build_as_child` accepts only an X11 (Xlib/XCB) parent on Linux. GPUI on this lane hands it a
+Wayland surface, so `BrowserSurface::new` fails both its direct and adapter branches and the app's own
+banner reads:
+
+> Direct XCB build failed: the window handle kind is not supported; XCB→Xlib adapter failed: GPUI
+> returned unsupported handle: `Wayland(WaylandWindowHandle { ... })`
+
+Every later call then reports **`Browser child is unavailable`**. That string means *no webview was
+ever constructed*; it is not evidence about the browser feature, the network, or the page.
+
+**For browser rows the X11 lane is not a fallback — it is the only lane.** `Scripts/linux-drive.sh`
+launches with `env -u WAYLAND_DISPLAY DISPLAY=:1`, and both halves matter: **`DISPLAY=:1` alone is not
+enough**, because GPUI prefers Wayland whenever `WAYLAND_DISPLAY` is set. A hand-rolled launch that
+exports only `DISPLAY` silently takes the Wayland path and reproduces the failure while looking like
+an X11 run — this produced several false negatives before it was spotted. (Note the mirror image of
+the rule already documented above: this lane must have `DISPLAY` *unset*, not empty. Each lane has to
+clear the other's variable.)
+
+Two failure modes look identical to a broken browser and are not:
+
+- **No workspace selected.** `project.add` does **not** select a workspace. Without
+  `workspace.select workspace=<id>` (the param is `workspace`, **not** `path`), browser calls return
+  `no current workspace` or `no browser surface`.
+- **A truncated wait.** `CONTROL_ACTION_TIMEOUT` (`main.rs:196`) is a hardcoded 5 s bound on control
+  dispatch, so a `browser.wait timeoutMs=` above ~5 s fails with `control action timed out` — which
+  reads as "the condition never happened". See `tasks/P126-…`.
+
+Working recipe, proven end to end (`browser.get` → `loading:false`, `title:"Example Domain"`;
+`browser.eval script=document.title` → `"Example Domain"`):
+
+```bash
+export TILLER_SOCKET=/tmp/<label>.sock TILLER_DB=/tmp/<label>.sqlite
+Scripts/linux-drive.sh out.png '
+  python3 Scripts/control-probe.py "$TILLER_SOCKET" project.add path=<repo>
+  python3 Scripts/control-probe.py "$TILLER_SOCKET" workspace.select workspace=<id>
+  python3 Scripts/control-probe.py "$TILLER_SOCKET" browser.open url=<url>
+  sleep 5
+  python3 Scripts/control-probe.py "$TILLER_SOCKET" browser.get
+'
+```
+
+`Scripts/control-probe.py <socket> <method> [k=v ...]` sends one line-delimited control request and
+prints the reply — `linux-drive.sh` has no `ctl` action of its own.
