@@ -1,0 +1,58 @@
+{
+ "base": "e17c94f6",
+ "slices": {
+  "I1-autoname": {
+   "ids": [
+    "F-CORE-DOM-07"
+   ],
+   "owns": [
+    "rust/crates/tiller_agents/src/claude.rs",
+    "rust/crates/tiller_agents/src/codex.rs",
+    "rust/crates/tiller_agents/src/pi.rs",
+    "rust/crates/tiller_agents/src/lib.rs",
+    "rust/crates/tiller_project/src/domain.rs",
+    "rust/crates/tiller/src/main.rs"
+   ],
+   "count": 1
+  },
+  "I2-xdnd": {
+   "ids": [
+    "F-CORE-FILE-03A"
+   ],
+   "owns": [
+    "Scripts/wayland-drive.sh",
+    "Scripts/xdnd-source.py",
+    "docs/linux-rewrite/WAYLAND-LANE.md",
+    "rust/crates/tiller_terminal/src/lib.rs"
+   ],
+   "count": 1
+  },
+  "I3-tray-jump": {
+   "ids": [
+    "F-USE-05"
+   ],
+   "owns": [
+    "rust/crates/tiller/src/tray.rs",
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller/src/session.rs"
+   ],
+   "count": 1
+  },
+  "I4-settle": {
+   "ids": [
+    "F-WIN-09",
+    "F-CHAT-33",
+    "F-CHAT-05"
+   ],
+   "owns": [
+    "rust/crates/tiller_ui/src/chat.rs",
+    "rust/crates/tiller_acp/src/lib.rs",
+    "rust/crates/tiller_project/src/ui.rs",
+    "Scripts/linux-drive.sh"
+   ],
+   "count": 3
+  }
+ },
+ "note": "Serial by construction: multiple slices may touch rust/crates/tiller/src/main.rs, the app's single composition root. Ownership here is for INTEGRATOR ATTRIBUTION, not scheduling.",
+ "expected_deletion": "I1-autoname removes or rewrites unported_summarizers_answer_none_rather_than_guessing, a test that asserted the bug it fixes."
+}
