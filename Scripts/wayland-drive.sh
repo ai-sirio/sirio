@@ -392,20 +392,31 @@ title() {
 
 # Repaint is lazy. After the first frame the app sits still and grim keeps returning that frame
 # BYTE FOR BYTE — a socket call that demonstrably succeeded can produce an identical PNG. Setting
-# the output to the size it already has is a no-op, so this alternates between two sizes to force
-# a configure. Never read an unchanged capture as "the feature did nothing": verify the frame is
-# fresh first, or the lane manufactures false negatives.
+# the output to the size it already has is a no-op, so a configure has to be forced. Never read an
+# unchanged capture as "the feature did nothing": verify the frame is fresh first, or the lane
+# manufactures false negatives.
+#
+# This used to force the configure by ALTERNATING between two sizes, leaving each capture at
+# whichever size came next. That made the lane a measuring instrument whose scale changed between
+# observation and action: coordinates read off one frame were sent while the output was at the
+# other size, the pointer scaled them to the wrong space (see pointer_command's OUTPUT_W/OUTPUT_H),
+# the click landed in dead space, and the row was written up as a missing feature. It cost at least
+# two false negatives in wave F (F-EDIT-10, F-EDIT-11) before a critic noticed, and it silently
+# spanned invocations, because CUR resets to 1 on every run while the compositor keeps the size the
+# previous run left behind.
+#
+# Now the configure is forced by nudging to the off-size and immediately returning, so EVERY
+# captured frame — and every click, in this run or the next — is in one fixed coordinate space.
 SHOT_N=0
-CUR=1
 shot() {
-  local name="${1:-shot}" res
+  local name="${1:-shot}"
   SHOT_N=$((SHOT_N + 1))
-  if [ "$CUR" = 1 ]; then
-    res="${W2}x${H2}"; OUTPUT_W="$W2"; OUTPUT_H="$H2"; CUR=2
-  else
-    res="${W1}x${H1}"; OUTPUT_W="$W1"; OUTPUT_H="$H1"; CUR=1
-  fi
-  swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "$res" >/dev/null 2>&1
+  # Nudge away and back: two real configure events, ending at the canonical size.
+  swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "${W2}x${H2}" >/dev/null 2>&1
+  sleep 0.4
+  swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "${W1}x${H1}" >/dev/null 2>&1
+  OUTPUT_W="$W1"; OUTPUT_H="$H1"
+  local res="${W1}x${H1}"
   sleep 1
   local path
   path="$(printf '%s/%02d-%s.png' "$OUTDIR" "$SHOT_N" "$name")"
