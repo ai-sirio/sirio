@@ -892,7 +892,6 @@ pub struct Chat {
     /// commit wins. `None` when nothing is queued.
     queued_item: Option<String>,
     connecting: bool,
-    retry_pending_send: bool,
     has_completed_turn: bool,
     /// F-CHAT-33: how many of `AcpClient::mcp_warnings()` have already been
     /// surfaced as transcript entries. `mcp_warnings()` returns the whole
@@ -1009,7 +1008,7 @@ impl Chat {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut chat = Self::new(command, cwd, cx);
-        chat.start_connection(cx, false);
+        chat.start_connection(cx);
 
         chat
     }
@@ -1031,7 +1030,7 @@ impl Chat {
             worktree_id,
         });
         chat.restore_persisted_transcript();
-        chat.start_connection(cx, false);
+        chat.start_connection(cx);
         chat
     }
 
@@ -1109,7 +1108,6 @@ impl Chat {
             streaming: false,
             queued_item: None,
             connecting: false,
-            retry_pending_send: false,
             has_completed_turn: false,
             mcp_warnings_shown: 0,
             available_models: Vec::new(),
@@ -1736,14 +1734,31 @@ impl Chat {
         cx.notify();
     }
 
+    /// F-CHAT-05: true exactly when the composer's own "offline" placeholder
+    /// is showing (see the `composer_parts` match in `render`) — mirrors the
+    /// Swift reference's `ChatController.ChatState.disconnected`, which
+    /// `ChatComposerView.canInteract` explicitly excludes
+    /// (`ChatComposerView.swift:25-28`). Every composer-mutating entry point
+    /// below checks this the same way it already checks `pending_question`,
+    /// so the whole editor goes out of service while disconnected, not just
+    /// Send.
+    fn is_offline(&self) -> bool {
+        self.client.is_none() && !self.connecting
+    }
+
     fn can_send(&self) -> bool {
         // F-CHAT-05: an unresolved permission/plan question must block Send
         // in its own right, not merely ride along with `streaming` (a
         // permission request always arrives mid-turn today, so the two
         // happen to coincide, but the check must name its real reason —
-        // future non-streaming question types must not slip through).
+        // future non-streaming question types must not slip through). The
+        // offline check is the same rule applied to the other half of the
+        // same contract row: the reference disables Send while disconnected
+        // too, it just never needed a separate flag for it because
+        // `.disabled(!canInteract)` covers the whole editor at once.
         !self.streaming
             && !self.connecting
+            && !self.is_offline()
             && !self.composer.is_empty()
             && self.pending_question().is_none()
     }
@@ -2429,9 +2444,11 @@ impl Chat {
 
     /// Mirrors F-CHAT-05's rule for typed input: a composer that cannot
     /// accept a keystroke must not quietly accumulate chips from a drop
-    /// either. Matches Swift's `ChatPaneView.canAcceptDrop`.
+    /// either. Matches Swift's `ChatPaneView.canAcceptDrop`, which excludes
+    /// `.disconnected` the same way `canInteract` does
+    /// (`ChatPaneView.swift:153-157`).
     fn can_accept_drop(&self) -> bool {
-        self.pending_question().is_none()
+        self.pending_question().is_none() && !self.is_offline()
     }
 
     /// The whole chat pane is the drop target for files dragged in from
@@ -2576,7 +2593,7 @@ impl Chat {
         self.has_completed_turn = false;
         self.transcript_selection = None;
         self.clear_persisted_transcript();
-        self.start_connection(cx, false);
+        self.start_connection(cx);
         cx.notify();
     }
 
@@ -2611,19 +2628,21 @@ impl Chat {
             self.commit_queued_item(cx);
             return;
         }
+        // F-CHAT-05: `can_send` already excludes the offline state, so this
+        // is the last line of defense, not the primary guard — mirrors the
+        // Swift reference, whose `.disabled(!canInteract)` disables the
+        // whole editor while `.disconnected` rather than letting Send retry
+        // the connection. An earlier revision here did the opposite (an
+        // offline Send silently reconnected and resent), on the theory that
+        // was a deliberate UX improvement over the contract's wording; a
+        // wave-I critic checked that against `ChatController.swift` and
+        // found no such feature in the reference, only a disabled composer.
+        // Reconnecting is now only ever explicit — the transcript's own
+        // retryable-error "Retry" button (`chat.retry`) — never an implicit
+        // side effect of Send. Whatever the reason `can_send` said no, this
+        // must still never touch `self.composer`: a typed draft must survive
+        // untouched. See `offline_enter_never_discards_the_typed_draft`.
         if !self.can_send() {
-            return;
-        }
-        if self.client.is_none() {
-            // F-CHAT-05: offline Send retries the connection and resends
-            // automatically once it lands (`should_send` in
-            // `start_connection`) rather than disabling the composer. That
-            // tradeoff is only safe because this branch returns *before*
-            // touching `self.composer` — a failed retry must leave the
-            // user's typed draft exactly where they left it, never clear it
-            // silently. See `offline_enter_never_discards_the_typed_draft`.
-            self.retry_pending_send = true;
-            self.start_connection(cx, true);
             return;
         }
         let draft = self.composer.draft();
@@ -2944,6 +2963,15 @@ impl Chat {
         if self.pending_question().is_some() {
             return;
         }
+        // F-CHAT-05: same rule, offline half — `canInteract` excludes
+        // `.disconnected` too, so a disconnected composer refuses typed
+        // characters exactly like it refuses them during permission-wait.
+        // Returning here before ever touching `self.composer` is what keeps
+        // this safe for a draft typed *before* the connection dropped: see
+        // `offline_enter_never_discards_the_typed_draft`.
+        if self.is_offline() {
+            return;
+        }
         // F-CHAT-16: the only remaining path into the composer while the
         // model picker is open is Shift+Enter's bound `Newline` action
         // (plain typing is already redirected to `model_search` in
@@ -3030,14 +3058,13 @@ impl Chat {
         }
     }
 
-    fn start_connection(&mut self, cx: &mut Context<Self>, retry_pending_send: bool) {
+    fn start_connection(&mut self, cx: &mut Context<Self>) {
         if self.connecting {
             return;
         }
 
         self.client.take();
         self.connecting = true;
-        self.retry_pending_send = retry_pending_send;
         let command = self.agent_command.clone();
         let cwd = self.agent_cwd.clone();
         self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -3050,29 +3077,22 @@ impl Chat {
                 Ok((client, events)) => {
                     let initial_catalog = client.model_catalog().cloned();
                     let initial_mode_catalog = client.mode_catalog();
-                    let should_send = this
-                        .update(cx, |chat, _| {
-                            chat.clear_recovered_connection_errors();
-                            chat.client = Some(client);
-                            if let Some(ModelCatalog {
-                                config_id,
-                                options,
-                                selected_id,
-                            }) = initial_catalog
-                            {
-                                chat.model_config_id = Some(config_id);
-                                chat.available_models = options;
-                                chat.selected_model = Some(selected_id);
-                            }
-                            chat.mode_catalog = initial_mode_catalog;
-                            chat.connecting = false;
-                            std::mem::take(&mut chat.retry_pending_send)
-                        })
-                        .unwrap_or(false);
-
-                    if should_send {
-                        let _ = this.update(cx, |chat, cx| chat.send(cx));
-                    }
+                    let _ = this.update(cx, |chat, _| {
+                        chat.clear_recovered_connection_errors();
+                        chat.client = Some(client);
+                        if let Some(ModelCatalog {
+                            config_id,
+                            options,
+                            selected_id,
+                        }) = initial_catalog
+                        {
+                            chat.model_config_id = Some(config_id);
+                            chat.available_models = options;
+                            chat.selected_model = Some(selected_id);
+                        }
+                        chat.mode_catalog = initial_mode_catalog;
+                        chat.connecting = false;
+                    });
 
                     while let Ok(event) = events.recv().await {
                         if this
@@ -3123,13 +3143,13 @@ impl Chat {
     }
 
     fn retry(&mut self, cx: &mut Context<Self>) {
-        self.start_connection(cx, false);
+        self.start_connection(cx);
     }
 
     #[cfg(test)]
     fn from_test_command(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut chat = Self::new(command, cwd, cx);
-        chat.start_connection(cx, false);
+        chat.start_connection(cx);
         chat
     }
 
@@ -3145,8 +3165,8 @@ impl Chat {
             return;
         }
         // F-CHAT-05: see `insert_text` — the editor is fully disabled while
-        // a permission/plan question is unanswered.
-        if self.pending_question().is_some() {
+        // a permission/plan question is unanswered, or while disconnected.
+        if self.pending_question().is_some() || self.is_offline() {
             return;
         }
         self.composer.backspace();
@@ -3156,8 +3176,8 @@ impl Chat {
 
     fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
         // F-CHAT-05: see `insert_text` — the editor is fully disabled while
-        // a permission/plan question is unanswered.
-        if self.pending_question().is_some() {
+        // a permission/plan question is unanswered, or while disconnected.
+        if self.pending_question().is_some() || self.is_offline() {
             return;
         }
         self.composer.delete_forward();
@@ -8018,13 +8038,19 @@ mod tests {
     }
 
     /// F-CHAT-05: sweep E03 drove a real offline composer (agent process
-    /// never came up) and found typing + Enter genuinely inert -- `send()`
-    /// already routes an offline Enter into a silent reconnect instead of
-    /// submitting -- but nothing on screen said why, since the empty
-    /// composer fell back to the same generic "Message…" placeholder used
-    /// once connected. This is the missing half: a distinct placeholder
-    /// names the offline state, the way permission-wait and queueing above
-    /// already do.
+    /// never came up) and found typing + Enter genuinely inert, but nothing
+    /// on screen said why — the empty composer fell back to the same
+    /// generic "Message…" placeholder used once connected. This is one half
+    /// of the fix: a distinct placeholder names the offline state, the way
+    /// permission-wait and queueing above already do. The other half —
+    /// typed characters and Enter actually being refused, not merely
+    /// looking refused — is asserted directly here too, mirroring
+    /// `permission_wait_disables_the_composer_and_shows_its_own_placeholder`
+    /// above: a wave-I critic checked the row's cited `SRC`
+    /// (`ChatComposerView.swift:25-28`) against the real reference and found
+    /// `canInteract` excludes `.disconnected` exactly like it excludes a
+    /// pending permission, so the editor must be equally inert in both
+    /// states, not just visually different.
     #[gpui::test]
     async fn offline_composer_shows_its_own_placeholder(cx: &mut TestAppContext) {
         cx.update(Theme::init);
@@ -8057,27 +8083,48 @@ mod tests {
             cx.debug_bounds("permission-wait-placeholder").is_none(),
             "offline must not read as a pending permission"
         );
+
+        let entries_before = chat.read_with(cx, |chat, _| chat.entries.len());
+        focus_and_type(cx, "should not appear");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.is_empty()),
+            "the disabled editor must refuse typed characters entirely while offline"
+        );
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.entries.len()),
+            entries_before,
+            "Enter must neither send nor start a fresh reconnect attempt while offline"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| !chat.connecting),
+            "a blocked Enter must not itself trigger a new connection attempt"
+        );
+        assert!(
+            cx.debug_bounds("offline-placeholder").is_some(),
+            "the placeholder survives the blocked keystrokes"
+        );
     }
 
     /// F-CHAT-05 (H5-drive): a wave-G critic live-drove a genuinely offline
     /// agent (Codex ACP, refuses to launch without auth) and reported that,
     /// while the distinct offline placeholder correctly appeared before
     /// typing, pressing Return after typing "silently cleared the draft"
-    /// instead of visibly disabling the field. That reading does not
-    /// reproduce here: `send()`'s offline branch (`self.client.is_none()`)
-    /// returns before ever touching `self.composer`, and no `AcpEvent`
-    /// handler or connection-failure path clears it either — the only
-    /// writers of `self.composer` are the actual-send path, `new_conversation`,
-    /// and the control-socket compose seam, none of which run on a failed
-    /// reconnect. This deterministic drive (same permanently-missing-binary
-    /// setup as `offline_composer_shows_its_own_placeholder`, so the offline
-    /// state is real, not simulated) proves the draft survives a failed
-    /// offline Send — the live "cleared" report is far more likely the
-    /// capture-staleness artifact P131 documents for this exact live-agent
-    /// area than a real code defect. Locking in the guarantee either way:
-    /// keeping the editor enabled (the documented reconnect-and-retry
-    /// tradeoff) is only acceptable so long as a typed message can never be
-    /// silently lost on Return, which this asserts directly.
+    /// instead of visibly disabling the field. That reading did not
+    /// reproduce structurally at the time, and a wave-I critic later live-
+    /// drove the disabled-vs-enabled question directly and confirmed the
+    /// reference (`ChatComposerView.swift`) genuinely disables the editor
+    /// for `.disconnected` — the composer here now matches that. What must
+    /// keep holding regardless of *how* the editor is taken out of service:
+    /// a draft typed before the connection dropped is never touched by
+    /// going offline. The draft is seeded directly (bypassing the now-
+    /// disabled `insert_text` path) to model exactly that "already there
+    /// when disconnect happened" case, since real timing can't reliably
+    /// land a keystroke inside the fleeting `connecting` window before the
+    /// missing-binary launch fails.
     #[gpui::test]
     async fn offline_enter_never_discards_the_typed_draft(cx: &mut TestAppContext) {
         cx.update(Theme::init);
@@ -8093,28 +8140,31 @@ mod tests {
         chat.read_with(cx, |chat, _| {
             assert!(chat.client.is_none(), "the missing binary must fail to launch");
         });
-        refresh_frame(cx);
 
-        focus_and_type(cx, "hello offline test");
-        cx.run_until_parked();
+        chat.update(cx, |chat, _| {
+            chat.composer.insert_text("hello offline test");
+        });
         refresh_frame(cx);
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
             "hello offline test",
-            "typing while offline must be accepted, matching the placeholder's promise"
+            "a draft already in the composer when disconnect happened must render untouched"
         );
 
+        // Further typing must be refused outright — the editor is disabled,
+        // not merely "won't send" — and Enter must be equally inert.
+        focus_and_type(cx, " more");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
         refresh_frame(cx);
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
             "hello offline test",
-            "a failed offline Send must never silently discard the user's typed message"
+            "a disabled offline composer must never silently discard or extend the user's draft"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.client.is_none()),
-            "the missing binary must still fail on the retry the offline Send triggered"
+            chat.read_with(&cx.cx, |chat, _| chat.client.is_none() && !chat.connecting),
+            "a blocked Enter must not itself start a new connection attempt"
         );
     }
 
@@ -9911,6 +9961,13 @@ mod tests {
         );
     }
 
+    /// F-CHAT-05: a failed launch must leave the transcript's own retryable
+    /// error banner as the *only* way back online — an offline Send used to
+    /// silently reconnect-and-resend, but a wave-I critic found the
+    /// reference (`ChatComposerView.swift`/`ChatController.swift`) has no
+    /// such feature, only a disabled editor. This drives the explicit
+    /// `chat.retry` path (what the banner's "Retry" control calls) instead,
+    /// and confirms an ordinary Send works again once that reconnect lands.
     #[gpui::test]
     async fn failed_launch_can_retry_and_complete(cx: &mut TestAppContext) {
         let cwd = std::env::temp_dir();
@@ -9927,10 +9984,13 @@ mod tests {
         cx.executor().allow_parking();
         cx.run_until_parked();
         chat.update(cx, |chat, _| {
-            chat.composer.insert_text("retry");
+            chat.composer.insert_text("draft that must survive");
         });
         chat.read_with(cx, |chat, _| {
-            assert!(chat.can_send(), "a failed launch must leave Send usable");
+            assert!(
+                !chat.can_send(),
+                "F-CHAT-05: Send must stay disabled while disconnected, even with a draft present"
+            );
             assert!(chat.entries.iter().any(|entry| {
                 matches!(
                     entry,
@@ -9942,14 +10002,14 @@ mod tests {
             }));
         });
 
+        // The only path back online: the transcript error banner's explicit
+        // Retry control, not a side effect of a disabled Send.
         chat.update(cx, |chat, cx| {
             chat.agent_command = AgentCommand::new("/bin/sh").args([
                 "-c",
                 r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"stopReason":"end_turn"}}' ;; esac; done"#,
             ]);
-            chat.composer = Composer::new();
-            chat.composer.insert_text("hello");
-            chat.send(cx);
+            chat.retry(cx);
         });
 
         for _ in 0..20 {
@@ -9965,6 +10025,27 @@ mod tests {
                     .any(|entry| matches!(entry, Entry::Error { .. })),
                 "a recovered connection must not retain its startup error"
             );
+            assert_eq!(
+                chat.composer.text(),
+                "draft that must survive",
+                "reconnecting on its own must not touch the still-unsent draft"
+            );
+            assert!(chat.can_send(), "Send must re-enable once back online");
+        });
+
+        // Now that the composer is enabled again, an ordinary Send goes
+        // through exactly as it would have while never disconnected.
+        chat.update(cx, |chat, cx| {
+            chat.composer = Composer::new();
+            chat.composer.insert_text("hello");
+            chat.send(cx);
+        });
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            cx.run_until_parked();
+        }
+        chat.read_with(cx, |chat, _| {
             assert!(
                 chat.entries
                     .iter()
@@ -10172,16 +10253,16 @@ mod tests {
         let txt = dir.0.join("notes.txt");
         std::fs::write(&txt, b"text").expect("write txt");
 
-        cx.update(Theme::init);
-        let (chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::from_test_command(
-                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
-                std::env::temp_dir(),
-                cx,
-            );
-            configure_test_chat(&mut chat);
-            chat
-        });
+        // F-CHAT-05: attach/chip mechanics are exercised here, not
+        // connectivity, so this needs a real connected client rather than
+        // the permanently-missing-binary fixture other tests use — once
+        // offline disables the whole composer (see the `offline_*` tests
+        // above), the final "type right after chip removal" assertion below
+        // would be exercising the disabled-editor path instead of the
+        // chip-removal focus behavior it's meant to prove.
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| configure_test_chat(chat));
         cx.update(|window, _| window.refresh());
 
         let attach = cx
