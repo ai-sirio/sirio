@@ -286,9 +286,18 @@ run_root_stage "test-visual-sweep.sh" env PYTHONDONTWRITEBYTECODE=1 \
 # dependencies cannot compile for the cross targets no matter what our source says.
 # Those failures are environmental and must not read as a code regression.
 CROSS_TARGET_KNOWN_WALL='error occurred in cc-rs:'
-# The packages that wall stops, plus what cascades behind them. Anything *else* that
-# fails is ours.
-CROSS_TARGET_WALL_PKGS='psm|stacker|libsqlite3-sys|rusqlite'
+# Packages whose *build scripts* cannot run on this box: no MSVC toolchain, no macOS SDK,
+# no Windows resource compiler, no cross bindgen. Names only — cargo prints
+# `pkg v1.2.3 (source)`, so an anchored `pkg`-with-closing-backtick pattern never matches.
+# Getting that wrong is not academic: an earlier version of this filter required the
+# backtick immediately after the bare name, so nothing ever matched, `residual` was never
+# empty, and the stage could not reach BLOCKED on this box no matter what the code said.
+# Always-red is safer than always-green but just as useless — a gate nobody can get green
+# is a gate nobody reads.
+#
+# Deliberately restricted to *build-script* failures. A genuine rustc error in any of
+# these packages would surface as `could not compile <pkg>` and is NOT allowlisted.
+CROSS_TARGET_WALL_PKGS='psm|stacker|libsqlite3-sys|gpui|media'
 
 # Cross-target compile check, classified into PASS / BLOCKED / FAILED.
 #
@@ -322,14 +331,16 @@ run_cross_target_stage() {
         return 0
     fi
 
+    # Every top-level error except the allowlisted build-script walls. `could not compile
+    # <crate>` is the reliable marker for one of ours failing to build — it is what caught
+    # the 30 real tiller_control errors the previous classifier was masking.
     local residual
     residual=$(grep -E '^error' "$log" \
         | grep -vE "$CROSS_TARGET_KNOWN_WALL" \
-        | grep -vE "could not compile \`($CROSS_TARGET_WALL_PKGS)\`" \
-        | grep -vE "failed to run custom build command for \`($CROSS_TARGET_WALL_PKGS)\`" \
+        | grep -vE "^error: failed to run custom build command for \`($CROSS_TARGET_WALL_PKGS) v" \
         || true)
 
-    if [[ -z "$residual" ]] && grep -qE "$CROSS_TARGET_KNOWN_WALL" "$log"; then
+    if [[ -z "$residual" ]] && grep -qE "$CROSS_TARGET_KNOWN_WALL|^error: failed to run custom build command for" "$log"; then
         echo "BLOCKED: $stage — known SDK/cross-toolchain wall, not a code regression"
         echo "  no MSVC toolchain / macOS SDK / cross-linker on this box; see docs/linux-rewrite/PORTABILITY.md"
         tail -15 "$log" || true
