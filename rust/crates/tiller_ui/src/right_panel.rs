@@ -1010,7 +1010,8 @@ impl Render for RightPanel {
             .bg(theme.background)
             .child(self.render_header(theme))
             .child(if self.worktree_selected {
-                self.render_files(entity.clone(), theme, cx).into_any_element()
+                self.render_files(entity.clone(), theme, cx)
+                    .into_any_element()
             } else {
                 div()
                     .id("right-panel-no-worktree")
@@ -1037,7 +1038,7 @@ impl Render for RightPanel {
             })
             .when(self.worktree_selected, |this| {
                 this.when_some(self.file_context_menu.clone(), |this, menu| {
-                this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
+                    this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
                 })
             })
             .child(self.render_activity(entity, theme))

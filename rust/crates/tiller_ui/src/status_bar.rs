@@ -222,9 +222,8 @@ impl StatusBar {
             let executor = cx.background_executor();
             let claude = executor.spawn(async move { ClaudeUsageFetcher::fetch() });
             let codex = executor.spawn(async move { CodexUsageFetcher::fetch() });
-            let opencode_go = executor.spawn(async move {
-                OpenCodeGoUsageFetcher::fetch(workspace_override.as_deref())
-            });
+            let opencode_go = executor
+                .spawn(async move { OpenCodeGoUsageFetcher::fetch(workspace_override.as_deref()) });
             let ollama_cloud = executor.spawn(async move { OllamaCloudUsageFetcher::fetch() });
             let (claude, codex, opencode_go, ollama_cloud) = (
                 claude.await,
@@ -267,8 +266,7 @@ impl StatusBar {
                 let opencode_go = executor.spawn(async move {
                     OpenCodeGoUsageFetcher::fetch(workspace_override.as_deref())
                 });
-                let ollama_cloud =
-                    executor.spawn(async move { OllamaCloudUsageFetcher::fetch() });
+                let ollama_cloud = executor.spawn(async move { OllamaCloudUsageFetcher::fetch() });
                 let (claude, codex, opencode_go, ollama_cloud) = (
                     claude.await,
                     codex.await,
@@ -394,41 +392,39 @@ impl Render for StatusBar {
             theme.title
         };
 
-        let provider_segment = move |display_name: &'static str,
-                                      mark: Icon,
-                                      text_color: gpui::Rgba,
-                                      text: String| {
-            // The `text!` macro derives its element id from its own source
-            // location: inside this closure the location is shared by all
-            // three segments, so the ids must be explicit or the duplicate
-            // element ids make GPUI drop all but one segment.
-            let text_id = format!("{display_name}-usage-text");
-            // F-USE-02: the segment's own text is the unavailable reason
-            // (or the abbreviated numbers) already — the tooltip repeats it
-            // rather than inventing a second vocabulary, so it stays
-            // correct for every state (Loading/Loaded/Stale/Unavailable)
-            // for free.
-            let segment_id = format!("{display_name}-usage-segment");
-            let tooltip_text = text.clone();
-            div()
-                .id(segment_id)
-                .debug_selector(move || format!("{display_name}-usage-text"))
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .text_size(theme.typography.caption2)
-                .text_color(text_color)
-                .tooltip(move |_, cx| -> AnyView {
-                    let tooltip_text = tooltip_text.clone();
-                    cx.new(|_| StatusBarTooltip {
-                        theme,
-                        text: tooltip_text,
+        let provider_segment =
+            move |display_name: &'static str, mark: Icon, text_color: gpui::Rgba, text: String| {
+                // The `text!` macro derives its element id from its own source
+                // location: inside this closure the location is shared by all
+                // three segments, so the ids must be explicit or the duplicate
+                // element ids make GPUI drop all but one segment.
+                let text_id = format!("{display_name}-usage-text");
+                // F-USE-02: the segment's own text is the unavailable reason
+                // (or the abbreviated numbers) already — the tooltip repeats it
+                // rather than inventing a second vocabulary, so it stays
+                // correct for every state (Loading/Loaded/Stale/Unavailable)
+                // for free.
+                let segment_id = format!("{display_name}-usage-segment");
+                let tooltip_text = text.clone();
+                div()
+                    .id(segment_id)
+                    .debug_selector(move || format!("{display_name}-usage-text"))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(theme.typography.caption2)
+                    .text_color(text_color)
+                    .tooltip(move |_, cx| -> AnyView {
+                        let tooltip_text = tooltip_text.clone();
+                        cx.new(|_| StatusBarTooltip {
+                            theme,
+                            text: tooltip_text,
+                        })
+                        .into()
                     })
-                    .into()
-                })
-                .child(IconElement::new(mark, px(12.0)))
-                .child(text!(id = text_id, text))
-        };
+                    .child(IconElement::new(mark, px(12.0)))
+                    .child(text!(id = text_id, text))
+            };
 
         // The segments follow the settings surface's "Show in usage bar"
         // toggles (F-SET-10): a provider hidden there does not render here.

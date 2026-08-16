@@ -50,7 +50,9 @@ fn mcp_server_from_json(name: &str, config: &serde_json::Value) -> Option<McpSer
     let server_type = config.get("type").and_then(|v| v.as_str());
     let url = config.get("url").and_then(|v| v.as_str());
 
-    if server_type == Some("sse") && let Some(url) = url {
+    if server_type == Some("sse")
+        && let Some(url) = url
+    {
         return Some(McpServer::Sse(McpServerSse::new(name, url)));
     }
     if let Some(url) = url {
@@ -129,7 +131,10 @@ mod tests {
         match &servers[0] {
             McpServer::Stdio(stdio) => {
                 assert_eq!(stdio.name, "broken-server");
-                assert_eq!(stdio.command, Path::new("/definitely/missing/mcp-nonexistent-binary"));
+                assert_eq!(
+                    stdio.command,
+                    Path::new("/definitely/missing/mcp-nonexistent-binary")
+                );
             }
             other => panic!("expected Stdio, got {other:?}"),
         }

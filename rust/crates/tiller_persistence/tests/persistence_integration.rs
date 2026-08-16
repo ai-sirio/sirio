@@ -662,16 +662,18 @@ fn chat_sessions_list_saved_tabs_by_activity_and_delete_only_transcript() {
     assert!(sessions[0].last_activity >= sessions[1].last_activity);
 
     assert!(db.delete_chat_session("chat-2").expect("delete"));
-    assert!(db
-        .chat_sessions("worktree")
-        .expect("list after delete")
-        .iter()
-        .all(|session| session.tab_id != "chat-2"));
-    assert!(db
-        .tabs_of_worktree("worktree")
-        .expect("tabs after delete")
-        .iter()
-        .any(|tab| tab.id == "chat-2"));
+    assert!(
+        db.chat_sessions("worktree")
+            .expect("list after delete")
+            .iter()
+            .all(|session| session.tab_id != "chat-2")
+    );
+    assert!(
+        db.tabs_of_worktree("worktree")
+            .expect("tabs after delete")
+            .iter()
+            .any(|tab| tab.id == "chat-2")
+    );
 }
 
 #[test]
@@ -972,7 +974,8 @@ fn account_identity_upserts_one_row_per_provider_and_survives_a_relaunch() {
     {
         let db = AppDatabase::open(&path).expect("open writer database");
         assert_eq!(
-            db.account_identity("claude").expect("query unknown provider"),
+            db.account_identity("claude")
+                .expect("query unknown provider"),
             None,
             "no identity has been saved for claude yet"
         );
@@ -1142,7 +1145,9 @@ fn linux_settings_survive_a_database_relaunch_with_contract_clamps() {
     })
     .expect("save the cleared override");
     assert_eq!(
-        db.settings().expect("reload").opencode_workspace_id_override,
+        db.settings()
+            .expect("reload")
+            .opencode_workspace_id_override,
         "",
         "a cleared override persists as empty, not as the stale value"
     );

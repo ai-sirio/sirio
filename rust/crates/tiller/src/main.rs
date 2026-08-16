@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use tiller_acp::AgentCommand;
 use tiller_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
-    BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId,
-    Transition, WorktreeMountPolicy,
+    BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
+    WorktreeMountPolicy,
 };
 use tiller_agents::ALL as AGENT_CATALOG;
 use tiller_control::{
@@ -333,7 +333,11 @@ fn browser_act_non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn browser_act_script(verb: &str, selector: Option<&str>, text: Option<&str>) -> Result<String, String> {
+fn browser_act_script(
+    verb: &str,
+    selector: Option<&str>,
+    text: Option<&str>,
+) -> Result<String, String> {
     let non_empty = browser_act_non_empty;
     let selector_literal = |field: &str| -> Result<String, String> {
         let selector = non_empty(selector)
@@ -1046,7 +1050,10 @@ impl AppControlHandler {
         let database = match AppDatabase::open(database_path) {
             Ok(database) => database,
             Err(error) => {
-                eprintln!("[control] cannot open {} ({error})", database_path.display());
+                eprintln!(
+                    "[control] cannot open {} ({error})",
+                    database_path.display()
+                );
                 return;
             }
         };
@@ -1898,8 +1905,7 @@ impl ControlHandler for AppControlHandler {
                     );
                 };
                 drop(references);
-                let home_directory =
-                    PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let home_directory = PathBuf::from(std::env::var("HOME").unwrap_or_default());
                 let text = match agent_id.as_str() {
                     "claude" => tiller_agents::ClaudeTranscriptSource::new(
                         worktree_path.clone(),
@@ -1907,11 +1913,10 @@ impl ControlHandler for AppControlHandler {
                         home_directory,
                     )
                     .recent_text(),
-                    "codex" => tiller_agents::CodexTranscriptSource::new(
-                        session_ref,
-                        home_directory,
-                    )
-                    .recent_text(),
+                    "codex" => {
+                        tiller_agents::CodexTranscriptSource::new(session_ref, home_directory)
+                            .recent_text()
+                    }
                     other => {
                         return ControlResponse::failure(
                             &request.id,
@@ -2222,8 +2227,11 @@ fn summarizer_candidate_commands(
     tab_agent_id: Option<&str>,
     prompt: &str,
 ) -> Vec<String> {
-    let primary = AGENT_CATALOG.iter().find(|adapter| adapter.id() == selected_id);
-    let fallback = tab_agent_id.and_then(|id| AGENT_CATALOG.iter().find(|adapter| adapter.id() == id));
+    let primary = AGENT_CATALOG
+        .iter()
+        .find(|adapter| adapter.id() == selected_id);
+    let fallback =
+        tab_agent_id.and_then(|id| AGENT_CATALOG.iter().find(|adapter| adapter.id() == id));
     let mut adapters: Vec<&dyn tiller_agents::AgentAdapter> = Vec::new();
     if let Some(primary) = primary {
         adapters.push(*primary);
@@ -3604,9 +3612,12 @@ impl TillerWorkspace {
     /// Routes through the same de-duplicating `add_file_tab` path as the
     /// Files panel and chat transcript link clicks.
     fn subscribe_file_view(file_view: &Entity<FileView>, cx: &mut Context<Self>) {
-        cx.subscribe(file_view, |workspace, _, event: &FileViewEvent, cx| match event {
-            FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
-        })
+        cx.subscribe(
+            file_view,
+            |workspace, _, event: &FileViewEvent, cx| match event {
+                FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+            },
+        )
         .detach();
     }
 
@@ -3703,18 +3714,21 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let expected_pane_id = format!("pane-{pane_id}");
-        cx.subscribe(terminal, move |workspace, _, event: &TerminalLinkEvent, _cx| {
-            if let Some(url) = terminal_link_url_for_pane(event, &expected_pane_id) {
-                // F-TERM-UI-02: opens in tiller's own Browser tab, the same
-                // route the Chat transcript's own link clicks already use
-                // (`bind_chat`'s `ChatEvent::OpenLink`) -- not `cx.open_url`,
-                // which launches the OS's external browser instead of the
-                // in-app one the row's own contract names.
-                if let Ok(mut actions) = workspace.pending_actions.lock() {
-                    actions.push(WorkspaceAction::OpenBrowserLink(url.to_string()));
+        cx.subscribe(
+            terminal,
+            move |workspace, _, event: &TerminalLinkEvent, _cx| {
+                if let Some(url) = terminal_link_url_for_pane(event, &expected_pane_id) {
+                    // F-TERM-UI-02: opens in tiller's own Browser tab, the same
+                    // route the Chat transcript's own link clicks already use
+                    // (`bind_chat`'s `ChatEvent::OpenLink`) -- not `cx.open_url`,
+                    // which launches the OS's external browser instead of the
+                    // in-app one the row's own contract names.
+                    if let Ok(mut actions) = workspace.pending_actions.lock() {
+                        actions.push(WorkspaceAction::OpenBrowserLink(url.to_string()));
+                    }
                 }
-            }
-        })
+            },
+        )
         .detach();
     }
 
@@ -5038,11 +5052,7 @@ impl TillerWorkspace {
         else {
             return;
         };
-        let Some(tab_index) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.panes.contains(pane_id))
-        else {
+        let Some(tab_index) = self.tabs.iter().position(|tab| tab.panes.contains(pane_id)) else {
             return;
         };
         if !self.tabs[tab_index].title_is_auto_named {
@@ -5050,13 +5060,15 @@ impl TillerWorkspace {
         }
 
         let mut transcript = None;
-        self.tabs[tab_index].panes.for_each(&mut |leaf_id, content| {
-            if leaf_id == pane_id
-                && let TabContent::Chat(chat) = content
-            {
-                transcript = Some(chat.read(cx).transcript_for_resume());
-            }
-        });
+        self.tabs[tab_index]
+            .panes
+            .for_each(&mut |leaf_id, content| {
+                if leaf_id == pane_id
+                    && let TabContent::Chat(chat) = content
+                {
+                    transcript = Some(chat.read(cx).transcript_for_resume());
+                }
+            });
         let Some(transcript) = transcript else {
             return;
         };
@@ -5961,10 +5973,7 @@ impl TillerWorkspace {
                     ("url".to_string(), state.address().to_string()),
                     ("title".to_string(), state.page_title().to_string()),
                     ("loading".to_string(), state.is_loading().to_string()),
-                    (
-                        "timedOut".to_string(),
-                        state.is_loading().to_string(),
-                    ),
+                    ("timedOut".to_string(), state.is_loading().to_string()),
                 ])
             }
             "browser.navigate" => {
@@ -6038,10 +6047,7 @@ impl TillerWorkspace {
                     .map(Duration::from_millis)
                     .unwrap_or(Duration::from_secs(5));
                 let result = surface
-                    .evaluate_script(
-                        "JSON.stringify(window.__tillerConsole || [])",
-                        timeout,
-                    )
+                    .evaluate_script("JSON.stringify(window.__tillerConsole || [])", timeout)
                     .map_err(|error| format!("{method} failed: {error}"))?;
                 Ok(vec![("messages".to_string(), result)])
             }
@@ -6114,8 +6120,9 @@ impl TillerWorkspace {
                         ));
                     }
                 };
-                let origin = resolved
-                    .ok_or_else(|| "browser.permission: no pending permission request".to_string())?;
+                let origin = resolved.ok_or_else(|| {
+                    "browser.permission: no pending permission request".to_string()
+                })?;
                 Ok(vec![
                     ("origin".to_string(), origin),
                     ("action".to_string(), action.to_string()),
@@ -6580,12 +6587,7 @@ impl TillerWorkspace {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        self.split_focused_terminal_with_placement(
-            direction,
-            SplitPlacement::After,
-            window,
-            cx,
-        );
+        self.split_focused_terminal_with_placement(direction, SplitPlacement::After, window, cx);
     }
 
     /// F-TERM-SPLIT-01: the control socket's `pane.split` used to always
@@ -6888,8 +6890,8 @@ impl TillerWorkspace {
                 let entity_for_click = entity.clone();
                 let entity_for_close = entity.clone();
                 let close_confirm_target = PendingPaneClose { tab_id, pane_id };
-                let confirm_banner = (self.pending_pane_close == Some(close_confirm_target))
-                    .then(|| {
+                let confirm_banner =
+                    (self.pending_pane_close == Some(close_confirm_target)).then(|| {
                         let confirm_entity = entity.clone();
                         let cancel_entity = entity.clone();
                         div()
@@ -7786,11 +7788,14 @@ impl TillerWorkspace {
             return;
         }
         destination.focused_pane = source_pane;
-        destination.session_state.pane_events.push(PaneEvent::Split {
-            focused: anchor,
-            new_id: source_pane,
-            direction: split_event_name(SplitDirection::Horizontal, SplitPlacement::After),
-        });
+        destination
+            .session_state
+            .pane_events
+            .push(PaneEvent::Split {
+                focused: anchor,
+                new_id: source_pane,
+                direction: split_event_name(SplitDirection::Horizontal, SplitPlacement::After),
+            });
         if let Some(terminal) = moved_terminal {
             Self::bind_terminal(&terminal, destination_tab_id, source_pane, cx);
         }
@@ -9188,12 +9193,12 @@ impl TillerWorkspace {
                     None,
                     theme.tab_focus_accent,
                 ),
-                UpdateState::Installing => {
-                    ("Installing update…".to_string(), None, theme.tab_focus_accent)
-                }
-                UpdateState::UpToDate => {
-                    ("Tiller is up to date".to_string(), None, theme.tab_done)
-                }
+                UpdateState::Installing => (
+                    "Installing update…".to_string(),
+                    None,
+                    theme.tab_focus_accent,
+                ),
+                UpdateState::UpToDate => ("Tiller is up to date".to_string(), None, theme.tab_done),
                 UpdateState::Failed { message } => (
                     format!("Update failed: {message}"),
                     Some("Retry"),
@@ -9628,7 +9633,12 @@ fn resumable_session_refs(
                 codex_home(),
             )
         })
-        .map(|reference| (reference.content_id.as_str().to_string(), reference.session_ref))
+        .map(|reference| {
+            (
+                reference.content_id.as_str().to_string(),
+                reference.session_ref,
+            )
+        })
         .collect()
 }
 
@@ -9984,15 +9994,10 @@ fn restore_tabs_in_workspace(
 fn merge_launch_snapshot_tabs(snapshot: &[SessionTab], current: &[SessionTab]) -> Vec<SessionTab> {
     let mut merged = current.to_vec();
     for tab in snapshot {
-        if current
-            .iter()
-            .any(|current| {
-                (!tab.id.is_empty() && current.id == tab.id)
-                    || (tab.id.is_empty()
-                        && current.title == tab.title
-                        && current.kind == tab.kind)
-            })
-        {
+        if current.iter().any(|current| {
+            (!tab.id.is_empty() && current.id == tab.id)
+                || (tab.id.is_empty() && current.title == tab.title && current.kind == tab.kind)
+        }) {
             continue;
         }
         let mut restored = tab.clone();
@@ -10335,7 +10340,8 @@ fn main() {
         let pending_for_settings = pending_actions.clone();
         let pending_for_titlebar = pending_actions.clone();
         let control_actions = Arc::new(Mutex::new(Vec::<ControlAction>::new()));
-        let mut control_state_seed = ControlState::from_catalog(&project_catalog, &working_directory);
+        let mut control_state_seed =
+            ControlState::from_catalog(&project_catalog, &working_directory);
         // F-CTRL-WORK-01: a comment set via worktree.set before the
         // previous shutdown must still be there after a restart.
         if let Ok(database) = AppDatabase::open(&database_path) {
@@ -10369,16 +10375,18 @@ fn main() {
         let control_environment: BTreeMap<String, String> = std::env::vars().collect();
         let socket_path = PathBuf::from(tiller_control::default_socket_path(&control_environment));
         let socket_info = ControlSocketInfo::new(socket_path);
-        let control_handler = Arc::new(AppControlHandler::new(
-            control_state.clone(),
-            control_actions.clone(),
-            panes.clone(),
-            notifications,
-            session_refs,
-            Some(session_store.clone()),
-            socket_info.clone(),
-        )
-        .with_database_path(database_path.clone()));
+        let control_handler = Arc::new(
+            AppControlHandler::new(
+                control_state.clone(),
+                control_actions.clone(),
+                panes.clone(),
+                notifications,
+                session_refs,
+                Some(session_store.clone()),
+                socket_info.clone(),
+            )
+            .with_database_path(database_path.clone()),
+        );
         let control_socket = Arc::new(ControlSocketController::new(
             socket_info.clone(),
             control_handler,
@@ -10525,10 +10533,8 @@ fn main() {
                             let pending_actions = pending_for_settings.clone();
                             move |agent_id, command| {
                                 if let Ok(mut actions) = pending_actions.lock() {
-                                    actions.push(WorkspaceAction::InstallAgent {
-                                        agent_id,
-                                        command,
-                                    });
+                                    actions
+                                        .push(WorkspaceAction::InstallAgent { agent_id, command });
                                 }
                             }
                         })
@@ -10540,8 +10546,7 @@ fn main() {
                             // app_settings_from_snapshot still drops them
                             // (no AppSettings column yet).
                             for (index, color) in snapshot.agent_colors.iter().enumerate() {
-                                session_store_for_settings
-                                    .save_agent_color_id(index, color.id());
+                                session_store_for_settings.save_agent_color_id(index, color.id());
                             }
                             session_store_for_settings
                                 .save_settings(&app_settings_from_snapshot(snapshot));
@@ -12164,9 +12169,7 @@ mod tests {
     /// `drawn_add_project_duplicate_shows_sidebar_notice` holds
     /// `workspace-toast` to.
     #[gpui::test]
-    async fn drawn_update_toast_renders_every_state_and_dismiss_resets_it(
-        cx: &mut TestAppContext,
-    ) {
+    async fn drawn_update_toast_renders_every_state_and_dismiss_resets_it(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -13643,7 +13646,11 @@ mod tests {
             ]),
         });
 
-        assert!(response.ok, "notification.create failed: {:?}", response.error);
+        assert!(
+            response.ok,
+            "notification.create failed: {:?}",
+            response.error
+        );
         let posted = captured.lock().expect("capture lock");
         assert_eq!(posted.len(), 1);
         assert_eq!(posted[0].title, "Build finished");
@@ -14542,15 +14549,15 @@ mod tests {
         // when `resume_agent_sessions` is true).
         let mut resumable = BTreeMap::new();
         resumable.insert("pane-9".to_string(), "sess-abc123".to_string());
-        let with_gate_on =
-            restored_agent_shell(Some("claude"), "pane-9", &worktree, &resumable)
-                .expect("claude adapter resolves a shell");
+        let with_gate_on = restored_agent_shell(Some("claude"), "pane-9", &worktree, &resumable)
+            .expect("claude adapter resolves a shell");
         let TerminalShell::WithArguments { args: on_args, .. } = with_gate_on else {
             panic!("expected a program+args shell");
         };
         assert!(
-            on_args.iter().any(|arg| arg.contains("--resume")
-                && arg.contains("sess-abc123")),
+            on_args
+                .iter()
+                .any(|arg| arg.contains("--resume") && arg.contains("sess-abc123")),
             "gate on must launch with --resume <ref>, got {on_args:?}"
         );
 
@@ -14558,9 +14565,8 @@ mod tests {
         // `resume_agent_sessions` is false -- an empty map, never the saved
         // refs.
         let empty = BTreeMap::new();
-        let with_gate_off =
-            restored_agent_shell(Some("claude"), "pane-9", &worktree, &empty)
-                .expect("claude adapter resolves a shell");
+        let with_gate_off = restored_agent_shell(Some("claude"), "pane-9", &worktree, &empty)
+            .expect("claude adapter resolves a shell");
         let TerminalShell::WithArguments { args: off_args, .. } = with_gate_off else {
             panic!("expected a program+args shell");
         };
@@ -14814,11 +14820,13 @@ mod tests {
         });
         workspace.update(&mut cx, |workspace, cx| {
             let path = workspace.working_directory.clone();
-            assert!(workspace
-                .control_state
-                .lock()
-                .expect("control state")
-                .close_worktree(&path));
+            assert!(
+                workspace
+                    .control_state
+                    .lock()
+                    .expect("control state")
+                    .close_worktree(&path)
+            );
             cx.notify();
         });
         cx.run_until_parked();
@@ -14903,7 +14911,9 @@ mod tests {
         });
         cx.run_until_parked();
 
-        let source_tab = cx.debug_bounds("workspace-tab-0").expect("source terminal tab");
+        let source_tab = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source terminal tab");
         cx.simulate_mouse_down(source_tab.center(), MouseButton::Right, Modifiers::none());
         let attach = cx
             .debug_bounds("tab-command-attach-to-current-terminal")
@@ -15255,9 +15265,7 @@ mod tests {
     /// `evict_over_capacity_worktrees` call site `select_worktree` invokes,
     /// not just the pure `WorktreeMountPolicy` unit test.
     #[gpui::test]
-    async fn selecting_past_the_mount_cap_evicts_the_oldest_idle_worktree(
-        cx: &mut TestAppContext,
-    ) {
+    async fn selecting_past_the_mount_cap_evicts_the_oldest_idle_worktree(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -15270,10 +15278,8 @@ mod tests {
 
         workspace.update(&mut cx, |workspace, cx| {
             let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
-                "tiller-mount-cap-{}-{unique}",
-                std::process::id()
-            ));
+            let root = std::env::temp_dir()
+                .join(format!("tiller-mount-cap-{}-{unique}", std::process::id()));
             let paths: Vec<PathBuf> = ["main", "second", "third"]
                 .iter()
                 .map(|name| root.join(name))
@@ -15281,21 +15287,22 @@ mod tests {
             for path in &paths {
                 std::fs::create_dir_all(path).expect("create fixture worktree");
             }
-            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
-                id: "mount-cap-project".into(),
-                name: "Mount Cap Project".into(),
-                root_path: paths[0].clone(),
-                is_git: true,
-                worktrees: paths
-                    .iter()
-                    .enumerate()
-                    .map(|(index, path)| session::CatalogWorktree {
-                        branch: format!("branch-{index}"),
-                        path: path.clone(),
-                        is_primary: index == 0,
-                    })
-                    .collect(),
-            }]);
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "mount-cap-project".into(),
+                    name: "Mount Cap Project".into(),
+                    root_path: paths[0].clone(),
+                    is_git: true,
+                    worktrees: paths
+                        .iter()
+                        .enumerate()
+                        .map(|(index, path)| session::CatalogWorktree {
+                            branch: format!("branch-{index}"),
+                            path: path.clone(),
+                            is_primary: index == 0,
+                        })
+                        .collect(),
+                }]);
             workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
                 &workspace.project_catalog,
                 &paths[0],
@@ -15375,21 +15382,22 @@ mod tests {
             for path in &paths {
                 std::fs::create_dir_all(path).expect("create fixture worktree");
             }
-            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
-                id: "tray-roster-project".into(),
-                name: "Tray Roster Project".into(),
-                root_path: paths[0].clone(),
-                is_git: true,
-                worktrees: paths
-                    .iter()
-                    .enumerate()
-                    .map(|(index, path)| session::CatalogWorktree {
-                        branch: format!("branch-{index}"),
-                        path: path.clone(),
-                        is_primary: index == 0,
-                    })
-                    .collect(),
-            }]);
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    id: "tray-roster-project".into(),
+                    name: "Tray Roster Project".into(),
+                    root_path: paths[0].clone(),
+                    is_git: true,
+                    worktrees: paths
+                        .iter()
+                        .enumerate()
+                        .map(|(index, path)| session::CatalogWorktree {
+                            branch: format!("branch-{index}"),
+                            path: path.clone(),
+                            is_primary: index == 0,
+                        })
+                        .collect(),
+                }]);
             workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
                 &workspace.project_catalog,
                 &paths[0],
@@ -15483,7 +15491,8 @@ mod tests {
                 .expect("workspace root")
         });
 
-        let target_path = workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        let target_path =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
         workspace.update(&mut cx, |workspace, cx| {
             let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
             let other_path = std::env::temp_dir().join(format!(
@@ -15505,10 +15514,11 @@ mod tests {
                 path: other_path.clone(),
                 is_primary: false,
             });
-            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
-                worktrees,
-                ..project
-            }]);
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    worktrees,
+                    ..project
+                }]);
             workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
                 &workspace.project_catalog,
                 &other_path,
@@ -15527,8 +15537,7 @@ mod tests {
                     pane_id,
                     TabContent::Terminal {
                         view: cx.new(|cx| {
-                            TerminalView::new(&target_path, cx)
-                                .expect("spawn a real test terminal")
+                            TerminalView::new(&target_path, cx).expect("spawn a real test terminal")
                         }),
                     },
                 );
@@ -15638,9 +15647,11 @@ mod tests {
     #[test]
     fn auto_naming_prompt_matches_the_reference_wording() {
         let prompt = auto_naming_prompt("user: hi\nassistant: hello");
-        assert!(prompt.starts_with(
-            "Summarize this coding-agent conversation into a short title, 2-5 words"
-        ));
+        assert!(
+            prompt.starts_with(
+                "Summarize this coding-agent conversation into a short title, 2-5 words"
+            )
+        );
         assert!(prompt.ends_with("user: hi\nassistant: hello"));
     }
 
@@ -15699,7 +15710,10 @@ mod tests {
             &cwd,
             Duration::from_secs(5),
         );
-        assert_eq!(title.map(|title| title.len()), Some(AUTO_NAMING_MAX_TITLE_LEN));
+        assert_eq!(
+            title.map(|title| title.len()),
+            Some(AUTO_NAMING_MAX_TITLE_LEN)
+        );
     }
 
     #[test]

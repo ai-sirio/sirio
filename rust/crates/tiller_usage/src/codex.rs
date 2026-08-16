@@ -665,10 +665,8 @@ mod tests {
 
     #[test]
     fn saving_writes_a_parseable_last_refresh_and_keeps_unknown_token_fields() {
-        let dir = std::env::temp_dir().join(format!(
-            "tiller-codex-last-refresh-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tiller-codex-last-refresh-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("auth.json");
         std::fs::write(

@@ -2555,9 +2555,8 @@ impl Settings {
                                 "Clear",
                                 theme,
                                 move |_, _, cx| {
-                                    clear_cookie_entity.update(cx, |this, cx| {
-                                        this.clear_opencode_cookie(cx)
-                                    });
+                                    clear_cookie_entity
+                                        .update(cx, |this, cx| this.clear_opencode_cookie(cx));
                                 },
                             )),
                     ),
@@ -2725,7 +2724,12 @@ impl Settings {
         card.child(controls::separator(theme))
     }
 
-    fn render_ai_providers(&self, theme: Theme, entity: Entity<Self>, window: &Window) -> gpui::Div {
+    fn render_ai_providers(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        window: &Window,
+    ) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
         let cards = [
             ProviderCardView::new(
@@ -2918,7 +2922,10 @@ impl Settings {
                                 settings.install_agent_clicked(agent_id, command, cx);
                             });
                         })
-                        .child(text!(id = ("settings-agent-install-label", index), "Install"))
+                        .child(text!(
+                            id = ("settings-agent-install-label", index),
+                            "Install"
+                        ))
                 });
             let install_launched = self.agent_install_launched.contains(agent_id);
             let mut row_container = div()
@@ -3387,9 +3394,7 @@ impl Settings {
                     .py(px(theme.cosmic.spacing.xxxs as f32))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.subtitle)
-                    .child(text!(
-                        "Installing… running in a new terminal tab."
-                    )),
+                    .child(text!("Installing… running in a new terminal tab.")),
             );
         }
 
@@ -3695,7 +3700,9 @@ impl Render for Settings {
         let entity = cx.entity();
         let category_sidebar = self.render_categories(theme, entity.clone());
         let detail = match self.category {
-            SettingsCategory::AiProviders => self.render_ai_providers(theme, entity.clone(), window),
+            SettingsCategory::AiProviders => {
+                self.render_ai_providers(theme, entity.clone(), window)
+            }
             SettingsCategory::Agents => self.render_agents(theme, entity.clone(), window),
             SettingsCategory::General => self.render_general(theme, entity.clone()),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
@@ -4854,7 +4861,10 @@ mod tests {
             )
         });
         assert!(!signed_in, "clearing the cookie signs the provider out");
-        assert!(!show_in_bar, "Clear removes the provider from the usage bar");
+        assert!(
+            !show_in_bar,
+            "Clear removes the provider from the usage bar"
+        );
         let last = saved
             .borrow()
             .last()
@@ -4935,8 +4945,14 @@ mod tests {
             input, "Fe26demo",
             "a failed Save keeps the typed cookie — dropping it silently is the defect"
         );
-        assert!(!signed_in, "a failed Save must not claim the provider signed in");
-        assert!(!show_in_bar, "a failed Save must not turn the bar segment on");
+        assert!(
+            !signed_in,
+            "a failed Save must not claim the provider signed in"
+        );
+        assert!(
+            !show_in_bar,
+            "a failed Save must not turn the bar segment on"
+        );
         let error = error.expect("the failure message is held");
         assert!(
             error.starts_with("Failed to update the credential store —"),
@@ -4946,7 +4962,10 @@ mod tests {
             saved.borrow().is_empty(),
             "a failed Save persists nothing through on_change"
         );
-        assert!(!store_path.exists(), "no store file appears behind the failure");
+        assert!(
+            !store_path.exists(),
+            "no store file appears behind the failure"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4957,10 +4976,8 @@ mod tests {
     #[gpui::test]
     async fn opencode_workspace_override_edits_persist_and_clear(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
-        let dir = std::env::temp_dir().join(format!(
-            "tiller-settings-override-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tiller-settings-override-{}", std::process::id()));
         let store_path = dir.join("credentials.json");
         let saved: Rc<RefCell<Vec<SettingsSnapshot>>> = Rc::new(RefCell::new(Vec::new()));
         let observed = saved.clone();
@@ -5200,7 +5217,10 @@ mod tests {
             )
         });
         assert!(!signed_in, "clearing the cookie signs the provider out");
-        assert!(!show_in_bar, "Clear removes the provider from the usage bar");
+        assert!(
+            !show_in_bar,
+            "Clear removes the provider from the usage bar"
+        );
         let last = saved
             .borrow()
             .last()
@@ -5215,9 +5235,7 @@ mod tests {
     /// cannot write the store must keep the typed value and show the
     /// failure — same contract as the OpenCode Go field.
     #[gpui::test]
-    async fn ollama_cookie_save_failure_keeps_the_input_and_reports(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn ollama_cookie_save_failure_keeps_the_input_and_reports(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
         // The store path's parent is a regular *file*, so creating the
         // store directory fails deterministically.
@@ -5285,8 +5303,14 @@ mod tests {
             input, "sessdemo",
             "a failed Save keeps the typed cookie — dropping it silently is the defect"
         );
-        assert!(!signed_in, "a failed Save must not claim the provider signed in");
-        assert!(!show_in_bar, "a failed Save must not turn the bar segment on");
+        assert!(
+            !signed_in,
+            "a failed Save must not claim the provider signed in"
+        );
+        assert!(
+            !show_in_bar,
+            "a failed Save must not turn the bar segment on"
+        );
         let error = error.expect("the failure message is held");
         assert!(
             error.starts_with("Failed to update the credential store —"),
@@ -5296,7 +5320,10 @@ mod tests {
             saved.borrow().is_empty(),
             "a failed Save persists nothing through on_change"
         );
-        assert!(!store_path.exists(), "no store file appears behind the failure");
+        assert!(
+            !store_path.exists(),
+            "no store file appears behind the failure"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5722,7 +5749,8 @@ mod tests {
             "Add Account is replaced while a login is pending"
         );
         assert!(
-            cx.debug_bounds("account-login-pending-Claude Code").is_some(),
+            cx.debug_bounds("account-login-pending-Claude Code")
+                .is_some(),
             "the Signing in… indicator renders"
         );
         let cancel = cx
@@ -5740,7 +5768,8 @@ mod tests {
             cx.debug_bounds("add-claude-account").is_some(),
             "Add Account re-renders once the login is canceled"
         );
-        let message = cx.update(|_window, cx| settings_entity.read(cx).account_action_error.clone());
+        let message =
+            cx.update(|_window, cx| settings_entity.read(cx).account_action_error.clone());
         assert_eq!(
             message,
             Some((ProviderKind::Claude, "Sign-in canceled".to_string())),

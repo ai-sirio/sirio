@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use std::time::Duration;
 
 use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
 
@@ -342,7 +342,9 @@ impl ClaudeUsageFetcher {
         envs: &[(&str, &str)],
     ) -> UsageFetchOutcome {
         let shell = login_shell();
-        let skip_dotfiles = envs.iter().any(|(key, _)| *key == "TILLER_USAGE_NO_DOTFILES");
+        let skip_dotfiles = envs
+            .iter()
+            .any(|(key, _)| *key == "TILLER_USAGE_NO_DOTFILES");
         let shell_name = Path::new(&shell)
             .file_name()
             .and_then(|name| name.to_str())
@@ -707,10 +709,7 @@ mod tests {
         unsafe {
             std::env::set_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS", "1500");
         }
-        assert_eq!(
-            ClaudeUsageFetcher::timeout(),
-            Duration::from_millis(1500)
-        );
+        assert_eq!(ClaudeUsageFetcher::timeout(), Duration::from_millis(1500));
 
         unsafe {
             std::env::set_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS", "not-a-number");

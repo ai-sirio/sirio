@@ -114,7 +114,11 @@ impl ksni::Tray for AgentRosterTray {
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        let entries = self.roster.lock().map(|roster| roster.clone()).unwrap_or_default();
+        let entries = self
+            .roster
+            .lock()
+            .map(|roster| roster.clone())
+            .unwrap_or_default();
         let mut items: Vec<MenuItem<Self>> = Vec::new();
         if entries.is_empty() {
             items.push(

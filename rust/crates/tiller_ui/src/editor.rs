@@ -1540,7 +1540,10 @@ mod tests {
         let line = "![alt](img.png) then [a](a.md) and [b](b.md)";
         let spans = markdown_links_in_line(line);
         assert_eq!(
-            spans.iter().map(|span| span.target.as_str()).collect::<Vec<_>>(),
+            spans
+                .iter()
+                .map(|span| span.target.as_str())
+                .collect::<Vec<_>>(),
             vec!["a.md", "b.md"],
             "the image link is not a document to open"
         );
@@ -1559,8 +1562,16 @@ mod tests {
     fn word_range_at_finds_the_touching_word() {
         let buffer = "the quick brown fox";
         assert_eq!(word_range_at(buffer, 6), Some(4..9), "middle of 'quick'");
-        assert_eq!(word_range_at(buffer, 4), Some(4..9), "leading edge of 'quick'");
-        assert_eq!(word_range_at(buffer, 9), Some(4..9), "trailing edge of 'quick'");
+        assert_eq!(
+            word_range_at(buffer, 4),
+            Some(4..9),
+            "leading edge of 'quick'"
+        );
+        assert_eq!(
+            word_range_at(buffer, 9),
+            Some(4..9),
+            "trailing edge of 'quick'"
+        );
     }
 
     #[test]

@@ -184,10 +184,8 @@ fn path_lookup_requires_an_executable_file_and_does_not_launch_it() {
 fn checked_lookup_prefers_a_found_binary_over_an_earlier_probe_error() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = std::env::temp_dir().join(format!(
-        "tiller-agent-checked-path-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("tiller-agent-checked-path-{}", std::process::id()));
     let locked = root.join("locked");
     let good = root.join("good");
     std::fs::create_dir_all(&locked).expect("create locked dir");
@@ -244,10 +242,8 @@ fn checked_lookup_prefers_a_found_binary_over_an_earlier_probe_error() {
 fn try_discover_fails_on_unsafe_absence_and_recovers_when_the_cause_is_fixed() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = std::env::temp_dir().join(format!(
-        "tiller-agent-try-discover-{}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("tiller-agent-try-discover-{}", std::process::id()));
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).expect("create bin dir");
     for name in ["claude", "codex", "opencode", "pi", "oh-my-pi"] {
@@ -630,7 +626,10 @@ fn install_skill_shares_one_destination_across_codex_opencode_pi_and_omp() {
         install_skill(&markdown, id, worktree.path().to_str().unwrap())
             .unwrap_or_else(|error| panic!("{id} install failed: {error}"));
         assert!(
-            worktree.path().join(".agents/skills/tiller/SKILL.md").exists(),
+            worktree
+                .path()
+                .join(".agents/skills/tiller/SKILL.md")
+                .exists(),
             "{id} installs to the shared .agents destination"
         );
     }
@@ -639,11 +638,18 @@ fn install_skill_shares_one_destination_across_codex_opencode_pi_and_omp() {
 #[test]
 fn install_skill_refuses_markdown_missing_its_own_marker() {
     let worktree = TempDir::new();
-    let error = install_skill("# Tiller\nno marker here\n", "claude", worktree.path().to_str().unwrap())
-        .expect_err("markdown without the marker must be refused");
+    let error = install_skill(
+        "# Tiller\nno marker here\n",
+        "claude",
+        worktree.path().to_str().unwrap(),
+    )
+    .expect_err("markdown without the marker must be refused");
     assert!(matches!(error, PrepareError::MissingSkillMarker));
     assert!(
-        !worktree.path().join(".claude/skills/tiller/SKILL.md").exists(),
+        !worktree
+            .path()
+            .join(".claude/skills/tiller/SKILL.md")
+            .exists(),
         "a refused install must not write anything"
     );
 }
@@ -652,8 +658,12 @@ fn install_skill_refuses_markdown_missing_its_own_marker() {
 fn install_skill_refuses_an_unsupported_agent_id() {
     let worktree = TempDir::new();
     let markdown = format!("{SKILL_MANAGED_MARKER}\n# Tiller\n");
-    let error = install_skill(&markdown, "not-a-real-agent", worktree.path().to_str().unwrap())
-        .expect_err("an unknown agent id must be refused");
+    let error = install_skill(
+        &markdown,
+        "not-a-real-agent",
+        worktree.path().to_str().unwrap(),
+    )
+    .expect_err("an unknown agent id must be refused");
     assert!(matches!(error, PrepareError::UnsupportedSkillAgent(id) if id == "not-a-real-agent"));
 }
 

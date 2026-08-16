@@ -113,8 +113,7 @@ fn migration_rewrites_only_the_stale_leading_path_and_no_other_field() {
 
     assert!(ClaudeHookMigrator::migrate_file(&path, CURRENT_TILLERCTL));
 
-    let after: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let before_leaves = leaves(&before);
     let after_leaves = leaves(&after);
 
@@ -169,7 +168,11 @@ fn migration_leaves_matching_malformed_and_unrelated_files_byte_identical() {
         }]}]}
     });
     let matching_path = dir.path().join("matching.json");
-    std::fs::write(&matching_path, serde_json::to_vec_pretty(&matching).unwrap()).unwrap();
+    std::fs::write(
+        &matching_path,
+        serde_json::to_vec_pretty(&matching).unwrap(),
+    )
+    .unwrap();
 
     // Malformed: truncated JSON.
     let malformed_path = dir.path().join("malformed.json");
@@ -184,7 +187,11 @@ fn migration_leaves_matching_malformed_and_unrelated_files_byte_identical() {
         }]}]}
     });
     let unrelated_path = dir.path().join("unrelated.json");
-    std::fs::write(&unrelated_path, serde_json::to_vec_pretty(&unrelated).unwrap()).unwrap();
+    std::fs::write(
+        &unrelated_path,
+        serde_json::to_vec_pretty(&unrelated).unwrap(),
+    )
+    .unwrap();
 
     for path in [&matching_path, &malformed_path, &unrelated_path] {
         let before = std::fs::read(path).unwrap();

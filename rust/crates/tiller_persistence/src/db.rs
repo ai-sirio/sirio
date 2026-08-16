@@ -384,8 +384,7 @@ impl AppDatabase {
         let keep_ids: std::collections::HashSet<&str> =
             tabs.iter().map(|t| t.id.as_str()).collect();
         let stale_ids: Vec<String> = {
-            let mut statement =
-                transaction.prepare("SELECT id FROM tab WHERE worktree_id = ?1")?;
+            let mut statement = transaction.prepare("SELECT id FROM tab WHERE worktree_id = ?1")?;
             let mut rows = statement.query([worktree_id])?;
             let mut stale = Vec::new();
             while let Some(row) = rows.next()? {
@@ -998,7 +997,11 @@ impl AppDatabase {
         set_setting(
             &transaction,
             settings_keys::TRANSLUCENCY,
-            if settings.translucency { "true" } else { "false" },
+            if settings.translucency {
+                "true"
+            } else {
+                "false"
+            },
         )?;
         transaction.commit()?;
         Ok(())
