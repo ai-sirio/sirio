@@ -172,3 +172,70 @@ path=<repo>; click 500 50; click 500 300; type echo https://example.com; key Ret
 unchanged, `positive` shows a new **Browser** tab selected with `https://example.com` in the address
 bar. (Exact pixel numbers are specific to this pane's current font/size and layout; re-derive with
 `TILLER_DEBUG_LINK_CLICK=1` and read `APP_LOG` if the coordinates ever stop landing.)
+
+---
+
+## `F-TERM-PTY-05` — a Codex child in a pane — **fully reachable up to the login boundary; boundary established live**
+
+The task's own diagnosis was right that the blocker is environmental (`codex login status` reports
+`Not logged in` on this host) but that leaves an open question the row itself asks: *how much of the
+row is reachable without auth?* Answer, established live: **all of it up to and including a real,
+correctly-rendered Codex sign-in screen.** No `rust/` change was needed or made — `main.rs`'s launch
+path (`open_command_palette` → `NewTabAction::Codex` → `add_agent_tab` → `CodexAdapter::command`,
+`rust/crates/tiller_agents/src/codex.rs`) was already correct.
+
+**Instrument gap found and fixed first**: driving this row needs the command palette, which only
+opens on `Ctrl+Shift+P` — a *two*-modifier chord — but `wayland-drive.sh`'s `chord <mod> <key>` only
+ever held one modifier. Extended it to accept `+`-joined modifiers (`chord ctrl+shift p`), pressing
+in order and releasing in reverse, matching how a real keyboard delivers a held multi-modifier chord.
+Sanity-checked outside the app first: a raw `pty.fork()` harness against the real `codex` binary
+initially produced only 91 bytes of terminal-setup escapes and then silent stall — traced (via
+`strace -f`) not to any auth/network wait (no `connect()` calls in the trace at all — outbound network
+to `api.openai.com` works fine from this host) but to the harness leaving the pty's winsize at its
+`pty.fork()` default of 0x0, which the TUI silently declines to render into. Setting a real winsize
+(`TIOCSWINSZ`) unblocked full rendering — the app's own PTY spawn already sizes the pty to the pane's
+real dimensions, so this was purely an artifact of the throwaway diagnostic harness, not something
+`rust/` needed to guard against.
+
+**Live drive** (one `wayland-drive.sh` invocation): `project.add` → `click` into the Terminal tab →
+`chord ctrl+shift p` opens the command palette → `type Codex` filters to a `Codex` / `Codex Here`
+pair → `key Return` selects the first. Result: a new **Codex** tab appears in the tab strip (sidebar
+and tab bar both show it, with a "1 running" Activity badge), and its pane renders the real `codex`
+CLI's own ASCII-art banner followed by:
+
+```
+Welcome to Codex, OpenAI's command-line coding agent
+Sign in with ChatGPT to use Codex as part of your paid plan
+or connect an API key for usage-based billing
+
+> 1. Sign in with ChatGPT
+     Usage included with Plus, Pro, Business, and Enterprise plans
+2. Sign in with Device Code
+     Sign in from another device with a one-time code
+3. Provide your own API key
+     Pay for what you use
+
+Press enter to continue
+```
+
+This is the real, unmodified `codex` binary's own first screen, rendered correctly at the pane's
+actual size — not a Tiller-side placeholder or error. It confirms: the child process spawns, the PTY
+attaches to the pane and renders correctly, and the pane shows the CLI's own correct, visible,
+interactive failure mode for being logged out. Screenshots:
+`/tmp/h6-pty05c/03-palette-open.png`, `04-palette-typed.png`, `05-after-select.png` (scratch, not
+committed — recreate with the `howToExercise` command below).
+
+**Exact boundary**: everything up to and including this sign-in screen is proven reachable without
+auth. What remains unreachable without a logged-in `codex` CLI is the interactive selection past this
+screen (options 1/2 both require either a live ChatGPT OAuth round-trip or a device-code exchange;
+option 3 needs a real API key) and anything beyond it — i.e. an actual Codex coding turn inside the
+pane. No further clause of this row can be exercised on this host without providing credentials, per
+the task's explicit instruction not to attempt that.
+
+Commit: `3ab56291` (Scripts/ instrument only; no `rust/` change).
+
+**howToExercise**: `TILLER_WL_LABEL=x Scripts/wayland-drive.sh /tmp/out 'ctl project.add
+path=<repo>; click 500 50; chord ctrl+shift p; type Codex; key Return; shot after' 5` — the capture
+shows a new **Codex** tab selected, its pane rendering the CLI's own "Welcome to Codex" / "Sign in
+with ChatGPT" screen. To go further requires real credentials, which this task was explicitly told
+not to obtain.
