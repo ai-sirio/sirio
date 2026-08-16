@@ -26,6 +26,13 @@
 #                            4), release at (x2,y2) — composes down/move/up for you
 #   scroll <x> <y> <steps>  move to (x,y), then send <steps> wheel notches (negative = opposite
 #                            direction) as a real axis event, not a synthesized keypress
+#   xdnd <x1> <y1> <x2> <y2> <file...> [--delay-ms N]   a REAL compositor-delivered XDND file
+#                            drag — a second Wayland client (Scripts/xdnd-source) offers
+#                            text/uri-list as a genuine wl_data_device_manager drag source, this
+#                            function presses the persistent virtual pointer at (x1,y1) to hand it
+#                            a real button serial, then walks to (x2,y2) and releases to drop.
+#                            Distinct from `drag`, which stays entirely inside this app's own
+#                            GPUI on_drag/on_drop and never touches wl_data_device at all.
 #   type <text>              type text through wtype (click a text target first)
 #   key <name>               type a named key through wtype, e.g. key Tab
 #   chord <mod> <key>        modifier-held named key, e.g. chord shift F10 (mod: shift, ctrl,
@@ -65,6 +72,11 @@ SETTLE="${3:-6}"
 LABEL="${TILLER_WL_LABEL:-wl-$$}"
 BIN="$ROOT/rust/target/debug/tiller"
 MIN_COLORS=200
+# Standalone crate (deliberately outside rust/'s workspace — see Scripts/xdnd-source/Cargo.toml)
+# providing the `xdnd` action's real wl_data_device_manager drag SOURCE. Built on first use, not
+# eagerly, so instances that never call `xdnd` pay nothing for it.
+XDND_SOURCE_DIR="$ROOT/Scripts/xdnd-source"
+XDND_SOURCE_BIN="$XDND_SOURCE_DIR/target/debug/xdnd-source"
 
 # Sockets live under /tmp because sockaddr_un caps a path at 108 bytes and the agents' scratchpad
 # paths overflow it — the failure is an opaque bind error a long way from the cause.
@@ -210,7 +222,7 @@ start_virtual_keyboard() {
 
 # modclick needs BOTH devices pre-created: the pointer for the click itself, the keyboard because
 # it holds a modifier around it. It appears in both guards below.
-if grep -Eq '(^|[;[:space:]])(click|move|rightclick|down|up|drag|scroll|modclick)([;[:space:]]|$)' <<<"$ACTIONS"; then
+if grep -Eq '(^|[;[:space:]])(click|move|rightclick|down|up|drag|scroll|modclick|xdnd)([;[:space:]]|$)' <<<"$ACTIONS"; then
   start_virtual_pointer || exit 3
 fi
 if grep -Eq '(^|[;[:space:]])(type|key|title|chord|modclick)([;[:space:]]|$)' <<<"$ACTIONS"; then
@@ -337,6 +349,106 @@ drag() {
 # convention is unverified until driven against a live control — record what you observed.
 scroll() { pointer_command scroll "$1" "$2" "$3"; }
 
+# xdnd <x1> <y1> <x2> <y2> <file1> [file2 ...] [--delay-ms N] — a REAL compositor-delivered XDND
+# drag, not GPUI's own in-process simulated drag (that path was already proven by
+# a_drawn_terminal_accepts_a_real_external_paths_drop_with_several_files in
+# tiller_terminal/src/lib.rs; F-CORE-FILE-03A was open on exactly the gap this closes). Launches
+# Scripts/xdnd-source as a second Wayland client on this SAME compositor connection — a real
+# wl_data_device_manager drag SOURCE offering text/uri-list for every <file> (turned into a
+# file:// URI each). It maps a tiny zwlr_layer_shell_v1 overlay surface at (x1,y1) — a layer-shell
+# surface, deliberately not an xdg_toplevel, so sway's tiling never touches Tiller's own window or
+# the coordinate space the rest of this script's actions use.
+#
+# The handshake: xdnd-source prints READY once that overlay is mapped and eligible for pointer
+# focus; THEN this function presses the persistent virtual pointer's button at (x1,y1) — the same
+# proven-live pointer client `click`/`drag` already use — which is what gives xdnd-source the real
+# wl_pointer.button serial it needs to call wl_data_device.start_drag (a serial from an
+# out-of-process synthetic click cannot be forged; it has to come from an actual button-down the
+# compositor delivered). xdnd-source prints DRAG_STARTED once that request went out. Only then does
+# this function walk the pointer to (x2,y2) with real intermediate motion and release — the
+# compositor delivers wl_data_device.enter/motion/drop to whatever surface is under the pointer at
+# that point, i.e. Tiller's own window, exactly as dragging out of a real file manager would.
+#
+# `--delay-ms N` simulates a slow-resolving provider by delaying xdnd-source's write into the
+# offer pipe once the target's `receive()` request triggers its `send` event — see
+# docs/linux-rewrite/WAYLAND-LANE.md's XDND section for why that is the closest analogue
+# `text/uri-list` has to the macOS NSItemProvider clause, and why it is not proven equivalent to it.
+xdnd() {
+  [ "$#" -ge 5 ] || { echo "usage: xdnd <x1> <y1> <x2> <y2> <file1> [file2 ...] [--delay-ms N]" >&2; return 2; }
+  [ "$POINTER_ENABLED" = 1 ] || { echo "FAIL: xdnd needs the pre-app virtual pointer" >&2; return 1; }
+  verify_nested_sway || return 1
+  local x1="$1" y1="$2" x2="$3" y2="$4"
+  shift 4
+  if [ ! -x "$XDND_SOURCE_BIN" ]; then
+    echo "Building Scripts/xdnd-source (first use in this checkout)..." >&2
+    ( cd "$XDND_SOURCE_DIR" && cargo build -q ) || {
+      echo "FAIL: Scripts/xdnd-source did not build — see above" >&2
+      return 1
+    }
+  fi
+  local -a files=() delay_args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --delay-ms) delay_args=(--delay-ms "$2"); shift 2 ;;
+      *) files+=("$1"); shift ;;
+    esac
+  done
+  [ "${#files[@]}" -ge 1 ] || { echo "usage: xdnd needs at least one file path" >&2; return 2; }
+  local -a uri_args=() f
+  for f in "${files[@]}"; do uri_args+=(--file "$f"); done
+
+  local xlog="$INPUT_DIR/xdnd-source.log"
+  : > "$xlog"
+  env -u DISPLAY XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WD" \
+    "$XDND_SOURCE_BIN" --anchor-x "$x1" --anchor-y "$y1" "${uri_args[@]}" "${delay_args[@]}" \
+    >"$xlog" 2>&1 &
+  local xpid=$! i
+
+  for i in $(seq 1 100); do
+    grep -qx READY "$xlog" 2>/dev/null && break
+    kill -0 "$xpid" 2>/dev/null || {
+      echo "FAIL: xdnd-source exited before READY — see $xlog" >&2
+      cat "$xlog" >&2
+      return 1
+    }
+    sleep 0.05
+  done
+  grep -qx READY "$xlog" 2>/dev/null || {
+    echo "FAIL: xdnd-source never printed READY within 5s" >&2
+    kill "$xpid" 2>/dev/null
+    cat "$xlog" >&2
+    return 1
+  }
+
+  down "$x1" "$y1" || { kill "$xpid" 2>/dev/null; return 1; }
+
+  for i in $(seq 1 60); do
+    grep -qx DRAG_STARTED "$xlog" 2>/dev/null && break
+    sleep 0.05
+  done
+  if ! grep -qx DRAG_STARTED "$xlog" 2>/dev/null; then
+    echo "FAIL: the button press over xdnd-source's surface never reached start_drag — see $xlog" >&2
+    up "$x1" "$y1" >/dev/null 2>&1
+    kill "$xpid" 2>/dev/null
+    cat "$xlog" >&2
+    return 1
+  fi
+
+  local steps=6 sx sy
+  for ((i = 1; i <= steps; i++)); do
+    sx=$(( x1 + (x2 - x1) * i / steps ))
+    sy=$(( y1 + (y2 - y1) * i / steps ))
+    move "$sx" "$sy" || true
+    sleep 0.05
+  done
+  up "$x2" "$y2"
+
+  wait "$xpid"
+  local rc=$?
+  cat "$xlog"
+  return $rc
+}
+
 type() {
   verify_nested_sway || return 1
   command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
@@ -456,7 +568,7 @@ shot() {
   fi
   echo "SHOT $path ($res · $colors colours)"
 }
-export -f ctl pointer_command move click rightclick down up drag scroll type key chord modclick shot verify_nested_sway
+export -f ctl pointer_command move click rightclick down up drag scroll xdnd type key chord modclick shot verify_nested_sway
 
 sleep "$SETTLE"
 shot baseline || { echo "FAIL: first frame is blank — presentation is broken, not layout. See $APP_LOG" >&2; exit 5; }
