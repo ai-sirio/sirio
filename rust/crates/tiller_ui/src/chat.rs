@@ -1803,6 +1803,15 @@ impl Chat {
         (!transcript.turns.is_empty()).then_some(transcript)
     }
 
+    /// The composer's current unsent draft text — F-CORE-WSP-08's
+    /// persistence seam. Read live at session-save time (mirrors how a
+    /// terminal pane's scrollback is captured fresh from the live view
+    /// rather than tracked incrementally) and pushed back through
+    /// [`Self::control_compose`] on restore.
+    pub fn draft_text(&self) -> String {
+        self.composer.text()
+    }
+
     /// Replaces the visible composer's plain-text draft through the control
     /// socket route. Attachments deliberately remain a pointer-only concern.
     pub fn control_compose(&mut self, text: &str, cx: &mut Context<Self>) {

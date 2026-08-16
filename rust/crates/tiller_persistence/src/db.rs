@@ -399,6 +399,21 @@ impl AppDatabase {
         for id in &stale_ids {
             transaction.execute("DELETE FROM tab WHERE id = ?1", [id])?;
         }
+        // Clear every existing row's `is_active` flag for this worktree
+        // before upserting the new set. `tab_one_active_per_worktree` is a
+        // partial unique index checked immediately per statement (SQLite
+        // partial indexes cannot be DEFERRABLE), so upserting the new active
+        // tab while a *different*, not-yet-updated row still carries the old
+        // `is_active = 1` transiently violates it — e.g. when the active tab
+        // moves from a later position in `tabs` to an earlier one, the
+        // now-active row is upserted before the now-inactive row's flag is
+        // cleared. Clearing first removes every stale active flag up front,
+        // so each upsert below only ever sets a flag, never races another
+        // row still holding one.
+        transaction.execute(
+            "UPDATE tab SET is_active = 0 WHERE worktree_id = ?1",
+            [worktree_id],
+        )?;
         let mut active_seen = false;
         for (index, tab) in tabs.iter().enumerate() {
             let mut tab = tab.clone();

@@ -3332,10 +3332,22 @@ impl TillerWorkspace {
                     let mut state = tab.session_state.clone();
                     state.scrollback.clear();
                     tab.panes.for_each(&mut |pane_id, content| {
-                        if let TabContent::Terminal { view } = content {
-                            state
-                                .scrollback
-                                .insert(pane_id, view.read(cx).capture_scrollback());
+                        match content {
+                            TabContent::Terminal { view } => {
+                                state
+                                    .scrollback
+                                    .insert(pane_id, view.read(cx).capture_scrollback());
+                            }
+                            // F-CORE-WSP-08: captured fresh at save time,
+                            // the same live-read pattern as scrollback
+                            // above, so a draft the user never sent still
+                            // survives a restart.
+                            TabContent::Chat(chat) => {
+                                state.chat_draft = chat.read(cx).draft_text();
+                            }
+                            TabContent::File { .. }
+                            | TabContent::Changes(_)
+                            | TabContent::Browser(_) => {}
                         }
                     });
                     state
@@ -6120,6 +6132,13 @@ impl TillerWorkspace {
                     chat.control_compose(&text, cx);
                     chat.control_snapshot()
                 });
+                // F-CORE-WSP-08: without this, a composed-but-unsent draft
+                // lives only in the live `Chat` entity — `layout()` would
+                // capture it correctly, but nothing schedules that capture
+                // until an unrelated mutation (rename, tab switch, …)
+                // happens to run one first, so the draft would silently not
+                // survive a restart that comes right after composing it.
+                self.schedule_save(cx);
                 Ok(Self::control_chat_result(&surface_id, snapshot))
             }
             ChatControlAction::Send { surface_id, text } => {
@@ -9240,14 +9259,19 @@ fn restore_tabs(
         register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
-                Chat::launch_with_command_and_persistence(
+                let mut chat = Chat::launch_with_command_and_persistence(
                     command.expect("chat restoration always has a fallback command"),
                     working_directory.to_path_buf(),
                     database_path.clone(),
                     tab.id.clone(),
                     worktree_id.clone(),
                     cx,
-                )
+                );
+                // F-CORE-WSP-08: an unsent draft survives a restart.
+                if !tab_state.chat_draft.is_empty() {
+                    chat.control_compose(&tab_state.chat_draft, cx);
+                }
+                chat
             })),
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
@@ -9399,14 +9423,19 @@ fn restore_tabs_in_workspace(
         register_restored_agent(activity, pane_id, agent_id.as_deref());
         let content = match tab.kind.as_str() {
             "chat" => TabContent::Chat(cx.new(|cx| {
-                Chat::launch_with_command_and_persistence(
+                let mut chat = Chat::launch_with_command_and_persistence(
                     command.expect("chat restoration always has a fallback command"),
                     working_directory.to_path_buf(),
                     database_path.clone(),
                     tab.id.clone(),
                     worktree_id.clone(),
                     cx,
-                )
+                );
+                // F-CORE-WSP-08: an unsent draft survives a restart.
+                if !tab_state.chat_draft.is_empty() {
+                    chat.control_compose(&tab_state.chat_draft, cx);
+                }
+                chat
             })),
             "terminal" => {
                 let cwd = working_directory.to_path_buf();
@@ -14167,6 +14196,114 @@ mod tests {
         );
     }
 
+    /// F-CORE-WSP-08: `layout()` reads a chat tab's live composer text the
+    /// same way it already reads a terminal's live scrollback — proven by
+    /// typing through the real `Chat` entity (never pressing Enter) and
+    /// reading the resulting `SessionLayout` back out.
+    #[gpui::test]
+    async fn layout_captures_the_live_unsent_chat_draft(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let chat = cx.new(|cx| {
+                Chat::launch_with_command(
+                    AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                    std::env::temp_dir(),
+                    cx,
+                )
+            });
+            workspace.tabs[0] = OpenTab {
+                id: 0,
+                persistence_id: "test-chat".into(),
+                group_id: 0,
+                title: "Chat".into(),
+                kind: TabKind::AgentChat,
+                agent_icon: Some(Icon::Codex),
+                agent_id: Some("codex".into()),
+                session_state: SessionTabState::with_root(0),
+                panes: PaneNode::leaf(0, TabContent::Chat(chat)),
+                focused_pane: 0,
+                title_is_auto_named: true,
+            };
+            workspace.rebuild_tab_machinery();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Chat(chat) = content {
+                    chat.update(cx, |chat, cx| chat.control_compose("an unsent idea", cx));
+                }
+            });
+        });
+        cx.run_until_parked();
+
+        let draft = workspace.update(&mut cx, |workspace, cx| {
+            workspace.layout(cx).tab_states[0].chat_draft.clone()
+        });
+        assert_eq!(
+            draft, "an unsent idea",
+            "an unsent composer draft must be captured into the session snapshot"
+        );
+    }
+
+    /// F-CORE-WSP-08's other half: a persisted `chat_draft` is pushed back
+    /// into the freshly-restored `Chat` entity's composer through the same
+    /// `control_compose` the control socket already uses.
+    #[gpui::test]
+    async fn restore_tabs_seeds_the_composer_with_the_persisted_draft(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::current_dir().expect("current directory");
+        let restored = session::RestoredSession {
+            working_directory: working_directory.clone(),
+            tabs: vec![session::SessionTab {
+                id: "restored-chat".into(),
+                title: "Chat".into(),
+                kind: "chat".into(),
+                agent_id: None,
+                active: true,
+            }],
+            tab_states: vec![session::SessionTabState {
+                root_id: Some(0),
+                pane_events: Vec::new(),
+                scrollback: std::collections::BTreeMap::new(),
+                chat_draft: "an idea I never sent".into(),
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let mut activity = AgentActivityModel::new();
+        let (tabs, _) = cx.update(|cx| {
+            restore_tabs(
+                &restored,
+                &working_directory,
+                None,
+                &mut activity,
+                &BTreeMap::new(),
+                cx,
+            )
+        });
+
+        let draft = cx.update(|cx| {
+            let mut draft = None;
+            tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Chat(chat) = content {
+                    draft = Some(chat.read(cx).draft_text());
+                }
+            });
+            draft.expect("restored chat tab has a chat pane")
+        });
+        assert_eq!(draft, "an idea I never sent");
+    }
+
     #[gpui::test]
     async fn restore_replays_persisted_terminal_scrollback(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -14186,6 +14323,7 @@ mod tests {
                 root_id: Some(0),
                 pane_events: Vec::new(),
                 scrollback: std::collections::BTreeMap::from([(0, nonce.clone())]),
+                chat_draft: String::new(),
             }],
             diagnostics: Vec::new(),
         };
