@@ -819,4 +819,97 @@ mod tests {
             UsageReason::Error
         )));
     }
+
+    /// F-USE-03: the reducer (`model::tests::success_replaces_the_previous_state`)
+    /// and `segment_dimmed`/`segment_text` as pure functions were already
+    /// proven, but nothing exercised the wiring that actually carries a
+    /// real Success->TimedOut transition into a live `StatusBar` entity --
+    /// the exact path `apply_outcomes` feeds from both `on_refresh_clicked`
+    /// and the periodic `ensure_refresh_task` loop. Driving a real 25s
+    /// `ClaudeUsageFetcher::TIMEOUT` hang through the Wayland lane (twice,
+    /// to first get a `Loaded` baseline and then a real timeout) risked
+    /// this dispatch's own silence-kill for no more proof than this: call
+    /// the production entity method directly with synthetic outcomes and
+    /// confirm the entity's live `claude` field -- the same field `render`
+    /// reads via `segment_dimmed` -- really does land on `Stale` and stays
+    /// dimmed, without a panic or a stuck `cx.notify()`, across two calls on
+    /// a real `Context<StatusBar>` (not a bare `reduce()` call with no
+    /// entity behind it).
+    #[gpui::test]
+    async fn a_real_timeout_after_a_real_success_dims_the_live_entity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // Let the constructor's own fetch loop settle first so the
+        // transition below is unambiguously caused by the two
+        // `apply_outcomes` calls, not leftover constructor state.
+        cx.run_until_parked();
+
+        let bar = cx.update(|window, _cx| {
+            window
+                .root::<StatusBar>()
+                .flatten()
+                .expect("status bar root")
+        });
+
+        let usage = ProviderUsage {
+            session: Some(UsageWindow::new("5h", 42)),
+            weekly: None,
+            monthly: None,
+            fable_weekly: None,
+        };
+        bar.update(&mut cx, |bar, cx| {
+            bar.apply_outcomes(
+                UsageFetchOutcome::Success(usage.clone()),
+                UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+                UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+                UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let loaded = cx.update(|_window, cx| bar.read(cx).claude.clone());
+        assert_eq!(
+            loaded,
+            ProviderUsageState::Loaded(usage.clone()),
+            "the entity's live field must reflect a real Success outcome \
+             before a timeout can meaningfully go stale"
+        );
+        assert!(
+            !StatusBar::segment_dimmed(&loaded),
+            "a freshly loaded segment must not render dimmed"
+        );
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_some(),
+            "the Loaded segment renders without panicking"
+        );
+
+        bar.update(&mut cx, |bar, cx| {
+            bar.apply_outcomes(
+                UsageFetchOutcome::TimedOut,
+                UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+                UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+                UsageFetchOutcome::Unavailable(UsageReason::NotInstalled),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let stale = cx.update(|_window, cx| bar.read(cx).claude.clone());
+        assert_eq!(
+            stale,
+            ProviderUsageState::Stale(usage),
+            "a real TimedOut outcome fed through the production entity \
+             method must keep the last good numbers, not drop them"
+        );
+        assert!(
+            StatusBar::segment_dimmed(&stale),
+            "the same field render() reads must now report dimmed"
+        );
+        assert!(
+            cx.debug_bounds("Claude-usage-text").is_some(),
+            "the Stale segment still renders (dimmed, not hidden) without panicking"
+        );
+    }
 }
