@@ -58,6 +58,27 @@ modifier chords, no button-held drag, no scroll. The lane's vocabulary had quiet
 ceiling on what could be *proven*, independent of what had been *built*, so wave D extends the
 harness in parallel with building.
 
+## Resuming a wave after a session ends
+
+A workflow that was still running when the session exited leaves no completion record, but its run is
+resumable: `Workflow({scriptPath, resumeFromRunId})` replays every finished `agent()` call from cache
+and runs only the ones that never returned.
+
+Two things make that work, and both have bitten:
+
+- **Pass the script's path in this directory, not the scratchpad copy.** The scratchpad is deleted at
+  the session boundary, so a resume pointed there fails outright with "script file not found". This is
+  the second time that has cost a wave; launching from `docs/linux-rewrite/workflows/` avoids it
+  entirely.
+- **The script must be byte-identical.** Cache keys are computed from each agent's `(prompt, opts)`,
+  so any edit to a shared prompt-builder invalidates *every* agent that uses it — including the ones
+  that already succeeded, which will then re-run. Verify with `md5sum` before resuming; if you must
+  edit, expect and accept the re-runs.
+
+An agent that died at the structured-output boundary has usually already **committed its work** —
+check `git log` and for its `*-verdicts.md` / `*-report.md` before assuming its rows are untouched.
+Wave E lost three verifiers this way and one of them had committed a complete verdict set.
+
 ## Rebuilding the partition
 
 `rowfiles.json` is recoverable — `../triage/*-plan.md` are committed and name the files per row.
