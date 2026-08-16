@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use tiller_acp::AgentCommand;
 use tiller_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
-    NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
+    BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId,
+    Transition, WorktreeMountPolicy,
 };
 use tiller_agents::ALL as AGENT_CATALOG;
 use tiller_control::{
@@ -688,11 +689,40 @@ impl ControlState {
                     branch: worktree.branch.clone(),
                     selected,
                     path,
+                    // Provisional -- BootstrapRestoreOrder below decides the
+                    // real first-paint mount set; only the selected worktree
+                    // (the sole "previously open" id a single-directory
+                    // launch snapshot can recover) is treated as priority.
                     mounted: true,
                     comment: String::new(),
                     session: None,
                 });
             }
+        }
+        // F-CORE-ACT-25: mount only the priority set at first paint --
+        // today that is just the selected worktree, since the launch
+        // snapshot persists a single `working_directory`, not a list of
+        // previously open worktree ids. Every other worktree starts
+        // deferred (unmounted) rather than eagerly mounted, and picks up a
+        // real mount the first time it is selected.
+        let selected_path = workspaces
+            .iter()
+            .find(|workspace| workspace.selected)
+            .map(|workspace| workspace.path.clone());
+        let open_ids: Vec<String> = selected_path.iter().cloned().collect();
+        let restore = BootstrapRestoreOrder::partition(
+            &workspaces,
+            &open_ids,
+            selected_path.as_ref(),
+            |workspace| workspace.path.clone(),
+        );
+        let priority_paths: HashSet<String> = restore
+            .priority
+            .iter()
+            .map(|workspace| workspace.path.clone())
+            .collect();
+        for workspace in &mut workspaces {
+            workspace.mounted = priority_paths.contains(&workspace.path);
         }
         let current = workspaces.iter().position(|worktree| worktree.selected);
         Self {
@@ -4083,6 +4113,54 @@ impl TillerWorkspace {
             })
     }
 
+    /// F-CORE-ACT-26: caps how many worktrees stay mounted once the newly
+    /// selected one joins them. `WorktreeMountPolicy::ids_to_evict` never
+    /// touches the selected worktree, and skips any worktree with a running
+    /// or needs-input agent -- it only evicts idle worktrees over the cap,
+    /// oldest-open first. Unsaved-work detection is not built yet, so that
+    /// gate always reports "safe to evict"; see the wave-G2 report for the
+    /// follow-up this leaves open.
+    fn evict_over_capacity_worktrees(&mut self, selected_path: &Path, cx: &mut Context<Self>) {
+        let snapshot = self.settings.read(cx).snapshot();
+        let cap = if snapshot.limit_mounted_worktrees {
+            snapshot.mounted_worktrees.clamp(2, 50) as usize
+        } else {
+            0
+        };
+        let mut state = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let open_ids: Vec<String> = state
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.mounted)
+            .map(|workspace| workspace.path.clone())
+            .collect();
+        let selected_id = selected_path.to_string_lossy().into_owned();
+        let status_of = |id: &String| -> Option<AgentStatus> {
+            let pane_ids: Vec<String> = self
+                .panes
+                .list_for(Path::new(id))
+                .ok()?
+                .into_iter()
+                .map(|pane| pane.id)
+                .collect();
+            let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
+            self.activity.status_for_panes(&refs)
+        };
+        let evicted = WorktreeMountPolicy::ids_to_evict(
+            &open_ids,
+            Some(&selected_id),
+            cap,
+            status_of,
+            |_id| false,
+        );
+        for id in evicted {
+            state.close_worktree(Path::new(&id));
+        }
+    }
+
     fn select_worktree(
         &mut self,
         requested_path: PathBuf,
@@ -4110,6 +4188,7 @@ impl TillerWorkspace {
         {
             return Err(format!("unknown worktree: {}", selected_path.display()));
         }
+        self.evict_over_capacity_worktrees(&selected_path, cx);
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
@@ -12090,6 +12169,55 @@ mod tests {
         );
     }
 
+    /// F-CORE-ACT-25: `ControlState::from_catalog` runs the restored
+    /// worktree list through `BootstrapRestoreOrder::partition` -- only the
+    /// selected worktree (the sole "previously open" id a single-directory
+    /// launch snapshot recovers) starts mounted; every deferred worktree
+    /// starts unmounted rather than the old "mount everything" default.
+    #[test]
+    fn bootstrap_restore_order_mounts_only_the_selected_worktree_at_first_paint() {
+        let main_path = PathBuf::from("/tmp/tiller-bootstrap-main");
+        let feature_path = PathBuf::from("/tmp/tiller-bootstrap-feature");
+        let other_path = PathBuf::from("/tmp/tiller-bootstrap-other");
+        let catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "project".into(),
+            name: "tiller".into(),
+            root_path: main_path.clone(),
+            is_git: true,
+            worktrees: vec![
+                session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: main_path.clone(),
+                    is_primary: true,
+                },
+                session::CatalogWorktree {
+                    branch: "feature".into(),
+                    path: feature_path.clone(),
+                    is_primary: false,
+                },
+                session::CatalogWorktree {
+                    branch: "other".into(),
+                    path: other_path.clone(),
+                    is_primary: false,
+                },
+            ],
+        }]);
+        let state = ControlState::from_catalog(&catalog, &feature_path);
+
+        assert_eq!(
+            state
+                .workspaces
+                .iter()
+                .map(|workspace| (workspace.path.clone(), workspace.mounted))
+                .collect::<Vec<_>>(),
+            vec![
+                (main_path.to_string_lossy().into_owned(), false),
+                (feature_path.to_string_lossy().into_owned(), true),
+                (other_path.to_string_lossy().into_owned(), false),
+            ]
+        );
+    }
+
     #[test]
     fn primary_context_transition_updates_one_catalog_worktree() {
         let main_path = PathBuf::from("/tmp/tiller-primary-main");
@@ -13864,6 +13992,102 @@ mod tests {
             "PROBE settings-branch escape done, closed={:?}",
             cx.debug_bounds("settings-category-General").is_none()
         );
+    }
+
+    /// F-CORE-ACT-26: once the mounted-worktree cap is exceeded, selecting
+    /// a new worktree evicts the oldest idle mounted worktree (never the
+    /// one just selected) — proven through the real
+    /// `evict_over_capacity_worktrees` call site `select_worktree` invokes,
+    /// not just the pure `WorktreeMountPolicy` unit test.
+    #[gpui::test]
+    async fn selecting_past_the_mount_cap_evicts_the_oldest_idle_worktree(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "tiller-mount-cap-{}-{unique}",
+                std::process::id()
+            ));
+            let paths: Vec<PathBuf> = ["main", "second", "third"]
+                .iter()
+                .map(|name| root.join(name))
+                .collect();
+            for path in &paths {
+                std::fs::create_dir_all(path).expect("create fixture worktree");
+            }
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                id: "mount-cap-project".into(),
+                name: "Mount Cap Project".into(),
+                root_path: paths[0].clone(),
+                is_git: true,
+                worktrees: paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| session::CatalogWorktree {
+                        branch: format!("branch-{index}"),
+                        path: path.clone(),
+                        is_primary: index == 0,
+                    })
+                    .collect(),
+            }]);
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &paths[0],
+            )));
+            // Simulate both other worktrees already mounted from earlier
+            // selections, so the cap of two is exceeded the moment a third
+            // is selected.
+            {
+                let mut state = workspace.control_state.lock().expect("control state");
+                for workspace in &mut state.workspaces {
+                    workspace.mounted = true;
+                }
+            }
+            workspace.settings = cx.new(|cx| {
+                Settings::with_snapshot(
+                    cx,
+                    SettingsSnapshot {
+                        limit_mounted_worktrees: true,
+                        mounted_worktrees: 2,
+                        ..SettingsSnapshot::default()
+                    },
+                )
+            });
+
+            workspace
+                .select_worktree(paths[2].clone(), cx)
+                .expect("select the third worktree");
+
+            let state = workspace.control_state.lock().expect("control state");
+            let mounted: Vec<bool> = paths
+                .iter()
+                .map(|path| {
+                    state
+                        .workspaces
+                        .iter()
+                        .find(|workspace| Path::new(&workspace.path) == path)
+                        .expect("fixture worktree row")
+                        .mounted
+                })
+                .collect();
+            assert_eq!(
+                mounted,
+                vec![false, true, true],
+                "the oldest idle worktree (main) is evicted; the just-selected \
+                 worktree (third) and the other still-open one (second) stay mounted"
+            );
+        });
     }
 
     /// F-SID-12: the worktree context menu's primary transitions reach the
