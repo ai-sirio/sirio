@@ -1451,6 +1451,15 @@ impl gpui::Render for TerminalView {
             .last_dropped_diff
             .as_ref()
             .map(|payload| payload.0.display().to_string());
+        // F-TAB-11: the disabled reason is computed from this pane's own
+        // live, prepainted size (the same source `on_left_mouse_down` uses
+        // for hit-testing), not from any cross-crate pane-tree state --
+        // `tiller_terminal` cannot depend on the `tiller` crate that owns
+        // the tab/pane tree. See `context_menu::items_with_split_availability`.
+        let split_pane_size = self
+            .running_terminal()
+            .and_then(|terminal| terminal.last_bounds.lock().map(|bounds| bounds.size))
+            .map(|size| (f32::from(size.width), f32::from(size.height)));
         let context_menu = self.context_menu.map(|position| {
             let entity = cx.entity();
             let dismiss_entity = entity.clone();
@@ -1465,11 +1474,19 @@ impl gpui::Render for TerminalView {
                 .bg(theme.card_fill)
                 .shadow_lg();
 
-            for (index, item) in context_menu::items().iter().enumerate() {
+            let items = match split_pane_size {
+                Some((width, height)) => {
+                    context_menu::items_with_split_availability(width, height)
+                }
+                None => context_menu::items().to_vec(),
+            };
+            for (index, item) in items.iter().enumerate() {
                 let action = item.action;
                 let item_entity = entity.clone();
                 let selector = format!("terminal-context-item-{index}");
                 let debug_selector = selector.clone();
+                let disabled_reason = item.disabled_reason.clone();
+                let is_disabled = disabled_reason.is_some();
                 menu = menu.child(
                     div()
                         .id(selector)
@@ -1479,15 +1496,34 @@ impl gpui::Render for TerminalView {
                         .px(px(10.0))
                         .py(px(5.0))
                         .rounded(theme.radii.control)
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
                         .text_size(theme.typography.footnote)
-                        .text_color(theme.title)
-                        .hover(|style| style.bg(theme.row_hover))
-                        .on_click(move |_, window, cx| {
-                            item_entity.update(cx, |terminal, cx| {
-                                terminal.handle_context_action(action, window, cx);
-                            });
+                        .when(is_disabled, |this| {
+                            this.text_color(theme.meta).cursor_not_allowed()
                         })
-                        .child(item.label),
+                        .when(!is_disabled, |this| {
+                            this.text_color(theme.title)
+                                .hover(|style| style.bg(theme.row_hover))
+                                .on_click(move |_, window, cx| {
+                                    item_entity.update(cx, |terminal, cx| {
+                                        terminal.handle_context_action(action, window, cx);
+                                    });
+                                })
+                        })
+                        .child(item.label)
+                        .when_some(disabled_reason, |this, reason| {
+                            this.child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("terminal-context-item-{index}-reason")
+                                    })
+                                    .text_size(px(11.0))
+                                    .text_color(theme.meta)
+                                    .child(reason),
+                            )
+                        }),
                 );
             }
             let menu = menu.on_mouse_down_out(move |_, _, cx| {
@@ -3097,6 +3133,97 @@ mod view_tests {
         assert!(
             captured.contains(&clipboard_text),
             "Paste did not feed the clipboard's pane id back into the terminal: {captured:?}"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// F-TAB-11: `TerminalContextItem` had no way to express "unavailable,
+    /// and here's why" -- `items()` took no parameters and the render site
+    /// attached `.on_click()` to every item unconditionally, so every item
+    /// was always clickable even when the action made no sense. This forces
+    /// the pane's own live prepainted size below the real split minimum
+    /// (mirroring `main.rs`'s `MIN_SPLIT_PANE_SIZE`) and checks both halves
+    /// of the fix in one drive: the disabled item shows its reason text and
+    /// a click at its own drawn position does not fire an event, while an
+    /// unrelated, still-available item in the very same open menu still
+    /// works normally.
+    #[gpui::test]
+    async fn a_too_narrow_pane_disables_split_left_with_a_visible_reason(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-disabled-split-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec cat".to_string()],
+        };
+        // A real, narrow window -- not a faked-up bounds value -- so the
+        // pane's own `TerminalElement::prepaint` records a genuinely small
+        // size the same way it would behind a real cramped split. Height
+        // stays generous so only the horizontal splits are expected to
+        // become unavailable.
+        let window = cx.open_window(size(px(220.0), px(900.0)), |_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+        let window_handle = window.into();
+        let mut cx = VisualTestContext::from_window(window_handle, cx);
+        cx.run_until_parked();
+
+        let terminal = cx.update(|window, _cx| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+                .clone()
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&terminal, move |_, event: &TerminalContextEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let click = point(px(40.0), px(40.0));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+
+        let reason_bounds = cx
+            .debug_bounds("terminal-context-item-6-reason")
+            .expect("Split Left's disabled reason must be drawn");
+        assert!(reason_bounds.size.width > px(0.0));
+
+        let split_left = cx
+            .debug_bounds("terminal-context-item-6")
+            .expect("Split Left item must still be drawn (disabled, not absent)");
+        cx.simulate_click(split_left.center(), Modifiers::none());
+        assert!(
+            events.borrow().is_empty(),
+            "a click on a disabled item must not fire its action: {:?}",
+            events.borrow()
+        );
+
+        // The disabled click landed inside the menu, so it did not dismiss
+        // it via `on_mouse_down_out`; an unrelated, available item in the
+        // same still-open menu must still work.
+        let copy_pane_id = cx
+            .debug_bounds("terminal-context-item-4")
+            .expect("Copy Pane ID item must still be reachable in the same menu");
+        cx.simulate_click(copy_pane_id.center(), Modifiers::none());
+        cx.run_until_parked();
+        let clipboard_text = cx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .expect("an unrelated, enabled item in the same menu must still work");
+        assert!(
+            clipboard_text.starts_with("pane-"),
+            "clipboard held {clipboard_text:?}, not a pane id"
         );
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
