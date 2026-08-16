@@ -239,3 +239,68 @@ path=<repo>; click 500 50; chord ctrl+shift p; type Codex; key Return; shot afte
 shows a new **Codex** tab selected, its pane rendering the CLI's own "Welcome to Codex" / "Sign in
 with ChatGPT" screen. To go further requires real credentials, which this task was explicitly told
 not to obtain.
+
+---
+
+## `F-CHAT-20` — manual scroll-away decouples tail-follow, re-pins on return to bottom — **both halves live-confirmed, byte-for-byte; no code change**
+
+P131 established the harness's captures are not stale; it also flagged that a *live* agent's
+uncontrolled `UsageUpdate`/streaming cadence is what made prior drives of this row ambiguous — no
+capture can be graded against a known-correct value when nobody knows what the real model should have
+said by wall-clock T. Built the smallest instrument that removes that ambiguity for this row
+specifically: `Scripts/acp-ticker-fixture.py`, a deterministic ACP agent (`initialize` /
+`session/new` / `session/prompt`) that streams `LINE 0001`, `LINE 0002`, ... on a fixed, configurable
+interval. Pointed `TILLER_ACP_PROGRAM` at it — the existing env override `Chat::launch_with_persistence`
+already reads, previously only exercised by `tiller_acp`'s own tests — so a live Chat tab's transcript
+becomes a scriptable, MD5-verifiable stream instead of a real LLM's turn.
+
+**First attempt was a false alarm, not a defect** — scrolling away only 3s into the stream (12–24
+lines) produced a view that looked identical to plain tail-follow because the content was still
+*shorter than the viewport* at that point: with nothing to scroll past, "scrolled to the top" and
+"following the tail" render pixel-identically, and a naive read of that result would have wrongly
+concluded the transcript keeps creeping back toward the tail even when scrolled away. Re-read
+`gpui`'s own `ListState::scroll`/`layout_items` (vendored source, `elements/list.rs`) to confirm
+`remeasure_items` (what `Chat::remeasure_entry` calls on every streamed chunk) anchors the scroll
+position by **absolute pixel offset**, not a growing-item-relative fraction — so a real decouple
+should hold a fixed frame regardless of how much more text streams in below the fold. Redrove with
+the scroll deferred until the stream had produced far more content than the viewport can show
+(~85 lines against a ~33-line-tall pane), which is what actually exercises the row.
+
+**Live drive** (one `wayland-drive.sh` invocation, `ACP_TICKER_LINES=220 ACP_TICKER_INTERVAL_S=0.25`):
+`project.add` → click Chat tab → `surface.chat.send text=go` → `sleep 20` (stream reaches ~86 lines,
+well past the ~33-line viewport) → `shot pre-scroll-tail` (confirms real overflow: shows lines
+54–86, not 1–86) → `scroll 700 400 -100` (a real synthetic wheel-up gesture, not a socket call) →
+`shot b-scrolled-away` (now shows lines **0001–0031** — genuinely scrolled to the top) → `sleep 4`
+(stream continues unattended, reaching ~150 lines) → `shot c-still-scrolled`.
+
+**Result — decouple, proven byte-for-byte**: `b-scrolled-away.png` and `c-still-scrolled.png` have
+the **identical MD5** (`6424d713ecbdfc76a7e14d9157c7266d`) despite ~4s / ~16 new lines having
+streamed into the transcript in between. The manually-scrolled position held exactly, pixel for
+pixel, while new content kept arriving off-screen below — this is what "manual scroll-away decouples
+tail-follow" looks like when actually driven, not inferred from code.
+
+Continuing the same invocation: `scroll 700 400 150` (a real wheel-down gesture back toward the
+bottom) → `shot d-scrolled-back` (lines 97–129, the tail at that moment) → `sleep 4` (stream
+continues) → `shot e-repinned` (lines **120–152** — a *later* window, tracking forward with real
+time). `d` and `e` have **different MD5s** (`1c5a21b4…` vs `0ef5a3f6…`), and `e`'s content is exactly
+what tail-follow should show ~4s later (line 152 vs line 129, ≈23 lines ≈ 4s at 0.25s/line) — proving
+re-pin: scrolling back to the true bottom re-armed `FollowMode::Tail`, and the transcript resumed
+tracking the live tail on its own, with no further manual scrolling.
+
+No `rust/` change was needed — `chat.rs`'s existing `scroll_handler` (added in `1bd79161`, already on
+this branch before this pass) is correct as written; both halves of this row simply had never been
+driven against content long enough to overflow the viewport, which is what made every prior attempt
+inconclusive.
+
+Screenshots (scratch, not committed — recreate with the `howToExercise` command):
+`/tmp/h6-chat20-full3/02-pre-scroll-tail.png` through `06-e-repinned.png`.
+
+Commit: `943c50a1` (Scripts/ instrument only; no `rust/` change).
+
+**howToExercise**: `TILLER_ACP_PROGRAM=<repo>/Scripts/acp-ticker-fixture.py ACP_TICKER_LINES=220
+ACP_TICKER_INTERVAL_S=0.25 TILLER_WL_LABEL=x Scripts/wayland-drive.sh /tmp/out 'ctl project.add
+path=<repo>; click 380 50; ctl surface.chat.send surfaceId=default-chat text=go; sleep 20; shot pre;
+scroll 700 400 -100; shot away; sleep 4; shot still-away; scroll 700 400 150; shot back; sleep 4;
+shot repinned' 3` — `away` and `still-away` must have identical MD5 (frozen while streaming
+continues); `back` and `repinned` must differ, with `repinned` showing a later `LINE` range than
+`back`.
