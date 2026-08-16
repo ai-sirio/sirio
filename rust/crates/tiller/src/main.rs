@@ -495,6 +495,15 @@ enum ControlAction {
         selector: String,
         reply: ControlReply,
     },
+    /// I3-tray-jump: drives `select_worktree_and_jump` -- the same
+    /// select-then-jump-to-worst-status-tab sequence a real tray roster
+    /// click makes -- so the behaviour behind `F-USE-05`'s tray jump is
+    /// observable over the control socket without a live D-Bus
+    /// `StatusNotifierWatcher` session.
+    TrayJump {
+        selector: String,
+        reply: ControlReply,
+    },
     AddProject {
         path: PathBuf,
         reply: ControlReply,
@@ -1222,6 +1231,7 @@ impl ControlHandler for AppControlHandler {
                     "workspace.list",
                     "workspace.create",
                     "workspace.select",
+                    "tray.jump",
                     "workspace.current",
                     "workspace.close",
                     "worktree.set",
@@ -2067,6 +2077,19 @@ impl ControlHandler for AppControlHandler {
                     );
                 };
                 self.queue_action(request, move |reply| ControlAction::SelectWorktree {
+                    selector,
+                    reply,
+                })
+            }
+            // I3-tray-jump: exercises the exact tray-roster-click code path
+            // (select worktree, then jump to its worst-status tab) over the
+            // socket, so it is observable without a live D-Bus
+            // StatusNotifierWatcher session -- see `select_worktree_and_jump`.
+            "tray.jump" => {
+                let Some(selector) = request.params.get("workspace").cloned() else {
+                    return ControlResponse::failure(&request.id, "tray.jump requires workspace");
+                };
+                self.queue_action(request, move |reply| ControlAction::TrayJump {
                     selector,
                     reply,
                 })
@@ -3126,6 +3149,11 @@ impl TillerWorkspace {
                                     let result = workspace.control_select_worktree(&selector, cx);
                                     let _ = reply.send(result);
                                 }
+                                ControlAction::TrayJump { selector, reply } => {
+                                    let result = workspace
+                                        .control_select_worktree_and_jump(&selector, cx);
+                                    let _ = reply.send(result);
+                                }
                                 ControlAction::AddProject { path, reply } => {
                                     let result = workspace.control_add_project(&path, cx);
                                     let _ = reply.send(result);
@@ -3265,11 +3293,11 @@ impl TillerWorkspace {
                                     window.activate_window();
                                 }
                                 tray::TrayRequest::SelectWorktree(path) => {
-                                    if workspace.select_worktree(path, cx).is_ok()
-                                        && let Some(id) = workspace.worst_status_tab_id(cx)
-                                    {
-                                        workspace.select_tab(id, cx);
-                                    }
+                                    // I3-tray-jump: `select_worktree_and_jump` is the
+                                    // exact same call the control socket's `tray.jump`
+                                    // makes, so a socket drive proves this arm's own
+                                    // behaviour, not a parallel stand-in for it.
+                                    let _ = workspace.select_worktree_and_jump(path, cx);
                                     window.activate_window();
                                 }
                                 tray::TrayRequest::Quit => {
@@ -4337,6 +4365,47 @@ impl TillerWorkspace {
             .map(|(id, _)| id)
     }
 
+    /// I3-tray-jump: the single code path both the tray's own roster-row
+    /// click (`tray::TrayRequest::SelectWorktree`) and the control socket's
+    /// `tray.jump` method drive -- selects `path`, then jumps to its
+    /// worst-status tab exactly the way `AgentRosterView.select(_:)` calls
+    /// `worstStatusTab(in:)` then `activateTab` in the Swift original. This
+    /// is factored out (rather than duplicated between the tray handler and
+    /// the control dispatcher) specifically so a control-socket drive
+    /// exercises the *same* production logic the tray uses, not a parallel
+    /// reimplementation that could pass while the tray path itself regressed.
+    ///
+    /// Returns `Ok(Some((tab_id, tab_title)))` when a tab was actually
+    /// activated, `Ok(None)` when the selection succeeded but no tab in
+    /// `self.tabs` carried a non-idle status to jump to (or the worktree has
+    /// no tabs at all), and `Err` when `select_worktree` itself failed. Note
+    /// the honest limitation this makes observable: `self.tabs` is this
+    /// window's single, un-scoped-to-worktree tab list (`F-CHG-19`'s
+    /// "single-open-worktree model"), and `select_worktree` does not
+    /// rehydrate it from a different worktree's persisted session -- so a
+    /// jump lands correctly for a tab already inside whichever worktree
+    /// happens to be materialized in `self.tabs` at call time, not
+    /// necessarily inside `path` if `path` differs from what was previously
+    /// on screen.
+    fn select_worktree_and_jump(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<(usize, String)>, String> {
+        self.select_worktree(path, cx)?;
+        let Some(id) = self.worst_status_tab_id(cx) else {
+            return Ok(None);
+        };
+        let title = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .map(|tab| tab.title.clone())
+            .unwrap_or_default();
+        self.select_tab(id, cx);
+        Ok(Some((id, title)))
+    }
+
     fn activity_surfaces(&self, cx: &App) -> Vec<ActivitySurface> {
         self.tabs
             .iter()
@@ -4568,6 +4637,47 @@ impl TillerWorkspace {
             ("branch".to_string(), workspace.branch.clone()),
             ("path".to_string(), workspace.path.clone()),
         ])
+    }
+
+    /// I3-tray-jump: the `tray.jump` control method's handler. Resolves
+    /// `selector` the same way `workspace.select` does, then drives
+    /// [`Self::select_worktree_and_jump`] -- the identical call the real
+    /// tray roster click makes -- and reports whether a tab was actually
+    /// activated.
+    fn control_select_worktree_and_jump(
+        &mut self,
+        selector: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let path = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .path_for_selector(selector)
+            .ok_or_else(|| format!("unknown worktree: {selector}"))?;
+        let jump = self.select_worktree_and_jump(path, cx)?;
+        let state = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workspace = state
+            .current_workspace()
+            .ok_or_else(|| "worktree selection did not produce a current workspace".to_string())?;
+        let mut rows = vec![
+            ("id".to_string(), workspace.id.clone()),
+            ("project".to_string(), workspace.project.clone()),
+            ("branch".to_string(), workspace.branch.clone()),
+            ("path".to_string(), workspace.path.clone()),
+        ];
+        match jump {
+            Some((tab_id, tab_title)) => {
+                rows.push(("jumped".to_string(), "true".to_string()));
+                rows.push(("tabId".to_string(), tab_id.to_string()));
+                rows.push(("tabTitle".to_string(), tab_title));
+            }
+            None => rows.push(("jumped".to_string(), "false".to_string())),
+        }
+        Ok(rows)
     }
 
     fn create_workspace(
@@ -15337,6 +15447,105 @@ mod tests {
                 ],
                 "gamma (no notified status) is absent; beta (Error) outranks \
                  alpha (Done) despite being added second"
+            );
+        });
+    }
+
+    /// I3-tray-jump / F-USE-05: `select_worktree_and_jump` -- the exact
+    /// method both the tray's own roster-row click and the control
+    /// socket's `tray.jump` drive -- must land on the target worktree's
+    /// own worst-status tab, not whichever tab merely happens to be
+    /// active beforehand. Two tabs exist (`palette_test_workspace_with_tab_count`
+    /// gives them pane ids 0 and 1, matching the `pane-{id}` key
+    /// `AgentActivityModel` is notified under); tab 1 is pushed to
+    /// `NeedsInput` while the workspace is currently showing a *different*
+    /// worktree (mirroring a real roster click arriving while another
+    /// worktree is on screen) -- reproduces live wayland-drive.sh evidence,
+    /// wave-I, 2026-08-16.
+    #[gpui::test]
+    async fn tray_jump_lands_on_the_target_worktrees_worst_status_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let target_path = workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        workspace.update(&mut cx, |workspace, cx| {
+            let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let other_path = std::env::temp_dir().join(format!(
+                "tiller-tray-jump-other-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&other_path).expect("create second fixture worktree");
+
+            // Widen the single-worktree fixture to two worktrees under one
+            // project, then rebuild `control_state` with the *other*
+            // worktree already selected -- the workspace is "currently
+            // showing" `other_path` when the jump request arrives, exactly
+            // like a roster click for a worktree that is not the one on
+            // screen.
+            let project = workspace.project_catalog.projects()[0].clone();
+            let mut worktrees = project.worktrees.clone();
+            worktrees.push(session::CatalogWorktree {
+                branch: "other".into(),
+                path: other_path.clone(),
+                is_primary: false,
+            });
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+                worktrees,
+                ..project
+            }]);
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &other_path,
+            )));
+            workspace.working_directory = other_path;
+
+            // `palette_test_workspace_with_tab_count`'s tabs use
+            // `TerminalView::failed`, which reports `ActivityStatus::Error`
+            // on its own and would mask the notify below (both tabs tying
+            // at Error, first-wins). Swap in real, non-failed terminals so
+            // `tab_status` falls through to `self.activity`, exactly as it
+            // does for a live PTY that hasn't exited.
+            for tab in workspace.tabs.iter_mut() {
+                let pane_id = tab.focused_pane;
+                tab.panes = PaneNode::leaf(
+                    pane_id,
+                    TabContent::Terminal {
+                        view: cx.new(|cx| {
+                            TerminalView::new(&target_path, cx)
+                                .expect("spawn a real test terminal")
+                        }),
+                    },
+                );
+            }
+
+            // Tab 1 (pane id 1) is worse than tab 0's default Idle.
+            workspace
+                .activity
+                .notify("pane-1", AgentStatus::NeedsInput, Instant::now());
+
+            let jump = workspace
+                .select_worktree_and_jump(target_path.clone(), cx)
+                .expect("select_worktree_and_jump succeeds for a known worktree");
+            assert_eq!(
+                jump,
+                Some((1, "Terminal 1".to_string())),
+                "the needs-input tab (id 1) must win over the idle tab (id 0), \
+                 regardless of which worktree was on screen when the jump ran"
+            );
+            assert_eq!(
+                workspace.working_directory, target_path,
+                "the jump must also have actually selected the target worktree"
+            );
+            assert_eq!(
+                workspace.active_tab, 1,
+                "select_tab must have made the needs-input tab the active one"
             );
         });
     }
