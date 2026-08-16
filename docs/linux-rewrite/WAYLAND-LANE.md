@@ -548,3 +548,35 @@ Controls run when this changed, all three of which must keep holding if you touc
 
 Read coordinates off the most recent frame and they are valid. You no longer need to reason about
 which size a frame was taken at.
+
+## The capture pipeline was stress-tested and is not stale (P131, 2026-08-16)
+
+A wave-G critic judging `F-CHAT-20` reported mid-stream captures "seconds apart" showing identical
+progress percentages, and called it "consistent with a capture-pipeline staleness artifact in this
+harness." That claim would have weakened every null result in this project, so it was tested directly
+rather than assumed — with a driven, predictable animation (a terminal counter ticking every 300 ms,
+whose expected value at any capture time is computable from wall-clock brackets) instead of a live
+agent stream, which has no ground truth to catch a stale frame against.
+
+**Result: no staleness found.** Three spaced `shot()` calls, five back-to-back `shot()` calls, and
+raw `grim` calls with **no resize nudge at all** (both against the ticking terminal and against a
+one-shot `project.add` socket mutation — the exact scenario trap 2 below describes) all returned
+frames that tracked real content, converging to fresh state within roughly the same ~0.6-2 s margin
+`shot()` already budgets. Full experiment design, every MD5/timestamp table, and the screenshots are
+in `tasks/P131-capture-staleness.md`.
+
+**This also narrows trap 2, immediately below.** Its blanket claim that grim returns a stale frame
+"byte for byte" absent a forced configure did not reproduce on the current build — an un-nudged
+`grim` call converged to the correct, fully-settled frame within ~2 s with no resize anywhere in the
+sequence. Read trap 2's *lesson* (verify a negative by forcing a repaint before you believe it — cheap
+insurance, and `shot()`'s nudge remains a strictly stronger, deterministic guarantee than hoping
+ambient settle time was enough) as still sound; read its literal claim that an un-forced capture is
+permanently stuck as **not current**, per the un-nudged tests in P131.
+
+**What this does *not* rule out**: whether the specific `context-ring` percentage widget itself calls
+`cx.notify()` on every `ContextUsage` update is an app-side (`rust/`) question this task's read-only
+instrument cannot answer, because exercising it needs a live ACP event — the same untrustworthy
+instrument this task replaced. The likelier read of the original report is that the agent's own
+`UsageUpdate` cadence was coarser than the sampling interval, i.e. the value had genuinely not
+changed yet. Do not re-litigate a row as "harness staleness" without a P131-style driven-animation
+control of your own — a live stream cannot tell you which one you're looking at.
