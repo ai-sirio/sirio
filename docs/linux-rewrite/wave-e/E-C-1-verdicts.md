@@ -3,6 +3,25 @@
 Critic pass over the builder's claims in `E-C-1-report.md`, against the wave-D root causes
 recorded in `E-C-1.md`. Verified independently in a worktree the builder never saw.
 
+## `F-CHAT-34` — verdict: `PASSED`
+
+Instrument: real process restarts against a real sqlite DB file, not a screenshot — the honest
+instrument for a persistence row. `Scripts/wayland-drive.sh` (label `ec1g`), fresh `tiller`
+build at current HEAD (`7190fde` still the last touch to `db.rs`), real project at `/tmp/ec1proj`.
+Drove the full repro: opened the Chat tab, typed and sent "Reply with exactly the single word OK"
+to a real Claude agent (not a socket-composed stub), waited for the turn to actually complete (a
+real assistant "OK" reply rendered, tab got its completion checkmark). Then ran the ordinary
+action the row names — `ctl tab.select` twice on the same worktree — which calls `schedule_save`
+→ `save_tabs`. Then **killed the app process entirely and started a fresh one against the same
+`TILLER_DB` file** (a real restart, twice over, across three separate process launches). Opened
+the Chat tab's overflow menu and clicked **Chat History** (not just the live transcript, which
+session-restore could trivially repaint) — it listed one real session, `"Chat"`, with a `Delete`
+affordance (`/tmp/ec1g-shots/04-after-history-click.png`), never dropping to "No past chats". This
+is the specific artifact wave-D's own evidence showed missing from the identical repro pre-fix.
+Code review of `upsert_tab`/`save_tabs` (`db.rs:382,1446`) confirms the mechanism matches: stale
+tab ids are deleted (cascading their transcripts deliberately), kept ids are upserted in place,
+never delete-then-reinsert.
+
 ## `F-CORE-ACT-25` — verdict: `FAILED — absent`
 
 Independently re-confirmed the wave-D root cause at the current HEAD: `select_worktree`
