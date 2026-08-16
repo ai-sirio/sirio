@@ -23,9 +23,13 @@
 //!   keeps serving.
 
 use std::fs;
+#[cfg(unix)]
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +70,9 @@ pub enum ServerError {
     ChmodFailed { path: PathBuf, detail: String },
     /// The bound path is not a socket owned by the current user.
     InsecureSocket { detail: String },
+    /// This platform has no transport implemented yet (see the
+    /// `#[cfg(not(unix))]` `ControlServer::start` below).
+    Unsupported { detail: String },
 }
 
 impl std::fmt::Display for ServerError {
@@ -87,6 +94,7 @@ impl std::fmt::Display for ServerError {
                 write!(f, "chmod 0o600 {}: {detail}", path.display())
             }
             ServerError::InsecureSocket { detail } => write!(f, "insecure socket: {detail}"),
+            ServerError::Unsupported { detail } => write!(f, "unsupported: {detail}"),
         }
     }
 }
@@ -124,6 +132,19 @@ impl ControlServer {
     }
 
     /// Binds the socket and starts accepting connections.
+    ///
+    /// Unix-only: the whole transport below is a unix domain socket
+    /// (`std::os::unix::net::{UnixListener, UnixStream}`), which has no
+    /// std-library Windows counterpart. The Windows counterpart is a named
+    /// pipe (`CreateNamedPipeW`/`ConnectNamedPipe`, or `tokio::net::windows::
+    /// named_pipe` if this crate ever adopts async I/O) — a genuinely
+    /// different transport, not a type this file's `cfg(unix)` functions can
+    /// be swapped for in place, since accept/read/write/set_nonblocking all
+    /// have different shapes on a named pipe (one server handle serves one
+    /// client at a time; a new instance is created per connection rather than
+    /// accepted from a listener). That redesign is deliberately not done
+    /// here — see the `#[cfg(not(unix))]` stub below.
+    #[cfg(unix)]
     pub fn start(&self) -> Result<(), ServerError> {
         self.prepare_parent_directory()?;
         self.prepare_path()?;
@@ -164,10 +185,25 @@ impl ControlServer {
         Ok(())
     }
 
+    /// Named-pipe transport not implemented (see the doc comment on the
+    /// `#[cfg(unix)]` twin above). Reports honestly via `Err` rather than
+    /// silently accepting connections nobody will ever get — `stop()` is
+    /// still safe to call afterward: `started` never flips to `true`, so it
+    /// stays a no-op.
+    #[cfg(not(unix))]
+    pub fn start(&self) -> Result<(), ServerError> {
+        Err(ServerError::Unsupported {
+            detail: "the control socket is not implemented on this platform yet \
+                     (Windows counterpart: a named pipe)"
+                .to_string(),
+        })
+    }
+
     /// XDG runtime directories are normally provisioned by the login/session
     /// manager, but the state-directory fallback and explicit test/override
     /// paths may not exist yet. Create only the socket's leaf parent and keep
     /// it private before binding anything inside it.
+    #[cfg(unix)]
     fn prepare_parent_directory(&self) -> Result<(), ServerError> {
         let parent = self
             .socket_path
@@ -216,6 +252,7 @@ impl ControlServer {
     }
 
     /// Removes a stale socket file, or refuses if a live server owns it.
+    #[cfg(unix)]
     fn prepare_path(&self) -> Result<(), ServerError> {
         let path = &self.socket_path;
         if path.as_os_str().as_encoded_bytes().len() > MAX_SOCKET_PATH_LENGTH {
@@ -246,6 +283,7 @@ impl ControlServer {
     /// mode is unreachable. Unlike narrowing the process umask, nothing here
     /// is process-global: concurrent binds from other threads cannot
     /// interfere with each other.
+    #[cfg(unix)]
     fn bind_private(path: &Path) -> io::Result<UnixListener> {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
@@ -312,6 +350,7 @@ impl ControlServer {
 
     /// Verifies the bound path is a socket owned by the current user,
     /// mirroring the Swift server's post-bind sanity check.
+    #[cfg(unix)]
     fn post_bind_sanity_check(&self) -> Result<(), ServerError> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
         let metadata =
@@ -342,8 +381,10 @@ impl Drop for ControlServer {
 /// so an idle or malicious client can never block another. The listener is
 /// non-blocking and polled at [`POLL_INTERVAL`], so shutdown is detected
 /// without depending on any wake-up mechanism.
+#[cfg(unix)]
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
+#[cfg(unix)]
 fn accept_loop(
     listener: UnixListener,
     handler: Arc<dyn ControlHandler>,
@@ -426,15 +467,21 @@ fn peer_is_owner(stream: &UnixStream) -> bool {
     result == 0 && credentials.uid == unsafe { libc::getuid() }
 }
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "openbsd",
-    target_os = "netbsd"
-)))]
+/// Any other unix (this arm previously also matched Windows by accident,
+/// where `UnixStream` does not exist at all — `unix` is now required
+/// explicitly so this is truly the unix catch-all, not a non-Linux one).
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))
+))]
 fn peer_is_owner(_stream: &UnixStream) -> bool {
     true
 }
@@ -442,6 +489,7 @@ fn peer_is_owner(_stream: &UnixStream) -> bool {
 /// Serves one connection: read one request per line, dispatch, write one
 /// response per line, in order. Never panics: every failure mode closes the
 /// connection, never the server.
+#[cfg(unix)]
 fn serve_connection(mut stream: UnixStream, handler: Arc<dyn ControlHandler>) {
     // On macOS (and other BSDs) the accepted socket inherits the listener's
     // O_NONBLOCK; restore blocking so reads wait for the client's data
@@ -510,6 +558,7 @@ fn serve_connection(mut stream: UnixStream, handler: Arc<dyn ControlHandler>) {
 }
 
 /// Full-write loop with EINTR retry. Returns false on failure (client gone).
+#[cfg(unix)]
 fn write_line(stream: &mut UnixStream, response: &ControlResponse) -> bool {
     let Ok(data) = encode_line(response) else {
         return false;

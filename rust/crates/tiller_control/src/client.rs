@@ -2,7 +2,9 @@
 //! `TillerControl/ControlClient.swift`: a fresh connection per request, one
 //! request line in, one response line out, with a receive timeout.
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -22,6 +24,10 @@ pub enum ClientError {
     BadResponse { detail: String },
     /// The server did not answer within the timeout.
     TimedOut { timeout: Duration },
+    /// This platform has no client transport implemented yet — see
+    /// [`ServerError::Unsupported`](crate::server::ServerError::Unsupported)
+    /// for the matching server-side gap and its rationale (named pipes).
+    Unsupported { detail: String },
 }
 
 impl std::fmt::Display for ClientError {
@@ -34,6 +40,7 @@ impl std::fmt::Display for ClientError {
             ClientError::TimedOut { timeout } => {
                 write!(f, "no response within {timeout:?}")
             }
+            ClientError::Unsupported { detail } => write!(f, "unsupported: {detail}"),
         }
     }
 }
@@ -47,6 +54,10 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3600);
 ///
 /// Blocking by design — `tillerctl` is a short-lived CLI. `timeout` bounds
 /// the wait for the response line.
+///
+/// Unix-only, matching [`crate::server::ControlServer::start`]'s transport —
+/// see its doc comment for why a named pipe is not a drop-in replacement.
+#[cfg(unix)]
 pub fn round_trip(
     socket_path: &Path,
     request: &ControlRequest,
@@ -107,4 +118,19 @@ pub fn round_trip(
             }
         }
     }
+}
+
+/// Named-pipe client not implemented (see the doc comment on the
+/// `#[cfg(unix)]` twin above).
+#[cfg(not(unix))]
+pub fn round_trip(
+    _socket_path: &Path,
+    _request: &ControlRequest,
+    _timeout: Duration,
+) -> Result<ControlResponse, ClientError> {
+    Err(ClientError::Unsupported {
+        detail: "the control socket client is not implemented on this platform yet \
+                 (Windows counterpart: a named pipe)"
+            .to_string(),
+    })
 }
