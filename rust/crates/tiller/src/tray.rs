@@ -58,19 +58,37 @@ pub type TrayRequestQueue = Arc<Mutex<Vec<TrayRequest>>>;
 /// a D-Bus client. Confirmed live: a bare `SharedRoster` write left
 /// `GetLayout` answering a stale "No active agents" indefinitely; adding
 /// the `update(|_| {})` call below is what made it pick up the change.
+#[cfg(target_os = "linux")]
 pub struct TrayHandle(ksni::blocking::Handle<AgentRosterTray>);
 
+#[cfg(target_os = "linux")]
 impl TrayHandle {
     pub fn nudge(&self) {
         let _ = self.0.update(|_tray| {});
     }
 }
 
+/// StatusNotifierItem (`ksni`) is a freedesktop D-Bus protocol with no
+/// macOS/Windows counterpart -- `NSStatusItem` and `Shell_NotifyIcon` are
+/// different APIs entirely (see docs/linux-rewrite/PORTABILITY.md's tray
+/// row). Nothing here has been ported for those platforms yet, so this
+/// handle carries no ksni state and `nudge()` is an honest no-op rather
+/// than a call into a tray that does not exist.
+#[cfg(not(target_os = "linux"))]
+pub struct TrayHandle;
+
+#[cfg(not(target_os = "linux"))]
+impl TrayHandle {
+    pub fn nudge(&self) {}
+}
+
+#[cfg(target_os = "linux")]
 struct AgentRosterTray {
     roster: SharedRoster,
     requests: TrayRequestQueue,
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for AgentRosterTray {
     fn id(&self) -> String {
         "tiller".into()
@@ -155,6 +173,7 @@ impl ksni::Tray for AgentRosterTray {
 /// -- headless CI, a WM with no tray applet -- in which case the app runs
 /// exactly as it did before this module existed, just without the roster
 /// surface.
+#[cfg(target_os = "linux")]
 pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
     use ksni::blocking::TrayMethods;
     let roster: SharedRoster = Arc::new(Mutex::new(Vec::new()));
@@ -170,4 +189,16 @@ pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
             None
         }
     }
+}
+
+/// No StatusNotifierItem host exists on macOS/Windows (see the module doc
+/// comment and docs/linux-rewrite/PORTABILITY.md). This is not a fallback
+/// that pretends to work -- it unconditionally declines, exactly like the
+/// Linux path's own `Err` branch above does when no SNI host answers, so
+/// the app runs with no roster surface until a real `NSStatusItem` /
+/// `Shell_NotifyIcon` port lands.
+#[cfg(not(target_os = "linux"))]
+pub fn spawn() -> Option<(SharedRoster, TrayRequestQueue, TrayHandle)> {
+    eprintln!("[tray] not implemented on this platform, roster disabled");
+    None
 }
