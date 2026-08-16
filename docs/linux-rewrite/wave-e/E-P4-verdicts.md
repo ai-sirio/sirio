@@ -1,43 +1,29 @@
-# Wave E slice E-P4 — critic verdicts
+# E-P4 critic verdicts
 
-Critic is independent of the E-P4 builder. Instrument: `Scripts/linux-drive.sh` on `DISPLAY=:1`
-(drive lock held under label `critic-ep4`), binary built 2026-08-15 21:28 (after fix commit
-`33fbb97` at 20:45, so the running binary contains the fix). `convert <capture>.png -crop
-<row> txt:-` pixel scans, same method D-P1 used.
+Critic pass, independent of the builder — the builder's own report (`E-P4-report.md`) already
+flags this row as "not re-verified this pass (X11-only row)"; that live re-check is what this pass
+supplies. Instrument: `Scripts/linux-drive.sh` against a fresh app process on the shared `DISPLAY=:1`
+X11 lane (real persisted DB). HEAD confirmed clean (`git status --porcelain` empty) before driving.
 
-## `F-BRW-01` — FAILED — defective
+## `F-BRW-01` — FAILED — defective (unchanged; live re-check finds byte-identical numbers to D-P1)
 
-**Route exercised exactly as specified.** Opened a brand-new Browser tab live (tab-bar `+` → "New
-Browser"), typed `https://example.com` into the address bar, pressed Return, waited for real
-WebKitGTK content to render (`Example Domain` heading + body text visible, not a blank/error
-page). Pixel-scanned a content row (`y=400`, well below the header) and the chrome row (`y=55`)
-across three separate captures: immediately after load, and again after switching tabs away and
-back twice (forcing additional `prepaint` calls, which is when the builder's calibration logic
-re-runs).
-
-**Result: identical in all three captures.** Content span `x=331..1060`; true pane chrome bounds
-(divider before sidebar `x=386`, divider before Files panel `x=1236`, both measured from the same
-frames) `x=386..1236`. That is the exact ~55px left bleed / ~177px right gap D-P1 measured before
-any fix existed — reproduced fresh, live, on the fixed binary, three times, including after forced
-re-prepaints.
-
-**Root cause of why the fix is inert, read from source:** `browser.rs`'s `prepaint` calls
-`webview.set_bounds(requested)` and then, in the same synchronous call, immediately calls
-`webview.bounds()` to measure what "actually landed," to derive the correction factor. But
-`wry::WebView::bounds()` (`wry-0.56.1/src/webkitgtk/mod.rs:935`) reads `XGetWindowAttributes`
-directly, while `set_bounds`'s resize goes through GTK/GDK widget allocation, which is applied on
-the next GLib main-loop iteration, not synchronously. So the very first calibrating read-back sees
-the *pre-resize* geometry, computes a spurious ~1.0 ratio, and the code's own guard
-(`if (factor - 1.0).abs() > 0.01`) then locks in `scale_correction = Some(1.0)` — a permanent
-no-op — and never measures again, because the `Some(_)` branch is taken forever after. This matches
-the wave's own listed trap ("green test != working feature"): the 10/10 unit test passes because it
-mocks `bounds()` to return the already-resized value, which is not what the real synchronous-call
-ordering produces.
-
-**Evidence discriminates:** a working fix would show the two spans converging (content span ==
-chrome bounds); an unfixed build reproduces exactly D-P1's numbers. All three live captures show
-the latter, unchanged across forced re-prepaints — this is not "default value == correct value"
-ambiguity.
-
-Frames: `/tmp/.../scratchpad/ep4/04-newbrowser-loaded.png`, `05-newbrowser-settled.png` (both fresh
-tabs, not the sweep-D orphan directory, not cited).
+Drove the exact route the builder's own `howToExercise` names, twice independently. (1) A fresh
+`linux-drive.sh` launch restored a persisted session with an already-open Browser tab on
+`https://example.com` (`00-baseline.png`); pixel-scanned it exactly as D-P1 did. (2) In a second
+fresh launch, opened tab-bar `+` (1218,54) → **New Browser** (1299,167) — confirmed genuinely new by
+the sidebar gaining a third `Browser` row, now selected/highlighted (`03-fresh.png`) — and
+pixel-scanned that tab too. Both scans, a content-row scan at y=400 and a chrome-row scan at y=850,
+land on **exactly** D-P1's numbers: rendered content spans x=331..1060, the pane's true chrome
+bounds span x=386..1236 (divider at 378-379) — the same ~55px left bleed and ~177px right gap,
+reproduced pixel-for-pixel across two independent tabs and two independent process launches of the
+current HEAD binary (`33fbb97` included). The builder's self-calibrating `SharedScaleCorrection`
+mechanism is real code (confirmed by `Read` of `browser.rs:1752-1805`) and its unit test genuinely
+passes (`cargo test -p tiller_ui --lib browser::` → 10/10, including
+`scale_correction_recovers_the_exact_shrink_d_p1_measured_live`), but that test only feeds
+hand-plugged D-P1 numbers through the correction math — it never calls the real `webview.bounds()`.
+Live, the correction has zero observable effect: either `webview.bounds()` errors/never returns
+`Ok`, or it echoes back the already-shrunk value instead of the window's true on-screen geometry, so
+`self.scale_correction` never moves the rendered rect. This is the wave's own "token call site" trap
+— new code with a passing test and no behavior change on the path a user actually takes. Not fixed.
+Frames: `00-baseline.png`, `02a-menu.png` (New Browser menu open), `03-fresh.png` (new tab, same
+shrink). Raw scans: `row400.txt`/`row850.txt` (restored tab), `row400b.txt`/`row850b.txt` (fresh tab).
