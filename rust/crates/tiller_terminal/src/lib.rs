@@ -27,8 +27,8 @@ use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Element, ElementId, EventEmitter, Font, FontStyle,
     FontWeight, GlobalElementId, Hsla, InteractiveElement, IntoElement, KeyDownEvent, LayoutId,
     MouseButton, MouseDownEvent, PaintQuad, ParentElement, Pixels, Point, ShapedLine,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window, div, fill, font, point, px,
-    relative, rgba, size,
+    StatefulInteractiveElement, Style, Styled, TextRun, Window, anchored, deferred, div, fill,
+    font, point, px, relative, rgba, size,
 };
 use parking_lot::Mutex;
 use tiller_theme::Theme;
@@ -1457,9 +1457,6 @@ impl gpui::Render for TerminalView {
             let mut menu = div()
                 .id("terminal-context-menu")
                 .debug_selector(|| "terminal-context-menu".to_owned())
-                .absolute()
-                .left(position.x)
-                .top(position.y)
                 .w(px(220.0))
                 .p(px(6.0))
                 .rounded(theme.radii.user_pill)
@@ -1493,12 +1490,28 @@ impl gpui::Render for TerminalView {
                         .child(item.label),
                 );
             }
-            menu.on_mouse_down_out(move |_, _, cx| {
+            let menu = menu.on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |terminal, cx| {
                     terminal.context_menu = None;
                     cx.notify();
                 });
-            })
+            });
+            // `position` is already window-absolute (it comes straight from
+            // `MouseDownEvent::position` in `open_context_menu`). A plain
+            // `.absolute().left()/.top()` div resolves against this
+            // container's own `.relative()` origin, which is *itself*
+            // already window-absolute for every pane not flush against the
+            // window's top-left corner -- double-counting the offset
+            // (P129). `anchored().position(...)` takes a window coordinate
+            // as-is, the same idiom already used correctly by
+            // `tab_bar.rs`'s "+" menu, `right_panel.rs`, and `sidebar.rs`.
+            deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window()
+                    .child(menu),
+            )
+            .priority(1)
         });
         match &self.terminal {
             TerminalState::Pending => {
@@ -2392,6 +2405,36 @@ mod view_tests {
         path: PathBuf,
     }
 
+    /// P129: every real pane except a single fullscreen one sits behind a
+    /// non-zero window origin (the sidebar, the tab strip, sibling split
+    /// panes). This fixture reproduces that with a fixed-width spacer to
+    /// the terminal's left, standing in for the sidebar, so a context-menu
+    /// regression that only shows up away from the window's top-left
+    /// corner (like P129's origin-doubling bug) is actually exercised.
+    struct NonZeroOriginFixture {
+        terminal: gpui::Entity<TerminalView>,
+    }
+
+    impl gpui::Render for NonZeroOriginFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div()
+                .size_full()
+                .flex()
+                .child(
+                    div()
+                        .id("terminal-test-origin-spacer")
+                        .debug_selector(|| "terminal-test-origin-spacer".to_owned())
+                        .w(px(280.0))
+                        .h_full(),
+                )
+                .child(self.terminal.clone())
+        }
+    }
+
     /// F-TERM-PTY-06: a real OS-level file-manager drag lands as
     /// `gpui::ExternalPaths` (GPUI's XDND payload), distinct from the
     /// in-app typed drag `FileDropFixture` exercises above. XDND itself is
@@ -2893,6 +2936,91 @@ mod view_tests {
         assert!(event.target.terminal_id().starts_with("terminal-"));
 
         assert!(cx.update(|_, cx| terminal.read(cx).is_failed()));
+    }
+
+    /// P129: the terminal's own right-click context menu reused the
+    /// already-window-absolute mouse-down position as a plain
+    /// `.absolute().left()/.top()` value inside a `.relative()` ancestor
+    /// whose own window origin is non-zero for every pane but one flush
+    /// against the window's top-left corner — double-counting the offset.
+    /// This drives the exact same real mouse gesture as
+    /// `right_click_resolves_this_terminal_and_draws_all_context_actions`
+    /// above, but behind a 280px spacer standing in for the sidebar, which
+    /// is the one layout an origin-doubling bug can actually show up in.
+    /// It asserts both halves of the regression: the menu paints exactly
+    /// at the click point (not click + pane origin), and a click at that
+    /// real, painted item position fires the action.
+    #[gpui::test]
+    async fn context_menu_paints_at_the_click_point_behind_a_non_zero_pane_origin(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let missing = missing_directory("context-menu-non-zero-origin");
+        let window = cx.add_window(|_, cx| {
+            let terminal = cx.new(|cx| {
+                TerminalView::failed(
+                    &missing,
+                    TerminalShell::System,
+                    "test non-zero-origin context-menu terminal",
+                    cx,
+                )
+            });
+            NonZeroOriginFixture { terminal }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<NonZeroOriginFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let terminal = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal.clone());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&terminal, move |_, event: &TerminalContextEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+
+        let spacer = cx
+            .debug_bounds("terminal-test-origin-spacer")
+            .expect("spacer must be drawn");
+        let pane_origin_x = spacer.origin.x + spacer.size.width;
+        assert!(
+            pane_origin_x > px(0.0),
+            "fixture must place the pane at a non-zero window origin, got {pane_origin_x:?}"
+        );
+
+        let click = point(pane_origin_x + px(40.0), spacer.origin.y + px(40.0));
+        cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
+
+        let menu = cx
+            .debug_bounds("terminal-context-menu")
+            .expect("context menu must be drawn");
+        // Sub-pixel layout rounding can shift this by a fraction of a
+        // pixel; P129's bug shifted it by the pane's entire 280px origin,
+        // so a 1px tolerance still cleanly distinguishes "fixed" from
+        // "double-counted."
+        let delta_x = (menu.origin.x - click.x).abs();
+        let delta_y = (menu.origin.y - click.y).abs();
+        assert!(
+            delta_x < px(1.0) && delta_y < px(1.0),
+            "menu must paint at the click point, not click + pane origin (P129): \
+             menu.origin={:?}, click={:?}",
+            menu.origin,
+            click
+        );
+
+        let split_left = cx
+            .debug_bounds("terminal-context-item-6")
+            .expect("Split Left item must be drawn");
+        cx.simulate_click(split_left.center(), Modifiers::none());
+        let event = events.borrow().last().cloned().expect("split event");
+        assert_eq!(event.action, TerminalContextAction::SplitLeft);
     }
 
     /// F-TERM-06: "Copy Pane ID" and "Paste" were only ever proven by
