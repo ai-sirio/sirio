@@ -539,6 +539,7 @@ impl TerminalHandle {
 const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 
+#[cfg(unix)]
 fn terminate_process_group(process_group: u32) {
     let process_group = process_group as libc::pid_t;
     if process_group <= 0 {
@@ -573,6 +574,7 @@ fn terminate_process_group(process_group: u32) {
 /// each thread's `children` file only lists the children *that thread*
 /// directly spawned, so every tid must be read to see the whole process's
 /// children.
+#[cfg(unix)]
 fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
     let mut discovered = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -609,6 +611,7 @@ fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
 /// Reading `getpgid` per pid at kill time, rather than assuming the shell's
 /// own pid is still its pgid, is what makes this correct even if the shell
 /// itself has re-grouped.
+#[cfg(unix)]
 fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
     let mut pids = vec![shell_pid];
     pids.extend(descendant_pids(shell_pid));
@@ -626,11 +629,31 @@ fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
 /// current descendants live in — not just the group captured at spawn
 /// (F-PER-06). Each distinct group gets its own SIGTERM-then-grace-then-
 /// SIGKILL handling via [`terminate_process_group`].
+#[cfg(unix)]
 fn terminate_descendant_process_groups(shell_pid: u32) {
     for group in descendant_process_groups(shell_pid as libc::pid_t) {
         terminate_process_group(group as u32);
     }
 }
+
+/// Windows stand-in for [`terminate_descendant_process_groups`]. Unix's
+/// `killpg`/`getpgid` walk over `/proc/<pid>/task/<tid>/children` has no
+/// Toolhelp32 port here (`CreateToolhelp32Snapshot` + `Process32First`/
+/// `Process32Next`, matching `th32ParentProcessID`, would enumerate the
+/// descendants; there is no Windows process-group signal to broadcast to
+/// once found). The more idiomatic Windows fix is different in kind, not
+/// just in API: attach the child to a Job Object created with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the job handle kills the
+/// whole descendant tree atomically — no enumerate-then-kill race at all.
+/// `alacritty_terminal`'s `tty/windows/` (ConPTY) backend is the natural
+/// place to own that job handle, since it already owns the child's lifetime;
+/// duplicating it here would fight that ownership rather than complement it.
+/// This is therefore a real no-op, not a partial implementation: the PTY's
+/// own child still gets torn down via the `Msg::Shutdown` send right after
+/// this call in `shutdown()`, but a descendant that has spawned its own
+/// detached process is not reached, and there is no substitute here yet.
+#[cfg(not(unix))]
+fn terminate_descendant_process_groups(_shell_pid: u32) {}
 
 /// A live PTY-backed terminal view, or a failed pane showing why the PTY
 /// could not be started.
