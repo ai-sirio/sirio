@@ -70,3 +70,26 @@ already-documented P123 mis-positioned-popover class of bug. Never reached the d
 tested; live end-to-end proof still owed) but flagging this specific, reproducible tab-menu
 click-through failure as a harder blocker than previously recorded, for whoever owns
 `main.rs`'s tab-strip context-menu dispatch.
+
+## `F-TERM-SCR-02` — output-settle / resize debounce — **half-proven**
+
+Independently re-read `tiller_terminal/src/lib.rs` at current HEAD myself (not trusting the
+report's line numbers): `TERMINAL_RESIZE_DEBOUNCE = 120ms` (:522), `OUTPUT_SETTLE_DEBOUNCE =
+200ms` (:635), the `resize_generation` fetch-add/load CAS pair (:418-423), all present and
+structurally unchanged — no regression. Given the tight per-row time budget this pass, I did not
+build the live WINCH-trap-plus-divider-drag instrument either (the same gap the builder and the
+prior critic both left open) — code-reading alone is not a live re-verification per the standing
+rule, so this stays half-proven, unchanged, rather than re-affirming PASSED on a third round of
+reading the same source.
+
+## `F-TERM-PTY-05` — real agent-CLI child process through the launch path — **half-proven**
+
+Correction to the report: `main.rs` (a G5-owned file) does contain the launch path this row needs
+— `open_command_palette`/`render_command_palette` (:8117-8455) and `NewTabAction::Codex` (:2471) —
+so this is not actually a "no files map to this row" gap, contrary to the report's claim. Did not
+re-run the live command-palette→Codex-child drive this pass (the existing ledger evidence is
+same-day, 2026-08-16, and no code in this path changed this wave per the integration report, so a
+repeat run would reconfirm rather than add information, and the row's real blocker is
+environment-external). Re-confirmed directly: `codex login status` still reports "Not logged in" on
+this host, so the credential gap the prior evidence hit is still real, not a stale claim. Leaving at
+half-proven, unchanged verdict, environment-gapped as before.
