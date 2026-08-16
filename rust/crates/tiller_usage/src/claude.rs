@@ -279,7 +279,25 @@ impl ClaudeUsageFetcher {
     pub const POLL: Duration = Duration::from_millis(300);
 
     pub fn fetch() -> UsageFetchOutcome {
-        Self::fetch_with(Self::SETTLE, Self::POLL, Self::TIMEOUT)
+        Self::fetch_with(Self::SETTLE, Self::POLL, Self::timeout())
+    }
+
+    /// `Self::TIMEOUT`, unless overridden by `TILLER_USAGE_CLAUDE_TIMEOUT_MS`
+    /// (F-USE-03). This exists purely as a live-driving instrument: a real
+    /// 25s hang is too risky to exercise against this project's harness's
+    /// own 180s silence kill, so this lets an operator shrink the bound
+    /// (below `SETTLE`'s fixed 2s pre-`/usage` sleep, which is unconditional
+    /// and not itself clamped to the deadline) and force a genuine
+    /// `UsageFetchOutcome::TimedOut` through the real production code path —
+    /// a real PTY spawn of the real `claude` binary, not a stand-in outcome
+    /// injected around this function. Unset in every normal run, so default
+    /// behaviour is exactly `Self::TIMEOUT`.
+    fn timeout() -> Duration {
+        std::env::var("TILLER_USAGE_CLAUDE_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Self::TIMEOUT)
     }
 
     /// Internal overload with explicit timing, for tests.
@@ -632,5 +650,41 @@ mod tests {
             Some(UsageReason::LoggedOut)
         );
         assert_eq!(classify_failure("some other output"), None);
+    }
+
+    /// F-USE-03: `TILLER_USAGE_CLAUDE_TIMEOUT_MS` overrides `TIMEOUT` when
+    /// set and parseable, so a live drive can shrink the bound below
+    /// `SETTLE` and force a genuine `TimedOut` in seconds instead of
+    /// risking a real 25s hang against this harness's own silence kill.
+    /// Unset (or unparseable), it falls back to the unmodified default.
+    #[test]
+    fn timeout_override_reads_the_env_var_and_falls_back_to_the_default() {
+        // SAFETY: single-threaded within this test; the var name is unique
+        // to this test and touched nowhere else in the crate.
+        unsafe {
+            std::env::remove_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS");
+        }
+        assert_eq!(ClaudeUsageFetcher::timeout(), ClaudeUsageFetcher::TIMEOUT);
+
+        unsafe {
+            std::env::set_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS", "1500");
+        }
+        assert_eq!(
+            ClaudeUsageFetcher::timeout(),
+            Duration::from_millis(1500)
+        );
+
+        unsafe {
+            std::env::set_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS", "not-a-number");
+        }
+        assert_eq!(
+            ClaudeUsageFetcher::timeout(),
+            ClaudeUsageFetcher::TIMEOUT,
+            "an unparseable override must fall back, not panic"
+        );
+
+        unsafe {
+            std::env::remove_var("TILLER_USAGE_CLAUDE_TIMEOUT_MS");
+        }
     }
 }
