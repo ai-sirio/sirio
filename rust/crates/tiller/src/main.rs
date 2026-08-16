@@ -3675,9 +3675,16 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let expected_pane_id = format!("pane-{pane_id}");
-        cx.subscribe(terminal, move |_, _, event: &TerminalLinkEvent, cx| {
+        cx.subscribe(terminal, move |workspace, _, event: &TerminalLinkEvent, _cx| {
             if let Some(url) = terminal_link_url_for_pane(event, &expected_pane_id) {
-                cx.open_url(url);
+                // F-TERM-UI-02: opens in tiller's own Browser tab, the same
+                // route the Chat transcript's own link clicks already use
+                // (`bind_chat`'s `ChatEvent::OpenLink`) -- not `cx.open_url`,
+                // which launches the OS's external browser instead of the
+                // in-app one the row's own contract names.
+                if let Ok(mut actions) = workspace.pending_actions.lock() {
+                    actions.push(WorkspaceAction::OpenBrowserLink(url.to_string()));
+                }
             }
         })
         .detach();
@@ -10638,6 +10645,53 @@ mod tests {
             Some("https://example.test/pane-2")
         );
         assert_eq!(terminal_link_url_for_pane(&event, "pane-1"), None);
+    }
+
+    /// F-TERM-UI-02: a real `TerminalLinkEvent`, fed through the real
+    /// `subscribe_terminal_link` wiring (not a reimplementation of its
+    /// logic), must queue `WorkspaceAction::OpenBrowserLink` -- the same
+    /// route `bind_chat`'s `ChatEvent::OpenLink` already uses to open
+    /// tiller's own Browser tab -- not call out to an external browser.
+    /// `terminal_links_are_only_routed_to_their_owning_pane` above already
+    /// covers the pure pane-id filter; this covers the subscription that
+    /// filter is wired into.
+    #[gpui::test]
+    fn a_terminal_link_click_queues_the_in_app_browser_tab_action(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let workspace = palette_test_workspace(cx);
+            let terminal = match &workspace.tabs[0].panes {
+                PaneNode::Leaf {
+                    content: Some(TabContent::Terminal { view }),
+                    ..
+                } => view.clone(),
+                _ => panic!("test tab 0 must be a terminal pane"),
+            };
+            terminal.update(cx, |terminal, _| {
+                terminal.set_identity(TerminalIdentity::new("pane-0", "terminal-0"));
+            });
+            TillerWorkspace::subscribe_terminal_link(&terminal, 0, cx);
+            terminal.update(cx, |_, cx| {
+                cx.emit(TerminalLinkEvent {
+                    target: TerminalIdentity::new("pane-0", "terminal-0"),
+                    url: "https://example.test/from-terminal".to_string(),
+                });
+            });
+            workspace
+        });
+        cx.run_until_parked();
+        let queued_url = workspace.read_with(cx, |workspace, _| {
+            let actions = workspace.pending_actions.lock().unwrap();
+            actions.iter().find_map(|action| match action {
+                WorkspaceAction::OpenBrowserLink(url) => Some(url.clone()),
+                _ => None,
+            })
+        });
+        assert_eq!(
+            queued_url.as_deref(),
+            Some("https://example.test/from-terminal"),
+            "a terminal link click must queue OpenBrowserLink (the same in-app \
+             Browser tab route bind_chat's ChatEvent::OpenLink uses)"
+        );
     }
 
     fn palette_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
