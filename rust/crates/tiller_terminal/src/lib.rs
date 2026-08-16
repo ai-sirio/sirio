@@ -644,6 +644,13 @@ pub struct TerminalView {
     context_menu: Option<Point<Pixels>>,
     last_dropped_diff: Option<(PathBuf, String)>,
     last_dropped_files: Option<Vec<PathBuf>>,
+    /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): whether this
+    /// pane's tab is currently the only tab in its pane group. Only the host
+    /// (`tiller::main`) can count tab-group membership, so this is pushed in
+    /// as a derived boolean via [`Self::set_sole_tab_in_group`] rather than
+    /// computed locally — `tiller_terminal` cannot depend on `tiller`'s tab
+    /// machinery.
+    sole_tab_in_group: bool,
 }
 
 /// Output is forwarded to the activity model only after this quiet period.
@@ -729,6 +736,7 @@ impl TerminalView {
             context_menu: None,
             last_dropped_diff: None,
             last_dropped_files: None,
+            sole_tab_in_group: false,
         })
     }
 
@@ -750,6 +758,7 @@ impl TerminalView {
             context_menu: None,
             last_dropped_diff: None,
             last_dropped_files: None,
+            sole_tab_in_group: false,
         }
     }
 
@@ -789,6 +798,7 @@ impl TerminalView {
             context_menu: None,
             last_dropped_diff: None,
             last_dropped_files: None,
+            sole_tab_in_group: false,
         }
     }
 
@@ -800,6 +810,21 @@ impl TerminalView {
     /// child will inherit `TILLER_PANE_ID`.
     pub fn set_identity(&mut self, identity: TerminalIdentity) {
         self.identity = identity;
+    }
+
+    /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): the host calls
+    /// this whenever it re-renders the pane tree, since tab-group membership
+    /// can change without this terminal's own state changing. Does not
+    /// notify on its own — the host wraps the call in an `Entity::update`
+    /// and calls `cx.notify()` itself so this stays a pure setter.
+    pub fn set_sole_tab_in_group(&mut self, sole: bool) {
+        self.sole_tab_in_group = sole;
+    }
+
+    /// Test/inspection accessor for [`Self::set_sole_tab_in_group`]'s
+    /// current value.
+    pub fn sole_tab_in_group(&self) -> bool {
+        self.sole_tab_in_group
     }
 
     pub fn identity(&self) -> &TerminalIdentity {
@@ -1517,9 +1542,11 @@ impl gpui::Render for TerminalView {
                 .shadow_lg();
 
             let items = match split_pane_size {
-                Some((width, height)) => {
-                    context_menu::items_with_split_availability(width, height)
-                }
+                Some((width, height)) => context_menu::items_with_split_availability(
+                    width,
+                    height,
+                    self.sole_tab_in_group,
+                ),
                 None => context_menu::items().to_vec(),
             };
             for (index, item) in items.iter().enumerate() {

@@ -145,12 +145,30 @@ fn split_disabled_reason(horizontal: bool, pane_width: f32, pane_height: f32) ->
     })
 }
 
+/// The reason text for `panes::SplitDisabledReason::SoleTabInGroup`,
+/// duplicated verbatim (see this module's own size-minimum duplication note
+/// above for why `tiller_terminal` cannot import `tiller::panes` directly)
+/// so both halves of the same disabled state read identically wherever they
+/// surface.
+const SOLE_TAB_IN_GROUP_REASON: &str = "cannot split the sole tab in its pane group";
+
 /// Returns [`items`] with each Split action's `disabled_reason` populated
-/// from this terminal pane's own current pixel size (F-TAB-11). All other
-/// items are always enabled.
-pub fn items_with_split_availability(pane_width: f32, pane_height: f32) -> Vec<TerminalContextItem> {
-    let horizontal_reason = split_disabled_reason(true, pane_width, pane_height);
-    let vertical_reason = split_disabled_reason(false, pane_width, pane_height);
+/// from this terminal pane's own current pixel size (F-TAB-11) and, when
+/// `sole_tab_in_group` is set, from the pane's tab-group membership (the
+/// other half of F-TAB-11 / `panes::SplitDisabledReason::SoleTabInGroup`):
+/// a lone tab in a pane group cannot be split regardless of how much room
+/// its pane has, so that reason takes priority over the size check for all
+/// four split actions. All other items are always enabled.
+pub fn items_with_split_availability(
+    pane_width: f32,
+    pane_height: f32,
+    sole_tab_in_group: bool,
+) -> Vec<TerminalContextItem> {
+    let sole_tab_reason = sole_tab_in_group.then(|| SOLE_TAB_IN_GROUP_REASON.to_owned());
+    let horizontal_reason =
+        sole_tab_reason.clone().or_else(|| split_disabled_reason(true, pane_width, pane_height));
+    let vertical_reason =
+        sole_tab_reason.or_else(|| split_disabled_reason(false, pane_width, pane_height));
     items()
         .iter()
         .cloned()
@@ -271,7 +289,7 @@ mod tests {
     /// not silently.
     #[test]
     fn a_too_narrow_pane_disables_only_the_horizontal_splits() {
-        let disabled: Vec<_> = items_with_split_availability(200.0, 900.0)
+        let disabled: Vec<_> = items_with_split_availability(200.0, 900.0, false)
             .into_iter()
             .filter(|item| item.disabled_reason.is_some())
             .collect();
@@ -294,7 +312,7 @@ mod tests {
     /// Above/Down, and the reason says "short", not "narrow".
     #[test]
     fn a_too_short_pane_disables_only_the_vertical_splits() {
-        let disabled: Vec<_> = items_with_split_availability(900.0, 200.0)
+        let disabled: Vec<_> = items_with_split_availability(900.0, 200.0, false)
             .into_iter()
             .filter(|item| item.disabled_reason.is_some())
             .collect();
@@ -314,9 +332,39 @@ mod tests {
     #[test]
     fn a_large_pane_disables_no_split() {
         assert!(
-            items_with_split_availability(1200.0, 900.0)
+            items_with_split_availability(1200.0, 900.0, false)
                 .iter()
                 .all(|item| item.disabled_reason.is_none())
         );
+    }
+
+    /// F-TAB-11's other half: a pane that is the sole tab in its group
+    /// disables every split direction, with the sole-tab reason, even when
+    /// the pane is comfortably large -- mirroring
+    /// `panes::split_disabled_reason`'s own SoleTabInGroup priority over the
+    /// size check.
+    #[test]
+    fn a_sole_tab_in_group_disables_every_split_regardless_of_size() {
+        let items = items_with_split_availability(1200.0, 900.0, true);
+        let split_actions = [
+            TerminalContextAction::SplitLeft,
+            TerminalContextAction::SplitRight,
+            TerminalContextAction::SplitAbove,
+            TerminalContextAction::SplitDown,
+        ];
+        for action in split_actions {
+            let reason = items
+                .iter()
+                .find(|item| item.action == action)
+                .unwrap()
+                .disabled_reason
+                .as_deref();
+            assert_eq!(reason, Some("cannot split the sole tab in its pane group"));
+        }
+        for item in &items {
+            if !split_actions.contains(&item.action) {
+                assert!(item.disabled_reason.is_none());
+            }
+        }
     }
 }

@@ -6741,12 +6741,29 @@ impl TillerWorkspace {
         tab_index: usize,
         entity: Entity<Self>,
         path: Vec<bool>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
             PaneNode::Leaf { id, content } => {
                 let Some(content) = content else {
                     return div().size_full().into_any_element();
                 };
+                // F-TAB-11 (SoleTabInGroup half): only this render pass can
+                // count the pane's tab-group membership -- `tiller_terminal`
+                // has no route to `tab_machinery`. Pushed in on every
+                // render rather than cached, since a tab moving groups (Move
+                // to Other Pane, tab close, …) doesn't itself notify this
+                // pane's own `TerminalView` entity.
+                if let TabContent::Terminal { view } = content {
+                    let sole_tab_in_group = self
+                        .tab_machinery
+                        .group_tabs(self.tabs[tab_index].group_id)
+                        .is_none_or(|tabs| tabs.len() == 1);
+                    view.update(cx, |terminal, cx| {
+                        terminal.set_sole_tab_in_group(sole_tab_in_group);
+                        cx.notify();
+                    });
+                }
                 let pane_id = *id;
                 let tab_id = self.tabs[tab_index].id;
                 let entity_for_click = entity.clone();
@@ -6872,9 +6889,9 @@ impl TillerWorkspace {
                     path
                 };
                 let first_element =
-                    self.render_pane_tree(first, tab_index, entity.clone(), first_path);
+                    self.render_pane_tree(first, tab_index, entity.clone(), first_path, cx);
                 let second_element =
-                    self.render_pane_tree(second, tab_index, entity.clone(), second_path);
+                    self.render_pane_tree(second, tab_index, entity.clone(), second_path, cx);
                 let first_style = |element| {
                     div()
                         .flex_shrink_1()
@@ -6961,7 +6978,12 @@ impl TillerWorkspace {
     /// deliberate because it gives Move Existing Tab a real destination and
     /// makes the F-TAB-13 empty state observable instead of silently deleting
     /// the pane.
-    fn render_group_surfaces(&self, theme: Theme, entity: Entity<Self>) -> AnyElement {
+    fn render_group_surfaces(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let groups = self.tab_machinery.groups();
         let mut surfaces = div().flex().flex_row().size_full().bg(theme.background);
         for (index, group) in groups.iter().enumerate() {
@@ -6983,6 +7005,7 @@ impl TillerWorkspace {
                             tab_index,
                             entity.clone(),
                             Vec::new(),
+                            cx,
                         ))
                         .into_any_element()
                 })
@@ -8014,7 +8037,7 @@ impl TillerWorkspace {
         &self,
         theme: &Theme,
         entity: Entity<Self>,
-        cx: &App,
+        cx: &mut Context<Self>,
         window: &Window,
     ) -> impl IntoElement {
         let mut columns = div().flex().flex_row().size_full();
@@ -8033,7 +8056,7 @@ impl TillerWorkspace {
                 .flex_1()
                 .w_full()
                 .overflow_hidden()
-                .child(self.render_group_surfaces(*theme, entity.clone()))
+                .child(self.render_group_surfaces(*theme, entity.clone(), cx))
                 .when_some(self.tabs.get(self.active_tab), |this, tab| {
                     this.when(tab_has_terminal(tab), |this| {
                         this.child(
@@ -11289,6 +11312,77 @@ mod tests {
         assert!(
             cx.update(|window, _| focus.is_focused(window)),
             "committing a tab rename must hand keyboard focus back to the tab's own content"
+        );
+    }
+
+    /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): only
+    /// `render_pane_tree` can count a tab's pane-group membership, so it
+    /// pushes the result into the tab's own `TerminalView` on every render
+    /// via `TerminalView::set_sole_tab_in_group`. A workspace with a single
+    /// tab has that tab as the sole member of pane group 0.
+    #[gpui::test]
+    async fn a_solo_tab_is_pushed_as_the_sole_tab_in_its_group(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let sole = workspace.update(&mut cx, |workspace, cx| {
+            let mut sole = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    sole = Some(view.read(cx).sole_tab_in_group());
+                }
+            });
+            sole.expect("tab 0 has a terminal pane")
+        });
+        assert!(
+            sole,
+            "the only tab in pane group 0 must be pushed as the sole tab in its group"
+        );
+    }
+
+    /// The other half of the same wiring: two tabs sharing pane group 0
+    /// (`palette_test_workspace_with_tab_count`'s default) must both be
+    /// pushed as *not* the sole tab, so Split stays offered on size alone.
+    #[gpui::test]
+    async fn two_tabs_sharing_a_group_are_not_pushed_as_sole(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let sole_flags = workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .tabs
+                .iter()
+                .map(|tab| {
+                    let mut sole = None;
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Terminal { view } = content {
+                            sole = Some(view.read(cx).sole_tab_in_group());
+                        }
+                    });
+                    sole.expect("every test tab has a terminal pane")
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            sole_flags,
+            vec![false, false],
+            "two tabs sharing one pane group must not be marked as the sole tab in their group"
         );
     }
 
