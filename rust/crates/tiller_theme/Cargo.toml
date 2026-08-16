@@ -20,3 +20,7 @@ fontdb = "0.23"
 # synchronously through NSAppearance and never needs the portal.
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
+# wayland/x11 are Linux-only gpui windowing backends; see the long comment
+# above the workspace-level `gpui` entry in the root Cargo.toml for why this
+# lives here per-crate rather than on the workspace dependency itself.
+gpui = { workspace = true, features = ["wayland", "x11"] }

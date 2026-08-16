@@ -15,5 +15,13 @@ alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev 
 parking_lot = "0.12"
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# wayland/x11 are Linux-only gpui/gpui_platform windowing backends; see the
+# long comment above the workspace-level `gpui` entry in the root Cargo.toml
+# for why this lives here per-crate rather than on the workspace dependency
+# itself.
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
+
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

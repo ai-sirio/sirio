@@ -32,15 +32,26 @@ publish = false
 # window on a Linux screen. gpui::guess_compositor() is compiled against *gpui's* features, not
 # gpui_platform's: with them off it reads neither $DISPLAY nor $WAYLAND_DISPLAY, returns
 # "Headless", and the app runs a perfectly healthy event loop forever without a window. It
-# compiles, starts, logs, exits cleanly — and renders nothing. Enable them explicitly here;
-# gpui_platform below must enable its own copies as well, since they are separate switches.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false, features = ["wayland", "x11"] }
-# "wayland" and "x11" are not decoration: gpui_platform ships `default = []`, so without them
-# gpui_linux compiles with no windowing backend at all. The app then starts, logs, runs, and
-# silently never maps a window — it fails in the one way a compiler cannot catch. macOS never
-# needed the flag, which is exactly why their absence survived the port. Zed's own binary
-# enables both and lets the backend be chosen at runtime; so do we.
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# compiles, starts, logs, exits cleanly — and renders nothing.
+#
+# "wayland" and "x11" are Linux-only windowing backends -- meaningless on macOS/Windows, whose
+# own backends live in gpui_macos and inside gpui_platform's own
+# `[target.'cfg(target_os = "windows")']` section -- so a workspace dependency (which cannot
+# itself be target-conditional; Cargo has no `[target...workspace.dependencies]` table) cannot
+# pin them unconditionally without breaking non-Linux resolution. They are re-added, Linux-only,
+# by every crate that depends on gpui/gpui_platform, via a `[target.'cfg(target_os = "linux")'.
+# dependencies]` section of the form `gpui = { workspace = true, features = ["wayland", "x11"] }`
+# -- Cargo unifies features requested for the same dependency across a package's unconditional
+# and target-specific dependency tables (verified: a `[dependencies]` entry with
+# `default-features = false` plus a `[target.cfg(...).dependencies]` entry adding a feature for
+# the *same* crate does turn that feature on for matching targets), so this is additive, not a
+# second declaration. Net effect for `x86_64-unknown-linux-gnu`: byte-for-byte the same feature
+# set as before this change. gpui_platform below must enable its own wayland/x11 copies the same
+# way, since they are separate switches from gpui's.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false }
+# "font-kit" is not Linux-specific (unlike wayland/x11 above) so it stays unconditional here,
+# matching gpui_platform's pre-portability-wave feature set on every platform.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "c05e34637b4f7f100a688bf6ac71cb70877fc8ad", default-features = false, features = ["font-kit"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
