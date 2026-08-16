@@ -1645,35 +1645,48 @@ impl Element for AddressTextElement {
     }
 }
 
-/// Converts a GPUI layout rect straight into wry's logical-pixel `Rect`.
+/// Converts a GPUI layout rect into wry's `Rect`, tagged `Logical` so wry's
+/// own `WebView::set_bounds` (which re-derives logical pixels by calling
+/// `bounds.to_logical(self.webview.scale_factor())` unconditionally,
+/// before ever touching a GTK/X11 geometry call — see wry 0.56's
+/// `webkitgtk/mod.rs`) treats the numbers as a literal pass-through
+/// (`PixelUnit::Logical::to_logical` is a no-op regardless of the scale
+/// factor argument) straight down to the raw X11 `resize`/`move_` calls,
+/// which operate in physical screen pixels.
 ///
-/// F-BRW-01: wry's WebKitGTK backend re-derives logical pixels from
-/// whatever `Rect` it is handed by calling its own
-/// `bounds.to_logical(self.webview.scale_factor())` before ever touching a
-/// GTK/X11 geometry call (`WebView::set_bounds` in wry 0.56's
-/// `webkitgtk/mod.rs`). That conversion runs unconditionally — it is not
-/// skipped for a `Rect` that is already logical. Pre-converting GPUI's
-/// bounds to device pixels with `to_device_pixels(window.scale_factor())`
-/// and tagging them `Physical` therefore fed wry a value it divided by
-/// *its own* GTK-reported scale factor a second time; whenever that GTK
-/// scale factor disagreed with GPUI's (as it does on this desktop), the
-/// child window landed at a uniform fraction of the intended rect around
-/// the window origin — exactly the shrink this row's evidence recorded.
-///
-/// `Bounds<Pixels>` is already the same logical-pixel space the webview's
-/// *initial* bounds use in `build_webview`/`build_production_webview`
-/// above (both call sites build a `Rect` from `LogicalPosition`/
-/// `LogicalSize`). Passing the live layout bounds straight through the
-/// same way keeps every `Rect` this file builds in one unit, and needs no
-/// scale factor at all — wry's own `to_logical` is a no-op on an
-/// already-`Logical` value.
-fn native_webview_rect(bounds: Bounds<Pixels>) -> Rect {
+/// F-BRW-01 (corrected diagnosis): the earlier fix here treated `bounds`
+/// (the `Bounds<Pixels>` GPUI's layout engine hands to `prepaint`) as
+/// already being that physical-pixel target and passed it straight
+/// through unscaled. Live instrumentation
+/// (`[F-BRW-01 DEBUG] element bounds=... window.scale_factor=1.1666666`)
+/// proved that wrong: GPUI lays this element out in its own internal
+/// units, which on a desktop with a fractional `window.scale_factor()`
+/// (1.1667 here — this box's Xft/GDK monitor scale) are already
+/// `1/scale_factor` smaller than the physical pixels the raw X11 child
+/// window needs. Confirmed two ways: (1) `webview.bounds()` (real
+/// `XGetWindowAttributes` readback) always reported the *unscaled*
+/// `bounds` value back byte-for-byte, meaning wry places the child
+/// exactly where asked and applies no scaling of its own on this build;
+/// (2) the D-P1 critic's own requested/observed pair (850x792 requested,
+/// 728x679 observed) is exactly `850/1.1667` and `792/1.1667` — i.e. the
+/// *live* `prepaint` bounds were already the post-divide value, not the
+/// pre-divide design size. Multiplying back by `window.scale_factor()`
+/// here recovers the true physical target before it ever reaches wry.
+fn native_webview_rect(bounds: Bounds<Pixels>, scale_factor: f64) -> Rect {
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
     Rect {
-        position: LogicalPosition::new(f64::from(bounds.origin.x), f64::from(bounds.origin.y))
-            .into(),
+        position: LogicalPosition::new(
+            f64::from(bounds.origin.x) * scale_factor,
+            f64::from(bounds.origin.y) * scale_factor,
+        )
+        .into(),
         size: LogicalSize::new(
-            f64::from(bounds.size.width).max(1.0),
-            f64::from(bounds.size.height).max(1.0),
+            (f64::from(bounds.size.width) * scale_factor).max(1.0),
+            (f64::from(bounds.size.height) * scale_factor).max(1.0),
         )
         .into(),
     }
@@ -1759,17 +1772,20 @@ impl Element for NativeWebViewElement {
         _: &mut App,
     ) -> Self::PrepaintState {
         if let Some(webview) = self.webview.borrow().as_ref() {
-            let requested = native_webview_rect(bounds);
+            // F-BRW-01: `bounds` arrives in GPUI's internal layout units,
+            // which are `1/window.scale_factor()` smaller than physical
+            // screen pixels whenever that factor is fractional (proven
+            // live at 1.1666666 on this desktop). `native_webview_rect`
+            // multiplies back up to the physical target before handing it
+            // to wry — see its doc comment for the live evidence.
+            let requested = native_webview_rect(bounds, _window.scale_factor() as f64);
 
-            // F-BRW-01: `native_webview_rect` is a verified no-op pass-through
-            // (see its doc comment) yet the child window still lands shrunk
-            // toward the origin, live-reproduced twice at the exact same
-            // ~1/1.1667 ratio -- proof the divide happens inside GTK/GDK's
-            // own geometry call, below anything wry's public API exposes.
-            // Rather than guess at *why* (a specific DPI setting, a GDK
-            // scale-factor query, a compositor transform), calibrate against
-            // reality: ask the same window what actually landed and correct
-            // future requests by the ratio actually observed.
+            // Residual-error safety net: even with the scale-factor
+            // correction above, keep a one-shot self-calibration pass in
+            // case this box's actual/requested pair still disagrees by a
+            // consistent ratio (e.g. a compositor-level rounding quirk) --
+            // it is a no-op (factor converges to 1.0) whenever the direct
+            // correction above already lands exactly, as it now does.
             let corrected = match self.scale_correction.get() {
                 Some(factor) => scale_rect(&requested, factor),
                 None => requested.clone(),
@@ -1786,10 +1802,10 @@ impl Element for NativeWebViewElement {
                     if requested_w > 8.0 && requested_h > 8.0 && actual_w > 8.0 && actual_h > 8.0 {
                         let factor_w = requested_w / actual_w;
                         let factor_h = requested_h / actual_h;
-                        // The observed bug is a uniform scale, not an
-                        // independent per-axis one; average the two
-                        // measurements to damp noise from integer pixel
-                        // rounding on either side.
+                        // The observed bug (when present at all) is a
+                        // uniform scale, not an independent per-axis one;
+                        // average the two measurements to damp noise from
+                        // integer pixel rounding on either side.
                         let factor = (factor_w + factor_h) / 2.0;
                         if (factor - 1.0).abs() > 0.01 {
                             self.scale_correction.set(Some(factor));
@@ -1920,18 +1936,15 @@ mod tests {
     }
 
     #[test]
-    fn webview_bounds_pass_gpui_logical_pixels_straight_to_wry() {
-        // F-BRW-01: wry's own `set_bounds` re-derives logical pixels via
-        // *its* GTK-reported scale factor before it ever reaches GTK/X11
-        // geometry calls, so this function must hand it the same logical
-        // rect GPUI laid the pane out at, unscaled — any pre-conversion
-        // here gets applied a second time inside wry.
+    fn webview_bounds_with_unit_scale_pass_through_unchanged() {
+        // At scale_factor 1.0 (the common case) native_webview_rect must
+        // still be a plain unit conversion, not a coordinate change.
         let bounds = Bounds::new(
             gpui::point(gpui::px(386.0), gpui::px(133.0)),
             gpui::size(gpui::px(850.0), gpui::px(792.0)),
         );
 
-        let rect = native_webview_rect(bounds);
+        let rect = native_webview_rect(bounds, 1.0);
 
         assert_eq!(
             rect.position,
@@ -1941,15 +1954,55 @@ mod tests {
     }
 
     #[test]
+    fn webview_bounds_recover_physical_target_from_live_fractional_scale_factor() {
+        // F-BRW-01 (corrected diagnosis): live instrumentation on this box
+        // showed `prepaint` receiving `bounds` of ~330.857,114.0 /
+        // 728.571x678.857 with `window.scale_factor() == 1.1666666` for a
+        // panel whose true physical target was x=386,y=133, 850x792 (the
+        // exact pair the D-P1 critic separately measured). GPUI's layout
+        // bounds are `1/scale_factor` smaller than physical screen pixels
+        // on a fractional-scale desktop; native_webview_rect must multiply
+        // back up by that same scale_factor to recover the physical rect
+        // wry needs to hand the raw X11 child window.
+        let laid_out_bounds = Bounds::new(
+            gpui::point(gpui::px(330.857_15), gpui::px(114.000_01)),
+            gpui::size(gpui::px(728.571_5), gpui::px(678.857_2)),
+        );
+
+        let rect = native_webview_rect(laid_out_bounds, 1.166_666_6);
+
+        let (width, height) = rect_size(&rect);
+        let position = rect.position.to_logical::<f64>(1.0);
+        assert!((position.x - 386.0).abs() < 1.0, "x = {}", position.x);
+        assert!((position.y - 133.0).abs() < 1.0, "y = {}", position.y);
+        assert!((width - 850.0).abs() < 1.0, "width = {width}");
+        assert!((height - 792.0).abs() < 1.0, "height = {height}");
+    }
+
+    #[test]
     fn webview_bounds_clamp_to_a_minimum_visible_size() {
         let bounds = Bounds::new(
             gpui::point(gpui::px(0.0), gpui::px(0.0)),
             gpui::size(gpui::px(0.0), gpui::px(0.0)),
         );
 
-        let rect = native_webview_rect(bounds);
+        let rect = native_webview_rect(bounds, 1.0);
 
         assert_eq!(rect.size, wry::dpi::LogicalSize::new(1.0, 1.0).into());
+    }
+
+    #[test]
+    fn webview_bounds_reject_non_finite_scale_factor() {
+        let bounds = Bounds::new(
+            gpui::point(gpui::px(10.0), gpui::px(10.0)),
+            gpui::size(gpui::px(100.0), gpui::px(100.0)),
+        );
+
+        let rect = native_webview_rect(bounds, f64::NAN);
+
+        // Falls back to an unscaled (factor 1.0) rect rather than
+        // propagating NaN into the geometry wry hands X11.
+        assert_eq!(rect.size, wry::dpi::LogicalSize::new(100.0, 100.0).into());
     }
 
     #[test]
@@ -1961,10 +2014,13 @@ mod tests {
         // `native_webview_rect` touches. `scale_rect` must recover the
         // exact corrective factor from that observed pair, in both
         // dimensions, without hardcoding the ratio anywhere.
-        let requested = native_webview_rect(Bounds::new(
-            gpui::point(gpui::px(386.0), gpui::px(133.0)),
-            gpui::size(gpui::px(850.0), gpui::px(792.0)),
-        ));
+        let requested = native_webview_rect(
+            Bounds::new(
+                gpui::point(gpui::px(386.0), gpui::px(133.0)),
+                gpui::size(gpui::px(850.0), gpui::px(792.0)),
+            ),
+            1.0,
+        );
         let observed_shrink = 1.0 / 1.1667_f64;
         let actual = scale_rect(&requested, observed_shrink);
 
