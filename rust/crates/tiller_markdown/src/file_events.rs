@@ -1,4 +1,3 @@
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 /// A filesystem change observed by the Linux file monitor.
@@ -17,12 +16,17 @@ pub struct FileSystemEvent {
 }
 
 /// A nonblocking inotify-backed monitor for a directory or a single file.
+///
+/// inotify is Linux-only (not even generically Unix — macOS has no inotify and uses
+/// FSEvents/kqueue instead), so the real implementation is `cfg(target_os = "linux")` below.
+#[cfg(target_os = "linux")]
 pub struct FileSystemEventMonitor {
-    fd: OwnedFd,
+    fd: std::os::fd::OwnedFd,
     directory: PathBuf,
     file_filter: Option<PathBuf>,
 }
 
+#[cfg(target_os = "linux")]
 impl FileSystemEventMonitor {
     pub fn new(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref();
@@ -62,7 +66,7 @@ impl FileSystemEventMonitor {
         Ok(Self {
             // SAFETY: fd is freshly returned by inotify_init1 and ownership
             // transfers to this value exactly once.
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            fd: unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) },
             directory,
             file_filter,
         })
@@ -70,6 +74,7 @@ impl FileSystemEventMonitor {
 
     /// Reads all currently queued events without blocking.
     pub fn poll(&self) -> std::io::Result<Vec<FileSystemEvent>> {
+        use std::os::fd::AsRawFd;
         let mut buffer = [0u8; 16 * 1024];
         let count = unsafe {
             libc::read(
@@ -128,9 +133,33 @@ impl FileSystemEventMonitor {
     }
 }
 
-use std::os::fd::AsRawFd;
+/// Non-Linux stand-in. macOS counterpart: FSEvents (`FSEventStreamCreate`) or kqueue
+/// (`EVFILT_VNODE`) — either is a legitimate port target, neither is inotify-shaped 1:1.
+/// Windows counterpart: `ReadDirectoryChangesW`. Neither is implemented here; `new` fails
+/// honestly and every caller already treats that as "no live file-watching" (see
+/// `tiller_ui/src/file_view.rs`, which does `FileSystemEventMonitor::new(&path).ok()`).
+#[cfg(not(target_os = "linux"))]
+pub struct FileSystemEventMonitor {
+    _private: (),
+}
 
-#[cfg(test)]
+#[cfg(not(target_os = "linux"))]
+impl FileSystemEventMonitor {
+    pub fn new(_path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "file-system change notification is not implemented on this platform yet \
+             (macOS: FSEvents/kqueue; Windows: ReadDirectoryChangesW)",
+        ))
+    }
+
+    /// Reads all currently queued events without blocking.
+    pub fn poll(&self) -> std::io::Result<Vec<FileSystemEvent>> {
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use std::fs;

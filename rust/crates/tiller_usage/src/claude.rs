@@ -7,13 +7,20 @@
 //! the user's login shell, sends `/usage`, and parses the rendered panel,
 //! exactly like the Swift app (which itself ports Orca's `claude-pty.ts`).
 
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::time::Instant;
+use std::time::Duration;
 
 use crate::model::{ProviderUsage, UsageFetchOutcome, UsageReason, UsageWindow};
 
@@ -62,6 +69,7 @@ const FABLE_LABEL: &str = "Fable";
 
 /// Upper bound on the PTY output we retain while polling. The `/usage`
 /// panel is a few kilobytes; a runaway TUI must not grow the buffer forever.
+#[cfg(unix)]
 const MAX_BUFFER_BYTES: usize = 512 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -320,6 +328,13 @@ impl ClaudeUsageFetcher {
     /// login/interactive dotfiles instead, so overrides in `envs` are the
     /// only thing deciding what `claude` resolves to. Production `fetch()`
     /// never sets that key, so real users still get the login shell.
+    ///
+    /// Unix-only: drives a real PTY (`posix_openpt`/`ptsname`/`TIOCSCTTY`) under a login
+    /// shell, exactly like the Swift app's `PtyProcess`. Windows has no POSIX PTY; the
+    /// counterpart is ConPTY (`CreatePseudoConsole`), which `alacritty_terminal`'s
+    /// `tty/windows/` already wraps for the terminal pane — reuse that rather than
+    /// hand-rolling a second ConPTY client here. See the `#[cfg(not(unix))]` stub below.
+    #[cfg(unix)]
     pub fn fetch_with_env(
         settle: Duration,
         poll: Duration,
@@ -452,8 +467,22 @@ impl ClaudeUsageFetcher {
         drop(pty);
         UsageFetchOutcome::TimedOut
     }
+
+    /// Windows stub: no ConPTY-backed fetch is implemented yet (see the doc comment on
+    /// the `#[cfg(unix)]` twin above for the intended counterpart). Reports honestly as
+    /// `Unavailable(Error)` rather than pretending to have tried.
+    #[cfg(not(unix))]
+    pub fn fetch_with_env(
+        _settle: Duration,
+        _poll: Duration,
+        _timeout: Duration,
+        _envs: &[(&str, &str)],
+    ) -> UsageFetchOutcome {
+        UsageFetchOutcome::Unavailable(UsageReason::Error)
+    }
 }
 
+#[cfg(unix)]
 fn login_shell() -> String {
     if let Some(shell) = std::env::var_os("SHELL")
         .filter(|shell| !shell.is_empty())
@@ -470,13 +499,16 @@ fn login_shell() -> String {
 }
 
 /// A minimal PTY: `posix_openpt` + a login-shell child on the slave side.
-/// macOS-only, mirroring the Swift app's `PtyProcess`.
+/// Unix-only (Linux and macOS both take this path), mirroring the Swift app's
+/// `PtyProcess`. See the `fetch_with_env` doc comment for the Windows counterpart.
+#[cfg(unix)]
 struct Pty {
     master: RawFd,
     child: Child,
     buffer: Arc<Mutex<String>>,
 }
 
+#[cfg(unix)]
 impl Pty {
     fn spawn_with_env(program: &str, args: &[&str], envs: &[(&str, &str)]) -> io::Result<Pty> {
         // SAFETY: standard PTY opening sequence; all error paths check the
@@ -587,6 +619,7 @@ impl Pty {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child.kill();

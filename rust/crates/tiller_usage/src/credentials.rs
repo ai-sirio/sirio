@@ -138,6 +138,11 @@ impl CredentialStore {
             && !dir.as_os_str().is_empty()
         {
             std::fs::create_dir_all(dir).map_err(io_error)?;
+            // Windows counterpart of "owner-only": not `mode()` (no POSIX permission
+            // bits) but a DACL restricted to the current user, e.g. via
+            // `SetNamedSecurityInfoW` or the `windows-acl` crate. Not implemented — on
+            // Windows this directory is left at its inherited (usually already
+            // per-user, under %LOCALAPPDATA%) ACL rather than pretending to tighten it.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -154,6 +159,8 @@ impl CredentialStore {
             use std::io::Write;
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create(true).truncate(true);
+            // Same Windows gap as the directory above: no `mode()` equivalent, real
+            // fix is a per-user DACL on the file, not implemented here.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
