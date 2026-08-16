@@ -48,6 +48,7 @@ required_markers=(
     'TILLER_DB'
     'DISPLAY'
     'WAYLAND_DISPLAY'
+    'project add "$ROOT"'
     'panel create'
     'panel write'
     'panel read'

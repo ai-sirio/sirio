@@ -393,6 +393,14 @@ done
 [[ "$socket_ready" -eq 1 ]] || smoke_failure "app did not create its private socket"
 capture_panel_groups
 
+# ControlState::from_catalog (crates/tiller/src/main.rs) builds `workspaces` only from
+# the persisted project catalog -- being launched inside a git checkout is not by itself
+# enough for `current-workspace` to see one, the same way `Scripts/visual-sweep.sh` already
+# has to `project add` its fixture before any `workspace.current`/`workspace.select` call.
+# $TILLER_DB above is a fresh, empty, per-run database, so without this the very next call
+# always reports "no current workspace" -- not a failure of anything this gate is testing.
+smoke_capture project-add "$CTL_BIN" project add "$ROOT" >/dev/null
+
 current_workspace=$(smoke_capture current-workspace "$CTL_BIN" current-workspace)
 IFS=$'\t' read -r current_project current_branch current_path current_id <<<"$current_workspace"
 if [[ -z "${current_project:-}" || -z "${current_path:-}" || -z "${current_id:-}" ||
