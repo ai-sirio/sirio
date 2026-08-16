@@ -1127,7 +1127,21 @@ impl TerminalView {
             cell_width,
             f32::from(LINE_HEIGHT),
         );
-        if let Some(url) = terminal.link_at(row, column) {
+        let link = terminal.link_at(row, column);
+        if std::env::var_os("TILLER_DEBUG_LINK_CLICK").is_some() {
+            eprintln!(
+                "TILLER_DEBUG_LINK_CLICK pos=({:.1},{:.1}) origin=({:.1},{:.1}) cell_width={:.3} row={} column={} link={:?}",
+                f32::from(event.position.x),
+                f32::from(event.position.y),
+                f32::from(origin.x),
+                f32::from(origin.y),
+                cell_width,
+                row,
+                column,
+                link,
+            );
+        }
+        if let Some(url) = link {
             cx.emit(TerminalLinkEvent {
                 target: self.identity.clone(),
                 url,
