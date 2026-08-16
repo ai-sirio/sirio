@@ -5939,6 +5939,15 @@ impl TillerWorkspace {
                     .unwrap_or(Duration::from_secs(5));
                 let deadline = Instant::now() + timeout;
                 loop {
+                    // Linux only: WebKitGTK's async load only progresses when
+                    // something pumps the process-global GTK main loop (see
+                    // the comment above). macOS's WKWebView and Windows'
+                    // WebView2 drive their own event loops with no
+                    // equivalent pump to call here -- see
+                    // docs/linux-rewrite/PORTABILITY.md's "Browser child
+                    // attach" row -- so this loop just polls
+                    // `surface.state()` on those platforms.
+                    #[cfg(target_os = "linux")]
                     while gtk::events_pending() {
                         gtk::main_iteration_do(false);
                     }
