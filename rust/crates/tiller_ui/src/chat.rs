@@ -2615,6 +2615,13 @@ impl Chat {
             return;
         }
         if self.client.is_none() {
+            // F-CHAT-05: offline Send retries the connection and resends
+            // automatically once it lands (`should_send` in
+            // `start_connection`) rather than disabling the composer. That
+            // tradeoff is only safe because this branch returns *before*
+            // touching `self.composer` — a failed retry must leave the
+            // user's typed draft exactly where they left it, never clear it
+            // silently. See `offline_enter_never_discards_the_typed_draft`.
             self.retry_pending_send = true;
             self.start_connection(cx, true);
             return;
@@ -8049,6 +8056,65 @@ mod tests {
         assert!(
             cx.debug_bounds("permission-wait-placeholder").is_none(),
             "offline must not read as a pending permission"
+        );
+    }
+
+    /// F-CHAT-05 (H5-drive): a wave-G critic live-drove a genuinely offline
+    /// agent (Codex ACP, refuses to launch without auth) and reported that,
+    /// while the distinct offline placeholder correctly appeared before
+    /// typing, pressing Return after typing "silently cleared the draft"
+    /// instead of visibly disabling the field. That reading does not
+    /// reproduce here: `send()`'s offline branch (`self.client.is_none()`)
+    /// returns before ever touching `self.composer`, and no `AcpEvent`
+    /// handler or connection-failure path clears it either — the only
+    /// writers of `self.composer` are the actual-send path, `new_conversation`,
+    /// and the control-socket compose seam, none of which run on a failed
+    /// reconnect. This deterministic drive (same permanently-missing-binary
+    /// setup as `offline_composer_shows_its_own_placeholder`, so the offline
+    /// state is real, not simulated) proves the draft survives a failed
+    /// offline Send — the live "cleared" report is far more likely the
+    /// capture-staleness artifact P131 documents for this exact live-agent
+    /// area than a real code defect. Locking in the guarantee either way:
+    /// keeping the editor enabled (the documented reconnect-and-retry
+    /// tradeoff) is only acceptable so long as a typed message can never be
+    /// silently lost on Return, which this asserts directly.
+    #[gpui::test]
+    async fn offline_enter_never_discards_the_typed_draft(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::from_test_command(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        cx.executor().allow_parking();
+        cx.run_until_parked();
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.client.is_none(), "the missing binary must fail to launch");
+        });
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello offline test");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            "hello offline test",
+            "typing while offline must be accepted, matching the placeholder's promise"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer.text()),
+            "hello offline test",
+            "a failed offline Send must never silently discard the user's typed message"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| chat.client.is_none()),
+            "the missing binary must still fail on the retry the offline Send triggered"
         );
     }
 
