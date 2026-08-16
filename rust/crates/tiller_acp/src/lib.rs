@@ -30,8 +30,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 mod chat;
+mod mcp_config;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
+pub use mcp_config::discover_mcp_servers;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
 // protocol byte exists. Keep that cold-start budget bounded, but long enough
@@ -1095,8 +1097,16 @@ fn run_connection(
                     *seen = session_auth_methods.clone();
                 }
 
+                // F-CHAT-33: `.mcp.json` in the project root, if present, is
+                // this crate's only source of MCP server config — ACP's
+                // `session/new` requires the client to name every server the
+                // agent should attempt to connect to; the agent never
+                // discovers the file on its own. See `mcp_config`'s doc
+                // comment for why an empty list here makes any MCP
+                // connection-failure banner permanently unreachable.
+                let mcp_servers = crate::mcp_config::discover_mcp_servers(&cwd);
                 let session = connection
-                    .send_request(NewSessionRequest::new(cwd))
+                    .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers))
                     .block_task()
                     .await?;
                 let initialize_info = InitializeInfo {
