@@ -1,10 +1,29 @@
-//! Linux control-owned terminal panes.
+//! Linux/macOS control-owned terminal panes.
 //!
 //! The GPUI terminal renderer intentionally owns its alacritty terminal
 //! object privately. The control socket therefore keeps a small, independent
 //! PTY registry for panes created through `panel.*`: it exposes the observable
 //! control contract (bytes in, bounded bytes out, exit status) without
 //! reaching into the renderer or creating a dependency cycle.
+//!
+//! Unix-only, unseamed for Windows (unlike `server.rs`'s socket transport,
+//! which does have a `cfg(not(unix))` branch): this file hand-rolls a PTY
+//! with raw `openpty`/`fork`/`setsid`/`TIOCSCTTY`/`execvp`, the same pattern
+//! as `tiller_usage::claude::Pty` and `tiller_terminal`'s process-group
+//! teardown, but with ~20 `PaneRegistry` methods built directly on top of it
+//! (`create`, `split`, `write`, `read`, `wait`, `close`, `shutdown`, …), not
+//! just a handful of free functions. Giving every one of those methods a
+//! `cfg(not(unix))` twin — and deciding what each should *do* on Windows
+//! (refuse to create a pane? report every operation as `PaneError`? something
+//! in between?) is exactly the kind of design decision this wave was told
+//! not to make speculatively ("seam it, do not build it"). The honest
+//! Windows counterpart is not a handful of Win32 substitutions but a second
+//! backend built on ConPTY (`CreatePseudoConsole`) — `alacritty_terminal`'s
+//! already-vendored `tty/windows/` is the natural implementation to reuse
+//! rather than a hand-rolled `CreateNamedPipeW`/`ConnectNamedPipe` +
+//! `CreatePseudoConsole` client written from scratch here. Left undone and
+//! documented rather than partially/incorrectly seamed; see the wave report
+//! for the reasoning.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
