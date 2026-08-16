@@ -119,3 +119,56 @@ No commit for code (nothing changed); this section is the record.
 `trap 'printf ...' WINCH` one-liner above, or type it in by hand) as one side of a `Split Right`,
 `down`/`move`×N/`up` the divider and read the pane's own scrollback — no control-socket door exists
 or is needed for this row; the pane's stdout **is** the instrument's readout.
+
+---
+
+## `F-TERM-UI-02` — logo/cmd+click a terminal URL opens the Browser tab — **two real defects found and fixed; live-confirmed end to end**
+
+P130 narrowed this to "app-side coordinate/hit-testing, out of that task's scope" and named the exact
+next step: dump the clicked `(row, column)`. Did that (a new opt-in instrument), and it found not one
+defect but two, stacked — fixing only the first would still have produced no visible effect.
+
+**Defect 1 — hit-testing used a hardcoded cell width, not the real measured one.**
+`on_left_mouse_down` computed the clicked column with a literal `8.0`, while
+`TerminalElement::prepaint` (which paints the very cells being hit-tested) measures the real glyph
+advance of "MesloLGS Nerd Font Mono" at 13px via `window.text_system().advance(...)` and falls back to
+`8.0` only when that's unavailable. The real value, confirmed live via the new
+`TILLER_DEBUG_LINK_CLICK` instrument, is `7.827`, not `8.0` — a small per-column error that
+accumulates with distance from the pane's left edge. Fixed by threading the real measured width
+through a new `last_cell_width` field (same `Arc<Mutex<Option<Pixels>>>` pattern `last_bounds`
+already used for the origin half of this same hit-test). Commit `ec40654c`.
+
+**Defect 2 (found only after fixing #1, via the same instrument) — the link event was wired to the
+wrong destination.** With hit-testing now correct, `TILLER_DEBUG_LINK_CLICK`'s log showed
+`link=Some("https://example.com")` and `cx.emit(TerminalLinkEvent{...})` firing — yet still no
+visible Tiller tab. `subscribe_terminal_link` called `cx.open_url(url)` (GPUI's generic external-URL
+opener, `xdg-open` on Linux) instead of queuing `WorkspaceAction::OpenBrowserLink`, the route
+`bind_chat`'s `ChatEvent::OpenLink` already uses for the *same* "open in Tiller's own Browser tab"
+behavior from chat links. This is why a live modclick eventually did pop a real external Brave
+window (once, with a session-restore banner) in one experiment — the click was working, just opening
+the wrong thing, on a delay long enough that five independent live attempts across two waves never
+correlated their click with any visible Tiller-side effect. Fixed by mirroring `bind_chat` exactly:
+push `WorkspaceAction::OpenBrowserLink` onto `pending_actions`. New test
+`a_terminal_link_click_queues_the_in_app_browser_tab_action` drives the real `subscribe_terminal_link`
+subscription (not a reimplementation of its logic) and asserts the queued action. Commit `c331914c`.
+
+**Instrument**: `TILLER_DEBUG_LINK_CLICK=1` (commit `d8be5b25`) — opt-in `eprintln!` in
+`on_left_mouse_down` printing position, origin, real `cell_width`, resolved `(row, column)`, and the
+link found. This is what turned coordinate-guessing into ground truth.
+
+**Live end-to-end confirmation** (one `wayland-drive.sh` invocation, negative and positive control at
+the identical coordinate): typed `echo https://example.com` in a terminal pane; plain `click 400 111`
+left the tab strip at Chat/Terminal, unchanged; `modclick logo 400 111` at the **same pixel**
+opened a new **Browser** tab in Tiller's own tab strip with `https://example.com` in the address bar
+(the red "Direct XCB build failed" banner in the capture is the already-documented P127 Wayland-lane
+limitation on embedded webview *content* — chrome renders correctly, which is all this row needs;
+route content-rendering questions to `Scripts/linux-drive.sh` per `WAYLAND-LANE.md`).
+
+`cargo test -p tiller_terminal`: 43 passed. `cargo test -p tiller`: 159 passed.
+
+**howToExercise**: `TILLER_WL_LABEL=x Scripts/wayland-drive.sh /tmp/out 'ctl project.add
+path=<repo>; click 500 50; click 500 300; type echo https://example.com; key Return; sleep 1; click
+400 111; shot negative; modclick logo 400 111; shot positive'` — `negative` shows the tab strip
+unchanged, `positive` shows a new **Browser** tab selected with `https://example.com` in the address
+bar. (Exact pixel numbers are specific to this pane's current font/size and layout; re-derive with
+`TILLER_DEBUG_LINK_CLICK=1` and read `APP_LOG` if the coordinates ever stop landing.)
