@@ -29,7 +29,8 @@
 #   type <text>              type text through wtype (click a text target first)
 #   key <name>               type a named key through wtype, e.g. key Tab
 #   chord <mod> <key>        modifier-held named key, e.g. chord shift F10 (mod: shift, ctrl,
-#                            alt, logo, altgr, capslock — see `man wtype`)
+#                            alt, logo, altgr, capslock — see `man wtype`; `+`-join for more than
+#                            one, e.g. chord ctrl+shift p for the command palette)
 #   modclick <mod> <x> <y>   hold <mod> while left-clicking (x,y) — e.g. modclick ctrl 400 300
 #                            for the platform-modifier+click convention on terminal links
 #   title <text>             set the focused terminal pane's title via OSC 0 (click the pane
@@ -353,12 +354,23 @@ key() {
 # (-M press, -k the key while held, -m release) is enough: the keyboard's wl_keyboard binding
 # already happened during start_virtual_keyboard's pre-app dance, so this one-shot process is not
 # racing a first bind (see trap 3) — the same reason plain `key`/`type` are safe as one-shot calls.
-# <mod> is whatever `man wtype` accepts: shift, ctrl, alt, logo, altgr, capslock.
+# <mod> is whatever `man wtype` accepts: shift, ctrl, alt, logo, altgr, capslock — or a `+`-joined
+# combination, e.g. `chord ctrl+shift p` for the command palette's Ctrl+Shift+P. Each `-M` press is
+# issued in the order given, and `-m` release in reverse order, so a genuinely-held multi-modifier
+# chord reaches the app the same way a real keyboard would deliver it (all modifiers already down
+# before the key event), not two separate single-modifier chords that could never register as one.
 chord() {
-  [ "$#" = 2 ] || { echo "usage: chord <mod> <key>" >&2; return 2; }
+  [ "$#" = 2 ] || { echo "usage: chord <mod[+mod...]> <key>" >&2; return 2; }
   verify_nested_sway || return 1
   command -v wtype >/dev/null || { echo "FAIL: wtype is not installed" >&2; return 1; }
-  wtype -M "$1" -k "$2" -m "$1"
+  local mods="$1" key="$2"
+  local -a mod_arr press_args release_args
+  IFS='+' read -r -a mod_arr <<<"$mods"
+  press_args=()
+  for m in "${mod_arr[@]}"; do press_args+=(-M "$m"); done
+  release_args=()
+  for ((i = ${#mod_arr[@]} - 1; i >= 0; i--)); do release_args+=(-m "${mod_arr[$i]}"); done
+  wtype "${press_args[@]}" -k "$key" "${release_args[@]}"
 }
 
 # modclick <mod> <x> <y> — hold <mod> across a left-click, e.g. `modclick ctrl 400 300` for the
