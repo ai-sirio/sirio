@@ -40,6 +40,10 @@ required_markers=(
     'test-crash-supervise.py'
     'test-crash-freeze-supervise.py'
     'test-visual-sweep.sh'
+    '--target x86_64-pc-windows-msvc --workspace'
+    '--target aarch64-apple-darwin --workspace'
+    'rustup target add'
+    'error occurred in cc-rs:'
     'TILLER_SOCKET'
     'TILLER_DB'
     'DISPLAY'
@@ -93,10 +97,14 @@ test_line=$(line_of 'cargo test --workspace')
 acp_line=$(line_of 'real ACP acceptance')
 python_line=$(line_of 'test-crash-supervise.py')
 visual_line=$(line_of 'test-visual-sweep.sh')
+windows_line=$(line_of '--target x86_64-pc-windows-msvc --workspace')
+macos_line=$(line_of '--target aarch64-apple-darwin --workspace')
 smoke_line=$(line_of 'panel create')
 if ! (( fmt_line < clippy_line && clippy_line < build_line && build_line < test_line &&
     test_line < acp_line && acp_line < python_line &&
-    python_line < visual_line && visual_line < smoke_line )); then
+    python_line < visual_line &&
+    visual_line < windows_line && windows_line < macos_line &&
+    macos_line < smoke_line )); then
     echo "FAIL: verification stages are not ordered fastest-failure first" >&2
     exit 1
 fi
@@ -111,6 +119,28 @@ grep -Fq 'TILLER_ACP_REAL:-0' "$SCRIPT" || {
 }
 grep -Fq 'SKIP: real ACP acceptance' "$SCRIPT" || {
     echo "FAIL: gate does not announce the skipped ACP stage; a silent skip reads as a pass" >&2
+    exit 1
+}
+
+# Same reasoning, twice over, for the macOS/Windows cross-target checks: a contributor without
+# `rust-std` for the triple must SKIP loudly with the exact fix, and a check that fails only on
+# this box's documented missing SDK/cross-toolchain must be BLOCKED loudly rather than silently
+# swallowed -- both outcomes have to print their own name, or a real regression hiding behind
+# either path reads as a pass just like an unannounced ACP skip would.
+grep -Fq 'SKIP: $stage' "$SCRIPT" || {
+    echo "FAIL: gate does not announce a skipped cross-target stage by name" >&2
+    exit 1
+}
+grep -Fq 'rustup target add' "$SCRIPT" || {
+    echo "FAIL: missing rust-std for a cross target needs the actionable rustup fix" >&2
+    exit 1
+}
+grep -Fq 'BLOCKED: $stage' "$SCRIPT" || {
+    echo "FAIL: gate does not announce a known-wall-blocked cross-target stage by name" >&2
+    exit 1
+}
+grep -Fq 'not a code regression' "$SCRIPT" || {
+    echo "FAIL: the cross-target BLOCKED outcome must say it is not a code regression" >&2
     exit 1
 }
 

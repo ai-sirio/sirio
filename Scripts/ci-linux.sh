@@ -225,6 +225,96 @@ run_root_stage "test-crash-freeze-supervise.py" env PYTHONDONTWRITEBYTECODE=1 \
 run_root_stage "test-visual-sweep.sh" env PYTHONDONTWRITEBYTECODE=1 \
     bash Scripts/Tests/test-visual-sweep.sh
 
+# --- Cross-platform compile gates (macOS, Windows) ---
+#
+# The user now requires macOS/Windows compatibility (docs/linux-rewrite/PORTABILITY.md). GPUI,
+# alacritty_terminal, and wry all carry real macOS/Windows backends already; what regresses
+# silently is our own glue -- an unconditional Linux-only Cargo dependency, or a Linux `cfg`
+# branch added with no counterpart. `cargo check --target <triple>` does not link, so it is a
+# real, cheap-enough-to-run gate against exactly that: it fails on both. These two stages are
+# what makes that failure loud instead of something a critic has to rediscover by hand.
+#
+# They run LAST, after every stage above, on purpose: a cold `target/<triple>/` means building
+# ~400 dependency crates from scratch for a target this box will never link or run, which the
+# wave's own reconnaissance clocked at tens of minutes per target (~20 GB of target/ growth
+# each) the first time a contributor's checkout touches them. A contributor iterating on an
+# ordinary bug should hit fmt/clippy/build/test failures long before either of these starts;
+# putting them first would make the common case slower for a check most edits cannot affect.
+# Once `target/<triple>/` is warm the repeat cost is much smaller (single-digit minutes).
+#
+# Two distinct non-PASS outcomes are handled on purpose, and they are not the same thing:
+#
+#  SKIP -- rust-std itself is not installed for the triple (`rustup target list --installed`
+#  doesn't list it). This is a one-command, always-fixable, per-contributor setup gap that
+#  cannot regress from a code change, so it is treated the same way the TILLER_ACP_REAL stage
+#  above is: skip loudly, name the exact fix (`rustup target add <triple>`), and let a
+#  contributor who hasn't opted in yet still reach a green gate. A maintained CI runner installs
+#  the target once, permanently, so the skip path is a laptop convenience, not a hole CI lives
+#  in. Silent would be wrong here; loud-and-named is not the same failure mode as silent.
+#
+#  BLOCKED -- rust-std is present, but the check fails while a third-party dependency's build
+#  script tries to invoke a C/asm compiler for the foreign target and that invocation itself
+#  fails -- observed from `psm` (pulled in transitively by gpui's `stacker`, used for
+#  stack-safety in gpui's text/layout code; fails to assemble its per-target `.s` stub),
+#  `stacker` itself (`windows.c` needs a real `windows.h`), and expected from `libsqlite3-sys`
+#  (rusqlite's bundled sqlite3.c) once the check gets that far. Confirmed independently by two
+#  prior slices (J2-windows, J3-macos): this box has no MSVC toolchain, no macOS SDK, and no
+#  cross-linker (cargo-xwin/osxcross/zig all absent) either, so none of that C/asm can be built
+#  for a foreign target from a plain Linux host -- the failure never reaches any of our own 13
+#  workspace crates, so it is not a code regression and no `cfg` seam in our tree can fix it. On
+#  real hardware (what `Scripts/ci.sh`, the Swift gate, stands in for on macOS -- it has never
+#  carried Rust stages, but the day it or a native runner does, real `cc`/Xcode tools understand
+#  `-arch`/`-mmacosx-version-min` and `windows.h` exists on a Windows box, so this wall does not
+#  exist there) this same command would just pass, so the two gates' definitions of "green" do
+#  not actually disagree -- this one just cannot prove it from here. Failing the gate on this
+#  forever would make it permanently, unfixably red on every SDK-less Linux box, which teaches
+#  exactly the lesson the sccache fallback above exists to prevent: a gate nobody can ever pass
+#  is a gate everybody learns to ignore. So it also reports non-fatally -- but by name, with the
+#  full log, and visibly distinct from PASS, never silently.
+#
+#  The signature is matched on the *mechanism* ("the `cc` crate's own compiler invocation
+#  failed"), not on an enumerated crate list -- `stacker` failing where `psm` had failed the
+#  slice before is exactly why: a name whitelist would already have missed it, and would keep
+#  missing whichever sys-crate the graph reaches next. None of our own 13 workspace crates
+#  shell out to a C compiler from build.rs, so this signature cannot originate from our code.
+#
+#  Anything else -- dependency resolution failing outright, an unconditional Linux-only crate,
+#  a missing `cfg` branch anywhere in our own code -- matches neither signature above and DOES
+#  fail the gate. That is the failure this pair of stages exists to catch, and it stays a hard
+#  failure the same as any other stage's FAILED above.
+CROSS_TARGET_KNOWN_WALL='error occurred in cc-rs:'
+
+run_cross_target_stage() {
+    local stage=$1
+    local triple=$2
+    local log="$LOG_DIR/$(echo "$stage" | tr ' /' '__').log"
+
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+        echo "SKIP: $stage — rust-std not installed for $triple"
+        echo "  run: rustup target add $triple"
+        return 0
+    fi
+
+    if (cd "$ROOT/rust" && cargo check --target "$triple" --workspace) >"$log" 2>&1; then
+        echo "PASS: $stage"
+        tail -5 "$log" || true
+        return 0
+    fi
+
+    if grep -qE "$CROSS_TARGET_KNOWN_WALL" "$log"; then
+        echo "BLOCKED: $stage — known SDK/cross-toolchain wall, not a code regression"
+        echo "  no MSVC toolchain / macOS SDK / cross-linker on this box; see docs/linux-rewrite/PORTABILITY.md"
+        tail -15 "$log" || true
+        return 0
+    fi
+
+    fail_stage "$stage" "$log" "(cd rust && cargo check --target $triple --workspace)"
+}
+
+echo "==> Cross-platform compile checks (macOS, Windows)"
+run_cross_target_stage "cargo check --target x86_64-pc-windows-msvc --workspace" x86_64-pc-windows-msvc
+run_cross_target_stage "cargo check --target aarch64-apple-darwin --workspace" aarch64-apple-darwin
+
 echo "==> Headless smoke test"
 smoke_failure() {
     local reason=$1
