@@ -1,0 +1,138 @@
+{
+ "slices": {
+  "G1-browser": {
+   "owns": [
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller_terminal/src/lib.rs",
+    "rust/crates/tiller_theme/src/cosmic/mod.rs",
+    "rust/crates/tiller_ui/src/browser.rs"
+   ],
+   "count": 3,
+   "ids": [
+    "F-BRW-01",
+    "F-CTRL-BROWSER-05",
+    "F-CTRL-BROWSER-06"
+   ],
+   "round": 1
+  },
+  "G2-gaps-a": {
+   "owns": [
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller_activity/src/bootstrap.rs",
+    "rust/crates/tiller_activity/src/mount.rs",
+    "rust/crates/tiller_activity/tests/activity_domain_integration.rs",
+    "rust/crates/tiller_project/src/domain.rs",
+    "rust/crates/tiller_project/src/settings.rs",
+    "rust/crates/tiller_terminal/src/domain.rs",
+    "rust/crates/tiller_terminal/src/lib.rs"
+   ],
+   "count": 3,
+   "ids": [
+    "F-CORE-ACT-25",
+    "F-CORE-ACT-26",
+    "F-CORE-DOM-07"
+   ],
+   "round": 2
+  },
+  "G3-gaps-b": {
+   "owns": [
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller/src/panes.rs",
+    "rust/crates/tiller/src/session.rs",
+    "rust/crates/tiller_project/src/layout.rs",
+    "rust/crates/tiller_terminal/src/context_menu.rs",
+    "rust/crates/tiller_terminal/src/lib.rs",
+    "rust/crates/tiller_ui/src/chat.rs",
+    "rust/crates/tiller_ui/src/editor.rs",
+    "rust/crates/tiller_ui/src/file_view.rs",
+    "rust/crates/tiller_ui/src/right_panel.rs",
+    "rust/crates/tiller_ui/src/tab_bar.rs"
+   ],
+   "count": 3,
+   "ids": [
+    "F-CORE-WSP-04",
+    "F-CORE-WSP-08",
+    "F-TAB-11"
+   ],
+   "round": 3
+  },
+  "G4-chat": {
+   "owns": [
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller_acp/src/lib.rs",
+    "rust/crates/tiller_agents/src/error.rs",
+    "rust/crates/tiller_control/src/client.rs",
+    "rust/crates/tiller_terminal/src/lib.rs",
+    "rust/crates/tiller_ui/src/chat.rs",
+    "rust/crates/tiller_ui/src/file_view.rs"
+   ],
+   "count": 4,
+   "ids": [
+    "F-CHAT-05",
+    "F-CHAT-20",
+    "F-CHAT-33",
+    "F-EDIT-07"
+   ],
+   "round": 4
+  },
+  "G5-terminal": {
+   "owns": [
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller_terminal/src/context_menu.rs",
+    "rust/crates/tiller_terminal/src/lib.rs",
+    "rust/crates/tiller_terminal/src/link_router.rs",
+    "rust/crates/tiller_ui/src/changes.rs",
+    "rust/crates/tiller_ui/src/chat.rs",
+    "rust/crates/tiller_ui/src/right_panel.rs"
+   ],
+   "count": 5,
+   "ids": [
+    "F-TERM-SCR-02",
+    "F-TERM-PTY-05",
+    "F-TERM-UI-01",
+    "F-TERM-UI-02",
+    "F-CHG-18"
+   ],
+   "round": 5
+  },
+  "G6-sidebar": {
+   "owns": [
+    "rust/crates/tiller/src/main.rs",
+    "rust/crates/tiller/src/session.rs",
+    "rust/crates/tiller_agents/src/claude.rs",
+    "rust/crates/tiller_agents/src/codex.rs",
+    "rust/crates/tiller_ui/src/sidebar.rs",
+    "rust/crates/tiller_ui/src/status_bar.rs",
+    "rust/crates/tiller_usage/src/claude.rs",
+    "rust/crates/tiller_usage/src/model.rs"
+   ],
+   "count": 3,
+   "ids": [
+    "F-SID-11",
+    "F-PRJ-05",
+    "F-USE-03"
+   ],
+   "round": 6
+  }
+ },
+ "rounds": [
+  [
+   "G1-browser"
+  ],
+  [
+   "G2-gaps-a"
+  ],
+  [
+   "G3-gaps-b"
+  ],
+  [
+   "G4-chat"
+  ],
+  [
+   "G5-terminal"
+  ],
+  [
+   "G6-sidebar"
+  ]
+ ]
+}
