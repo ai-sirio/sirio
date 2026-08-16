@@ -2592,4 +2592,80 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         );
         client.shutdown().expect("real ACP agent should shut down");
     }
+
+    /// (F-CHAT-33, sweep I4-settle) Locks in a diagnosis that took two
+    /// independent hand-drives of the real npx agent, outside this crate
+    /// entirely, to pin down. A broken `.mcp.json` server is real, wired all
+    /// the way to `session/new` (`discover_mcp_servers`, above), and the
+    /// agent DOES eventually notice it is unreachable -- but only across two
+    /// gates this test cannot get past from inside the repo:
+    ///
+    /// 1. **Trust.** The first time any project's `.mcp.json` names a
+    ///    server, the agent marks it "Pending approval (run `claude` to
+    ///    approve)" and never attempts a connection at all -- confirmed live
+    ///    by hand-driving the JSON-RPC wire directly: with the project
+    ///    unapproved, a `claude mcp list` tool call the agent ran on request
+    ///    reported `Pending approval`, not a connection attempt. That
+    ///    approval lives in the user's own `~/.claude.json` (a per-project
+    ///    `enabledMcpjsonServers` list), which nothing in Tiller's launch
+    ///    path ever populates -- a fresh Tiller project hits this wall on
+    ///    every single session, not just a broken one.
+    /// 2. **Channel.** Manually pre-approving the same scratch project (by
+    ///    editing `~/.claude.json` directly, outside this repo -- not
+    ///    reproducible in an automated test without mutating shared global
+    ///    state) and re-driving the wire DID produce a real connection
+    ///    attempt and a real failure: `Failed to connect — ENOENT: ENOENT:
+    ///    no such file or directory, posix_spawn '/definitely/missing/mcp-
+    ///    nonexistent-binary'`. But that text arrived as ordinary
+    ///    conversational/tool-call content inside a `session/update` --
+    ///    because the agent had been explicitly asked to run `claude mcp
+    ///    list` and check -- never once on the child process's own stderr,
+    ///    the only channel `drain_stderr`/`looks_like_mcp_warning` reads.
+    ///    Nothing was pushed spontaneously either: `session/new`'s response
+    ///    and the commands-list push that follows it carry no MCP status at
+    ///    all before anyone asks.
+    ///
+    /// So this crate's own reach ends exactly where this test can still
+    /// prove something real: the unapproved case, which is what every
+    /// fresh Tiller project actually gets. If a future agent version starts
+    /// writing to the child's stderr instead, this goes red and says so.
+    #[test]
+    #[ignore = "needs a real agent over the network; flakes the gate under load"]
+    fn real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json() {
+        let scratch = std::env::temp_dir().join(format!(
+            "tiller-f-chat-33-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        std::fs::write(
+            scratch.join(".mcp.json"),
+            r#"{"mcpServers":{"broken-server":{"command":"/definitely/missing/mcp-nonexistent-binary","args":[]}}}"#,
+        )
+        .expect("write .mcp.json");
+
+        let (mut client, _events) = AcpClient::launch(
+            AgentCommand::new("npx").args(["-y", "@agentclientprotocol/claude-agent-acp@latest"]),
+            &scratch,
+        )
+        .expect("real ACP agent should initialize even with a broken .mcp.json");
+
+        // Give the agent well past its own startup + any lazy connection
+        // attempt it might make on its own initiative.
+        std::thread::sleep(Duration::from_secs(10));
+        let warnings = client.mcp_warnings();
+        assert!(
+            warnings.is_empty(),
+            "if this ever fires, the agent finally started reporting MCP \
+             failures on the process's own stderr for an unapproved project \
+             -- re-open F-CHAT-33, this is exactly the signal it was waiting \
+             on: {warnings:?}"
+        );
+
+        let _ = client.shutdown();
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }
