@@ -107,6 +107,36 @@ const BUILD_SCHEMA = {
 
 const SLICES = [
   {
+    key: 'J0-chat05',
+    phase: 'Gate',
+    brief: `**One row, carried over from wave I: \`F-CHAT-05\`, currently \`FAILED — defective\`.** Unrelated to
+portability — it is here because this wave is serial and the fix is small.
+
+The contract says: when the agent is offline, *confirm the editor is disabled*. The Rust rewrite keeps
+the composer **enabled** with a distinct placeholder ("Agent offline — reconnecting when you send…",
+\`crates/tiller_ui/src/chat.rs\`), and a previous builder argued that was a deliberate, better UX than
+the contract's wording, proposing the row be reworded.
+
+**A wave-I critic checked that argument against the Swift original and it does not hold.**
+\`ChatComposerView.swift\`'s \`canInteract\` excludes exactly this failed-connection state
+(\`.disconnected\`) via \`ChatController.ChatState\` — so the reference genuinely **does** disable the
+composer here, and has no retry-and-resend feature at all. The reference matches the literal contract;
+the rewrite diverges from it. Read those two Swift files yourself before you start
+(\`${SWIFT}/App/...\` — find them with grep; do not edit that tree).
+
+What is already established and must not regress: a typed draft **survives** a failed offline Return
+byte-for-byte (proven live with the marker \`cRiTiC-9f3q\`, and by
+\`offline_enter_never_discards_the_typed_draft\`). Disabling the composer must not reintroduce draft
+loss — the user's text is more important than either behaviour.
+
+Implement the reference behaviour: disable the composer while disconnected, keeping the distinct
+placeholder so the user knows why. Then check the neighbouring states the critic flagged as separately
+unexercised — the permission-wait half of the row — and say what you found.
+
+Pass bar: a live drive with \`TILLER_ACP_PROGRAM\` pointed at a missing binary shows the composer
+refusing input, and a previously-typed draft still intact.`,
+  },
+  {
     key: 'J1-gate',
     phase: 'Gate',
     brief: `Target-gate the Linux-only dependencies and glue so the non-Linux builds can even begin.
@@ -280,7 +310,16 @@ routes, not for conclusions.
    \`Scripts/ci-linux.sh\` **fails**, then revert cleanly and confirm \`git status --porcelain\` is
    clean. If the gate stays green with the defect reintroduced, the gate is decorative and that is
    your headline finding.
-5. **Seam honesty.** For each \`cfg\` seam the wave added, read the non-Linux branch. It must not be a
+5. **\`F-CHAT-05\`, the one non-portability row in this wave.** Drive it live yourself:
+   \`TILLER_ACP_PROGRAM\` pointed at a missing binary, then try to type into the chat composer. The
+   contract requires the editor to be **disabled** while the agent is offline — the Swift reference's
+   \`ChatComposerView.canInteract\` excludes \`.disconnected\`, which is what settled this. Two things
+   must both hold, and the second is the one a fix could easily break: the composer refuses input,
+   **and** a draft typed before going offline is still intact byte-for-byte. Use your own marker
+   string so the capture can only have come from your drive. Return a verdict for this row from the
+   standard vocabulary (\`PASSED\` / \`half-proven\` / \`FAILED — absent\` / \`FAILED — defective\` /
+   \`UNREACHABLE\`) plus a 1-3 sentence evidence cell with no raw \`|\` and no triple backticks.
+6. **Seam honesty.** For each \`cfg\` seam the wave added, read the non-Linux branch. It must not be a
    silent no-op that looks like a working feature — it should log, return an error, or be plainly
    unimplemented. A macOS build where the tray silently does nothing while appearing wired is exactly
    the failure mode this wave was told to avoid. Name any seam that fails this test.
@@ -296,7 +335,8 @@ is the same error pointed the other way.
 ${HOUSE}
 Write \`docs/linux-rewrite/wave-j/VERDICT.md\` with your evidence and commit it (\`git add\` the new
 path first). Return a short plain-text summary: the two check results with real numbers, the Linux
-test counts you measured, the negative-control outcome, and any dishonest seam you found.`,
+test counts you measured, the negative-control outcome, any dishonest seam you found, and your
+\`F-CHAT-05\` verdict with its evidence cell.`,
   { label: 'verify:portability', phase: 'Verify', effort: 'high' })
 
 log(`verdict: ${String(verdict).slice(0, 400)}`)
