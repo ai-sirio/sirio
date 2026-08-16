@@ -82,6 +82,12 @@ pub struct SessionTabState {
     pub pane_events: Vec<PaneEvent>,
     #[serde(default)]
     pub scrollback: BTreeMap<usize, Vec<u8>>,
+    /// F-CORE-WSP-08: a chat tab's unsent composer text, captured live from
+    /// the `Chat` entity at save time (the same pattern `scrollback` above
+    /// uses for a terminal tab) and pushed back through `Chat::control_compose`
+    /// at restore, so a draft the user never hit Enter on survives a restart.
+    #[serde(default)]
+    pub chat_draft: String,
 }
 
 impl SessionTabState {
@@ -106,6 +112,7 @@ impl SessionTabState {
                 .iter()
                 .map(|(pane_id, bytes)| (*pane_id, Self::bounded_scrollback(bytes)))
                 .collect(),
+            chat_draft: self.chat_draft.clone(),
         };
         serde_json::to_string(&bounded).expect("session tab state is serializable")
     }
@@ -1617,6 +1624,7 @@ mod tests {
                 direction: "horizontal".into(),
             }],
             scrollback: std::collections::BTreeMap::from([(0, b"P28_SCROLLBACK_NONCE".to_vec())]),
+            chat_draft: String::new(),
         };
         let layout = SessionLayout {
             working_directory: working_directory.clone(),

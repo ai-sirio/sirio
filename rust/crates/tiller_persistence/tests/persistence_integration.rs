@@ -1245,6 +1245,39 @@ fn save_tabs_normalizes_the_active_flag() {
     assert!(!tabs[1].is_active, "second active tab is normalized away");
 }
 
+/// F-CORE-WSP-08 regression: moving the active tab from a later array
+/// position to an earlier one, across two `save_tabs` calls, used to fail
+/// the whole write with `UNIQUE constraint failed: tab.worktree_id`. The
+/// upsert loop processed tabs in array order, so upserting the
+/// newly-active earlier tab happened before the still-active-in-the-database
+/// later tab's row had its flag cleared — a transient two-actives state the
+/// partial unique index (checked immediately, not deferrable) rejected.
+#[test]
+fn save_tabs_moving_the_active_flag_to_an_earlier_tab_does_not_violate_the_unique_index() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("active-earlier")).expect("open");
+    db.save_projects(&[sample_project("proj-1", "tiller")])
+        .expect("seed project");
+    db.save_worktrees(&[sample_worktree("wt-1", "proj-1", "main")])
+        .expect("seed worktree");
+
+    let mut a = sample_tab("tab-a", "wt-1", "Chat", "chat");
+    a.is_active = false;
+    let mut b = sample_tab("tab-b", "wt-1", "Terminal", "terminal");
+    b.is_active = true;
+    db.save_tabs("wt-1", &[a.clone(), b.clone()])
+        .expect("first save: b (later position) active");
+
+    a.is_active = true;
+    b.is_active = false;
+    db.save_tabs("wt-1", &[a, b])
+        .expect("second save: a (earlier position) becomes active");
+
+    let tabs = db.tabs_of_worktree("wt-1").expect("load tabs");
+    assert!(tabs[0].is_active, "tab-a is now the sole active tab");
+    assert!(!tabs[1].is_active, "tab-b lost its active flag");
+}
+
 #[test]
 fn save_tab_keeps_a_single_active_tab_per_worktree() {
     let dir = TempDir::new();
