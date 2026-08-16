@@ -32,6 +32,8 @@ use tiller_persistence::{
 use tiller_theme::Theme;
 
 use crate::composer::{Composer, ComposerChip, ComposerPart};
+use crate::editor::Language;
+use crate::file_view::{CodeSpanKind, code_spans};
 use crate::sidebar::icons::{Icon, IconElement};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
@@ -3556,6 +3558,10 @@ impl Chat {
                 text,
                 open,
             } => {
+                let fence_language = language
+                    .as_deref()
+                    .map(Self::language_from_fence_tag)
+                    .unwrap_or(Language::PlainText);
                 let language_label = language.unwrap_or_else(|| "code".to_string());
                 let language_label = if open {
                     format!("{language_label} · streaming")
@@ -3635,8 +3641,9 @@ impl Chat {
                             .text_size(typography.code_size)
                             .line_height(typography.code_line_height)
                             .text_color(colors.primary_text_color)
-                            .child(Self::render_plain_text(
+                            .child(Self::render_highlighted_code(
                                 text,
+                                fence_language,
                                 theme,
                                 format!("{id}-code"),
                                 source_start + language_label.len() + 1,
@@ -3700,6 +3707,89 @@ impl Chat {
             .into_any_element()
         } else {
             styled.into_any_element()
+        }
+    }
+
+    /// F-EDIT-07: a fenced code block's rendered text, but with per-token
+    /// highlighting — the same `code_spans` pass the editor's own code
+    /// surface (`file_view.rs`) uses, so keywords/literals/comments in a
+    /// Markdown preview's fenced block no longer render as flat plain text
+    /// (the defect: `render_plain_text` applies zero `HighlightStyle`s).
+    fn render_highlighted_code(
+        text: String,
+        language: Language,
+        theme: &Theme,
+        id: String,
+        source_start: usize,
+        interaction: Option<&TranscriptInteraction>,
+    ) -> AnyElement {
+        let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+        let mut offset = 0usize;
+        for line in text.split_inclusive('\n') {
+            let trimmed = line.strip_suffix('\n').unwrap_or(line);
+            for span in code_spans(language, trimmed) {
+                let color = match span.kind {
+                    CodeSpanKind::Keyword => theme.colors.accent,
+                    CodeSpanKind::Literal => theme.colors.diff_addition,
+                    CodeSpanKind::Comment => theme.colors.meta,
+                };
+                highlights.push((
+                    offset + span.range.start..offset + span.range.end,
+                    HighlightStyle {
+                        color: Some(color.into()),
+                        ..Default::default()
+                    },
+                ));
+            }
+            offset += line.len();
+        }
+        highlights.sort_by_key(|(range, _)| range.start);
+        let styled = StyledText::new(text.clone()).with_highlights(highlights);
+        if let Some(interaction) = interaction {
+            TranscriptSelectableText::new(
+                ElementId::Name(id.into()),
+                styled,
+                source_start..source_start + text.len(),
+                interaction.clone(),
+                theme.colors.selection_fill,
+                Vec::new(),
+            )
+            .into_any_element()
+        } else {
+            styled.into_any_element()
+        }
+    }
+
+    /// Maps a fenced code block's info-string language tag (as written
+    /// after the opening ` ``` `) to the editor's [`Language`] so the
+    /// preview's highlighter picks the right keyword vocabulary. Unknown or
+    /// absent tags fall back to `PlainText`, same as the editor.
+    fn language_from_fence_tag(tag: &str) -> Language {
+        match tag.trim().to_ascii_lowercase().as_str() {
+            "rust" | "rs" => Language::Rust,
+            "python" | "py" => Language::Python,
+            "javascript" | "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
+            "typescript" | "ts" | "tsx" => Language::TypeScript,
+            "bash" | "sh" | "shell" | "zsh" | "fish" | "console" => Language::Shell,
+            "json" => Language::Json,
+            "yaml" | "yml" => Language::Yaml,
+            "toml" => Language::Toml,
+            "c" | "h" => Language::C,
+            "cpp" | "c++" | "cc" | "cxx" | "hpp" => Language::Cpp,
+            "go" | "golang" => Language::Go,
+            "swift" => Language::Swift,
+            "kotlin" | "kt" => Language::Kotlin,
+            "java" => Language::Java,
+            "ruby" | "rb" => Language::Ruby,
+            "php" => Language::Php,
+            "html" | "htm" => Language::Html,
+            "css" => Language::Css,
+            "sql" => Language::Sql,
+            "xml" => Language::Xml,
+            "lua" => Language::Lua,
+            "zig" => Language::Zig,
+            "markdown" | "md" => Language::Markdown,
+            _ => Language::PlainText,
         }
     }
 
@@ -10525,5 +10615,45 @@ mod tests {
             cx.debug_bounds("model-picker").is_none(),
             "the badge opens no picker"
         );
+    }
+
+    /// F-EDIT-07: a fenced code block's info-string tag resolves to the
+    /// same `Language` the editor uses, so the preview highlighter picks
+    /// the right keyword vocabulary instead of always falling back to
+    /// `PlainText` (which would produce zero highlights, reproducing the
+    /// original flat-color defect).
+    #[test]
+    fn fence_tag_resolves_to_editor_language() {
+        assert_eq!(Chat::language_from_fence_tag("bash"), Language::Shell);
+        assert_eq!(Chat::language_from_fence_tag("Rust"), Language::Rust);
+        assert_eq!(Chat::language_from_fence_tag("py"), Language::Python);
+        assert_eq!(
+            Chat::language_from_fence_tag("not-a-real-language"),
+            Language::PlainText
+        );
+    }
+
+    /// F-EDIT-07: the fenced `CodeBlock` render path now runs the same
+    /// `code_spans` pass the editor's code surface uses, producing at
+    /// least one highlighted keyword span for a comment-and-command shell
+    /// block — the exact case the critic's pixel inspection caught
+    /// rendering as flat, unhighlighted text.
+    #[test]
+    fn shell_code_block_produces_keyword_and_comment_highlights() {
+        let language = Chat::language_from_fence_tag("bash");
+        let text = "# comment\nif [ -f x ]; then\n  echo hi\nfi";
+        let mut saw_comment = false;
+        let mut saw_keyword = false;
+        for line in text.split('\n') {
+            for span in code_spans(language, line) {
+                match span.kind {
+                    CodeSpanKind::Comment => saw_comment = true,
+                    CodeSpanKind::Keyword => saw_keyword = true,
+                    CodeSpanKind::Literal => {}
+                }
+            }
+        }
+        assert!(saw_comment, "the comment line should highlight as a comment");
+        assert!(saw_keyword, "if/then/fi should highlight as keywords");
     }
 }

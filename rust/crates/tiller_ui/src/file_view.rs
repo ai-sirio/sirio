@@ -1149,23 +1149,28 @@ fn render_content(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CodeSpanKind {
+pub(crate) enum CodeSpanKind {
     Keyword,
     Literal,
     Comment,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct CodeSpan {
-    range: std::ops::Range<usize>,
-    kind: CodeSpanKind,
+pub(crate) struct CodeSpan {
+    pub(crate) range: std::ops::Range<usize>,
+    pub(crate) kind: CodeSpanKind,
 }
 
 /// A deliberately small, dependency-free syntax pass for the editor's code
 /// surface. Language detection is not merely a badge: the detected language
 /// selects a keyword vocabulary and produces different styled spans. A full
 /// parser/highlighter can replace this seam later without changing FileView.
-fn code_spans(language: Language, line: &str) -> Vec<CodeSpan> {
+///
+/// F-EDIT-07: also reused by `chat.rs`'s Markdown-preview `CodeBlock`
+/// rendering, so a fenced code block in a chat transcript gets the same
+/// per-token highlighting as the editor's own code surface instead of
+/// falling back to flat plain text.
+pub(crate) fn code_spans(language: Language, line: &str) -> Vec<CodeSpan> {
     let keywords: &[&str] = match language {
         Language::Rust => &["fn", "let", "mut", "pub", "struct", "impl", "use", "match"],
         Language::Python => &["def", "class", "import", "from", "return", "for", "in"],
