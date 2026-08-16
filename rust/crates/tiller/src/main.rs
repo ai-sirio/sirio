@@ -7471,7 +7471,7 @@ impl TillerWorkspace {
         self.dismiss_tab_menu(cx);
     }
 
-    fn commit_tab_rename(&mut self, cx: &mut Context<Self>) {
+    fn commit_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rename) = self.tab_rename.take() else {
             return;
         };
@@ -7486,21 +7486,66 @@ impl TillerWorkspace {
             tab.title_is_auto_named = false;
             self.schedule_save(cx);
             self.sync_activity(cx);
+
+            // F-CORE-WSP-04: the rename widget's own FocusHandle is dropped
+            // with `rename` above, and nothing else claims keyboard focus —
+            // without this, committing a rename left focus on no rendered
+            // element, so the terminal/chat pane silently stopped receiving
+            // key input until the user clicked back into it. Route the
+            // real mutation through `LayoutCommand`/`classify_layout_command`
+            // so the fix is driven by the general command classification
+            // (`FocusIntent::Tab`), not a one-off hardcoded assumption.
+            let command = tiller_project::LayoutCommand::Rename {
+                tab: rename.tab_id.to_string(),
+                title: title.to_owned(),
+            };
+            if tiller_project::classify_layout_command(&command).focus
+                == tiller_project::FocusIntent::Tab
+            {
+                self.focus_tab_content(rename.tab_id, window, cx);
+            }
         }
         cx.notify();
+    }
+
+    /// Focuses the given tab's currently-focused pane content, when it has
+    /// a focusable surface (chat composer or terminal). Shared by rename
+    /// commit/cancel so both leave keyboard input working without a click.
+    fn focus_tab_content(&self, tab_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let focused_pane = tab.focused_pane;
+        let mut focus_handle = None;
+        tab.panes.for_each(&mut |id, content| {
+            if id == focused_pane {
+                focus_handle = match content {
+                    TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
+                    TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                    TabContent::File { .. } | TabContent::Changes(_) | TabContent::Browser(_) => {
+                        None
+                    }
+                };
+            }
+        });
+        if let Some(focus_handle) = focus_handle {
+            window.focus(&focus_handle, cx);
+        }
     }
 
     fn handle_tab_rename_key(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
         match key {
-            "enter" | "return" => self.commit_tab_rename(cx),
+            "enter" | "return" => self.commit_tab_rename(window, cx),
             "escape" => {
-                self.tab_rename = None;
+                if let Some(rename) = self.tab_rename.take() {
+                    self.focus_tab_content(rename.tab_id, window, cx);
+                }
                 cx.notify();
             }
             "backspace" | "delete" => {
@@ -10773,6 +10818,49 @@ mod tests {
         cx.simulate_click(close_others.center(), Modifiers::none());
         cx.run_until_parked();
         assert!(workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len() == 1));
+    }
+
+    /// F-CORE-WSP-04: `commit_tab_rename` routes the real rename through
+    /// `LayoutCommand::Rename` + `classify_layout_command`, and its
+    /// `FocusIntent::Tab` answer is what sends keyboard focus back to the
+    /// pane. Before this, focus was left on the (now-unmounted) rename
+    /// field, so typing after a rename silently went nowhere until the
+    /// user clicked the terminal.
+    #[gpui::test]
+    async fn committing_a_tab_rename_returns_focus_to_the_terminal(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("palette workspace root")
+        });
+        let focus = palette_test_terminal_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+
+        right_click_tab(&mut cx, 0);
+        let rename = cx
+            .debug_bounds("tab-command-rename")
+            .expect("rename is reachable from the tab menu");
+        cx.simulate_click(rename.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("tab-rename-field").is_some());
+        // While the rename field is open, focus is on it, not the terminal.
+        assert!(!cx.update(|window, _| focus.is_focused(window)));
+
+        cx.simulate_input(" renamed");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "committing a tab rename must hand keyboard focus back to the tab's own content"
+        );
     }
 
     #[gpui::test]
