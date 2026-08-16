@@ -140,7 +140,7 @@ source for every site that used to assume Linux and gave each an honest non-Linu
 |---|---|---|---|
 | GTK main-loop pump | `crates/tiller/src/main.rs` `browser.wait` | pumps `gtk::events_pending`/`main_iteration_do` | no-op; still polls `surface.state()` on the same deadline (WKWebView/WebView2 drive their own loop, so there is nothing to pump) |
 | StatusNotifierItem tray | `crates/tiller/src/tray.rs` | real `ksni`-backed tray | `TrayHandle` is a unit struct, `nudge()` no-ops, `spawn()` returns `None` after an `eprintln!` — the same shape the Linux branch already uses for "no SNI host answered", so `main.rs` needed zero new branches |
-| Process enumeration (Layer D / login-shell descendants) | `tiller_activity/src/process.rs`, `tiller_terminal/src/lib.rs`, `tiller_ui/src/settings.rs` | real `/proc` walk | `Err(Unsupported)` / no-op, same signature |
+| Process enumeration (Layer D / login-shell descendants) | `tiller_activity/src/process.rs`, `tiller_terminal/src/lib.rs`, `tiller_ui/src/settings.rs` | real `/proc` walk | `Err(Unsupported)`; on macOS, the portable `getpgid`/`killpg` half still runs and a one-shot `eprintln!` says descendant discovery is missing — **see the correction below, this row was wrong when first written** |
 | File-system watch | `tiller_markdown/src/file_events.rs` | real `inotify` | `Err(Unsupported)` |
 | Usage-fetch PTY | `tiller_usage/src/claude.rs` | real `openpty`/`fork` | `Unavailable(Error)` |
 | Control socket transport | `tiller_control/src/{server,client}.rs` | real Unix-domain socket | `ServerError::Unsupported` / `ClientError::Unsupported` |
@@ -148,7 +148,60 @@ source for every site that used to assume Linux and gave each an honest non-Linu
 
 None of these claim to *work* on macOS/Windows — each one compiles, and is honest about doing
 nothing (a log line, an `Err`, a `None`) rather than silently pretending. That is the bar the wave
-set, and every seam above was checked against it.
+set.
+
+### Correction: two of those seams did not meet the bar, and this file said they did
+
+The table above originally asserted every seam had been checked. It had not, and the process-
+enumeration row was wrong in the most dangerous way available.
+
+`descendant_pids` in `tiller_terminal/src/lib.rs` and `tiller_ui/src/settings.rs` was gated
+`cfg(unix)` while its body reads `/proc`. **macOS is unix**, so macOS took the Linux
+implementation: every `read_dir("/proc/<pid>/task")` fails, the loop falls through, and the
+function returns an empty vector — indistinguishable from "this process has no descendants". It
+type-checks perfectly, no test touches it, and the failure at runtime is silent.
+
+For `tiller_ui/src/settings.rs` that is not a mild degradation. An empty descendant list reduces
+`terminate_login_process_group` to `kill <launcher>`, which is *precisely* the failure `F-SET-14`'s
+evidence recorded — the login command surviving. The bug would have returned on macOS wearing the
+comment that explains why it was fixed.
+
+Now `cfg(target_os = "linux")`, with a macOS/BSD branch that does the portable part
+(`getpgid`/`killpg` on the shell's own group) and emits a one-shot `eprintln!` naming the missing
+piece (libproc `proc_listchildpids`, already implemented in the Swift original).
+
+The general lesson, worth more than the fix: **`cfg(unix)` on a body that assumes Linux is the most
+dangerous shape in this codebase.** It compiles on macOS, passes every Linux test, and fails
+silently at runtime. No compiler and no test suite can catch it — only someone reading the branch
+and asking what it actually does on the other platform. Prefer `cfg(target_os = "linux")` and widen
+deliberately.
+
+### Correction: the CI gate could not do its job
+
+`run_cross_target_stage` classified any failure containing the SDK wall string as `BLOCKED`. With
+cargo's default fail-fast, whether an injected regression or the pre-existing wall surfaced first
+was a scheduling race — a critic measured a real `gtk` regression being absorbed as `BLOCKED` **1
+time in 7**.
+
+Fixed by running `cargo check ... --keep-going` (so the wall can no longer pre-empt anything) and
+classifying `BLOCKED` only when *every* error is attributable to an allowlisted environmental
+failure. Running the corrected gate immediately surfaced **30 real errors in `tiller_control` that
+the old classifier had been hiding** — the hand-rolled unix PTY in `panel.rs`, since seamed.
+
+Two follow-on bugs in that fix are worth recording, because both are easy to repeat:
+
+- The allowlist matched `` `psm` `` but cargo prints `` `psm v0.1.32` ``. Nothing ever matched, so
+  `residual` was never empty and the stage could not reach `BLOCKED` at all. Always-red is safer
+  than always-green and just as useless.
+- The gate ran `cargo test --workspace`, which went red **twice in three runs** on a tree whose
+  per-crate tests were all green, via two timing races that only appear when every test binary runs
+  concurrently. Every agent in this repo is already instructed to test per crate for that exact
+  reason; the gate was the last place still doing otherwise. Now per-crate.
+
+Both controls now hold, verified against real logs: a clean tree classifies `BLOCKED` on both
+targets, reintroducing `gtk` as an unconditional dependency is caught as `FAILED` via seven
+unallowlisted GTK build-script failures, and the pre-seam log with real source errors is caught as
+`FAILED`. `Scripts/ci-linux.sh` reaches `CI OK`.
 
 ### What is not seamed at all — the real, open gap
 
