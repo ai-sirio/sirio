@@ -6,37 +6,54 @@
 //! control contract (bytes in, bounded bytes out, exit status) without
 //! reaching into the renderer or creating a dependency cycle.
 //!
-//! Unix-only, unseamed for Windows (unlike `server.rs`'s socket transport,
-//! which does have a `cfg(not(unix))` branch): this file hand-rolls a PTY
-//! with raw `openpty`/`fork`/`setsid`/`TIOCSCTTY`/`execvp`, the same pattern
-//! as `tiller_usage::claude::Pty` and `tiller_terminal`'s process-group
-//! teardown, but with ~20 `PaneRegistry` methods built directly on top of it
-//! (`create`, `split`, `write`, `read`, `wait`, `close`, `shutdown`, …), not
-//! just a handful of free functions. Giving every one of those methods a
-//! `cfg(not(unix))` twin — and deciding what each should *do* on Windows
-//! (refuse to create a pane? report every operation as `PaneError`? something
-//! in between?) is exactly the kind of design decision this wave was told
-//! not to make speculatively ("seam it, do not build it"). The honest
-//! Windows counterpart is not a handful of Win32 substitutions but a second
-//! backend built on ConPTY (`CreatePseudoConsole`) — `alacritty_terminal`'s
-//! already-vendored `tty/windows/` is the natural implementation to reuse
-//! rather than a hand-rolled `CreateNamedPipeW`/`ConnectNamedPipe` +
-//! `CreatePseudoConsole` client written from scratch here. Left undone and
-//! documented rather than partially/incorrectly seamed; see the wave report
-//! for the reasoning.
+//! The PTY backend (`spawn_process`/`child_exec`/`reap`/`terminate` and their
+//! helpers) is unix-only: it hand-rolls a PTY with raw
+//! `openpty`/`fork`/`setsid`/`TIOCSCTTY`/`execvp`, the same pattern as
+//! `tiller_usage::claude::Pty` and `tiller_terminal`'s process-group
+//! teardown. `PaneRegistry` itself — the ~20 public methods (`create`,
+//! `split`, `write`, `read`, `wait`, `close`, `shutdown`, …) — is seamed for
+//! non-unix targets: every method still exists with the identical signature
+//! Linux/macOS expose, but `create`/`split` (the only entry points that spawn
+//! a control-owned PTY) return `PaneError::Unsupported` there instead of
+//! silently no-opping. Because those two never succeed off unix, the
+//! `panes` map they populate stays empty, so `write`/`read`/`state`/`wait`/
+//! `close` naturally and honestly report `UnknownPane`/`ClosedPane` for any
+//! id a caller could have obtained — no separate stub logic needed for them.
+//! `set_external`/`set_external_state`/`list`/`list_for`/`read`/`state`
+//! (the renderer-owned-pane paths, which never touch a local PTY) work
+//! unchanged on every platform.
+//!
+//! Deciding what a *real* Windows PTY backend should do is exactly the kind
+//! of design decision this wave was told not to make speculatively ("seam
+//! it, do not build it"). The honest Windows counterpart is not a handful of
+//! Win32 substitutions but a second backend built on ConPTY
+//! (`CreatePseudoConsole`) — `alacritty_terminal`'s already-vendored
+//! `tty/windows/` is the natural implementation to reuse (it already owns a
+//! child's lifetime end-to-end) rather than a hand-rolled
+//! `CreateNamedPipeW`/`ConnectNamedPipe` + `CreatePseudoConsole` client
+//! written from scratch here. Left undone and documented rather than
+//! partially/incorrectly implemented; see the wave report for the reasoning.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::io::{self, Read};
+use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::time::Instant;
+use std::time::Duration;
 
+#[cfg(unix)]
 const SCROLLBACK_CAPACITY: usize = 256 * 1024;
+#[cfg(unix)]
 const TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +92,10 @@ pub enum PaneError {
     Spawn(String),
     Io(String),
     TimedOut(String),
+    /// This platform has no control-owned PTY backend implemented yet — see
+    /// the module doc comment for the counterpart (ConPTY via
+    /// `alacritty_terminal`'s `tty/windows/`).
+    Unsupported(String),
 }
 
 impl fmt::Display for PaneError {
@@ -92,6 +113,7 @@ impl fmt::Display for PaneError {
             Self::Spawn(detail) => write!(formatter, "cannot spawn pane: {detail}"),
             Self::Io(detail) => write!(formatter, "pane I/O failed: {detail}"),
             Self::TimedOut(id) => write!(formatter, "pane timed out: {id}"),
+            Self::Unsupported(detail) => write!(formatter, "unsupported: {detail}"),
         }
     }
 }
@@ -104,10 +126,12 @@ struct PaneState {
 }
 
 struct PaneProcess {
+    #[cfg(unix)]
     pid: libc::pid_t,
     /// The pane child becomes a session leader in `child_exec`, so its pid is
     /// also the process-group id for every descendant that stays in the pane
     /// session.
+    #[cfg(unix)]
     process_group: libc::pid_t,
     writer: Mutex<File>,
     state: Mutex<PaneState>,
@@ -626,6 +650,25 @@ fn checked_directory(path: &Path) -> Result<PathBuf, PaneError> {
     Ok(path)
 }
 
+/// No control-owned PTY backend exists on this platform yet (see the module
+/// doc comment). `create`/`split` are the only callers, so returning an
+/// error here — rather than fabricating a pane that can never produce
+/// output — is what keeps every downstream `PaneRegistry` method honest
+/// instead of silently degrading.
+#[cfg(not(unix))]
+fn spawn_process(
+    _pane_id: &str,
+    _working_directory: &Path,
+    _command: Option<&str>,
+) -> Result<Arc<PaneProcess>, PaneError> {
+    Err(PaneError::Unsupported(
+        "control-owned panes have no PTY backend on this platform yet \
+         (Windows counterpart: ConPTY via alacritty_terminal's tty/windows/)"
+            .to_string(),
+    ))
+}
+
+#[cfg(unix)]
 fn spawn_process(
     pane_id: &str,
     working_directory: &Path,
@@ -633,7 +676,11 @@ fn spawn_process(
 ) -> Result<Arc<PaneProcess>, PaneError> {
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
-    let window = libc::winsize {
+    // `termp`/`winp` are typed `*const` on Linux/glibc but `*mut` on
+    // macOS/BSD libc (same split already handled for `TIOCSCTTY` below).
+    // `null_mut()`/`&mut window` coerce to either mutability at the call
+    // site, so this one call compiles unchanged on both.
+    let mut window = libc::winsize {
         ws_row: 24,
         ws_col: 80,
         ws_xpixel: 0,
@@ -644,8 +691,8 @@ fn spawn_process(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &window,
+            std::ptr::null_mut(),
+            &mut window,
         )
     };
     if result != 0 {
@@ -693,6 +740,7 @@ fn spawn_process(
     Ok(process)
 }
 
+#[cfg(unix)]
 fn child_exec(
     master: RawFd,
     slave: RawFd,
@@ -766,6 +814,7 @@ fn child_exec(
     }
 }
 
+#[cfg(unix)]
 fn read_process_output(mut reader: File, process: Arc<PaneProcess>) {
     let mut buffer = [0u8; 8192];
     loop {
@@ -795,6 +844,7 @@ fn read_process_output(mut reader: File, process: Arc<PaneProcess>) {
     }
 }
 
+#[cfg(unix)]
 fn reap(pid: libc::pid_t) -> i32 {
     let mut status = 0;
     loop {
@@ -814,6 +864,7 @@ fn reap(pid: libc::pid_t) -> i32 {
     }
 }
 
+#[cfg(unix)]
 fn terminate(process: &PaneProcess) {
     // A pane gets one polite 500 ms window. A child that ignores SIGTERM (or
     // a shell that is waiting on one) then receives SIGKILL as a group, so
@@ -834,6 +885,15 @@ fn terminate(process: &PaneProcess) {
     let _ = process_done(process, TERMINATE_GRACE);
 }
 
+/// Unreachable in practice: `spawn_process` on this platform always returns
+/// `Err` before a `PaneEntry`/`PaneProcess` is ever constructed, so no live
+/// pane can reach this. Kept so `close`/`shutdown`/`shutdown_for` — portable,
+/// platform-generic `PaneRegistry` methods — don't need a `cfg` split of
+/// their own just to call it.
+#[cfg(not(unix))]
+fn terminate(_process: &PaneProcess) {}
+
+#[cfg(unix)]
 fn wait_for_process_group(process_group: libc::pid_t, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -848,6 +908,7 @@ fn wait_for_process_group(process_group: libc::pid_t, timeout: Duration) -> bool
     }
 }
 
+#[cfg(unix)]
 fn process_done(process: &PaneProcess, timeout: Duration) -> bool {
     let Ok(state) = process.state.lock() else {
         return true;
