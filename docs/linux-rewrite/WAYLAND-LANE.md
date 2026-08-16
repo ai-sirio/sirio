@@ -427,35 +427,26 @@ exits, so the hold must outlive the click), a 50 ms settle for the press to land
 `click`, then `wait` for the release. Guarded in **both** startup conditions since it needs the
 pointer device and the keyboard device pre-created.
 
-**Not independently proven end-to-end against a live app target** — flagged honestly rather than
-claimed. `chord` and `click`/`rightclick`/`drag`/`scroll` are each proven above; `modclick` is a
-straightforward composition of exactly those two already-proven mechanisms (modifier-hold via
-`wtype`, click via the same persistent pointer FIFO) and there is no reason specific to Wayland
-input delivery for it to behave differently. But every in-app target gated on
-`event.modifiers.platform` on a mouse event turned out unusable for a *live* proof in the time
-available:
+**Proven end-to-end against a live app target (P130, 2026-08-16)**, closing the gap this section
+used to flag. `file_view.rs`'s platform-click-opens-a-markdown-link path (`F-CORE-FILE-04`) is
+gated on `event.modifiers.platform` at both `MouseDown` and `MouseUp`, resolves to a real
+repo-relative file, and its "open a new tab" outcome needs no external process — the sharpest
+available positive control. Same coordinates, same pane, same running instance: a plain `click`
+left the tab strip unchanged (negative control); `modclick logo` opened the linked file as a new
+foreground tab (positive control) —
+`reference/linux-progress/p130-modclick/p130-negative-control-plain-click.png` and
+`p130-positive-control-modclick-logo.png`. `TILLER_WL_PROTOCOL_LOG=1` (new env var, wraps the app's
+own process in `WAYLAND_DEBUG=1`) independently confirms the wire order: `wl_keyboard.modifiers`
+carrying `Mod4` (Logo) lands 25 microseconds to 64 milliseconds before the `wl_pointer.button` press
+it is meant to gate, in both a terminal-link attempt and the markdown-link attempt above, and the
+hold outlives the whole press/release pair every time. Full evidence and wire-trace excerpts:
+`docs/linux-rewrite/tasks/P130-modclick.md`.
 
-- The terminal's platform-modifier-click-opens-a-link path (`F-TERM-UI-02`,
-  `tiller_terminal/src/lib.rs:1071`) computes the clicked grid row/column directly from
-  `event.position` without subtracting the terminal element's own `bounds.origin` — the paint path
-  a few lines away (`bounds.origin.y + LINE_HEIGHT * line`) does add it, so the two are asymmetric.
-  In the isolated `gpui::test` window (origin ≈ 0,0) this coincidentally hits the right cell; in
-  the real multi-pane app the terminal is never at the window origin, and an exhaustive coordinate
-  sweep (both axes, values spanning the entire plausible range) never triggered the link's
-  `xdg-open` spawn. This looks like a genuine, pre-existing app defect independent of our lane —
-  noted here for whoever next touches `F-TERM-UI-02`, not filed separately since it is outside this
-  task's three assigned rows.
-- `file_view.rs`'s own platform-click-opens-a-markdown-link path (`open_markdown_link`,
-  `F-CORE-FILE-04`) emits `FileViewEvent::OpenFile`, but `Workspace::add_file_tab`
-  (`tiller/src/main.rs:4499`) never subscribes to that event on the `FileView` it constructs — only
-  a test harness does. Dead code in production.
-- Chat transcript links only parse as clickable markdown from **assistant**-authored messages;
-  `surface.chat.compose`/`.send`-posted user text renders as literal, unlinked text
-  (`[Example](url)` shown verbatim), so this path needs a live agent turn to reach, which is out of
-  this task's control.
-
-If a future pass needs `modclick` proven against a live target, `F-TERM-UI-02`'s row/column bug
-above is worth fixing first — it is currently the only reachable modifier+click target in the app.
+That leaves `F-TERM-UI-02` (cmd/logo-click a terminal URL) still not opening a Browser tab live,
+but P130's evidence narrows why: it is not `modclick`, and not `F-CORE-FILE-04`'s old dead-code gap
+either (`Workspace::add_file_tab` now subscribes to `FileViewEvent::OpenFile`, fixed independently
+of this lane). The remaining candidates are app-side coordinate/hit-testing questions specific to
+the terminal's own multi-pane layout — see P130's write-up for what to check next.
 
 ## The Clone/Create project popover — a real layout defect, not a lane gap (P123, 2026-08-15)
 
