@@ -2656,7 +2656,8 @@ mod tests {
             "src/app inherits the marker from the file two levels below it"
         );
         assert!(
-            cx.debug_bounds("file-status-changed-src/app/deep").is_some(),
+            cx.debug_bounds("file-status-changed-src/app/deep")
+                .is_some(),
             "…and so does src/app/deep, the directory that actually holds it"
         );
 
@@ -2718,9 +2719,7 @@ mod tests {
             })
             .expect("right panel entity");
         let cx = VisualTestContext::from_window(window.into(), cx);
-        pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| panel.settled)
-        });
+        pump_until(&cx.cx, || panel.read_with(&cx.cx, |panel, _| panel.settled));
         cx.cx.run_until_parked();
         (cx, panel)
     }
