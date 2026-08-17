@@ -366,11 +366,25 @@ impl AgentActivityModel {
     /// [`Self::running_agent_ids`] still only ever name panes with a
     /// registered agent.
     ///
+    /// It *is* subject to pane ownership, which is not a formality: a
+    /// title-owned or process-owned pane is cleared only by its own layer
+    /// (the title ceasing to match, the process disappearing), and the PTY
+    /// child-exit path already refuses to rewrite those for exactly that
+    /// reason — see `apply_terminal_activity_event`'s `ChildExited` arm.
+    /// Letting a surface's exit code through here would have reintroduced
+    /// the bug that guard exists to prevent, and did: a claude pane
+    /// identified from its OSC title had its Running overwritten with Done
+    /// the moment the shell behind it exited. A chat pane is never
+    /// title- or process-owned, so its evidence is never affected.
+    ///
     /// `None` withdraws the claim; the pane falls back on layers A–D.
     ///
     /// Returns whether the stored evidence changed, so a caller that syncs
     /// on every redraw can skip the redraw it would otherwise cause.
     pub fn set_entity_status(&mut self, pane_id: &str, status: Option<AgentStatus>) -> bool {
+        if self.title_owned_panes.contains(pane_id) || self.process_owned_panes.contains(pane_id) {
+            return self.entity_status.remove(pane_id).is_some();
+        }
         match status {
             Some(status) => self.entity_status.insert(pane_id.to_string(), status) != Some(status),
             None => self.entity_status.remove(pane_id).is_some(),
@@ -385,11 +399,20 @@ impl AgentActivityModel {
     /// The pane's resolved status: Layer E when the surface is making a
     /// claim, the layered A–D status otherwise. Every "what is this pane
     /// doing" question in the app answers with this.
+    ///
+    /// Ownership is enforced here, at read time, and not only on the write:
+    /// the two are ordered by whichever event happened to arrive first, and
+    /// a surface that exits *before* the 500 ms Layer-D sweep identifies its
+    /// agent would otherwise have staked an error the sweep could no longer
+    /// displace. Owned panes are cleared by their own layer, full stop.
     fn resolved(&self, pane_id: &str) -> Option<AgentStatus> {
-        self.entity_status
-            .get(pane_id)
-            .or_else(|| self.agent_status.get(pane_id))
-            .copied()
+        if !self.title_owned_panes.contains(pane_id)
+            && !self.process_owned_panes.contains(pane_id)
+            && let Some(status) = self.entity_status.get(pane_id)
+        {
+            return Some(*status);
+        }
+        self.agent_status.get(pane_id).copied()
     }
 
     // ------------------------------------------------------------------
