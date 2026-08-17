@@ -37,6 +37,47 @@ pub mod icons;
 
 use self::icons::{Icon, IconElement};
 use crate::right_panel::ActivityStatus;
+use crate::settings::AgentAccentColor;
+
+/// What the leading status column of a worktree (or collapsed project) row
+/// draws — a port of `TillerCore/SidebarGlyph.swift`'s `SidebarGlyphKind`,
+/// with the extra `Idle` case the Rust `ActivityStatus` carries folded onto
+/// the same `None` the Swift `nil` status maps to.
+///
+/// The Swift table is the contract, and two of its rows had been inverted
+/// here: `Idle` drew the amber needs-input dot, so a worktree with nothing
+/// happening was pixel-identical to one waiting on an answer, and `Running`
+/// drew nothing at all, so a busy worktree looked empty. Both now follow
+/// `SidebarGlyphKind.forStatus`: nothing for no status, the loader for
+/// running, a lifecycle dot for the rest.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RowStatusGlyph {
+    /// No glyph. The column keeps its width so rows stay aligned.
+    None,
+    /// The running indicator, tinted with the agent's accent — Swift's
+    /// `RunningDots(color: AgentIcon.color(for: agentId))`.
+    Running(Rgba),
+    /// A static lifecycle dot: amber needs-input, green done, red error.
+    Dot(Rgba),
+}
+
+impl RowStatusGlyph {
+    fn for_status(
+        status: Option<ActivityStatus>,
+        accent: Option<AgentAccentColor>,
+        theme: Theme,
+    ) -> Self {
+        match status {
+            None | Some(ActivityStatus::Idle) => Self::None,
+            Some(ActivityStatus::Running) => {
+                Self::Running(accent.map_or(theme.tab_focus_accent, |accent| accent.resolve(theme)))
+            }
+            Some(ActivityStatus::NeedsInput) => Self::Dot(theme.tab_needs_input),
+            Some(ActivityStatus::Done) => Self::Dot(theme.tab_done),
+            Some(ActivityStatus::Error) => Self::Dot(theme.tab_error),
+        }
+    }
+}
 
 /// `SidebarRow::id` for a tab row built from real, host-owned tab data is
 /// this offset plus the tab's own id. Real tab ids and the fixture/catalog's
@@ -128,8 +169,17 @@ pub struct SidebarRow {
     /// The semantic kind for a real tab row. `None` for non-tab rows and
     /// legacy fixture rows that do not represent a host-owned tab.
     pub tab_kind: Option<TabKind>,
-    /// The running agent's brand mark for a real tab row, if any.
+    /// The running agent's brand mark for a real tab row, if any. This is
+    /// the **tab** row's mark, matching the Swift original, where the agent
+    /// brand belongs to the tab and the worktree row keeps its branch
+    /// glyph. A worktree row never sets it.
     pub agent_icon: Option<Icon>,
+    /// F-CORE-ACT-17: the accent the worktree's own agent is drawn in — the
+    /// tint of the running indicator, and nothing else. Mirrors
+    /// `WorktreeStatusGlyph(status:agentId:)`, whose `agentId` argument is
+    /// used for exactly one thing: `RunningDots(color:)`. Only meaningful
+    /// for `RowKind::Worktree`.
+    pub agent_accent: Option<AgentAccentColor>,
     /// F-SID-11: the worktree's durable comment annotation, carried through
     /// from `SidebarWorktree::comment`. Only meaningful for
     /// `RowKind::Worktree`.
@@ -403,6 +453,7 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
+                agent_accent: None,
                 comment: None,
                 running_agent_icons: Vec::new(),
             }
@@ -493,6 +544,7 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
+                agent_accent: None,
                 comment: None,
                 running_agent_icons: Vec::new(),
             });
@@ -514,6 +566,7 @@ impl Sidebar {
                     tab_id: None,
                     tab_kind: None,
                     agent_icon: None,
+                    agent_accent: None,
                     comment: worktree.comment,
                     running_agent_icons: Vec::new(),
                 });
@@ -533,6 +586,7 @@ impl Sidebar {
                     tab_id: None,
                     tab_kind: None,
                     agent_icon: None,
+                    agent_accent: None,
                     comment: None,
                     running_agent_icons: Vec::new(),
                 });
@@ -1328,13 +1382,25 @@ impl Sidebar {
         }
     }
 
-    /// Sets everything a worktree row draws about its live agents: the
-    /// status dot (`status`), the row's leading brand mark (`agent_icon`,
-    /// from `AgentActivityModel::agent_id_for_panes`), and the trailing
-    /// running-agents badge (`running_agent_icons`, from
-    /// `AgentActivityModel::running_agent_ids`).
+    /// Sets everything a worktree row draws about its live agents. The row
+    /// carries three facts and draws them as three distinct things, in the
+    /// Swift original's own division of labour:
     ///
-    /// All three are host-resolved. This crate deliberately does not depend
+    /// * **this is a worktree** — the branch glyph, always drawn beside the
+    ///   branch name (`App/SidebarView.swift:361`). Not settable here: it
+    ///   is a property of the row, not of the agents in it.
+    /// * **what it is doing, and whose** — one leading indicator carrying
+    ///   both: `status` picks the shape (a running indicator, a lifecycle
+    ///   dot, or nothing), `agent_accent` tints it. That is precisely what
+    ///   `WorktreeStatusGlyph(status:agentId:)` does; `agentId` reaches
+    ///   nothing but `RunningDots(color:)` there, and reaches nothing but
+    ///   the tint here.
+    /// * **which agents are running** — the trailing badge
+    ///   (`running_agent_icons`, from
+    ///   `AgentActivityModel::running_agent_ids`), the only place a brand
+    ///   mark appears on a worktree row.
+    ///
+    /// All of it is host-resolved. This crate deliberately does not depend
     /// on `tiller_activity`: status resolution, urgency ranking and catalog
     /// order live there and are applied by the host, so the sidebar can
     /// never grow a second, disagreeing copy of those rules.
@@ -1345,7 +1411,7 @@ impl Sidebar {
         &mut self,
         id: usize,
         status: Option<ActivityStatus>,
-        agent_icon: Option<Icon>,
+        agent_accent: Option<AgentAccentColor>,
         running_agent_icons: Vec<Icon>,
         cx: &mut Context<Self>,
     ) {
@@ -1355,13 +1421,13 @@ impl Sidebar {
             .find(|row| row.id == id && row.kind == RowKind::Worktree)
         {
             if row.agent_status == status
-                && row.agent_icon == agent_icon
+                && row.agent_accent == agent_accent
                 && row.running_agent_icons == running_agent_icons
             {
                 return;
             }
             row.agent_status = status;
-            row.agent_icon = agent_icon;
+            row.agent_accent = agent_accent;
             row.running_agent_icons = running_agent_icons;
             cx.notify();
         }
@@ -1511,6 +1577,7 @@ impl Sidebar {
             tab_id: Some(tab.id),
             tab_kind: Some(tab.kind),
             agent_icon: tab.agent_icon,
+            agent_accent: None,
             comment: None,
             running_agent_icons: Vec::new(),
         });
@@ -1713,6 +1780,7 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
+                agent_accent: None,
                 comment: None,
                 running_agent_icons: Vec::new(),
             },
@@ -1973,15 +2041,20 @@ impl Sidebar {
     /// F-SID-06: a collapsed project hides its worktree rows, so the status
     /// dot they'd otherwise show has nowhere to draw. This picks the single
     /// most urgent status among a project's worktree children so the
-    /// collapsed project row can badge it instead — the same "a dot only
+    /// collapsed project row can badge it instead — the same "a glyph only
     /// appears for a notable status" rule `render_row` already applies to
     /// an expanded worktree row, just aggregated up one level.
+    ///
+    /// Only statuses that would actually draw something are candidates:
+    /// `Idle` draws nothing (`RowStatusGlyph::for_status`), so aggregating it
+    /// would let an idle worktree hide a finished sibling behind a row with
+    /// no glyph on it at all.
     fn collapsed_project_status(children: &[SidebarRow]) -> Option<ActivityStatus> {
         fn urgency(status: ActivityStatus) -> u8 {
             match status {
-                ActivityStatus::Running => 0,
+                ActivityStatus::Idle => 0,
                 ActivityStatus::Done => 1,
-                ActivityStatus::Idle => 2,
+                ActivityStatus::Running => 2,
                 ActivityStatus::NeedsInput => 3,
                 ActivityStatus::Error => 4,
             }
@@ -2009,13 +2082,13 @@ impl Sidebar {
     fn row_icon(row: &SidebarRow) -> Icon {
         match row.kind {
             RowKind::Project => Icon::FolderFill,
-            // F-CORE-ACT-17: the worktree's own agent identity, resolved by
-            // `AgentActivityModel::agent_id_for_panes` across every pane in
-            // the worktree and pushed here by the host. Mirrors the Swift
-            // `WorktreeStatusGlyph(status:agentId:)`: the branch glyph is
-            // the fallback for a worktree with no agent, not the only mark
-            // a worktree row can have.
-            RowKind::Worktree => row.agent_icon.unwrap_or(Icon::GitBranch),
+            // A worktree row's mark says what the row *is*, not what is
+            // running in it: `App/SidebarView.swift:361` draws
+            // `arrow.triangle.branch` beside the branch name unconditionally
+            // and never puts an agent mark there. The agent reaches this row
+            // as the tint of the status indicator and as the trailing badge
+            // — see `set_worktree_activity`.
+            RowKind::Worktree => Icon::GitBranch,
             RowKind::Tab => row.agent_icon.unwrap_or(match row.tab_kind {
                 Some(TabKind::Terminal) => Icon::SquareTerminal,
                 Some(TabKind::Editor | TabKind::Diff) => Icon::File,
@@ -2535,21 +2608,16 @@ impl Sidebar {
             (RowKind::Project, false) => Some(Icon::ChevronRight),
             _ => None,
         };
-        // A dot only appears for a notable status — matching the reference.
-        // A collapsed project also gets one (F-SID-06): its worktree rows
-        // are hidden, so `row.agent_status` was pre-aggregated onto the
-        // project row itself in `visible_rows`.
-        let status_dot_color = (kind == RowKind::Worktree
-            || (kind == RowKind::Project && !row.expanded))
-            .then_some(row.agent_status)
-            .flatten()
-            .and_then(|status| match status {
-                ActivityStatus::Done => Some(theme.tab_done),
-                ActivityStatus::Error => Some(theme.tab_error),
-                ActivityStatus::Idle => Some(theme.tab_needs_input),
-                ActivityStatus::NeedsInput => Some(theme.tab_needs_input),
-                ActivityStatus::Running => None,
-            });
+        // A glyph only appears for a notable status — matching the
+        // reference. A collapsed project also gets one (F-SID-06): its
+        // worktree rows are hidden, so `row.agent_status` was pre-aggregated
+        // onto the project row itself in `visible_rows`.
+        let status_glyph =
+            if kind == RowKind::Worktree || (kind == RowKind::Project && !row.expanded) {
+                RowStatusGlyph::for_status(row.agent_status, row.agent_accent, theme)
+            } else {
+                RowStatusGlyph::None
+            };
         let glyph = project_icon
             .as_ref()
             .and_then(|icon| match &icon.value {
@@ -2702,14 +2770,33 @@ impl Sidebar {
                     .justify_center()
                     .text_size(px(11.0))
                     .text_color(theme.meta)
-                    .child(match status_dot_color {
-                        Some(color) => div()
+                    .child(match status_glyph {
+                        // Swift's `RunningDots`, tinted by the agent: a
+                        // different *shape* from a lifecycle dot, so a
+                        // running worktree can never be mistaken for a
+                        // finished one at a glance, and a different tint per
+                        // agent, so the one glyph carries both facts.
+                        RowStatusGlyph::Running(color) => {
+                            div()
+                                .id(("sidebar-status-running", row_id))
+                                .debug_selector(move || format!("sidebar-status-running-{row_id}"))
+                                .flex()
+                                .items_center()
+                                .gap(px(1.5))
+                                .children((0..3).map(|_| {
+                                    div().w(px(3.0)).h(px(3.0)).rounded(px(1.5)).bg(color)
+                                }))
+                                .into_any_element()
+                        }
+                        RowStatusGlyph::Dot(color) => div()
+                            .id(("sidebar-status-dot", row_id))
+                            .debug_selector(move || format!("sidebar-status-dot-{row_id}"))
                             .w(px(6.0))
                             .h(px(6.0))
                             .rounded(px(3.0))
                             .bg(color)
                             .into_any_element(),
-                        None => match disclosure {
+                        RowStatusGlyph::None => match disclosure {
                             Some(icon) => IconElement::new(icon, px(11.0))
                                 .text_color(theme.meta)
                                 .invisible()
@@ -3286,6 +3373,7 @@ mod tests {
             tab_id: Some(1),
             tab_kind: Some(TabKind::Terminal),
             agent_icon: None,
+            agent_accent: None,
             comment: None,
             running_agent_icons: Vec::new(),
         };
@@ -3309,6 +3397,7 @@ mod tests {
             tab_id: Some(2),
             tab_kind: Some(TabKind::Terminal),
             agent_icon: Some(Icon::ClaudeCode),
+            agent_accent: None,
             comment: None,
             running_agent_icons: Vec::new(),
         };
@@ -3986,14 +4075,22 @@ mod tests {
         assert_eq!(after.get(2).copied(), Some(0));
     }
 
-    /// F-CORE-ACT-17 + F-CORE-ACT-18, drawn: a worktree row with no agent
-    /// keeps the branch glyph and no trailing badge; once the host pushes
-    /// the identity `AgentActivityModel::agent_id_for_panes` resolved and
-    /// the set `running_agent_ids` returned, the row's leading mark becomes
-    /// that agent's brand and one badge mark is drawn per running agent, in
-    /// the order handed over (catalog order).
+    /// F-CORE-ACT-17 + F-CORE-ACT-18, drawn: the three facts a worktree row
+    /// has to carry read as three separate things, the way the Swift
+    /// original divides them.
+    ///
+    /// * The **branch glyph** stays put whatever the agents are doing —
+    ///   `App/SidebarView.swift:361` draws `arrow.triangle.branch` beside
+    ///   the branch name unconditionally. The port had been replacing it
+    ///   with the agent's brand mark, which erased the git-ness of the row
+    ///   and stated the agent twice.
+    /// * The **status indicator** is the only thing the agent identity
+    ///   touches, and only as a tint — `WorktreeStatusGlyph(status:agentId:)`
+    ///   passes `agentId` to nothing but `RunningDots(color:)`.
+    /// * The **trailing badge** is the one place a brand mark appears, one
+    ///   per running agent, in the order handed over (catalog order).
     #[gpui::test]
-    async fn drawn_worktree_row_marks_its_agent_and_badges_every_running_agent(
+    async fn drawn_worktree_row_keeps_its_branch_glyph_and_tints_one_status_indicator(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
@@ -4017,7 +4114,7 @@ mod tests {
             sidebar.set_worktree_activity(
                 1,
                 Some(ActivityStatus::Running),
-                Some(Icon::ClaudeCode),
+                Some(AgentAccentColor::Amber),
                 vec![Icon::ClaudeCode, Icon::Codex],
                 cx,
             );
@@ -4026,13 +4123,17 @@ mod tests {
 
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
-                .is_none(),
-            "the branch glyph gives way to the worktree's agent identity"
+                .is_some(),
+            "the branch glyph is a property of the row, not of the agents in it"
         );
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-claude-mark")
-                .is_some(),
-            "the worktree row draws the agent agent_id_for_panes resolved"
+                .is_none(),
+            "the agent's brand mark never takes the branch glyph's place"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-status-running-1").is_some(),
+            "a running worktree draws the running indicator, not nothing"
         );
         assert!(cx.debug_bounds("sidebar-running-agents-1").is_some());
         let claude = cx
@@ -4047,15 +4148,63 @@ mod tests {
         );
 
         // The badge is strictly the `.running` set: a worktree that goes
-        // quiet loses it, and the branch glyph comes back.
+        // quiet loses it, and the running indicator gives way to a dot.
         entity.update(&mut cx, |sidebar, cx| {
             sidebar.set_worktree_activity(1, Some(ActivityStatus::Done), None, Vec::new(), cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("sidebar-running-agents-1").is_none());
+        assert!(cx.debug_bounds("sidebar-status-running-1").is_none());
+        assert!(cx.debug_bounds("sidebar-status-dot-1").is_some());
         assert!(
             cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
                 .is_some()
+        );
+    }
+
+    /// The status table itself, against `SidebarGlyphKind.forStatus` in
+    /// `Packages/TillerCore/Sources/TillerCore/SidebarGlyph.swift`. Two rows
+    /// of it had been inverted: `Idle` drew the amber needs-input dot, so an
+    /// idle worktree was pixel-identical to one waiting on an answer, and
+    /// `Running` drew nothing, so a busy worktree looked empty.
+    #[test]
+    fn status_glyph_table_matches_the_swift_original() {
+        let theme = Theme::light();
+        assert_eq!(
+            RowStatusGlyph::for_status(None, None, theme),
+            RowStatusGlyph::None
+        );
+        assert_eq!(
+            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
+            RowStatusGlyph::None,
+            "nil status draws no glyph -- and Idle is the Rust name for it"
+        );
+        assert_eq!(
+            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
+            RowStatusGlyph::Dot(theme.tab_needs_input)
+        );
+        assert_eq!(
+            RowStatusGlyph::for_status(Some(ActivityStatus::Done), None, theme),
+            RowStatusGlyph::Dot(theme.tab_done)
+        );
+        assert_eq!(
+            RowStatusGlyph::for_status(Some(ActivityStatus::Error), None, theme),
+            RowStatusGlyph::Dot(theme.tab_error)
+        );
+        // Running is a different *shape*, and the agent id reaches the row
+        // only as its tint.
+        assert_eq!(
+            RowStatusGlyph::for_status(
+                Some(ActivityStatus::Running),
+                Some(AgentAccentColor::Blue),
+                theme
+            ),
+            RowStatusGlyph::Running(AgentAccentColor::Blue.resolve(theme))
+        );
+        assert_ne!(
+            RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
+            RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme),
+            "an idle worktree must not look like one that needs input"
         );
     }
 
@@ -4094,6 +4243,7 @@ mod tests {
                     selected: true,
                     kind: TabKind::Terminal,
                     agent_icon: Some(Icon::ClaudeCode),
+                    agent_accent: None,
                 }],
                 cx,
             );
@@ -4348,6 +4498,7 @@ mod tests {
                         selected: true,
                         kind: TabKind::Terminal,
                         agent_icon: None,
+                        agent_accent: None,
                     },
                     SidebarTab {
                         id: 43,
@@ -4355,6 +4506,7 @@ mod tests {
                         selected: false,
                         kind: TabKind::Terminal,
                         agent_icon: None,
+                        agent_accent: None,
                     },
                 ],
                 cx,
@@ -4442,6 +4594,7 @@ mod tests {
                     selected: true,
                     kind: TabKind::AgentChat,
                     agent_icon: None,
+                    agent_accent: None,
                 }],
                 cx,
             );
