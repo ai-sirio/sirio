@@ -309,6 +309,84 @@ fn directory_statuses_mark_every_ancestor_with_precedence_and_both_rename_sides(
     assert!(!map.contains_key(Path::new("")) && !map.contains_key(Path::new(".")));
 }
 
+/// The Files tree tints a *file* row from the same three-valued vocabulary
+/// its ancestors are tinted from, so `DirectoryGitStatus::for_entry` — the
+/// classification the aggregator itself applies — must agree with the
+/// aggregate every leaf produces. Proved over one real repo carrying a real
+/// merge conflict, an untracked file, a modification and a `git mv`.
+#[test]
+fn for_entry_classifies_leaves_exactly_as_it_marks_their_ancestors() {
+    let repo = make_repo();
+
+    write(repo.path(), "conflict/dir/file.txt", "base\n");
+    write(repo.path(), "mod/dir/file.txt", "base\n");
+    write(repo.path(), "move/from/orig.txt", "moving\n");
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-m", "base tree"]);
+
+    git(repo.path(), &["checkout", "-b", "left"]);
+    write(repo.path(), "conflict/dir/file.txt", "left\n");
+    git(repo.path(), &["commit", "-am", "left"]);
+    git(repo.path(), &["checkout", "main"]);
+    write(repo.path(), "conflict/dir/file.txt", "right\n");
+    git(repo.path(), &["commit", "-am", "right"]);
+    assert!(
+        !git_allowed_to_fail(repo.path(), &["merge", "left"]),
+        "the merge must stop on the conflict"
+    );
+
+    write(repo.path(), "mod/dir/file.txt", "edited\n");
+    write(repo.path(), "fresh/dir/new.txt", "untracked\n");
+    std::fs::create_dir_all(repo.path().join("moved_dest")).unwrap();
+    git(
+        repo.path(),
+        &["mv", "move/from/orig.txt", "moved_dest/renamed.txt"],
+    );
+
+    let snapshot = status(repo.path()).expect("status parses");
+    let by_path: HashMap<PathBuf, DirectoryGitStatus> = snapshot
+        .entries
+        .iter()
+        .map(|entry| (entry.path.clone(), DirectoryGitStatus::for_entry(entry)))
+        .collect();
+
+    assert_eq!(
+        by_path.get(Path::new("conflict/dir/file.txt")),
+        Some(&DirectoryGitStatus::Conflicted),
+        "an unmerged leaf is conflicted, not merely changed"
+    );
+    assert_eq!(
+        by_path.get(Path::new("mod/dir/file.txt")),
+        Some(&DirectoryGitStatus::Changed)
+    );
+    assert_eq!(
+        by_path.get(Path::new("fresh/dir/new.txt")),
+        Some(&DirectoryGitStatus::Untracked)
+    );
+    assert_eq!(
+        by_path.get(Path::new("moved_dest/renamed.txt")),
+        Some(&DirectoryGitStatus::Changed),
+        "a rename destination is a change, never an untracked file"
+    );
+
+    // Every leaf's own classification is exactly what its immediate parent
+    // inherits when that parent has no stronger sibling beneath it.
+    let directories = directory_statuses(&snapshot.entries);
+    for (path, leaf_status) in &by_path {
+        let parent = path.parent().expect("fixture leaves are all nested");
+        assert_eq!(
+            directories.get(parent),
+            Some(leaf_status),
+            "{} and its parent disagree",
+            path.display()
+        );
+    }
+
+    assert_eq!(DirectoryGitStatus::Conflicted.slug(), "conflicted");
+    assert_eq!(DirectoryGitStatus::Changed.slug(), "changed");
+    assert_eq!(DirectoryGitStatus::Untracked.slug(), "untracked");
+}
+
 // ---------------------------------------------------------------- DIFF-03
 
 #[test]

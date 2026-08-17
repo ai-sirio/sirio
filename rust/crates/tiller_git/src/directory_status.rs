@@ -21,6 +21,32 @@ impl DirectoryGitStatus {
             Self::Untracked => 0,
         }
     }
+
+    /// The status one changed path contributes, before any aggregation.
+    ///
+    /// This is the classification [`DirectoryStatusAggregator::directory_statuses`]
+    /// applies to every entry — exposed (rather than duplicated) so a *file*
+    /// row in the same tree can be tinted from the same three-valued
+    /// vocabulary its ancestors are, and so the two can never drift apart.
+    pub fn for_entry(entry: &StatusEntry) -> Self {
+        if entry.is_conflicted() {
+            Self::Conflicted
+        } else if entry.is_untracked() {
+            Self::Untracked
+        } else {
+            Self::Changed
+        }
+    }
+
+    /// The stable lower-case name of this status, for element ids and any
+    /// other machine-readable spelling. Not a user-facing label.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Conflicted => "conflicted",
+            Self::Changed => "changed",
+            Self::Untracked => "untracked",
+        }
+    }
 }
 
 /// Namespace for directory aggregation.
@@ -32,13 +58,7 @@ impl DirectoryStatusAggregator {
     pub fn directory_statuses(entries: &[StatusEntry]) -> HashMap<PathBuf, DirectoryGitStatus> {
         let mut result = HashMap::new();
         for entry in entries {
-            let status = if entry.is_conflicted() {
-                DirectoryGitStatus::Conflicted
-            } else if entry.is_untracked() {
-                DirectoryGitStatus::Untracked
-            } else {
-                DirectoryGitStatus::Changed
-            };
+            let status = DirectoryGitStatus::for_entry(entry);
             add_ancestors(&mut result, &entry.path, status);
             if let Some(original) = &entry.original_path {
                 add_ancestors(&mut result, original, status);
