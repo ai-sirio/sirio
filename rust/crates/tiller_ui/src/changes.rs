@@ -73,48 +73,34 @@ const BAND_ROW_HEIGHT: f32 = 24.0;
 /// A run of unchanged context lines this long collapses into one labelled
 /// band (orca's "18 hidden lines").
 const CONTEXT_BAND_MIN: usize = 4;
-/// Assumed advance width of one glyph of the 11.5px code family.
+/// The 1px rule between the two split columns.
 ///
-/// A *reservation*, deliberately not a measurement. GPUI can measure text,
-/// but only during layout, and this number is needed to build the layout:
-/// the two columns have to be told a width before either knows what it
-/// holds, because equal columns down the whole diff is the property that
-/// makes a split diff readable at all. A typical monospace advance at
-/// 11.5px is ≈6.9px, so this errs about 8% wide — which costs a little dead
-/// space to the right of the single widest line and never clips it. Erring
-/// the other way would put an ellipsis on the one line the reader most
-/// wanted to see.
-const SPLIT_CHAR_WIDTH: f32 = 7.5;
-/// The line-number gutter plus padding inside one split column: 28px of
-/// number, 6px of padding on each side, and 2px of slack.
-const SPLIT_GUTTER_WIDTH: f32 = 42.0;
-/// A split column is never narrower than this, so a diff of short lines
-/// still reads as two columns rather than two slivers.
-const SPLIT_COLUMN_MIN: f32 = 240.0;
-/// …and never wider than this — about 90 characters.
+/// It is the only geometry constant this rendering needs, and that is the
+/// point. An earlier version of this file sized the split columns to the
+/// *content* — reserving `chars * advance` for the widest expanded line and
+/// scrolling the list horizontally to reach it. The macOS original tried
+/// that too and abandoned it, and `SideBySideDiffLayout.columnWidth`
+/// (`DiffContentAdapter.swift:246`) records why in its own words: "Sizing to
+/// the content is what put the right-hand column past the right edge of the
+/// pane: one long line in the file was enough to leave a side-by-side view
+/// with only one visible side. Long lines are clipped instead."
 ///
-/// This cap is the whole reason the port can size to content at all, and
-/// the macOS original is why it exists. `SideBySideDiffLayout.columnWidth`
-/// halves the *viewport* and truncates long lines, and its comment records
-/// why: "Sizing to the content is what put the right-hand column past the
-/// right edge of the pane: one long line in the file was enough to leave a
-/// side-by-side view with only one visible side"
-/// (`DiffContentAdapter.swift:246`). Sizing to content is exactly what this
-/// port does, so it inherits that bug unless the reservation is bounded.
+/// Driven here, it was worse than that. On the 1715×972 lane, choosing Split
+/// and then Expand All over a file with a 276-character line widened the
+/// whole surface until the Files panel was off the right edge of the window
+/// *and took the Changes toolbar's own action cluster with it*, leaving no
+/// Unified segment on screen to escape with
+/// (`/tmp/n1-split/10-09-split-settled.png`). Adding `min_w(px(0.0))` to the
+/// scroll container — the CSS answer — got the rows laying out but did not
+/// stop the surface growing (`/tmp/n1-fix/07-06-split-settled.png`).
 ///
-/// 720 is bounded against the narrowest pane this surface is actually used
-/// at — ~980px, measured on the 1715×972 lane with the Files panel open.
-/// Two 720px columns put the divider at 721, so it stays on screen and
-/// roughly a quarter of the pane still shows the new file at rest; the rest
-/// of a long line is reached by scrolling *inside the diff*, which the
-/// macOS build could not do at all. Past the cap a line truncates in its
-/// cell, exactly as that build always did.
-///
-/// The principled version measures the pane instead of assuming it — see
-/// the report's follow-up note; it needs a `canvas` measuring pass and a
-/// width field on the tab, which is more machinery than this row is owed.
-const SPLIT_COLUMN_MAX: f32 = 720.0;
-/// The 1px rule between the two columns.
+/// So the columns are each exactly half the pane, `flex_1` against whatever
+/// width the surface was given, and a line longer than its column ends in an
+/// ellipsis — the same trade the macOS build settled on. Making a long line
+/// *reachable* rather than clipped needs a per-column horizontal scroll (what
+/// VS Code and GitHub do), which needs the two columns to be two stacks
+/// rather than two halves of each row; that is a different shape of code,
+/// not a constant.
 const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
 
 /// How an expanded file's diff is drawn.
@@ -1665,24 +1651,6 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
         )
 }
 
-/// The width one side-by-side column must be able to reach for this file,
-/// so its longest line is *scrollable to* rather than silently clipped.
-///
-/// Clamped at both ends: never so narrow that two columns become two
-/// slivers, never so wide that one minified line reserves a scroll extent
-/// nobody can use.
-fn split_column_width(diff: &FileDiff) -> f32 {
-    let widest = diff
-        .hunks
-        .iter()
-        .flat_map(|hunk| hunk.lines.iter())
-        .map(|line| line.content.chars().count())
-        .max()
-        .unwrap_or(0);
-    (SPLIT_GUTTER_WIDTH + widest as f32 * SPLIT_CHAR_WIDTH)
-        .clamp(SPLIT_COLUMN_MIN, SPLIT_COLUMN_MAX)
-}
-
 /// The collapsed-context runs of one diff, as `(key, count)` pairs — the
 /// same walk `expand_diff` performs when rendering, so Expand All and the
 /// render can never disagree about which bands exist. `key` is the run's
@@ -1762,33 +1730,22 @@ impl ChangesTab {
                 .into_any_element();
         }
         let row_entity = entity;
-        // Split mode reserves the horizontal room its widest expanded line
-        // needs, once, on the wrapper that holds every row — so the two
-        // columns stay exactly half of a width that is *wide enough*, and a
-        // long line is reached by scrolling **inside the diff**. In Unified
-        // mode the wrapper asks for nothing and the list behaves exactly as
-        // before.
-        //
-        // The `min_w(px(0.0))` on `changes-list` below is what keeps that
-        // reservation *inside* the diff, and it is not decoration. A flex
-        // item's automatic minimum size is its content's min-content width,
-        // so without it this wrapper's `min_w` propagated straight up
-        // through the scroll container and widened the workspace itself:
-        // driven on the 1715×972 lane, choosing Split and then Expand All
-        // over a file with a 276-character line pushed the entire Files
-        // panel off the right edge of the window and took the toolbar's own
-        // action cluster with it. An `overflow_x_scroll` that cannot shrink
-        // below its content never scrolls; it just makes its ancestors
-        // bigger.
-        let content_min = match mode {
-            DiffViewMode::Unified => 0.0,
-            DiffViewMode::Split => self.split_content_width(),
-        };
-        let content = div()
+        // Both modes render into exactly the width the surface was given —
+        // see `SPLIT_DIVIDER_WIDTH` for the two attempts at doing otherwise
+        // and what each one cost. `min_w(px(0.0))` stays because a scroll
+        // container that cannot shrink below its content is a container that
+        // grows its ancestors instead of scrolling, and this one holds
+        // arbitrarily long file paths in its section rows.
+        div()
+            .id("changes-list")
+            .debug_selector(|| "changes-list".into())
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .w_full()
             .flex()
             .flex_col()
-            .w_full()
-            .min_w(px(content_min))
+            .overflow_y_scroll()
             .children(sections.into_iter().flat_map(move |section| {
                 let mut elements: Vec<AnyElement> = vec![
                     Self::render_section_header(
@@ -1804,41 +1761,8 @@ impl ChangesTab {
                     elements.push(Self::render_change_row(row, row_entity.clone(), theme));
                 }
                 elements
-            }));
-        div()
-            .id("changes-list")
-            .debug_selector(|| "changes-list".into())
-            .flex_1()
-            .min_h(px(0.0))
-            // See the note above `content_min`: this is the line that keeps
-            // a wide diff scrolling inside the surface instead of widening
-            // the window and evicting the Files panel.
-            .min_w(px(0.0))
-            .w_full()
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .when(mode == DiffViewMode::Split, |this| this.overflow_x_scroll())
-            .child(content)
+            }))
             .into_any_element()
-    }
-
-    /// The width the split rendering needs for the widest line currently
-    /// expanded: two columns plus the rule between them. Only expanded files
-    /// count — a collapsed file draws no diff rows, so reserving room for
-    /// its longest line would make the surface scroll sideways for content
-    /// nobody can see.
-    fn split_content_width(&self) -> f32 {
-        let widest = self
-            .expanded_changes
-            .iter()
-            .filter_map(|(_, path)| self.diffs.get(path))
-            .map(split_column_width)
-            .fold(0.0_f32, f32::max);
-        if widest == 0.0 {
-            return 0.0;
-        }
-        widest * 2.0 + SPLIT_DIVIDER_WIDTH
     }
 
     /// The F-CHG-09 error state: git's own message (enough detail to act
@@ -3505,12 +3429,13 @@ mod tests {
     /// panel clean off the right edge of the window and took the Changes
     /// toolbar's own action cluster with it.
     ///
-    /// The cause was a missing `min_w(px(0.0))` on `changes-list`: a flex
-    /// item's automatic minimum size is its content's min-content width, so
-    /// the width the split rendering reserves propagated straight through
-    /// the scroll container into the workspace. An `overflow_x_scroll` that
-    /// cannot shrink below its content does not scroll — it grows its
-    /// ancestors.
+    /// The cause was that the split rendering reserved room for its widest
+    /// line on a wrapper inside the scroll container, and that reservation
+    /// propagated out of it into the workspace. `min_w(px(0.0))` on the
+    /// container — the CSS answer — got the rows laying out and did *not*
+    /// stop the surface growing (`/tmp/n1-fix/07-06-split-settled.png`), so
+    /// the reservation is gone entirely and each column is now exactly half
+    /// of whatever width the surface was given. See `SPLIT_DIVIDER_WIDTH`.
     #[gpui::test]
     async fn a_wide_line_scrolls_inside_the_diff_instead_of_widening_the_surface(
         cx: &mut TestAppContext,
