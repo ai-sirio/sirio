@@ -1765,11 +1765,21 @@ impl ChangesTab {
         // Split mode reserves the horizontal room its widest expanded line
         // needs, once, on the wrapper that holds every row — so the two
         // columns stay exactly half of a width that is *wide enough*, and a
-        // long line is reached by scrolling **inside the diff**. The scroll
-        // lives on `changes-list`, which is `flex_1` inside a `size_full`
-        // surface, so nothing it contains can ever make the window itself
-        // scroll. In Unified mode the wrapper asks for nothing and the list
-        // behaves exactly as before.
+        // long line is reached by scrolling **inside the diff**. In Unified
+        // mode the wrapper asks for nothing and the list behaves exactly as
+        // before.
+        //
+        // The `min_w(px(0.0))` on `changes-list` below is what keeps that
+        // reservation *inside* the diff, and it is not decoration. A flex
+        // item's automatic minimum size is its content's min-content width,
+        // so without it this wrapper's `min_w` propagated straight up
+        // through the scroll container and widened the workspace itself:
+        // driven on the 1715×972 lane, choosing Split and then Expand All
+        // over a file with a 276-character line pushed the entire Files
+        // panel off the right edge of the window and took the toolbar's own
+        // action cluster with it. An `overflow_x_scroll` that cannot shrink
+        // below its content never scrolls; it just makes its ancestors
+        // bigger.
         let content_min = match mode {
             DiffViewMode::Unified => 0.0,
             DiffViewMode::Split => self.split_content_width(),
@@ -1800,6 +1810,11 @@ impl ChangesTab {
             .debug_selector(|| "changes-list".into())
             .flex_1()
             .min_h(px(0.0))
+            // See the note above `content_min`: this is the line that keeps
+            // a wide diff scrolling inside the surface instead of widening
+            // the window and evicting the Files panel.
+            .min_w(px(0.0))
+            .w_full()
             .flex()
             .flex_col()
             .overflow_y_scroll()
@@ -1870,6 +1885,10 @@ impl Render for ChangesTab {
         let entity = cx.entity();
         let mode = DiffViewMode::get(cx);
         div()
+            // The surface's own extent, so a drawn test can assert that
+            // nothing inside it — notably Split mode's width reservation —
+            // makes it wider than the space it was given.
+            .debug_selector(|| "changes-surface".into())
             .size_full()
             .flex()
             .flex_col()
@@ -3460,6 +3479,91 @@ mod tests {
             "ctx-1\nctx-2\nctx-3\nctx-4\nctx-5\nctx-6\nctx-7\nctx-8\nctx-9\nnew-1\nnew-2\nnew-3\nadd-only-x\nctx-10\nctx-11\nctx-12\nctx-13\nctx-14\n",
         )
         .expect("edit side-by-side file");
+    }
+
+    /// A repo whose one changed file carries a line far wider than any pane
+    /// this surface is drawn in — the case that broke the layout.
+    fn wide_line_fixture(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Tiller tests"]);
+        let wide: String = (1..40).map(|i| format!("seg{i:03}-")).collect();
+        std::fs::write(dir.join("wide.txt"), format!("head\n{wide}OLD\ntail\n"))
+            .expect("seed wide file");
+        git(dir, &["add", "wide.txt"]);
+        git(
+            dir,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "base"],
+        );
+        std::fs::write(dir.join("wide.txt"), format!("head\n{wide}NEW\ntail\n"))
+            .expect("edit wide file");
+    }
+
+    /// "Long lines must scroll inside the diff, never scroll the window as a
+    /// whole." Driven on the 1715×972 lane, Split mode did the opposite:
+    /// choosing Split over a file with a 276-character line pushed the Files
+    /// panel clean off the right edge of the window and took the Changes
+    /// toolbar's own action cluster with it.
+    ///
+    /// The cause was a missing `min_w(px(0.0))` on `changes-list`: a flex
+    /// item's automatic minimum size is its content's min-content width, so
+    /// the width the split rendering reserves propagated straight through
+    /// the scroll container into the workspace. An `overflow_x_scroll` that
+    /// cannot shrink below its content does not scroll — it grows its
+    /// ancestors.
+    #[gpui::test]
+    async fn a_wide_line_scrolls_inside_the_diff_instead_of_widening_the_surface(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        wide_line_fixture(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        let surface = cx
+            .debug_bounds("changes-surface")
+            .expect("the Changes surface is drawn");
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let split = cx
+            .debug_bounds("changes-view-mode-1")
+            .expect("the view-mode control draws a Split segment");
+        cx.simulate_click(split.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("changes-split-pair-replacement").is_some(),
+            "the wide line really is being drawn side by side"
+        );
+        let list = cx
+            .debug_bounds("changes-list")
+            .expect("the scrolling list is drawn");
+        let after = cx
+            .debug_bounds("changes-surface")
+            .expect("the surface is still drawn");
+        assert!(
+            f32::from(list.size.width) <= f32::from(surface.size.width) + 1.0,
+            "the diff list ({}) grew past the surface it lives in ({}) — the \
+             reservation escaped the scroll container",
+            f32::from(list.size.width),
+            f32::from(surface.size.width)
+        );
+        assert!(
+            (f32::from(after.size.width) - f32::from(surface.size.width)).abs() < 1.0,
+            "choosing Split changed the surface's own width ({} -> {}), which is \
+             how the Files panel got pushed off the window",
+            f32::from(surface.size.width),
+            f32::from(after.size.width)
+        );
+        // …and the toolbar it shares the surface with is still reachable.
+        assert!(
+            cx.debug_bounds("changes-view-mode-0").is_some(),
+            "the Unified segment is still on screen to switch back with"
+        );
     }
 
     /// F-GIT-DIFF-03. The whole clause, in one drawn frame reached by real
