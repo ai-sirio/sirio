@@ -1590,16 +1590,32 @@ fn split_row_shape(row: &DiffSideBySideRow) -> &'static str {
 /// what makes a paired context row show *both* numbers across the row while
 /// a zipped deletion/addition pair shows one on each side.
 fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui::Div {
+    // `relative` + `overflow_hidden` with an absolutely positioned interior is
+    // the whole trick, and it is load-bearing rather than stylistic.
+    //
+    // A flex item's intrinsic width contribution is derived from its content,
+    // and a diff line is one unbreakable token as far as layout is concerned.
+    // With the line as an ordinary child, a 276-character line made this cell
+    // ask for ~1900px, the row asked for two of those, and the row won: driven
+    // on the 1715×972 lane the left column measured 975px inside a 980px pane
+    // and the right column started at 1307 — straight over the top of the
+    // Files panel, which vanished, taking the Changes toolbar's own action
+    // cluster with it and leaving no Unified segment on screen to escape by
+    // (/tmp/n1-fix/07-06-split-settled.png, sampled: the deletion wash runs
+    // unbroken from x=330 to x=1305). Neither `min_w(px(0.0))` nor deleting
+    // the width reservation altogether changed that, because both address the
+    // *minimum* size and this is the *maximum* one.
+    //
+    // An absolutely positioned child contributes nothing to its parent's
+    // intrinsic size at all. So the cell is sized purely by the flex share it
+    // is given — exactly half the row, every row, down the whole diff — and
+    // the line is painted inside it and clipped at its edge.
     let cell = div()
         .flex_1()
-        // 0 basis with an equal grow on both halves: the two columns are
-        // exactly half of whatever width the row was given, so they line up
-        // down the whole diff.
         .min_w(px(0.0))
         .h_full()
-        .flex()
-        .items_center()
-        .px(px(6.0));
+        .relative()
+        .overflow_hidden();
     let Some(line) = line else {
         // No content on this side of the zip: the deletion run and the
         // addition run it was paired against had different lengths, and this
@@ -1624,31 +1640,38 @@ fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui
     } else {
         line.new_line_number
     };
-    cell.bg(background)
-        .child(
-            div()
-                .w(px(28.0))
-                .flex_none()
-                .flex()
-                // Right-aligned, like every diff gutter and like the macOS
-                // original's own `.frame(width: 40, alignment: .trailing)`.
-                // Left-aligned numbers make the ones and the hundreds start
-                // in different places, and the eye then reads the gutter as
-                // ragged text rather than as a column.
-                .justify_end()
-                .pr(px(4.0))
-                .text_color(theme.meta)
-                .child(number.map_or(String::new(), |number| number.to_string())),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_color(theme.title)
-                .child(line.content),
-        )
+    cell.bg(background).child(
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .px(px(6.0))
+            .child(
+                div()
+                    .w(px(28.0))
+                    .flex_none()
+                    .flex()
+                    // Right-aligned, like every diff gutter and like the macOS
+                    // original's own `.frame(width: 40, alignment: .trailing)`.
+                    // Left-aligned numbers make the ones and the hundreds start
+                    // in different places, and the eye then reads the gutter as
+                    // ragged text rather than as a column.
+                    .justify_end()
+                    .pr(px(4.0))
+                    .text_color(theme.meta)
+                    .child(number.map_or(String::new(), |number| number.to_string())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(theme.title)
+                    .child(line.content),
+            ),
+    )
 }
 
 /// The collapsed-context runs of one diff, as `(key, count)` pairs — the
