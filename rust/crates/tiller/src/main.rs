@@ -2680,15 +2680,46 @@ fn activity_status_for_agent(status: AgentStatus) -> ActivityStatus {
     }
 }
 
-/// Mirrors `tiller_activity::ActivityStatus::requires_close_confirmation`
-/// (F-TERM-08): `main.rs` renders activity through `tiller_ui`'s own
-/// `ActivityStatus` enum (identical shape, separate type), so the rule is
-/// duplicated here rather than pulled across that boundary.
+/// The inverse of [`activity_status_for_agent`]: `tiller_ui`'s render-facing
+/// `ActivityStatus` back to the domain lifecycle status the activity crate's
+/// rules are written against. `Idle` is not an agent state, so it maps to
+/// `None` — the same "no agent status" `AgentActivityModel` returns for an
+/// untracked pane, which is what makes it safe to feed straight into
+/// `AttentionSort`.
+fn agent_status_for_activity(status: ActivityStatus) -> Option<AgentStatus> {
+    match status {
+        ActivityStatus::Running => Some(AgentStatus::Running),
+        ActivityStatus::NeedsInput => Some(AgentStatus::NeedsInput),
+        ActivityStatus::Done => Some(AgentStatus::Done),
+        ActivityStatus::Error => Some(AgentStatus::Error),
+        ActivityStatus::Idle => None,
+    }
+}
+
+/// F-CORE-ACT-23: whether closing this activity would kill live work and
+/// therefore has to be confirmed first. The rule itself is
+/// `tiller_activity::ActivityStatus::requires_close_confirmation` — this
+/// only crosses the two identically-shaped `ActivityStatus` enums (the
+/// render-facing one in `tiller_ui`, the domain one in `tiller_activity`)
+/// so both the pane-close banner and the Activity panel's close button ask
+/// the same function rather than each carrying its own copy of the list.
 fn pane_close_needs_confirmation(status: ActivityStatus) -> bool {
-    matches!(
-        status,
-        ActivityStatus::Running | ActivityStatus::NeedsInput | ActivityStatus::Error
-    )
+    let domain =
+        tiller_activity::ActivityStatus::from_agent_status(agent_status_for_activity(status));
+    domain.requires_close_confirmation()
+}
+
+/// One worktree row's live agent facts, as resolved by
+/// [`TillerWorkspace::sync_worktree_activity`].
+#[derive(Clone)]
+struct WorktreeActivity {
+    /// The sidebar row this belongs to (`sidebar_worktree_id`'s numbering).
+    row_id: usize,
+    status: Option<ActivityStatus>,
+    /// F-CORE-ACT-17: `agent_id_for_panes`, as a brand mark.
+    agent_icon: Option<Icon>,
+    /// F-CORE-ACT-18: `running_agent_ids`, as brand marks in catalog order.
+    running: Vec<Icon>,
 }
 
 fn tab_status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
@@ -3005,6 +3036,11 @@ struct Toast {
 struct PendingPaneClose {
     tab_id: usize,
     pane_id: usize,
+    /// F-CORE-ACT-23: an Activity-row close targets the whole tab, not the
+    /// one pane the banner happens to be drawn over. Same held-close, same
+    /// banner, same `requires_close_confirmation` gate — only what
+    /// "Close Anyway" then closes differs.
+    whole_tab: bool,
 }
 
 impl TillerWorkspace {
@@ -3559,6 +3595,11 @@ impl TillerWorkspace {
                 sidebar.set_project_identity(&id, display_name, icon, cx);
             }
         });
+        // `set_projects` rebuilds every row from the catalog, which drops the
+        // per-row agent facts and the urgency order with them. Re-apply both
+        // here so a refresh (a project added, a worktree created) never
+        // silently reverts a needs-input worktree back down the list.
+        self.sync_worktree_activity(cx);
     }
 
     fn sync_control_state(&self) {
@@ -3591,7 +3632,9 @@ impl TillerWorkspace {
             right_panel,
             |workspace, _, event: &RightPanelEvent, cx| match event {
                 RightPanelEvent::SelectActivity(index) => workspace.select_activity(*index, cx),
-                RightPanelEvent::CloseActivity(index) => workspace.close_tab(*index, cx),
+                RightPanelEvent::CloseActivity(index) => {
+                    workspace.request_close_activity(*index, cx)
+                }
                 RightPanelEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
             },
         )
@@ -4276,16 +4319,51 @@ impl TillerWorkspace {
             return;
         };
         if pane_close_needs_confirmation(self.pane_activity_status(tab, pane_id, cx)) {
-            self.pending_pane_close = Some(PendingPaneClose { tab_id, pane_id });
+            self.pending_pane_close = Some(PendingPaneClose {
+                tab_id,
+                pane_id,
+                whole_tab: false,
+            });
             cx.notify();
             return;
         }
         self.close_terminal_at(tab_id, pane_id, None, cx);
     }
 
+    /// F-CORE-ACT-23: the Activity panel's own close button. It used to call
+    /// `close_tab` straight through, so the one list that exists to show a
+    /// running agent was also the one place that could kill it without
+    /// asking. Now it consults the same
+    /// `tiller_activity::ActivityStatus::requires_close_confirmation` the
+    /// pane close does — running, needs-input and error are held for
+    /// confirmation, done and idle close immediately — and reuses the
+    /// existing hold-and-banner rather than raising a second prompt.
+    fn request_close_activity(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let tab_id = tab.id;
+        let pane_id = tab.focused_pane;
+        let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
+        if pane_close_needs_confirmation(status) {
+            self.pending_pane_close = Some(PendingPaneClose {
+                tab_id,
+                pane_id,
+                whole_tab: true,
+            });
+            cx.notify();
+            return;
+        }
+        self.close_tab(index, cx);
+    }
+
     fn confirm_pending_pane_close(&mut self, cx: &mut Context<Self>) {
         if let Some(pending) = self.pending_pane_close.take() {
-            self.close_terminal_at(pending.tab_id, pending.pane_id, None, cx);
+            if pending.whole_tab {
+                self.close_tab_by_id(pending.tab_id, cx);
+            } else {
+                self.close_terminal_at(pending.tab_id, pending.pane_id, None, cx);
+            }
         }
     }
 
@@ -4610,7 +4688,7 @@ impl TillerWorkspace {
             && let Some(old_sidebar_id) = old_sidebar_id
         {
             self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_worktree_status(old_sidebar_id, None, cx);
+                sidebar.set_worktree_activity(old_sidebar_id, None, None, Vec::new(), cx);
                 sidebar.set_worktree_tabs(old_sidebar_id, Vec::new(), cx);
             });
         }
@@ -4943,7 +5021,6 @@ impl TillerWorkspace {
         self.right_panel
             .update(cx, |panel, cx| panel.set_activity(activity, cx));
 
-        let worktree_status = self.worktree_status(cx);
         // The sidebar's tab rows under this worktree are the same `tabs`
         // the tab bar and the Activity panel just rendered from above —
         // one collection, three views, so they cannot disagree the way the
@@ -4962,10 +5039,100 @@ impl TillerWorkspace {
             .collect();
         if let Some(worktree_id) = self.sidebar_worktree_id(&self.working_directory) {
             self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_worktree_status(worktree_id, worktree_status, cx);
                 sidebar.set_worktree_tabs(worktree_id, sidebar_tabs, cx);
             });
         }
+        self.sync_worktree_activity(cx);
+    }
+
+    /// F-CORE-ACT-17/18/22: everything a worktree row draws about its live
+    /// agents, plus the order the rows themselves appear in.
+    ///
+    /// Three `AgentActivityModel` queries, one per fact, all keyed by the
+    /// same pane-id set so they cannot disagree with each other or with the
+    /// dot:
+    ///
+    /// * `status_for_panes`   → the status dot for a worktree that is not
+    ///   the one on screen. The *selected* worktree keeps `worktree_status`,
+    ///   which folds in the facts only the live entities know (a terminal's
+    ///   exit code, a chat's streaming state) on top of the same model.
+    /// * `agent_id_for_panes` → the row's leading brand mark, replacing the
+    ///   generic branch glyph, exactly as `WorktreeStatusGlyph(status:agentId:)`
+    ///   does in the Swift original.
+    /// * `running_agent_ids`  → the row's trailing running-agents badge,
+    ///   already de-duplicated and in `AgentCatalog` order.
+    ///
+    /// The row order is `AttentionSort::urgent_first` over the project's
+    /// worktrees **in catalog order**, and catalog order *is* the user's
+    /// manual order: a worktree drag is persisted by `reorder_sidebar`
+    /// through `ProjectCatalog::reorder_worktrees` before the rows are
+    /// rebuilt. That is precisely the list `urgent_first` exists for — only
+    /// `error`/`needs-input` jump the queue, everything else stays where it
+    /// was dragged. The other mode, `sorted` (the full
+    /// error→needs-input→running→done order), belongs to the tray roster
+    /// (`tray_roster_snapshot`), a list with no manual order to respect.
+    fn sync_worktree_activity(&self, cx: &mut Context<Self>) {
+        let selected_row_id = self.sidebar_worktree_id(&self.working_directory);
+        let selected_status = self.worktree_status(cx);
+        let mut projects: Vec<(usize, Vec<WorktreeActivity>)> = Vec::new();
+        for (project_index, project) in self.project_catalog.projects().iter().enumerate() {
+            let mut worktrees = Vec::new();
+            for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
+                let row_id = project_index * 1000 + worktree_index + 1;
+                let pane_ids: Vec<String> = self
+                    .panes
+                    .list_for(&worktree.path)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|pane| pane.id)
+                    .collect();
+                let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
+                let status = if selected_row_id == Some(row_id) {
+                    selected_status
+                } else {
+                    self.activity
+                        .status_for_panes(&refs)
+                        .map(activity_status_for_agent)
+                };
+                worktrees.push(WorktreeActivity {
+                    row_id,
+                    status,
+                    agent_icon: self
+                        .activity
+                        .agent_id_for_panes(&refs)
+                        .and_then(Icon::for_agent_id),
+                    running: self
+                        .activity
+                        .running_agent_ids(&refs, &tiller_activity::CATALOG_IDS)
+                        .into_iter()
+                        .filter_map(Icon::for_agent_id)
+                        .collect(),
+                });
+            }
+            projects.push((project_index * 1000, worktrees));
+        }
+
+        self.sidebar.update(cx, |sidebar, cx| {
+            for (project_row_id, worktrees) in &projects {
+                for worktree in worktrees {
+                    sidebar.set_worktree_activity(
+                        worktree.row_id,
+                        worktree.status,
+                        worktree.agent_icon,
+                        worktree.running.clone(),
+                        cx,
+                    );
+                }
+                let order: Vec<usize> =
+                    tiller_activity::AttentionSort::urgent_first(worktrees, |worktree| {
+                        worktree.status.and_then(agent_status_for_activity)
+                    })
+                    .into_iter()
+                    .map(|worktree| worktree.row_id)
+                    .collect();
+                sidebar.set_worktree_order(*project_row_id, &order, cx);
+            }
+        });
     }
 
     fn post_activity_notification(&self, transition: &Transition) {
@@ -6889,11 +7056,17 @@ impl TillerWorkspace {
                 let tab_id = self.tabs[tab_index].id;
                 let entity_for_click = entity.clone();
                 let entity_for_close = entity.clone();
-                let close_confirm_target = PendingPaneClose { tab_id, pane_id };
-                let confirm_banner =
-                    (self.pending_pane_close == Some(close_confirm_target)).then(|| {
+                let confirm_banner = self
+                    .pending_pane_close
+                    .filter(|pending| pending.tab_id == tab_id && pending.pane_id == pane_id)
+                    .map(|pending| {
                         let confirm_entity = entity.clone();
                         let cancel_entity = entity.clone();
+                        let message = if pending.whole_tab {
+                            "This tab has running work. Close anyway?"
+                        } else {
+                            "This pane has running work. Close anyway?"
+                        };
                         div()
                             .id(format!("pane-close-confirm-{pane_id}"))
                             .debug_selector(|| "pane-close-confirm".into())
@@ -6905,11 +7078,7 @@ impl TillerWorkspace {
                             .justify_center()
                             .gap(px(10.0))
                             .bg(gpui::black().opacity(0.82))
-                            .child(
-                                div()
-                                    .text_color(gpui::white())
-                                    .child("This pane has running work. Close anyway?"),
-                            )
+                            .child(div().text_color(gpui::white()).child(message))
                             .child(
                                 div()
                                     .flex()
@@ -11151,6 +11320,523 @@ mod tests {
             None,
             cx,
         )
+    }
+
+    /// A workspace whose one project has three worktrees, so the sidebar
+    /// carries a real manual order for F-CORE-ACT-22's `urgent_first` to
+    /// move rows inside. The selected worktree (index 0) holds a *live*
+    /// terminal rather than a failed one: a failed pane reports `Error`,
+    /// which would outrank everything the test is trying to float.
+    fn worktree_urgency_test_workspace(
+        cx: &mut Context<TillerWorkspace>,
+        root: &Path,
+    ) -> TillerWorkspace {
+        let worktrees: Vec<PathBuf> = (0..3)
+            .map(|index| root.join(format!("wt-{index}")))
+            .collect();
+        // A live shell, not `TerminalView::failed`: a failed pane reports
+        // `Error`, which outranks every status these tests try to float.
+        let terminal = cx.new(|cx| {
+            TerminalView::with_shell(
+                &worktrees[0],
+                TerminalShell::WithArguments {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), "sleep 60".into()],
+                },
+                cx,
+            )
+            .expect("spawn urgency test terminal")
+        });
+        let project_catalog = ProjectCatalog::from_projects(vec![session::CatalogProject {
+            id: "urgency-project".into(),
+            name: "Urgency Project".into(),
+            root_path: worktrees[0].clone(),
+            is_git: true,
+            worktrees: worktrees
+                .iter()
+                .enumerate()
+                .map(|(index, path)| session::CatalogWorktree {
+                    branch: format!("branch-{index}"),
+                    path: path.clone(),
+                    is_primary: index == 0,
+                })
+                .collect(),
+        }]);
+        let working_directory = worktrees[0].clone();
+        let tabs = vec![OpenTab {
+            id: 0,
+            persistence_id: "urgency-terminal".into(),
+            group_id: 0,
+            title: "Terminal".into(),
+            kind: TabKind::Terminal,
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(0),
+            panes: PaneNode::leaf(0, TabContent::Terminal { view: terminal }),
+            focused_pane: 0,
+            title_is_auto_named: true,
+        }];
+        let pending_actions = Arc::new(Mutex::new(Vec::new()));
+        let control_actions = Arc::new(Mutex::new(Vec::new()));
+        let panes = Arc::new(PaneRegistry::new());
+        let state = Arc::new(Mutex::new(ControlState::from_catalog(
+            &project_catalog,
+            &working_directory,
+        )));
+        let session = SessionStore::open(&root.join("tiller.sqlite"));
+        TillerWorkspace::new(
+            cx.new(Titlebar::new),
+            cx.new(|cx| Sidebar::from_projects(sidebar_projects(&project_catalog), cx)),
+            cx.new(TabBar::new),
+            cx.new(|_| {
+                StatusBar::new(UsageBarData {
+                    branch: "branch-0".into(),
+                    path: working_directory.to_string_lossy().into_owned(),
+                })
+            }),
+            cx.new(Settings::new),
+            cx.new(|_| RightPanel::new(working_directory.clone())),
+            panes,
+            state,
+            tabs,
+            0,
+            working_directory.clone(),
+            pending_actions.clone(),
+            pending_actions,
+            control_actions,
+            session,
+            project_catalog,
+            "Urgency Project/branch-0".into(),
+            "in test shell".into(),
+            RestoredSession {
+                working_directory,
+                tabs: Vec::new(),
+                tab_states: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            AgentActivityModel::new(),
+            None,
+            None,
+            None,
+            cx,
+        )
+    }
+
+    /// Kills every PTY a drawn workspace test spawned, so the test process
+    /// does not leave `sleep` children behind.
+    fn shutdown_workspace_terminals(
+        workspace: &Entity<TillerWorkspace>,
+        cx: &mut VisualTestContext,
+    ) {
+        let views = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut views = Vec::new();
+            for tab in &workspace.tabs {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Terminal { view } = content {
+                        views.push(view.clone());
+                    }
+                });
+            }
+            views
+        });
+        for view in views {
+            view.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        }
+        cx.run_until_parked();
+    }
+
+    fn urgency_test_root(tag: &str) -> (PathBuf, Vec<PathBuf>) {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-worktree-urgency-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let worktrees: Vec<PathBuf> = (0..3)
+            .map(|index| root.join(format!("wt-{index}")))
+            .collect();
+        for path in &worktrees {
+            std::fs::create_dir_all(path).expect("create urgency worktree fixture");
+        }
+        (root, worktrees)
+    }
+
+    /// F-CORE-ACT-17 + F-CORE-ACT-18, drawn end to end through the app:
+    /// `AgentActivityModel::agent_id_for_panes` decides which brand mark a
+    /// worktree row draws, and `running_agent_ids` decides its trailing
+    /// badge. Nothing here re-derives either from the pane list — the model
+    /// is asked, and the answer is what appears on screen.
+    #[gpui::test]
+    async fn drawn_worktree_row_shows_the_identity_and_running_set_the_model_resolved(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("identity");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Row 3 is the third worktree. Give it two live agent panes: one
+        // running Claude, one running Codex, plus a *done* OpenCode pane
+        // that must not reach the running badge.
+        let third = worktrees[2].clone();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .panes
+                .set_external(
+                    &third,
+                    vec![
+                        PaneInfo {
+                            id: "pane-90".into(),
+                            tab: "Claude Code".into(),
+                            title: "Claude Code".into(),
+                            agent: "claude".into(),
+                            active: false,
+                        },
+                        PaneInfo {
+                            id: "pane-91".into(),
+                            tab: "Codex".into(),
+                            title: "Codex".into(),
+                            agent: "codex".into(),
+                            active: false,
+                        },
+                        PaneInfo {
+                            id: "pane-92".into(),
+                            tab: "opencode".into(),
+                            title: "opencode".into(),
+                            agent: "opencode".into(),
+                            active: false,
+                        },
+                    ],
+                )
+                .expect("register external panes for the third worktree");
+            let now = Instant::now();
+            workspace.activity.agent_spawned("pane-90", "claude", now);
+            workspace.activity.agent_spawned("pane-91", "codex", now);
+            workspace.activity.agent_spawned("pane-92", "opencode", now);
+            workspace.activity.notify("pane-92", AgentStatus::Done, now);
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("sidebar-worktree-mark-3-claude-mark")
+                .is_some(),
+            "agent_id_for_panes picks the first running pane's agent for the worktree mark"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-running-agent-3-claude-mark")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("sidebar-running-agent-3-openai-mark")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("sidebar-running-agent-3-agent-opencode")
+                .is_none(),
+            "a done agent is not in the running set"
+        );
+        let claude = cx
+            .debug_bounds("sidebar-running-agent-3-claude-mark")
+            .expect("claude badge");
+        let codex = cx
+            .debug_bounds("sidebar-running-agent-3-openai-mark")
+            .expect("codex badge");
+        assert!(
+            claude.origin.x < codex.origin.x,
+            "running_agent_ids emits catalog order (claude before codex), not discovery order"
+        );
+        // A worktree with no agent at all keeps the branch glyph.
+        assert!(
+            cx.debug_bounds("sidebar-worktree-mark-2-git-branch")
+                .is_some()
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-CORE-ACT-22, drawn end to end: a needs-input worktree is lifted
+    /// above the siblings the user's manual (catalog) order put it under,
+    /// while those siblings keep their order relative to each other — the
+    /// `urgent_first` contract, not the full `sorted` one. Clearing the
+    /// urgency puts the row back where the manual order had it.
+    #[gpui::test]
+    async fn drawn_needs_input_worktree_floats_above_its_manual_order_siblings(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("order");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let row_top = |cx: &mut VisualTestContext, id: usize| -> gpui::Pixels {
+            let selector: &'static str = Box::leak(format!("sidebar-row-{id}").into_boxed_str());
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("worktree row {id} is drawn"))
+                .origin
+                .y
+        };
+        assert!(row_top(&mut cx, 1) < row_top(&mut cx, 2));
+        assert!(row_top(&mut cx, 2) < row_top(&mut cx, 3));
+
+        let third = worktrees[2].clone();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .panes
+                .set_external(
+                    &third,
+                    vec![PaneInfo {
+                        id: "pane-90".into(),
+                        tab: "Claude Code".into(),
+                        title: "Claude Code".into(),
+                        agent: "claude".into(),
+                        active: false,
+                    }],
+                )
+                .expect("register a pane on the third worktree");
+            let now = Instant::now();
+            workspace.activity.agent_spawned("pane-90", "claude", now);
+            workspace
+                .activity
+                .notify("pane-90", AgentStatus::NeedsInput, now);
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            row_top(&mut cx, 3) < row_top(&mut cx, 1),
+            "a needs-input worktree is drawn above the manual order's first row"
+        );
+        assert!(
+            row_top(&mut cx, 1) < row_top(&mut cx, 2),
+            "the non-urgent siblings keep their manual order"
+        );
+
+        // `running` is not urgent: only error and needs-input jump the
+        // queue, which is exactly what separates `urgent_first` from
+        // `sorted`.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .activity
+                .notify("pane-90", AgentStatus::Running, Instant::now());
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            row_top(&mut cx, 1) < row_top(&mut cx, 3),
+            "a merely running worktree stays where the manual order put it"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-CORE-ACT-23, drawn: the pane close prompt is requested for exactly
+    /// the statuses `tiller_activity::ActivityStatus::requires_close_confirmation`
+    /// names — running, needs-input, error — and for neither done nor idle.
+    /// Every status is attempted against a real pane, and the cancel is a
+    /// real click on the drawn banner.
+    #[gpui::test]
+    async fn drawn_pane_close_prompt_is_requested_for_exactly_the_urgent_statuses(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("close");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Idle: the pane has no agent status at all.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.request_close_terminal_at(0, 0, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_none(),
+            "an idle pane closes without a prompt"
+        );
+
+        for status in [
+            AgentStatus::Running,
+            AgentStatus::NeedsInput,
+            AgentStatus::Error,
+        ] {
+            workspace.update(&mut cx.cx, |workspace, cx| {
+                workspace.activity.notify(
+                    "pane-0",
+                    status,
+                    Instant::now() + Duration::from_millis(1),
+                );
+                workspace.request_close_terminal_at(0, 0, cx);
+            });
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("pane-close-confirm").is_some(),
+                "closing a {status:?} pane must be held for confirmation"
+            );
+            let cancel = cx
+                .debug_bounds("pane-close-confirm-cancel")
+                .expect("the held close offers a cancel");
+            cx.simulate_click(cancel.center(), Modifiers::none());
+            cx.run_until_parked();
+            assert!(
+                cx.debug_bounds("pane-close-confirm").is_none(),
+                "cancelling releases the held close"
+            );
+            assert_eq!(
+                workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+                1,
+                "a cancelled close leaves the pane alone"
+            );
+        }
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.activity.notify(
+                "pane-0",
+                AgentStatus::Done,
+                Instant::now() + Duration::from_millis(2),
+            );
+            workspace.request_close_terminal_at(0, 0, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_none(),
+            "a finished pane closes without a prompt"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-CORE-ACT-23, drawn: the Activity panel's own close control used to
+    /// call `close_tab` straight through — the one list that exists to show
+    /// a running agent was also the only place that could kill it silently.
+    /// It now asks the same `requires_close_confirmation` the pane close
+    /// does, and reuses the same banner instead of raising a second prompt.
+    #[gpui::test]
+    async fn drawn_activity_row_close_holds_a_running_tab_and_lets_an_idle_one_go(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("activity-close");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1400.0), px(700.0)));
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // Tab 0 runs an agent; tab 1 is a plain idle shell.
+            workspace
+                .activity
+                .agent_spawned("pane-0", "claude", Instant::now());
+            workspace.add_terminal_tab_with_shell(
+                "Terminal 2",
+                TerminalShell::WithArguments {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), "sleep 60".into()],
+                },
+                None,
+                cx,
+            );
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            2
+        );
+
+        let header = cx
+            .debug_bounds("activity-header")
+            .expect("the activity header is drawn");
+        cx.simulate_click(header.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // The close control is the row's last child, inside its 10px right
+        // padding.
+        let close_point = |row: gpui::Bounds<gpui::Pixels>| {
+            point(row.origin.x + row.size.width - px(16.0), row.center().y)
+        };
+
+        // Idle: closes on the spot, no prompt.
+        let idle_row = cx
+            .debug_bounds("activity-1")
+            .expect("the idle tab has an activity row");
+        cx.simulate_click(close_point(idle_row), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_none(),
+            "an idle activity row closes without a prompt"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "the idle tab actually closed"
+        );
+
+        let row = cx
+            .debug_bounds("activity-0")
+            .expect("the running tab has an activity row");
+        cx.simulate_click(close_point(row), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "closing a running agent from the Activity list must not kill it silently"
+        );
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "the Activity close is held behind the same banner the pane close uses"
+        );
+
+        let confirm = cx
+            .debug_bounds("pane-close-confirm-close")
+            .expect("the held close offers Close Anyway");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            0,
+            "confirming an Activity close closes the whole tab, not just one pane"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn activity_status(

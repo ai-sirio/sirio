@@ -134,6 +134,13 @@ pub struct SidebarRow {
     /// from `SidebarWorktree::comment`. Only meaningful for
     /// `RowKind::Worktree`.
     pub comment: Option<String>,
+    /// F-CORE-ACT-18: one brand mark per *distinct agent currently running*
+    /// in this worktree, already de-duplicated and in `AgentCatalog` order
+    /// by `AgentActivityModel::running_agent_ids`. Only meaningful for
+    /// `RowKind::Worktree`; drawn as the row's trailing badge. Empty when
+    /// nothing is running — this is strictly the `.running` set, never
+    /// done/error/needs-input (those are the leading status dot's job).
+    pub running_agent_icons: Vec<Icon>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -397,6 +404,7 @@ impl Sidebar {
                 tab_kind: None,
                 agent_icon: None,
                 comment: None,
+                running_agent_icons: Vec::new(),
             }
         }
 
@@ -486,6 +494,7 @@ impl Sidebar {
                 tab_kind: None,
                 agent_icon: None,
                 comment: None,
+                running_agent_icons: Vec::new(),
             });
             let worktree_count = project.worktrees.len();
             for (worktree_index, worktree) in project.worktrees.into_iter().enumerate() {
@@ -506,6 +515,7 @@ impl Sidebar {
                     tab_kind: None,
                     agent_icon: None,
                     comment: worktree.comment,
+                    running_agent_icons: Vec::new(),
                 });
             }
             if project_is_git {
@@ -524,6 +534,7 @@ impl Sidebar {
                     tab_kind: None,
                     agent_icon: None,
                     comment: None,
+                    running_agent_icons: Vec::new(),
                 });
             }
         }
@@ -1317,13 +1328,25 @@ impl Sidebar {
         }
     }
 
-    /// Sets the live agent status shown on a worktree row's status dot. The
-    /// host resolves the status (from `tiller_activity`, ultimately); this
-    /// crate only renders whatever it is handed.
-    pub fn set_worktree_status(
+    /// Sets everything a worktree row draws about its live agents: the
+    /// status dot (`status`), the row's leading brand mark (`agent_icon`,
+    /// from `AgentActivityModel::agent_id_for_panes`), and the trailing
+    /// running-agents badge (`running_agent_icons`, from
+    /// `AgentActivityModel::running_agent_ids`).
+    ///
+    /// All three are host-resolved. This crate deliberately does not depend
+    /// on `tiller_activity`: status resolution, urgency ranking and catalog
+    /// order live there and are applied by the host, so the sidebar can
+    /// never grow a second, disagreeing copy of those rules.
+    ///
+    /// Called every render (`TillerWorkspace::sync_activity`), so it diffs
+    /// before touching a row.
+    pub fn set_worktree_activity(
         &mut self,
         id: usize,
         status: Option<ActivityStatus>,
+        agent_icon: Option<Icon>,
+        running_agent_icons: Vec<Icon>,
         cx: &mut Context<Self>,
     ) {
         if let Some(row) = self
@@ -1331,12 +1354,91 @@ impl Sidebar {
             .iter_mut()
             .find(|row| row.id == id && row.kind == RowKind::Worktree)
         {
-            if row.agent_status == status {
+            if row.agent_status == status
+                && row.agent_icon == agent_icon
+                && row.running_agent_icons == running_agent_icons
+            {
                 return;
             }
             row.agent_status = status;
+            row.agent_icon = agent_icon;
+            row.running_agent_icons = running_agent_icons;
             cx.notify();
         }
+    }
+
+    /// F-CORE-ACT-22: applies a host-computed display order to the worktree
+    /// rows under `project_row_id`. The host produces `order` (worktree row
+    /// ids) by running the project's current row order through
+    /// `tiller_activity::AttentionSort::urgent_first`, so a worktree whose
+    /// agent is in `error`/`needs-input` floats above its siblings while
+    /// every other row keeps exactly the position the user dragged it to.
+    ///
+    /// A worktree row moves together with the tab rows underneath it. Row
+    /// ids are untouched — they are the host's catalog identity, not a
+    /// position — so a later drag still resolves to the right worktree.
+    /// Returns whether anything actually moved; a no-op when the order is
+    /// already correct, which is what makes this safe to call every frame.
+    pub fn set_worktree_order(
+        &mut self,
+        project_row_id: usize,
+        order: &[usize],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(project_index) = self
+            .rows
+            .iter()
+            .position(|row| row.id == project_row_id && row.kind == RowKind::Project)
+        else {
+            return false;
+        };
+        let section_end = self.rows[project_index + 1..]
+            .iter()
+            .position(|row| row.kind == RowKind::Project)
+            .map_or(self.rows.len(), |offset| project_index + 1 + offset);
+
+        // Split the project's section into [worktree row + its tab rows]
+        // blocks, keeping whatever trailing rows (the New Worktree
+        // affordance) follow the last block exactly where they are.
+        let mut blocks: Vec<(usize, Vec<SidebarRow>)> = Vec::new();
+        let mut trailing: Vec<SidebarRow> = Vec::new();
+        for row in &self.rows[project_index + 1..section_end] {
+            match row.kind {
+                RowKind::Worktree => blocks.push((row.id, vec![row.clone()])),
+                RowKind::Tab if !blocks.is_empty() => {
+                    blocks
+                        .last_mut()
+                        .expect("checked non-empty")
+                        .1
+                        .push(row.clone());
+                }
+                _ => trailing.push(row.clone()),
+            }
+        }
+        if blocks.len() < 2 {
+            return false;
+        }
+        let current: Vec<usize> = blocks.iter().map(|(id, _)| *id).collect();
+        // Only a permutation of exactly this project's worktree rows is a
+        // legal order; anything else is a stale snapshot and is ignored.
+        let mut wanted = order.to_vec();
+        let mut sorted_current = current.clone();
+        wanted.sort_unstable();
+        sorted_current.sort_unstable();
+        if wanted != sorted_current || current.as_slice() == order {
+            return false;
+        }
+
+        let mut reordered: Vec<SidebarRow> = Vec::new();
+        for id in order {
+            if let Some(position) = blocks.iter().position(|(block_id, _)| block_id == id) {
+                reordered.extend(blocks.remove(position).1);
+            }
+        }
+        reordered.extend(trailing);
+        self.rows.splice(project_index + 1..section_end, reordered);
+        cx.notify();
+        true
     }
 
     /// Replaces the tab rows under a worktree with the host's real, current
@@ -1410,6 +1512,7 @@ impl Sidebar {
             tab_kind: Some(tab.kind),
             agent_icon: tab.agent_icon,
             comment: None,
+            running_agent_icons: Vec::new(),
         });
         self.rows.splice(insert_at..existing_end, new_rows);
         cx.notify();
@@ -1611,6 +1714,7 @@ impl Sidebar {
                 tab_kind: None,
                 agent_icon: None,
                 comment: None,
+                running_agent_icons: Vec::new(),
             },
         );
         self.select_row(id, cx);
@@ -1890,10 +1994,28 @@ impl Sidebar {
             .max_by_key(|status| urgency(*status))
     }
 
+    /// The icon's asset stem (`claude-mark`, `git-branch`). Worktree-row
+    /// marks name themselves with it in their `debug_selector`, so a drawn
+    /// test can assert *which* agent a row is showing rather than only that
+    /// some glyph is present.
+    fn icon_selector_name(icon: Icon) -> &'static str {
+        icon.path()
+            .rsplit('/')
+            .next()
+            .and_then(|file| file.strip_suffix(".svg"))
+            .unwrap_or("unknown")
+    }
+
     fn row_icon(row: &SidebarRow) -> Icon {
         match row.kind {
             RowKind::Project => Icon::FolderFill,
-            RowKind::Worktree => Icon::GitBranch,
+            // F-CORE-ACT-17: the worktree's own agent identity, resolved by
+            // `AgentActivityModel::agent_id_for_panes` across every pane in
+            // the worktree and pushed here by the host. Mirrors the Swift
+            // `WorktreeStatusGlyph(status:agentId:)`: the branch glyph is
+            // the fallback for a worktree with no agent, not the only mark
+            // a worktree row can have.
+            RowKind::Worktree => row.agent_icon.unwrap_or(Icon::GitBranch),
             RowKind::Tab => row.agent_icon.unwrap_or(match row.tab_kind {
                 Some(TabKind::Terminal) => Icon::SquareTerminal,
                 Some(TabKind::Editor | TabKind::Diff) => Icon::File,
@@ -2393,7 +2515,21 @@ impl Sidebar {
         let row_height = Self::row_height(&row);
         let row_left_inset = ROW_LEFT_INSET + row.depth.saturating_sub(1) as f32 * TAB_INDENT;
         let row_width = SIDEBAR_WIDTH - row_left_inset - ROW_RIGHT_INSET;
-        let title_width = row_width - 16.0 - 12.0 - 16.0 - 21.0 - 16.0;
+        // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
+        // per distinct running agent, 3px apart, 7px clear of the title. It
+        // takes its width out of the title's, so a busy worktree truncates
+        // its branch name instead of pushing the hover controls off the row.
+        let running_agent_icons: Vec<Icon> = if kind == RowKind::Worktree {
+            row.running_agent_icons.clone()
+        } else {
+            Vec::new()
+        };
+        let badge_width = if running_agent_icons.is_empty() {
+            0.0
+        } else {
+            running_agent_icons.len() as f32 * 15.0 + 4.0
+        };
+        let title_width = row_width - 16.0 - 12.0 - 16.0 - 21.0 - 16.0 - badge_width;
         let disclosure = match (kind, row.expanded) {
             (RowKind::Project, true) => Some(Icon::ChevronDown),
             (RowKind::Project, false) => Some(Icon::ChevronRight),
@@ -2583,14 +2719,22 @@ impl Sidebar {
                         },
                     }),
             )
-            .child(
-                div()
-                    .w(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(project_mark),
-            )
+            .child({
+                let slot = div().w(px(16.0)).flex().items_center().justify_center();
+                // F-CORE-ACT-17: a worktree row's mark is its agent's brand
+                // when one owns the worktree, and the branch glyph
+                // otherwise. The selector carries which, so the identity is
+                // assertable from a drawn test.
+                if is_worktree {
+                    let name = Self::icon_selector_name(glyph);
+                    slot.id(("sidebar-worktree-mark", row_id))
+                        .debug_selector(move || format!("sidebar-worktree-mark-{row_id}-{name}"))
+                        .child(project_mark)
+                        .into_any_element()
+                } else {
+                    slot.child(project_mark).into_any_element()
+                }
+            })
             .child(
                 div()
                     .w(px(title_width))
@@ -2625,6 +2769,36 @@ impl Sidebar {
                                 });
                             }
                         }),
+                )
+            })
+            // F-CORE-ACT-18: `AgentActivityModel::running_agent_ids` already
+            // de-duplicated these and put them in `AgentCatalog` order, so
+            // the badge draws them left to right exactly as handed over —
+            // it never re-sorts and never de-duplicates again.
+            .when(!running_agent_icons.is_empty(), |this| {
+                this.child(
+                    div()
+                        .id(("sidebar-running-agents", row_id))
+                        .debug_selector(move || format!("sidebar-running-agents-{row_id}"))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(3.0))
+                        .children(running_agent_icons.iter().enumerate().map(|(index, icon)| {
+                            div()
+                                .id(("sidebar-running-agent", row_id * 16 + index))
+                                .debug_selector({
+                                    let name = Self::icon_selector_name(*icon);
+                                    move || format!("sidebar-running-agent-{row_id}-{name}")
+                                })
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .child(
+                                    IconElement::new(*icon, px(12.0))
+                                        .text_color(theme.tab_focus_accent),
+                                )
+                        })),
                 )
             })
             .when(is_worktree, |this| {
@@ -3113,6 +3287,7 @@ mod tests {
             tab_kind: Some(TabKind::Terminal),
             agent_icon: None,
             comment: None,
+            running_agent_icons: Vec::new(),
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::SquareTerminal);
@@ -3135,6 +3310,7 @@ mod tests {
             tab_kind: Some(TabKind::Terminal),
             agent_icon: Some(Icon::ClaudeCode),
             comment: None,
+            running_agent_icons: Vec::new(),
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::ClaudeCode);
@@ -3810,6 +3986,185 @@ mod tests {
         assert_eq!(after.get(2).copied(), Some(0));
     }
 
+    /// F-CORE-ACT-17 + F-CORE-ACT-18, drawn: a worktree row with no agent
+    /// keeps the branch glyph and no trailing badge; once the host pushes
+    /// the identity `AgentActivityModel::agent_id_for_panes` resolved and
+    /// the set `running_agent_ids` returned, the row's leading mark becomes
+    /// that agent's brand and one badge mark is drawn per running agent, in
+    /// the order handed over (catalog order).
+    #[gpui::test]
+    async fn drawn_worktree_row_marks_its_agent_and_badges_every_running_agent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
+                .is_some(),
+            "an agent-less worktree row draws the branch glyph"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-running-agents-1").is_none(),
+            "no running agents means no trailing badge at all"
+        );
+
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_activity(
+                1,
+                Some(ActivityStatus::Running),
+                Some(Icon::ClaudeCode),
+                vec![Icon::ClaudeCode, Icon::Codex],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
+                .is_none(),
+            "the branch glyph gives way to the worktree's agent identity"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-worktree-mark-1-claude-mark")
+                .is_some(),
+            "the worktree row draws the agent agent_id_for_panes resolved"
+        );
+        assert!(cx.debug_bounds("sidebar-running-agents-1").is_some());
+        let claude = cx
+            .debug_bounds("sidebar-running-agent-1-claude-mark")
+            .expect("claude is badged as running");
+        let codex = cx
+            .debug_bounds("sidebar-running-agent-1-openai-mark")
+            .expect("codex is badged as running");
+        assert!(
+            claude.origin.x < codex.origin.x,
+            "badge marks are drawn in the catalog order they were handed over"
+        );
+
+        // The badge is strictly the `.running` set: a worktree that goes
+        // quiet loses it, and the branch glyph comes back.
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_activity(1, Some(ActivityStatus::Done), None, Vec::new(), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-running-agents-1").is_none());
+        assert!(
+            cx.debug_bounds("sidebar-worktree-mark-1-git-branch")
+                .is_some()
+        );
+    }
+
+    /// F-CORE-ACT-22, drawn: the host's urgency order actually moves the
+    /// rows on screen, and a worktree takes its own tab rows with it rather
+    /// than leaving them orphaned under whatever row lands in its place.
+    #[gpui::test]
+    async fn drawn_worktree_order_moves_a_row_with_its_tab_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let project = SidebarProject {
+            id: "project".into(),
+            name: "Project".into(),
+            is_git: true,
+            root_path: PathBuf::from("/repo/project"),
+            worktrees: (0..3)
+                .map(|index| SidebarWorktree {
+                    branch: format!("branch-{index}"),
+                    path: PathBuf::from(format!("/repo/project-{index}")),
+                    is_primary: index == 0,
+                    comment: None,
+                })
+                .collect(),
+        };
+        let window = cx.add_window(|_window, cx| Sidebar::from_projects(vec![project], cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(
+                3,
+                vec![SidebarTab {
+                    id: 7,
+                    title: "Claude Code".into(),
+                    selected: true,
+                    kind: TabKind::Terminal,
+                    agent_icon: Some(Icon::ClaudeCode),
+                }],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let before = cx
+            .debug_bounds("sidebar-row-3")
+            .expect("third worktree row");
+        let first_before = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("first worktree row");
+        assert!(before.origin.y > first_before.origin.y);
+
+        let moved = entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_order(0, &[3, 1, 2], cx)
+        });
+        cx.run_until_parked();
+        assert!(moved, "a genuine permutation reorders the rows");
+
+        let urgent = cx
+            .debug_bounds("sidebar-row-3")
+            .expect("third worktree row");
+        let first = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("first worktree row");
+        let second = cx
+            .debug_bounds("sidebar-row-2")
+            .expect("second worktree row");
+        let tab_selector: &'static str =
+            Box::leak(format!("sidebar-row-{}", TAB_ROW_ID_OFFSET + 7).into_boxed_str());
+        let tab = cx
+            .debug_bounds(tab_selector)
+            .expect("the moved worktree's tab row");
+        assert!(
+            urgent.origin.y < first.origin.y && urgent.origin.y < second.origin.y,
+            "the urgent worktree is drawn above both siblings"
+        );
+        assert!(
+            first.origin.y < second.origin.y,
+            "the siblings keep their manual order relative to each other"
+        );
+        assert!(
+            tab.origin.y > urgent.origin.y && tab.origin.y < first.origin.y,
+            "the worktree's tab row travelled with it"
+        );
+        assert!(
+            cx.debug_bounds("new-worktree-row")
+                .expect("the New Worktree affordance stays drawn")
+                .origin
+                .y
+                > second.origin.y,
+            "the New Worktree affordance stays at the end of the project"
+        );
+
+        // Idempotent: pushing the same order again changes nothing, which is
+        // what makes this safe on every frame.
+        let again = entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_order(0, &[3, 1, 2], cx)
+        });
+        assert!(!again, "re-pushing the standing order is a no-op");
+        // A stale or foreign order is rejected rather than half-applied.
+        let stale = entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_order(0, &[3, 1, 2, 99], cx)
+        });
+        assert!(
+            !stale,
+            "an order that is not a permutation of the rows is ignored"
+        );
+    }
+
     #[gpui::test]
     async fn dragging_worktree_rows_reorders_only_their_project_group(
         cx: &mut gpui::TestAppContext,
@@ -4446,7 +4801,7 @@ mod tests {
         // Project row 4 (the long fixture name) starts collapsed with
         // worktree row 5 as its only child.
         entity.update(&mut cx, |sidebar, cx| {
-            sidebar.set_worktree_status(5, Some(ActivityStatus::Error), cx);
+            sidebar.set_worktree_activity(5, Some(ActivityStatus::Error), None, Vec::new(), cx);
         });
         cx.run_until_parked();
 
