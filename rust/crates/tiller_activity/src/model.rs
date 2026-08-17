@@ -59,6 +59,13 @@ pub struct AgentActivityModel {
     /// rejected because of Layer C, and content must never be gated by a
     /// hook timestamp.
     last_hook_push_at: HashMap<String, Instant>,
+    /// Layer E — what the live surface entity knows about itself and no
+    /// other layer can see: an ACP chat that is mid-stream, a terminal that
+    /// failed to spawn or has already reaped its child. Revocable, so it is
+    /// kept apart from `agent_status` rather than written into it: when the
+    /// surface stops making a claim the pane falls straight back on layers
+    /// A–D instead of being stuck at the last thing the surface said.
+    entity_status: HashMap<String, AgentStatus>,
     pane_agents: HashMap<String, String>,
     title_owned_panes: HashSet<String>,
     process_owned_panes: HashSet<String>,
@@ -331,12 +338,68 @@ impl AgentActivityModel {
     }
 
     // ------------------------------------------------------------------
+    // Layer E: live-surface evidence
+    // ------------------------------------------------------------------
+
+    /// Records what the pane's own live surface reports about itself —
+    /// evidence no other layer can produce: an ACP chat that is mid-stream
+    /// or has finished a turn, a terminal that failed to spawn or whose
+    /// child has already been reaped.
+    ///
+    /// This exists so a worktree row has exactly one place to ask "what is
+    /// this pane's status". Before it, the app read the model for every
+    /// worktree but the selected one, and the live entities directly for
+    /// that one — so the same row answered differently depending on whether
+    /// it was selected. Feeding the surfaces' own facts in here keeps
+    /// F-CORE-ACT-17's "priority result across its pane statuses" a
+    /// statement about one map.
+    ///
+    /// Unlike [`Self::apply_content_signal`] and [`Self::apply_exit_result`],
+    /// this is *not* gated on the pane already being a known agent pane. A
+    /// surface reporting on itself is first-hand evidence about that pane
+    /// whether or not any layer has identified an agent in it — a terminal
+    /// that exited non-zero is in an error state, and the Rust app already
+    /// draws exactly that on the tab's own status cell. Gating it here would
+    /// put the tab cell and the worktree row back into disagreement, which
+    /// is the whole defect this layer exists to end. It stays out of the
+    /// *identity* queries regardless: [`Self::agent_id_for_panes`] and
+    /// [`Self::running_agent_ids`] still only ever name panes with a
+    /// registered agent.
+    ///
+    /// `None` withdraws the claim; the pane falls back on layers A–D.
+    ///
+    /// Returns whether the stored evidence changed, so a caller that syncs
+    /// on every redraw can skip the redraw it would otherwise cause.
+    pub fn set_entity_status(&mut self, pane_id: &str, status: Option<AgentStatus>) -> bool {
+        match status {
+            Some(status) => self.entity_status.insert(pane_id.to_string(), status) != Some(status),
+            None => self.entity_status.remove(pane_id).is_some(),
+        }
+    }
+
+    /// The live surface's own claim about this pane, if it is making one.
+    pub fn entity_status(&self, pane_id: &str) -> Option<AgentStatus> {
+        self.entity_status.get(pane_id).copied()
+    }
+
+    /// The pane's resolved status: Layer E when the surface is making a
+    /// claim, the layered A–D status otherwise. Every "what is this pane
+    /// doing" question in the app answers with this.
+    fn resolved(&self, pane_id: &str) -> Option<AgentStatus> {
+        self.entity_status
+            .get(pane_id)
+            .or_else(|| self.agent_status.get(pane_id))
+            .copied()
+    }
+
+    // ------------------------------------------------------------------
     // Pane closed
     // ------------------------------------------------------------------
 
     /// Removes all state for a closed pane. Idempotent.
     pub fn pane_closed(&mut self, pane_id: &str) {
         self.agent_status.remove(pane_id);
+        self.entity_status.remove(pane_id);
         self.last_hook_update_at.remove(pane_id);
         self.last_hook_push_at.remove(pane_id);
         self.pane_agents.remove(pane_id);
@@ -348,9 +411,12 @@ impl AgentActivityModel {
     // Queries
     // ------------------------------------------------------------------
 
-    /// The pane's current status, if it has one.
+    /// The pane's current status, if it has one — Layer E first, then the
+    /// layered A–D status. This is the query, so it must not be used to
+    /// decide what a layer's own write should overwrite; the layer methods
+    /// read `agent_status` directly for that.
     pub fn status(&self, pane_id: &str) -> Option<AgentStatus> {
-        self.agent_status.get(pane_id).copied()
+        self.resolved(pane_id)
     }
 
     /// Whether this pane's agent identity came from title identification.
@@ -368,7 +434,10 @@ impl AgentActivityModel {
     /// (error > needs-input > running > done). Returns `None` if no agent
     /// panes are in the collection.
     pub fn status_for_panes(&self, pane_ids: &[&str]) -> Option<AgentStatus> {
-        AgentStatus::highest_priority(pane_ids.iter().filter_map(|id| self.agent_status.get(*id)))
+        pane_ids
+            .iter()
+            .filter_map(|id| self.resolved(id))
+            .min_by_key(|status| status.priority())
     }
 
     /// Agent id of the most relevant pane among the given pane ids (same
@@ -381,10 +450,7 @@ impl AgentActivityModel {
             AgentStatus::Running,
             AgentStatus::Done,
         ] {
-            if let Some(pane) = pane_ids
-                .iter()
-                .find(|id| self.agent_status.get(**id) == Some(&wanted))
-            {
+            if let Some(pane) = pane_ids.iter().find(|id| self.resolved(id) == Some(wanted)) {
                 return self.pane_agents.get(*pane).map(String::as_str);
             }
         }
@@ -403,7 +469,7 @@ impl AgentActivityModel {
     ) -> Vec<&'a str> {
         let running: HashSet<&str> = pane_ids
             .iter()
-            .filter(|id| self.agent_status.get(**id) == Some(&AgentStatus::Running))
+            .filter(|id| self.resolved(id) == Some(AgentStatus::Running))
             .filter_map(|id| self.pane_agents.get(*id).map(String::as_str))
             .collect();
         catalog_ids

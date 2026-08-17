@@ -218,3 +218,74 @@ fn f_core_act_26_mount_policy_evicts_only_safe_oldest_worktrees_until_cap() {
 
     assert_eq!(evicted, vec!["w1"]);
 }
+
+/// F-CORE-ACT-17, the "one map" half: the live surface's own evidence is a
+/// pane status like any other, so `status_for_panes` — the single query the
+/// worktree row asks — already accounts for it. Before Layer E the app had
+/// to read the chat entity separately for the selected worktree, which is
+/// how the same row came to answer the same question two ways.
+#[test]
+fn f_core_act_17_entity_evidence_resolves_through_the_same_pane_status_query() {
+    let now = std::time::Instant::now();
+    let mut model = AgentActivityModel::new();
+    model.register_agent_id("pane-1", "claude");
+    model.notify("pane-1", AgentStatus::Done, now);
+
+    // The surface says it is streaming; the one query agrees immediately.
+    assert!(model.set_entity_status("pane-1", Some(AgentStatus::Running)));
+    assert_eq!(model.status("pane-1"), Some(AgentStatus::Running));
+    assert_eq!(
+        model.status_for_panes(&["pane-1"]),
+        Some(AgentStatus::Running)
+    );
+    assert_eq!(
+        model.running_agent_ids(&["pane-1"], &["claude", "codex"]),
+        vec!["claude"]
+    );
+    assert_eq!(model.agent_id_for_panes(&["pane-1"]), Some("claude"));
+
+    assert_eq!(model.entity_status("pane-1"), Some(AgentStatus::Running));
+
+    // Re-stating the same claim is not a change, so a per-redraw sync does
+    // not churn.
+    assert!(!model.set_entity_status("pane-1", Some(AgentStatus::Running)));
+
+    // Withdrawing it falls back on layers A-D rather than sticking.
+    assert!(model.set_entity_status("pane-1", None));
+    assert_eq!(model.entity_status("pane-1"), None);
+    assert_eq!(model.status("pane-1"), Some(AgentStatus::Done));
+    assert_eq!(model.status_for_panes(&["pane-1"]), Some(AgentStatus::Done));
+}
+
+/// Layer E is first-hand evidence about a pane, so it applies whether or
+/// not any layer has identified an agent in it — a terminal that exited
+/// non-zero is in an error state either way, and the tab's own status cell
+/// already draws that. What it must never do is *invent an identity*: the
+/// two identity queries still only name panes with a registered agent.
+#[test]
+fn f_core_act_17_entity_evidence_reports_status_without_inventing_an_identity() {
+    let mut model = AgentActivityModel::new();
+    assert!(model.set_entity_status("pane-9", Some(AgentStatus::Error)));
+    assert_eq!(model.status("pane-9"), Some(AgentStatus::Error));
+    assert_eq!(
+        model.status_for_panes(&["pane-9"]),
+        Some(AgentStatus::Error)
+    );
+    assert_eq!(
+        model.agent_id_for_panes(&["pane-9"]),
+        None,
+        "a shell that exited is not an agent"
+    );
+
+    model.set_entity_status("pane-9", Some(AgentStatus::Running));
+    assert!(
+        model
+            .running_agent_ids(&["pane-9"], &["claude", "codex"])
+            .is_empty(),
+        "and it never reaches the running-agents badge either"
+    );
+
+    // Closing the pane drops the evidence with everything else.
+    model.pane_closed("pane-9");
+    assert_eq!(model.status("pane-9"), None);
+}
