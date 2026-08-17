@@ -4243,7 +4243,6 @@ mod tests {
                     selected: true,
                     kind: TabKind::Terminal,
                     agent_icon: Some(Icon::ClaudeCode),
-                    agent_accent: None,
                 }],
                 cx,
             );
@@ -4498,7 +4497,6 @@ mod tests {
                         selected: true,
                         kind: TabKind::Terminal,
                         agent_icon: None,
-                        agent_accent: None,
                     },
                     SidebarTab {
                         id: 43,
@@ -4506,7 +4504,6 @@ mod tests {
                         selected: false,
                         kind: TabKind::Terminal,
                         agent_icon: None,
-                        agent_accent: None,
                     },
                 ],
                 cx,
@@ -4594,7 +4591,6 @@ mod tests {
                     selected: true,
                     kind: TabKind::AgentChat,
                     agent_icon: None,
-                    agent_accent: None,
                 }],
                 cx,
             );
