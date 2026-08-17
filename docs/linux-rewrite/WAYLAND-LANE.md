@@ -11,6 +11,54 @@ compositor, and wlroots' headless backend composites it in software with no GPU 
 lavapipe, same absent hardware, opposite outcome. **Do not conclude from the X11 result that this
 one cannot work — it is verified working, with screenshots in `reference/linux-progress/`.**
 
+## 2026-08-17 — running this lane on the Pi 5, and five faults found by running it
+
+The lane works unmodified on the Raspberry Pi 5 (see `ENVIRONMENT.md`'s top section for the box).
+Everything below was found by *driving* it, not by reading it, and four of the five are now fixed
+in `Scripts/wayland-drive.sh`. They are recorded because each one fails **silently** — every symptom
+reads as "the app ignored me", which is the most expensive wrong answer this project keeps buying.
+
+**The parent compositor is not optional and is not yours to kill.** Nothing renders on a
+monitor-less box without it, and nested lanes are also called `sway`, so `pkill -x sway` kills the
+parent *and* every other agent's lane. Once the parent died, a leaked nested compositor took the
+freed `wayland-1` name, so `WAYLAND_DISPLAY=wayland-1` still resolved, drives still started, and
+every frame came back black with a MESA `failed to choose pdev` line buried in the app log.
+
+```bash
+Scripts/pi-session.sh status     # exits 1 if the parent is down
+Scripts/pi-session.sh start      # idempotent
+eval "$(Scripts/pi-session.sh env)"
+```
+
+The parent now publishes the socket name it was given (`/tmp/tiller-parent.display`) instead of
+being guessed at, and is identified by its config path. **Kill only your own instance**:
+`pkill -x "$(basename "$TILLER_WL_BIN")"`.
+
+| fault | symptom | status |
+|---|---|---|
+| `kill_ours` used `pgrep -x tiller` | Linux caps `comm` at 15 chars and `pgrep -x` matches `comm`, so a pinned snapshot named `/tmp/L2crit-tiller` matched **nothing** — pgrep only warns on stderr. Every pinned instance survived cleanup *and* `pkill -x tiller` | **fixed** — pattern truncated to 15 and taken from `$BIN` |
+| the virtual keyboard expired after 10 min | a longer `TILLER_WL_KEEP` session lost **all** keyboard input silently; `type`/`key`/`chord` still exit 0 and nothing reaches the app. Already recorded once as a false negative | **fixed** — 4 h, `TILLER_WL_KEYBOARD_HOLD_MS` |
+| `shot()` guessed the relayout with `sleep 1` | on a loaded Pi it captured a full-size frame of a window still laid out at the nudge size, black down two edges. Coordinates read off such a frame land in dead space | **fixed** — polls sway for the relayout, `TILLER_WL_REPAINT_SETTLE` |
+| the `settle` argument's default of 6 | tuned on the x86 box; too short here. A near-blank first frame is settle, not the app | **use 10–30**, and read the frame's colour count |
+| `title <text>` against an interactive bash | this box's default `PS1` embeds its own `\[\e]0;…\a\]`, so a one-shot title is overwritten by the very next prompt within milliseconds | **not fixable in the script** — neutralise `PS1`/`PROMPT_COMMAND` first, or let a long-running foreground process own the title |
+
+**`TILLER_WL_BIN` pins the binary under test.** A critic judging a wave must not have the binary
+swapped under it by a builder rebuilding the shared `rust/target`:
+
+```bash
+cp rust/target/debug/tiller /tmp/mylabel-tiller && export TILLER_WL_BIN=/tmp/mylabel-tiller
+```
+
+### A legal ACP counterparty for states the installed agent cannot produce
+
+`rust/crates/tiller_ui/tests/fixtures/chat_fixture.py`, selected with `TILLER_ACP_PROGRAM`, is a
+scriptable ACP v1 agent. It is the right instrument when the blocker is **upstream in the agent**
+rather than in Tiller — measured example: `@agentclientprotocol/claude-agent-acp@0.69.0` only
+forwards thinking chunks that carry text, and recent models default `thinking.display` to
+`omitted`, so `agent_thought_chunk` is never emitted at any effort level. It stands in for an agent
+this box lacks exactly as `Scripts/xdnd-source` stands in for a file manager: the app, the render
+and the click stay production. **Say when you used it**, and never use it to stand in for a gesture.
+
 ## What it proves, and what it does not
 
 | | |
