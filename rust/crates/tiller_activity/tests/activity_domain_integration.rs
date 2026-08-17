@@ -289,3 +289,47 @@ fn f_core_act_17_entity_evidence_reports_status_without_inventing_an_identity() 
     model.pane_closed("pane-9");
     assert_eq!(model.status("pane-9"), None);
 }
+
+/// Layer E is subject to the same pane ownership every other layer is. A
+/// title-owned or process-owned pane is cleared only by its own layer, and
+/// the PTY child-exit path already refuses to rewrite those; letting a
+/// surface's exit code through here reintroduced exactly that bug — a
+/// claude pane identified from its OSC title had its Running overwritten
+/// with Done the moment the shell behind it exited.
+#[test]
+fn f_core_act_17_entity_evidence_never_overrides_a_title_or_process_owned_pane() {
+    let now = std::time::Instant::now();
+
+    let mut title_owned = AgentActivityModel::new();
+    title_owned.handle_title_change("pane-1", ". working", now);
+    assert!(title_owned.is_title_owned("pane-1"));
+    assert!(!title_owned.set_entity_status("pane-1", Some(AgentStatus::Done)));
+    assert_eq!(title_owned.status("pane-1"), Some(AgentStatus::Running));
+
+    let mut process_owned = AgentActivityModel::new();
+    process_owned.process_identified("pane-2", "codex");
+    assert!(process_owned.is_process_owned("pane-2"));
+    assert!(!process_owned.set_entity_status("pane-2", Some(AgentStatus::Error)));
+    assert_eq!(process_owned.status("pane-2"), Some(AgentStatus::Running));
+
+    // Order-independence: a claim staked *before* the pane became owned is
+    // ignored on the very next read, with no second write to prune it. A
+    // terminal that dies before the 500 ms Layer-D sweep identifies its
+    // agent is exactly this case, and enforcing ownership only on the write
+    // left the sweep unable to displace the error it had already staked.
+    let mut later = AgentActivityModel::new();
+    assert!(later.set_entity_status("pane-3", Some(AgentStatus::Error)));
+    assert_eq!(later.status("pane-3"), Some(AgentStatus::Error));
+    later.process_identified("pane-3", "codex");
+    assert_eq!(later.status("pane-3"), Some(AgentStatus::Running));
+    assert_eq!(
+        later.status_for_panes(&["pane-3"]),
+        Some(AgentStatus::Running)
+    );
+
+    // Once the process goes, its own layer clears the pane and the
+    // surface's claim is visible again — which is right: what is left is a
+    // dead terminal that exited non-zero, and that is what it reports.
+    later.process_gone("pane-3");
+    assert_eq!(later.status("pane-3"), Some(AgentStatus::Error));
+}
