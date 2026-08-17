@@ -9,11 +9,11 @@ use gpui::{
     MouseButton, Pixels, Point, Render, Rgba, Task, Window, anchored, div, prelude::*, px,
     uniform_list,
 };
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tiller_git::status;
+use tiller_git::{DirectoryGitStatus, directory_statuses, status};
 use tiller_theme::Theme;
 
 use crate::editor::fs_actions;
@@ -92,12 +92,48 @@ impl ActivitySurface {
     }
 }
 
+/// The git state the Files tree paints, for both halves of the tree.
+///
+/// `files` holds one entry per changed path, exactly as `git status`
+/// reports it. `directories` is [`tiller_git::directory_statuses`]'s
+/// aggregate: every non-root ancestor of every changed path, resolved with
+/// conflicted > changed > untracked, and with a rename contributing both its
+/// destination *and* its original ancestors (F-GIT-STATUS-02). Both are
+/// keyed by worktree-relative path.
+///
+/// This replaced a `HashSet<PathBuf>` of changed paths plus a
+/// `changed.starts_with(relative)` roll-up done in `read_tree`: that
+/// produced a *boolean* for a directory, so a conflicted, a changed and an
+/// untracked ancestor were byte-identical on screen, and it discarded
+/// `StatusEntry::original_path` entirely, so the source directories of a
+/// `git mv` were marked as nothing at all.
+#[derive(Clone, Debug, Default)]
+struct GitMarkers {
+    files: HashMap<PathBuf, DirectoryGitStatus>,
+    directories: HashMap<PathBuf, DirectoryGitStatus>,
+}
+
+impl GitMarkers {
+    /// The marker for one worktree-relative path, taken from the half of
+    /// the model that owns it.
+    fn get(&self, relative: &Path, is_dir: bool) -> Option<DirectoryGitStatus> {
+        if is_dir {
+            self.directories.get(relative).copied()
+        } else {
+            self.files.get(relative).copied()
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FileNode {
     path: PathBuf,
     name: String,
     is_dir: bool,
-    modified: bool,
+    /// The git marker this row carries: its own status for a file, the
+    /// aggregate of everything beneath it for a directory. `None` is a
+    /// clean row.
+    git_status: Option<DirectoryGitStatus>,
     expanded: bool,
     /// Why the directory could not be read (permissions, a vanished
     /// mount). Rendered on the row — an unreadable directory must not
@@ -126,15 +162,29 @@ pub struct RightPanel {
     /// Files/Changes surface look current while serving stale data.
     worktree_selected: bool,
     file_tree: Vec<FileNode>,
-    changed_paths: HashSet<PathBuf>,
+    git_markers: GitMarkers,
     activity_expanded: bool,
     activity: Vec<ActivitySurface>,
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
     walk_task: Option<Task<()>>,
     /// Whether the top-level tree refresh is currently in flight. This is
-    /// both the single-flight guard and the loading state rendered to users.
+    /// the single-flight guard. It is deliberately *not* the loading state
+    /// rendered to users — see `settled`.
     refresh_started: bool,
+    /// Whether any top-level walk has ever finished, successfully or not.
+    ///
+    /// This, and not `refresh_started`, is what "Loading files…" is about.
+    /// `ensure_tree_refresh` re-walks every second, so gating the
+    /// placeholder on "a walk is in flight" put a full-panel placeholder
+    /// over a perfectly good tree once a second — on this 4-core box the
+    /// tree was visible roughly one frame in three, for minutes. Gating it
+    /// on "no walk has ever finished" also covers the two cases an
+    /// `is_empty()` test gets wrong: a directory that is genuinely empty
+    /// (which would say "Loading files…" forever) and a root that failed to
+    /// read (whose error panel would be replaced by the placeholder on every
+    /// tick, hiding the Retry the user is trying to click).
+    settled: bool,
     refresh_error: Option<String>,
     selected_path: Option<PathBuf>,
     file_focus: Option<FocusHandle>,
@@ -154,11 +204,12 @@ impl RightPanel {
             repo_root: repo_root.into(),
             worktree_selected: true,
             file_tree: Vec::new(),
-            changed_paths: HashSet::new(),
+            git_markers: GitMarkers::default(),
             activity_expanded: false,
             activity: Vec::new(),
             walk_task: None,
             refresh_started: false,
+            settled: false,
             refresh_error: None,
             selected_path: None,
             file_focus: None,
@@ -197,7 +248,7 @@ impl RightPanel {
         }
         self.worktree_selected = false;
         self.file_tree.clear();
-        self.changed_paths.clear();
+        self.git_markers = GitMarkers::default();
         self.selected_path = None;
         self.refresh_error = None;
         self.file_context_menu = None;
@@ -219,26 +270,38 @@ impl RightPanel {
                     // Files can browse a plain directory too; an absent Git
                     // repository means no status dots, not an unreadable
                     // filesystem. Root traversal remains the error boundary.
-                    let changed = status(&repo_root)
-                        .map(|snapshot| {
-                            snapshot
+                    let markers = status(&repo_root)
+                        .map(|snapshot| GitMarkers {
+                            files: snapshot
                                 .entries
                                 .iter()
-                                .map(|entry| entry.path.clone())
-                                .collect::<HashSet<_>>()
+                                .map(|entry| {
+                                    (entry.path.clone(), DirectoryGitStatus::for_entry(entry))
+                                })
+                                .collect(),
+                            // F-GIT-STATUS-02: the tested aggregate, not a
+                            // second implementation of it. It is what
+                            // resolves conflicted > changed > untracked on a
+                            // shared ancestor and what marks *both* sides of
+                            // a rename.
+                            directories: directory_statuses(&snapshot.entries),
                         })
                         .unwrap_or_default();
-                    let tree = read_tree(&repo_root, &repo_root, &changed)
+                    let tree = read_tree(&repo_root, &repo_root, &markers)
                         .map_err(|error| error.to_string())?;
-                    Ok::<_, String>((changed, tree))
+                    Ok::<_, String>((markers, tree))
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 panel.walk_task = None;
                 panel.refresh_started = false;
+                // The walk finished. Whichever way it went, the panel now
+                // has something truthful to show — a tree, an empty tree, or
+                // an error — and must never fall back to "Loading files…".
+                panel.settled = true;
                 match result {
-                    Ok((changed, tree)) => {
-                        panel.changed_paths = changed;
+                    Ok((markers, tree)) => {
+                        panel.git_markers = markers;
                         // F-TAB-01: the periodic 1s refresh loop
                         // (`ensure_tree_refresh`) walks only the root
                         // listing and used to replace `file_tree` wholesale,
@@ -320,13 +383,13 @@ impl RightPanel {
         self.walk_generation += 1;
         let generation = self.walk_generation;
         let repo_root = self.repo_root.clone();
-        let changed_paths = self.changed_paths.clone();
+        let markers = self.git_markers.clone();
         // The walk consumes `path`; the update needs its own copy to find
         // the node again.
         let apply_path = path.clone();
         self.walk_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { read_tree(&repo_root, &path, &changed_paths) })
+                .background_spawn(async move { read_tree(&repo_root, &path, &markers) })
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 if generation != panel.walk_generation {
@@ -467,8 +530,20 @@ impl RightPanel {
         let path = row.node.path.clone();
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
-        let modified = row.node.modified;
+        let git_status = row.node.git_status;
         let read_error = row.node.read_error.clone();
+        // The marker's selector names both the row and the status it
+        // resolved to, so a drawn test can assert that a directory holding a
+        // conflict *and* a modification marks conflicted — the precedence is
+        // otherwise unobservable from a frame.
+        let marker_selector = git_status.map(|status| {
+            let relative = path
+                .strip_prefix(&repo_root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            format!("file-status-{}-{relative}", status.slug())
+        });
         let disclosure = if is_dir {
             if row.node.expanded {
                 Some(IconElement::new(Icon::ChevronDown, px(10.0)).text_color(theme.subtitle))
@@ -503,7 +578,8 @@ impl RightPanel {
             .items_center()
             .gap(theme.spacing.titlebar_control_spacing)
             .text_size(px(12.5))
-            // Names are neutral text; the status dot carries "modified",
+            // Names are neutral text; the status dot carries the git state
+            // (three distinguishable colours, not one "modified" amber),
             // and unreadable directories dim rather than shout.
             .text_color(if read_error.is_some() {
                 theme.subtitle
@@ -578,16 +654,18 @@ impl RightPanel {
                         .child("⚠"),
                 )
             })
-            .when(modified, |this| {
+            .when_some(marker_selector, |this, selector| {
+                let status = git_status.expect("a marker selector implies a status");
                 this.child(
                     div()
+                        .debug_selector(move || selector.clone())
                         .w(px(5.0))
                         .h(px(5.0))
                         .rounded(px(3.0))
-                        .bg(theme.git_modified),
+                        .bg(git_status_color(status, theme)),
                 )
             })
-            .when(modified && !is_dir, |this| {
+            .when(git_status.is_some() && !is_dir, |this| {
                 this.child(files_action_button(
                     "Diff",
                     "file-open-diff",
@@ -722,7 +800,14 @@ impl RightPanel {
                 theme,
                 move |cx| refresh_entity.update(cx, |panel, cx| panel.refresh(cx)),
             ));
-        let body = if self.refresh_started {
+        // "Loading files…" is the *first-load* state, not the refresh state
+        // — see the `settled` field. A refresh over a settled panel happens
+        // in place: whatever the panel was truthfully showing stays on
+        // screen until the new walk lands, which is the same rule
+        // `preserve_expansion` above already applies to expansion state and
+        // the same rule `ChangesTab::render_body` applies to its own 1 s
+        // poll.
+        let body = if !self.settled {
             div()
                 .id("files-loading")
                 .debug_selector(|| "files-loading".to_owned())
@@ -1109,11 +1194,7 @@ fn file_glyph(path: &Path, is_dir: bool) -> Icon {
     Icon::File
 }
 
-fn read_tree(
-    root: &Path,
-    directory: &Path,
-    changed_paths: &HashSet<PathBuf>,
-) -> Result<Vec<FileNode>, String> {
+fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<FileNode>, String> {
     let entries = std::fs::read_dir(directory).map_err(|error| error.to_string())?;
     let mut nodes = entries
         .filter_map(Result::ok)
@@ -1124,14 +1205,12 @@ fn read_tree(
             }
             let is_dir = entry.file_type().ok()?.is_dir();
             let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
-            let modified = changed_paths
-                .iter()
-                .any(|changed| changed == &relative || (is_dir && changed.starts_with(&relative)));
+            let git_status = markers.get(&relative, is_dir);
             Some(FileNode {
                 name: path.file_name()?.to_string_lossy().to_string(),
                 path,
                 is_dir,
-                modified,
+                git_status,
                 expanded: false,
                 read_error: None,
                 children: Vec::new(),
@@ -1195,6 +1274,18 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
     None
 }
 
+/// The Files tree's marker hue. The three cases are the three the model
+/// distinguishes, and they must stay three *different* colours: rendering
+/// them all as `git_modified` is what made F-GIT-STATUS-02's precedence
+/// ordering unobservable in the frame.
+fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
+    match status {
+        DirectoryGitStatus::Conflicted => theme.git_conflict,
+        DirectoryGitStatus::Changed => theme.git_modified,
+        DirectoryGitStatus::Untracked => theme.git_untracked,
+    }
+}
+
 fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
     match status {
         ActivityStatus::Idle => theme.meta,
@@ -1219,8 +1310,8 @@ fn activity_status_glyph(status: ActivityStatus) -> &'static str {
 mod tests {
     use super::*;
     use gpui::{
-        Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TestAppContext,
-        VisualTestContext,
+        Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        TestAppContext, VisualTestContext,
     };
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -2379,6 +2470,409 @@ mod tests {
             events.borrow().as_slice(),
             &[RightPanelActionEvent::OpenDiff(PathBuf::from("changed.md"))],
             "Open diff crosses the panel seam with a repo-relative path"
+        );
+    }
+
+    /// Runs git and returns whether it succeeded — for the one command in
+    /// these fixtures that is *meant* to fail (`git merge` stopping on a
+    /// conflict).
+    fn git_may_fail(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git")
+            .status
+            .success()
+    }
+
+    /// A real repository carrying, at once: a real unresolved merge conflict
+    /// beside a plain modification under the same directory, a modification
+    /// beside an untracked file under another, an untracked-only directory,
+    /// and a real `git mv` whose source directory still exists on disk.
+    fn ancestor_status_fixture(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Tiller tests"]);
+        git(dir, &["config", "commit.gpgSign", "false"]);
+        for (relative, contents) in [
+            ("src/app/deep/mod.rs", "mod deep;\n"),
+            ("docs/guide/readme.md", "guide\n"),
+            ("conflict/dir/file.txt", "base\n"),
+            ("conflict/also_mod.txt", "base\n"),
+            ("move/from/orig.txt", "moving\n"),
+        ] {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().expect("nested fixture path"))
+                .expect("create fixture dir");
+            std::fs::write(&path, contents).expect("write fixture file");
+        }
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "base tree"]);
+
+        // A genuine conflict, produced by a genuine merge.
+        git(dir, &["checkout", "-q", "-b", "left"]);
+        std::fs::write(dir.join("conflict/dir/file.txt"), "left\n").expect("left edit");
+        git(dir, &["commit", "-qam", "left"]);
+        git(dir, &["checkout", "-q", "-"]);
+        std::fs::write(dir.join("conflict/dir/file.txt"), "right\n").expect("right edit");
+        git(dir, &["commit", "-qam", "right"]);
+        assert!(
+            !git_may_fail(dir, &["merge", "left"]),
+            "the merge has to stop on the conflict for this fixture to mean anything"
+        );
+
+        std::fs::write(dir.join("src/app/deep/mod.rs"), "mod deep; // edited\n")
+            .expect("edit nested file");
+        std::fs::write(dir.join("src/zz_new.txt"), "untracked\n").expect("untracked sibling");
+        std::fs::write(dir.join("docs/guide/notes.txt"), "untracked only\n")
+            .expect("untracked-only dir");
+        std::fs::write(
+            dir.join("conflict/also_mod.txt"),
+            "modified beside a conflict\n",
+        )
+        .expect("modification beside a conflict");
+        std::fs::create_dir_all(dir.join("moved_dest")).expect("rename destination");
+        git(dir, &["mv", "move/from/orig.txt", "moved_dest/renamed.txt"]);
+    }
+
+    /// F-GIT-STATUS-02, in the drawn frame: every ancestor of a changed
+    /// path carries a marker, the marker resolves conflicted > changed >
+    /// untracked, and a rename marks the directories it came *from* as well
+    /// as the ones it went to.
+    ///
+    /// Each assertion is paired with its own negative: a directory that
+    /// resolved to conflicted must draw no changed marker, and vice versa.
+    /// Without that pair the test would pass on the old boolean roll-up,
+    /// which drew one identical amber dot for all three states.
+    #[gpui::test]
+    async fn the_files_tree_marks_every_ancestor_with_conflict_over_change_over_untracked(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        ancestor_status_fixture(&dir.0);
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("right panel entity");
+        cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel.file_tree.iter().any(|node| node.name == "moved_dest")
+            })
+        });
+        cx.cx.run_until_parked();
+
+        // Conflict beats the modification that shares its parent.
+        assert!(
+            cx.debug_bounds("file-status-conflicted-conflict").is_some(),
+            "the directory holding the conflict is marked conflicted"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-conflict").is_none(),
+            "…and not merely changed, though it also holds a plain modification"
+        );
+        // Changed beats the untracked file that shares its parent.
+        assert!(
+            cx.debug_bounds("file-status-changed-src").is_some(),
+            "a directory holding a modification and an untracked file is changed"
+        );
+        assert!(
+            cx.debug_bounds("file-status-untracked-src").is_none(),
+            "…the untracked sibling cannot demote it"
+        );
+        // Untracked alone still marks its ancestors.
+        assert!(
+            cx.debug_bounds("file-status-untracked-docs").is_some(),
+            "a directory whose only change is an untracked file is marked untracked"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-docs").is_none(),
+            "…and is not indistinguishable from a modified one"
+        );
+        // Both sides of the rename.
+        assert!(
+            cx.debug_bounds("file-status-changed-moved_dest").is_some(),
+            "the rename destination's directory is marked"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-move").is_some(),
+            "the rename *source* directory is marked too — it was not, before"
+        );
+        // A root-level changed file is a file marker, not a directory one.
+        assert!(
+            cx.debug_bounds("file-status-changed-src/app").is_none(),
+            "only the rows the root listing drew are on screen yet"
+        );
+
+        // Depth: expand the rename source and find its own child directory
+        // marked. Clicking the marker clicks the row it sits in.
+        let source = cx
+            .debug_bounds("file-status-changed-move")
+            .expect("the rename source directory is drawn");
+        cx.simulate_click(source.center(), Modifiers::none());
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel
+                    .file_rows()
+                    .iter()
+                    .any(|row| row.node.name == "from" && row.depth == 1)
+            })
+        });
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-status-changed-move/from").is_some(),
+            "the rename source's own directory, two levels down, is marked as well"
+        );
+
+        // The clause says *every* ancestor, so walk one chain to its end
+        // rather than stopping at the first level. `src/app/deep/mod.rs` is
+        // three directories deep, and each of the three must carry the
+        // marker its descendant earned. (`debug_bounds` takes a `'static`
+        // selector, so these are spelled out rather than formatted.)
+        for (marker, opened) in [
+            ("file-status-changed-src", "src/app"),
+            ("file-status-changed-src/app", "src/app/deep"),
+        ] {
+            let row = cx
+                .debug_bounds(marker)
+                .unwrap_or_else(|| panic!("{marker} is drawn"));
+            cx.simulate_click(row.center(), Modifiers::none());
+            pump_until(&cx.cx, || {
+                panel.read_with(&cx.cx, |panel, _| {
+                    let wanted = panel.repo_root.join(opened);
+                    panel.file_rows().iter().any(|row| row.node.path == wanted)
+                })
+            });
+            cx.cx.run_until_parked();
+        }
+        assert!(
+            cx.debug_bounds("file-status-changed-src/app").is_some(),
+            "src/app inherits the marker from the file two levels below it"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-src/app/deep").is_some(),
+            "…and so does src/app/deep, the directory that actually holds it"
+        );
+
+        // …and with `src` open, the untracked sibling that could not demote
+        // it is on screen at the same time, drawn as its own untracked file
+        // marker. Two different statuses, in one frame, in one subtree —
+        // which the old boolean roll-up could not express at all.
+        assert!(
+            cx.debug_bounds("file-status-untracked-src/zz_new.txt")
+                .is_some(),
+            "the untracked file itself is marked untracked, beside its changed parent"
+        );
+
+        // The sharpest case: a conflicted directory whose own child file is
+        // merely changed. Precedence made the parent red; the child stays
+        // amber.
+        let conflict = cx
+            .debug_bounds("file-status-conflicted-conflict")
+            .expect("the conflicted directory is drawn");
+        cx.simulate_click(conflict.center(), Modifiers::none());
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel
+                    .file_rows()
+                    .iter()
+                    .any(|row| row.node.name == "also_mod.txt")
+            })
+        });
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-status-conflicted-conflict/dir")
+                .is_some(),
+            "the directory that actually holds the unmerged file is conflicted too"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-conflict/also_mod.txt")
+                .is_some(),
+            "…while the plain modification beside it stays a changed file"
+        );
+        assert!(
+            cx.debug_bounds("file-status-conflicted-conflict/also_mod.txt")
+                .is_none(),
+            "…and does not inherit its parent's conflict"
+        );
+    }
+
+    /// Builds a panel over `root`, drives one refresh, and hands back the
+    /// entity plus a visual context — the setup every placeholder case below
+    /// repeats.
+    fn settled_panel(
+        cx: &mut TestAppContext,
+        root: PathBuf,
+    ) -> (VisualTestContext, Entity<RightPanel>) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(root));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("right panel entity");
+        let cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| panel.settled)
+        });
+        cx.cx.run_until_parked();
+        (cx, panel)
+    }
+
+    /// The Files panel spent most of its time showing "Loading files…": the
+    /// 1 s `ensure_tree_refresh` tick calls `refresh()`, which sets
+    /// `refresh_started`, and the body swapped the whole tree for a
+    /// full-panel placeholder on that flag alone.
+    ///
+    /// Two halves, and this test proves both. The *gesture* half: the drawn
+    /// Refresh control really reaches `refresh()`, and the rows survive it.
+    /// The *frame* half: with a walk genuinely in flight over a panel that
+    /// has already settled, the drawn frame is the tree — while a panel that
+    /// has never finished a walk still draws the first-load placeholder, so
+    /// the fix narrowed the state rather than deleting it.
+    #[gpui::test]
+    async fn a_refresh_over_a_loaded_tree_keeps_the_rows_instead_of_flashing_loading(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        std::fs::write(dir.0.join("visible.txt"), "x").expect("seed file");
+
+        let (mut cx, panel) = settled_panel(cx, dir.0.clone());
+        assert!(
+            cx.debug_bounds("file-row").is_some(),
+            "the tree is on screen before anything is refreshed"
+        );
+
+        // Gesture half: the drawn control reaches the refresh path.
+        let refresh = cx
+            .debug_bounds("files-refresh")
+            .expect("the Refresh control is drawn");
+        cx.simulate_click(refresh.center(), Modifiers::none());
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("file-row").is_some(),
+            "the rows survive a refresh triggered by the real control"
+        );
+
+        // Frame half, in two steps, because a frame can only be asserted on
+        // once it has actually been drawn. First: `refresh()` is genuinely
+        // what raises the in-flight flag.
+        let in_flight = cx.update(|_, app| {
+            panel.update(app, |panel, cx| {
+                panel.refresh(cx);
+                panel.refresh_started
+            })
+        });
+        assert!(
+            in_flight,
+            "refresh() marks the walk in flight — the state the frame below holds"
+        );
+        cx.cx.run_until_parked();
+
+        // Second: hold exactly that flag and force the repaint. Nothing is
+        // walking now, so the flag survives the draw and the frame is the
+        // one a user saw once a second — which must be the tree, not the
+        // placeholder.
+        hold_in_flight(&mut cx, &panel);
+        assert!(
+            cx.debug_bounds("files-loading").is_none(),
+            "a refresh over an existing tree must not replace it with a placeholder"
+        );
+        assert!(
+            cx.debug_bounds("file-row").is_some(),
+            "the last good tree stays drawn while the refresh runs"
+        );
+
+        // The first-load placeholder still exists — the fix narrowed the
+        // state, it did not delete it.
+        cx.update(|_, app| {
+            panel.update(app, |panel, cx| {
+                panel.settled = false;
+                cx.notify();
+            })
+        });
+        cx.cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("files-loading").is_some(),
+            "the very first load, with nothing to show yet, still says so"
+        );
+    }
+
+    /// Puts the panel in the state the 1 s tick puts it in — a walk in
+    /// flight — and forces the repaint, without starting a walk that would
+    /// clear the flag again before the frame could be asserted on.
+    fn hold_in_flight(cx: &mut VisualTestContext, panel: &Entity<RightPanel>) {
+        cx.update(|_, app| {
+            panel.update(app, |panel, cx| {
+                panel.refresh_started = true;
+                cx.notify();
+            })
+        });
+        cx.cx.run_until_parked();
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| panel.refresh_started),
+            "the drawn frame really was drawn with a walk in flight"
+        );
+    }
+
+    /// The two cases a `file_tree.is_empty()` test of the loading state gets
+    /// wrong, and the reason the flag is "has a walk ever finished" instead.
+    ///
+    /// A genuinely empty directory has an empty tree forever, so it would
+    /// claim to be loading forever; and a root that cannot be read has an
+    /// empty tree *and* an error to show, so the 1 s tick would cover its
+    /// Retry button with the placeholder for the whole in-flight window —
+    /// hiding the one control that recovers the panel.
+    #[gpui::test]
+    async fn an_empty_directory_and_an_unreadable_root_never_claim_to_be_loading(
+        cx: &mut TestAppContext,
+    ) {
+        let empty = TempDir::new();
+        let (mut cx, panel) = settled_panel(cx, empty.0.clone());
+        assert!(
+            panel.read_with(&cx.cx, |panel, _| panel.file_tree.is_empty()),
+            "the fixture directory really is empty"
+        );
+        assert!(
+            cx.debug_bounds("files-loading").is_none(),
+            "an empty directory has finished loading — it is empty, not pending"
+        );
+        // The next 1 s tick, held over the drawn frame, must not say
+        // otherwise. Under the old `refresh_started && file_tree.is_empty()`
+        // rule this frame was the placeholder, forever, once a second.
+        hold_in_flight(&mut cx, &panel);
+        assert!(
+            cx.debug_bounds("files-loading").is_none(),
+            "…and the next 1 s tick over it must not say otherwise either"
+        );
+
+        let broken = TempDir::new();
+        let root = broken.0.clone();
+        std::fs::remove_dir_all(&root).expect("break the root before the first walk");
+        let (mut cx, panel) = settled_panel(&mut cx.cx, root);
+        assert!(
+            cx.debug_bounds("files-error").is_some(),
+            "an unreadable root draws its error"
+        );
+        let retry = cx
+            .debug_bounds("files-retry")
+            .expect("…and the Retry that recovers it");
+        // The 1 s retry tick fires while the user is reaching for Retry.
+        hold_in_flight(&mut cx, &panel);
+        assert!(
+            cx.debug_bounds("files-loading").is_none(),
+            "the retry loop must not paint over the error it is retrying"
+        );
+        assert_eq!(
+            cx.debug_bounds("files-retry").map(|bounds| bounds.origin),
+            Some(retry.origin),
+            "Retry stays exactly where the user was about to click it"
         );
     }
 }
