@@ -722,7 +722,7 @@ impl RightPanel {
                     }
                 }
             }
-            _ => return,
+            _ => {}
         }
     }
 
