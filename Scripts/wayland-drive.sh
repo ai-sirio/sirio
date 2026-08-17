@@ -55,6 +55,9 @@
 #   '
 #
 # Env: TILLER_WL_LABEL  names this instance and all its /tmp paths (default: wl-$$).
+#      TILLER_WL_BIN    drive a specific binary instead of rust/target/debug/tiller. A critic
+#      judging one wave must not have the binary swapped under it by a builder rebuilding the
+#      shared target dir mid-drive, so pin a snapshot: cp the binary to /tmp and point here.
 #      TILLER_WL_KEEP=1 leaves the compositor and app running after the actions finish.
 #      TILLER_WL_PROTOCOL_LOG=1 adds WAYLAND_DEBUG=1 to the app's own environment, so APP_LOG
 #      carries the app's ONE Wayland connection's wire trace — every wl_keyboard/wl_pointer event
@@ -70,7 +73,7 @@ OUTDIR="${1:?usage: wayland-drive.sh <outdir> '<actions>' [settle]}"
 ACTIONS="${2:-}"
 SETTLE="${3:-6}"
 LABEL="${TILLER_WL_LABEL:-wl-$$}"
-BIN="$ROOT/rust/target/debug/tiller"
+BIN="${TILLER_WL_BIN:-$ROOT/rust/target/debug/tiller}"
 MIN_COLORS=200
 # Standalone crate (deliberately outside rust/'s workspace — see Scripts/xdnd-source/Cargo.toml)
 # providing the `xdnd` action's real wl_data_device_manager drag SOURCE. Built on first use, not
