@@ -107,7 +107,10 @@ command -v grim >/dev/null || { echo "FAIL: grim is not installed" >&2; exit 3; 
 # Kill only processes whose environment names THIS instance. Matching on the process name would
 # kill other agents' instances — and, on a machine where the user runs a Wayland session, theirs.
 kill_ours() {
-  local var="$1" want="$2" name="$3" p
+  # Linux caps a process's comm at 15 characters and `pgrep -x` matches comm, so a longer name
+  # matches NOTHING and pgrep only warns on stderr. A pinned snapshot called /tmp/L2crit-tiller
+  # therefore leaked past cleanup silently. Truncate the pattern the same way the kernel did.
+  local var="$1" want="$2" name="${3:0:15}" p
   for p in $(pgrep -x "$name" 2>/dev/null); do
     tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "$var=$want" && kill "$p" 2>/dev/null
   done
@@ -119,7 +122,10 @@ cleanup() {
   }
   [ -n "${VP_PID:-}" ] && kill "$VP_PID" 2>/dev/null || true
   [ -n "${VK_PID:-}" ] && kill "$VK_PID" 2>/dev/null || true
-  kill_ours TILLER_SOCKET "$SOCK" tiller
+  # Match the binary's real process name, not the literal "tiller": TILLER_WL_BIN lets a critic
+  # drive a renamed snapshot (/tmp/L3-tiller), and pgrep -x never matched those, so every pinned
+  # instance leaked past cleanup and survived `pkill -x tiller` too.
+  kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
   kill_ours SWAYSOCK "$SWAYSOCK" sway
   return 0
 }
@@ -217,7 +223,12 @@ start_virtual_keyboard() {
   verify_nested_sway || return 1
   # The press/release happens before Tiller starts; -s then keeps wtype (and its virtual keyboard)
   # connected without leaving Shift held. Later type/key commands use the already-advertised seat.
-  wtype -M shift -m shift -s 600000 -k Shift_L >"$VK_LOG" 2>&1 &
+  #
+  # The hold has to outlive the drive. At the old 10 minutes, a TILLER_WL_KEEP session that ran
+  # longer lost ALL keyboard input silently — every type/key/chord still exited 0 and nothing
+  # reached the app, which reads exactly like the app ignoring input and has already been recorded
+  # as a false negative. Four hours, overridable.
+  wtype -M shift -m shift -s "${TILLER_WL_KEYBOARD_HOLD_MS:-14400000}" -k Shift_L >"$VK_LOG" 2>&1 &
   VK_PID=$!
   sleep 0.1
   kill -0 "$VK_PID" 2>/dev/null || { cat "$VK_LOG" >&2; return 1; }
@@ -559,7 +570,18 @@ shot() {
   swaymsg -s "$SWAYSOCK" output HEADLESS-1 resolution "${W1}x${H1}" >/dev/null 2>&1
   OUTPUT_W="$W1"; OUTPUT_H="$H1"
   local res="${W1}x${H1}"
-  sleep 1
+  # Wait for the app to actually finish the second relayout, rather than guessing with a sleep.
+  # A fixed `sleep 1` was long enough on the x86 box and is not on a Pi 5 under load: it produced
+  # a full-size capture of a window still laid out at W2xH2, black down the right and bottom edges,
+  # and coordinates read off such a frame land in dead space. Ask sway instead of guessing.
+  local deadline=$((SECONDS + ${TILLER_WL_RELAYOUT_TIMEOUT:-10})) laid_out=0
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if swaymsg -s "$SWAYSOCK" -t get_tree 2>/dev/null \
+        | grep -q "\"width\": $W1,"; then laid_out=1; break; fi
+    sleep 0.2
+  done
+  [ "$laid_out" = 1 ] || echo "WARN window never relaid out to ${W1}x${H1}; frame may be letterboxed" >&2
+  sleep "${TILLER_WL_REPAINT_SETTLE:-0.6}"
   local path
   path="$(printf '%s/%02d-%s.png' "$OUTDIR" "$SHOT_N" "$name")"
   grim -o HEADLESS-1 "$path" 2>/dev/null
