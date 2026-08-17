@@ -3,14 +3,75 @@
 Written by the orchestrator so this work survives losing any single session. Anyone picking it up
 should be able to read this file and continue without re-deriving anything.
 
-Branch `linux/gpui-waku`, worktree `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`.
+Branch `linux/gpui-waku`, worktree **`/home/epalmi/tiller`** on a Raspberry Pi 5.
 Everything is committed — the working tree is no longer the state.
 
-> **Head refreshed 2026-08-14 17:30.** Everything from "## Closed" down is kept as history and
-> parts of it are superseded — in particular **the display crisis is over**; see
-> "2026-08-14 — both lanes work" below before believing anything about `:1`, `:2` or blank frames.
+> **Head refreshed 2026-08-17.** Read the next section first: **the machine changed**, and it
+> invalidates every absolute path and the whole `DISPLAY=:1` half of this file. Everything from
+> "## Closed" down is history, and parts of it are superseded twice over.
 
 ---
+
+## 2026-08-17 — the machine changed, and one lane replaced two
+
+The work moved from an x86 desktop to a **Raspberry Pi 5** (aarch64, 4 cores, 7.7 GB RAM, no
+monitor). `docs/linux-rewrite/ENVIRONMENT.md`'s top section is the measured record. Three
+consequences reshape everything below:
+
+**1. `DISPLAY=:1` does not exist here.** XWayland on V3D fails at swapchain creation. The
+single-holder X drive lock — described below as "the project's throughput ceiling" — is simply
+gone, and so is the lane the `F-BRW` rows depended on. **There is now one lane, and it has no
+lock:**
+
+```bash
+Scripts/pi-session.sh status      # the PARENT compositor. Nothing renders without it.
+eval "$(Scripts/pi-session.sh env)"
+export TILLER_WL_LABEL=mine TILLER_WL_BIN=/tmp/mine-tiller
+cp rust/target/debug/tiller "$TILLER_WL_BIN"
+Scripts/wayland-drive.sh /tmp/shots '<actions>' 20
+```
+
+`Scripts/wayland-drive.sh` works here unmodified and carries the full gesture vocabulary. Use
+`settle` 15-30; the default 6 was tuned on the faster box. **Never `pkill -x sway`** — it kills the
+parent and every other agent's nested compositor. `Scripts/pi-session.sh start` restores the parent.
+
+**2. Two independent throughput ceilings replaced the drive lock.** Workflow fan-out is capped at
+`min(16, cores - 2)` — **two agents at a time** on this box. And `main.rs` is 15 751 lines holding
+every `TerminalView` construction, so two builders that both need it cannot run concurrently
+without one seeing the other's half-finished edits through the shared `rust/target`. The wave shape
+that works: **two builders on disjoint crates → one integration build → two fresh critics.**
+
+**3. Only `claude` is installed.** codex, opencode, pi and oh-my-pi are absent, so rows needing
+them are environment-blocked here for a different reason than they were on the old box.
+`rust/crates/tiller_ui/tests/fixtures/chat_fixture.py` (via `TILLER_ACP_PROGRAM`) is a legal ACP v1
+counterparty for states the installed agent cannot produce — say when you used it, and never use it
+to stand in for a gesture.
+
+### What moved today
+
+`PASSED 353 → 357 · FAILED — defective 1 → 5 · UNREACHABLE 28 → 20`, plus four rows wired.
+
+- **Stale `UNREACHABLE`s cost exactly what stale `FAILED`s cost.** Eight rows were parked on
+  2026-08-14/15 with reasons of the form "the harness has no primitive for this". The primitives
+  were built afterwards and nobody re-ran them. Four were finished work the ledger was denying;
+  four were genuine port gaps the stale reason was hiding. **One reason — "a stuck Question waiting
+  banner; fs confirms write never ran" — was load-bearing for four rows at once**, and a single
+  real click on *Allow Once* retired it: the tool completed and the file on disk changed.
+  `EVIDENCE-STANDARD.md` already said verdicts expire. This is the price of not re-running them.
+- **"Zero app callers" is the remaining shape of the backlog.** F-CORE-ACT-17/18/22/23 were
+  UNREACHABLE for one reason: `tiller_activity` was complete, correct and unit-tested, and nothing
+  called it. Half B took no change to `tiller_activity` at all. The same shape still holds
+  `F-TERM-02`, `F-TERM-PTY-07/08`, `F-GIT-STATUS-02`, `F-GIT-DIFF-03` and `F-BRW-06`.
+- **A repair pass can be judged more harshly than the thing it repaired.** The critic that judged
+  the activity wiring passed three rows and then found that *selecting* a worktree changed its
+  status — the row reads the window's tab set instead of that worktree's panes, so an error is
+  erased the instant you click it and an innocent worktree inherits one. One state, several views:
+  the exact problem the piece existed to end.
+- **Faults that fail silently are the ones to hunt.** Four lane faults found by driving it, not
+  reading it — a `pgrep -x` that could not see a pinned binary because Linux caps `comm` at 15
+  characters, a virtual keyboard that expired after ten minutes while `type` kept returning 0, a
+  screenshot taken before the window relaid out, a killed parent compositor whose name a leaked
+  nested one silently inherited. **Every one reads as "the app ignored my input."**
 
 ## The goal, in one line
 
@@ -26,25 +87,26 @@ Features stay Tiller's; the UI is redrawn taking inspiration — never code — 
 block matches. Run the gate rather than counting yourself; a paraphrased count has already produced
 a phantom discrepancy here.
 
-As of 2026-08-14 17:20 (389 rows, denominator frozen):
+**Do not read a count from this file.** Every snapshot written here has been overtaken within
+hours, and this file's own warning — that a paraphrased count already produced a phantom
+discrepancy — applies to itself. Run the gate:
 
 ```
-PASSED 190 · half-proven 34 · FAILED — absent 14 · FAILED — defective 47
-UNREACHABLE 12 · N/A — platform 12 · NOT EXERCISED 79 · builder-claimed 1     (389)
+python3 Scripts/ledger-totals.py          # counts, recomputed from the body
+python3 Scripts/ledger-totals.py --write  # after editing rows, to re-sync the totals block
 ```
 
-Two things to read correctly:
+Two rules that survive every snapshot, both learned the expensive way:
 
-- **`FAILED — absent` fell from 82 to 14 today** and that is the day's biggest correction. `P105`
-  re-censused the bucket and found 20 rows built and 36 partial; the ledger had been asserting that
-  features which exist do not. Only **14** are genuinely absent, and all 14 are dispatched.
-- **`PASSED` did not move.** Removing unearned "absent" claims must never manufacture passes.
-  Census evidence — a symbol and a line number — makes a row `NOT EXERCISED`, never `PASSED`.
-  That substitution is the mechanism that produced this project's false passes.
+- **Removing an unearned claim must never manufacture a pass.** Census evidence — a symbol and a
+  line number — makes a row `NOT EXERCISED`, never `PASSED`. That substitution is the mechanism
+  that produced this project's false passes.
+- **Verdicts expire in both directions.** A stale `FAILED` sends a builder to build what already
+  exists; a stale `UNREACHABLE` hides both finished work and work still owed. On 2026-08-17 eight
+  rows parked as "the harness cannot do this" turned out to be four of each.
 
-`NOT EXERCISED` at 79 is now the real backlog, and `FAILED — defective` at 47 is the largest
-actionable one. `P113-triage.md` groups those 47 by root cause and ranks them by rows-unblocked —
-they are far fewer than 47 bugs.
+`P113-triage.md` groups the `FAILED — defective` bucket by root cause and ranks it by rows-unblocked;
+root causes are always far fewer than rows.
 
 ## The four references, frozen
 
@@ -60,7 +122,12 @@ they are far fewer than 47 bugs.
 rows are in scope. COSMIC (Pop!_OS) supersedes waku as the general visual bar; the titlebar follows
 the comet reference.
 
-Reference checkouts (read-only, never copy code): `../\_tiller-refs/{waku,zed,orca,t3code}`.
+Reference checkouts (read-only, never copy code) lived at `../\_tiller-refs/{waku,zed,orca,t3code}`
+on the old box and **are not present on the Pi**. A critic that wants to check for transplanted code
+must therefore judge on internal evidence — foreign identifiers, attribution markers, idioms that do
+not match this codebase's own types — or clone a reference itself, read-only. Say which you did.
+The Swift original, by contrast, **is** here: `App/` and `Packages/` in this same repo. It is the
+authority on what a clause meant, and reading it is not optional when a clause is ambiguous.
 
 ## 2026-08-14 — both lanes work, and that changes the shape of the work
 
@@ -79,87 +146,31 @@ each cost someone a false result.
 behind one agent. That is why `P112` — can the Wayland lane be given synthetic input — is worth more
 than the row it would close.
 
-## Who owns what right now (18:40)
+## Who does what now (2026-08-17) — roles, not panes
 
-**The OpenAI account went out at ~18:15 and took four panes with it** — `codex11`, `codex12`, `pi`
-and `pireview` all returned `Codex error: The usage limit has been reached`. Not a rate limit that
-clears in minutes; `codex11` was told **2026-08-20 08:19**, and every `openai-codex` model in the
-picker draws on the same account, so switching models *within* that provider buys nothing.
+The named panes below (`pi`, `sonnet`, `codex12`, `fable`) were herdr panes on the old box and are
+gone. The structure that replaced them is the same rule expressed differently, and the rule is the
+one thing that must not change:
 
-**The user then rebuilt the roster on Anthropic.** `pi` (w1:p4) and `codex12` (w1:p3) are now
-**Claude Code panes running Sonnet 5**, 1M context, thinking high, auto mode. The names are
-unchanged; the engines behind them are not. `pireview` (w1:p6) is **gone from `herdr agent list`**.
+**The critic is never the agent that built the piece.** Builders and critics are now workflow
+subagents spawned per piece. A critic gets the row's clause, the VERIFY line and the lane recipe —
+**never the builder's report or reasoning** — and must compile, launch, screenshot and exercise the
+thing itself. The orchestrator applies verdicts to `INVENTORY-LEDGER.md`; builders never touch it.
 
-### The roles, set by the user 18:37 — read this before dispatching anything
+Two mechanics make that honest rather than nominal, and both were added today after they failed:
 
-**`pi`, `sonnet` and `codex12` are implementers. `fable` is the critic/reviewer.** I had this
-backwards in the 18:40 table and dispatched against the inverted version; the two mis-slotted panes
-were already deep into their work, so they are being allowed to finish rather than thrashed. The
-roles apply **from the next dispatch onward**.
+- **Pin the binary.** A critic and a builder share one `rust/target`. Without
+  `TILLER_WL_BIN=/tmp/<label>-tiller` pointing at a snapshot, a builder's rebuild swaps the binary
+  under a running drive and the verdict silently describes something the critic never compiled.
+- **Commit path-scoped, early.** A builder was killed mid-piece with 1167 uncommitted insertions
+  and no report; the next agent had to read `git diff` and judge inherited code it did not write.
+  `ENVIRONMENT.md`'s "a shared file is not a reason to leave work uncommitted" is the protocol —
+  never `git add -A`, and say in the message when a shared file may carry someone else's edits.
 
-| Pane | Engine | Role | Piece in flight | Territory |
-|---|---|---|---|---|
-| `pi` (w1:p4) | Sonnet 5 | **implementer** | `P121` (mis-slotted — finishing it). Delivered `P119`; done `P112`, `P116` Slice C | back to `rust/` after |
-| `sonnet` (w1:p5) | Claude | **implementer** | `P109` — 34 gestures; **holds the `:1` drive lock** | drives only today |
-| `codex12` (w1:p3) | Sonnet 5 | **implementer** | `P120` — ~21 re-slotted rows. Delivered `P118`; done `P110` | no `rust/` |
-| `fable` (w1:pD) | Fable 5 | **critic / reviewer** | `P111` (mis-slotted — finishing it) | **inherits `INVENTORY-LEDGER.md`** |
-| ~~`codex11` (w1:p2)~~ | — | — | **OUT OF CREDIT.** Never started `P117` | — |
-| ~~`pireview` (w1:p6)~~ | — | — | **GONE.** Delivered `P113`, `P115`, `P116` Slice A | was sole ledger owner |
+File ownership is still how builders stay out of each other's way, and the two standing rules in
+`QUEUE.md` still hold: reassigning a file under a running agent is the orchestrator's bug, and
+whoever widens an enum owns every match arm it breaks.
 
-**`fable` inherits `INVENTORY-LEDGER.md` from `pireview`** once `P111` lands, and is the pane that
-sets verdicts for `P118`, `P119`, `P120` and `P121`.
-
-### The one row-set `fable` may not judge
-
-`fable` is currently **building** `P111` (`F-SET-12`, `F-SET-17`, `F-AGENT-OPENCODE-03` landed;
-`F-SET-13` in flight). Under the binding rule — **the critic is never the agent that built the
-piece** — `fable` cannot be the judge of its own `P111` rows, and it is the only critic.
-
-**Those rows go to the orchestrator, who built none of them.** Everything else is `fable`'s. Role
-labels are the user's org structure; builder ≠ critic is the project's invariant, and where the two
-collide the invariant wins.
-
-### What was tried on the dead panes, so nobody retries it
-
-Filtering `pi`'s old `/model` picker for `claude` returned **no matches** — no Anthropic provider
-was configured there, and its only non-exhausted options were `opencode-go` (`minimax-m3`,
-`qwen3.7-max`, `qwen3.7-plus`), a poor match for a subtle GPUI layout defect. That is moot now that
-the pane is a Claude Code pane, but it is why the swap was needed rather than a model change.
-
-Answer any rate-limit or `/model` menu with `send-keys down`/`enter` and read the cursor back — a
-typed digit confirms the highlighted default instead, which is how `codex11` got silently moved to
-`gpt-5.6-luna high`.
-
-**Ownership is by file, not by feature.** Two agents in one worktree otherwise overwrite each other
-silently — not as a git conflict, but as one agent reading a file, thinking, and writing over
-another's work. Commit path-scoped, never `git add -A`, and `grep '??'` before calling a piece done:
-the rule that prevents collisions never catches a file nobody is thinking about.
-
-Expect `index.lock` contention with six panes committing. **Retry; never delete the lock.**
-
-### Standing rules that cost something to relearn
-
-- **The critic must never be the agent that built the piece.** Rotate.
-- **A feature the critic has not successfully tried does not exist.** Code plus a green test is
-  `NOT EXERCISED`, never `PASSED`.
-- **Reset context before every piece** — `/clear` for `codex` and Claude panes, `/new` for `pi`
-  panes. **Check the model after `/new`**: it resets a pi pane to the global default and the critic
-  silently loses its stronger model. Order is always read → reset → dispatch, and the brief must
-  carry its own context.
-- **Reproduce a gate with the gate's own command.** A paraphrase returned "clean" while the gate was
-  red and overruled three correct agents.
-- **`herdr pane send-text` replaces the buffer** rather than appending; `herdr pane run` sends text
-  and Enter together and is what you want. `shift+tab` and bare `Enter` via `pane key` report
-  success and do nothing.
-- Every agent here is **text-only**. Visual judgement is the orchestrator's alone —
-  see `CRITIC-visual-baseline.md`.
-
-Briefs live in `docs/linux-rewrite/tasks/`. They are written to be **self-contained**, because
-every agent's context is reset before it is given one (see Method).
-
-Ownership is by **file**, not by feature. Three agents in one worktree will otherwise overwrite each
-other silently — not as a clean git conflict, but as one agent reading a file, thinking for two
-minutes, and writing over another's work.
 
 ## Closed
 
