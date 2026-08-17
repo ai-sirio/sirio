@@ -4,7 +4,73 @@ Facts about *this* box that builders keep rediscovering, each one costing a pane
 shell archaeology. Every line here was measured, not assumed. **Briefs should link here rather than
 restate it**, and anything you discover the hard way belongs in this file the same hour.
 
-Last measured: 2026-08-13, late evening.
+Last measured: 2026-08-13, late evening. **Then the machine changed — read the next section before
+anything below it.**
+
+---
+
+# 2026-08-17 — the box is a Raspberry Pi 5 now, and everything below was measured on a different one
+
+Every absolute path in the rest of this file, in `STATE.md`, `QUEUE.md` and the P-reports —
+`/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, `/home/enzopalmisano/Hello-World` — belongs
+to an x86 desktop that is no longer the machine. **Translate; do not follow.**
+
+| | measured 2026-08-17 |
+|---|---|
+| host | Raspberry Pi 5, **aarch64**, 4 cores, 7.7 GB RAM, NVMe with 434 GB free |
+| worktree | `/home/epalmi/tiller`, branch `linux/gpui-waku` |
+| GPU | Broadcom **V3D** via `/dev/dri/renderD128` — real hardware, not lavapipe |
+| `cargo check --workspace` | **exit 0**, 7 m 07 s, 2 warnings (`browser.rs:827` `pump_task` never read; `main.rs:9482` `sidebar_projects` never used) |
+| `rust/target` | 5.1 GB · `target/debug/tiller` 284 MB |
+| agent CLIs | **`claude` only** (`~/.local/bin/claude`), plus `node`/`npx`/`bun`. `codex`, `opencode`, `pi`, `oh-my-pi` are **absent** — every row that needs one is environment-blocked here for a different reason than it was on the old box |
+| `cargo` on PATH | still no. `export PATH="$HOME/.cargo/bin:$PATH"` |
+
+## The display: a headless sway that renders on the real GPU
+
+There is no monitor. A **parent** sway runs on the wlroots *headless* backend and still composites
+through V3D, so GPUI's Vulkan renderer paints real pixels and `grim` captures them:
+
+```
+WAYLAND_DISPLAY=wayland-1   XDG_RUNTIME_DIR=/run/user/1000    # the parent compositor
+wayvnc -o HEADLESS-1 127.0.0.1 5900                           # a human can watch over VNC
+```
+
+X11 is **not** a lane here: XWayland on V3D fails at swapchain creation. The `DISPLAY=:1` lane and
+its single-holder drive lock — the throughput ceiling this project spent a day working around — do
+not exist on this box. `F-BRW` rows, which WAYLAND-LANE.md sends to `DISPLAY=:1`, have no lane at
+all here.
+
+## `Scripts/wayland-drive.sh` works unmodified, and it is the lane
+
+Verified 2026-08-17 10:26: it boots its own **nested** sway inside the parent above, launches the
+app with a private SQLite DB and control socket, and captured `1715x972 · 5434 colours`.
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1
+export TILLER_WL_LABEL=mylabel
+Scripts/wayland-drive.sh /tmp/shots 'ctl project.add path=/home/epalmi/tiller
+                                     shot sidebar' 8
+```
+
+The full vocabulary is live on this box — `click`, `rightclick`, `down`/`up`/`drag`, `scroll`,
+`chord`, `modclick`, `xdnd`, `type`, `key`, `title`, `ctl`, `shot`. No lock, any number of
+instances in parallel.
+
+**`TILLER_WL_BIN` pins the binary** (added 2026-08-17). A critic judging a wave must not have the
+binary swapped under it by a builder rebuilding the shared `rust/target`:
+
+```bash
+cp rust/target/debug/tiller /tmp/mylabel-tiller
+export TILLER_WL_BIN=/tmp/mylabel-tiller
+```
+
+### The trap that cost a session an hour
+
+A session on this Pi built a compositor, a VNC server and a from-scratch RFB input driver in Python
+before anyone checked whether the repo already had a drive lane. It did, it was far richer — the
+hand-rolled driver had no modifiers, no drag, no scroll, no screenshot — and it worked here on the
+first try. **Check `Scripts/` before building an instrument.** The same lesson as the right-click
+finding below: the expensive wrong answer is the one that closes an avenue you never tested.
 
 ## Rust toolchain
 
