@@ -82,12 +82,21 @@ fn write(repo: &Path, relative: &str, content: &[u8]) -> PathBuf {
 }
 
 /// Creates a git repo with one commit on `main` containing `file.txt`.
-/// The identity is passed as `-c` config on the commit itself, so no
-/// `git config` calls (and their fsyncs) are needed: two fewer process
-/// spawns per repo, which matters when the machine is under load.
+///
+/// The identity is written into the repo's own config rather than passed as
+/// `-c` on the first commit alone. The `-c` form saved two process spawns
+/// per repo, but it only covered the commit `make_repo` itself makes:
+/// `binary_file_reports_no_line_counts`, `crlf_files_diff_cleanly` and
+/// `status_and_diff_handle_spaces_and_non_ascii_paths` all make a *second*
+/// commit through the bare `git` helper, and on a machine with no global
+/// git identity (this one) git refuses it with "Author identity unknown"
+/// and the test dies in its fixture. A fixture that only works on a
+/// developer's own configured box is a fixture that lies about the code.
 fn make_repo() -> TempDir {
     let repo = TempDir::new();
     git(repo.path(), &["init", "-b", "main"]);
+    git(repo.path(), &["config", "user.email", "test@tiller.dev"]);
+    git(repo.path(), &["config", "user.name", "Tiller Test"]);
     write(repo.path(), "file.txt", b"one\ntwo\nthree\n");
     git(repo.path(), &["add", "-A"]);
     git(

@@ -113,12 +113,18 @@ fn porcelain_worktree_count(repo: &Path) -> usize {
 }
 
 /// Creates a git repo with one commit on `main`.
-/// The identity is passed as `-c` config on the commit itself, so no
-/// `git config` calls (and their fsyncs) are needed: two fewer process
-/// spawns per repo, which matters when the machine is under load.
+///
+/// The identity is written into the repo's own config, not passed as `-c`
+/// on the first commit alone: `created_worktree_survives_a_porcelain_round_trip_with_base`
+/// makes a *second* commit through the bare `git` helper, and on a machine
+/// with no global git identity (this one) git refuses it with "Author
+/// identity unknown" and the test dies in its fixture rather than in the
+/// code under test. Same defect, same fix, as `git_integration.rs`.
 fn make_repo(tag: &str) -> TempDir {
     let repo = TempDir::new(tag);
     git(repo.path(), &["init", "-b", "main"]);
+    git(repo.path(), &["config", "user.email", "test@tiller.dev"]);
+    git(repo.path(), &["config", "user.name", "Tiller Test"]);
     std::fs::write(repo.path().join("file.txt"), "one\ntwo\nthree\n").expect("write file");
     git(repo.path(), &["add", "-A"]);
     git(
