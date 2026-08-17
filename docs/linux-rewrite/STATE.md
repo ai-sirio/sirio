@@ -47,6 +47,21 @@ them are environment-blocked here for a different reason than they were on the o
 counterparty for states the installed agent cannot produce — say when you used it, and never use it
 to stand in for a gesture.
 
+### The one bucket this machine cannot re-exercise: `F-BRW`
+
+Eight of the nine `F-BRW` rows are `PASSED`, and **every one of those passes was earned on the old
+box's `DISPLAY=:1` lane.** The embedded browser needs an X11 window handle; on the Wayland lane its
+chrome renders and the page does not (`WAYLAND-LANE.md`), and XWayland here dies at swapchain
+creation. So there is no lane on this machine that can put a page in a browser tab.
+
+**Say this out loud before the finish line, not at it.** The goal's bar is a full-app critic
+ticking every row live; a critic that meets eight rows it physically cannot drive will either
+report a regression that is not one or, worse, tick them from the old box's evidence. Neither is
+acceptable. The honest options are: re-earn them on a machine with a working X11 lane, or record
+them as carried-over-from-another-host with the date and the host named in the evidence column.
+The same question applies, more weakly, to every other row whose pass predates 2026-08-17 — the
+code did not change, the platform did.
+
 ### What moved today
 
 `PASSED 353 → 357 · FAILED — defective 1 → 5 · UNREACHABLE 28 → 20`, plus four rows wired.
