@@ -47,11 +47,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tiller_git::{
-    DiffLine, DiffOrigin, DiffStat, FileDiff, GitError, StatusEntry, StatusSnapshot, diff_entry,
-    discard, discard_all, stage, stage_all, stats, status, unstage,
+    DiffLine, DiffOrigin, DiffSideBySideLine, DiffSideBySideRow, DiffStat, FileDiff,
+    GitDiffSideBySide, GitError, StatusEntry, StatusSnapshot, diff_entry, discard, discard_all,
+    stage, stage_all, stats, status, unstage,
 };
 use tiller_theme::Theme;
 
+use crate::controls;
 use crate::sidebar::icons::{Icon, IconElement};
 
 /// Context lines fetched for each change. Generous enough that the
@@ -71,6 +73,122 @@ const BAND_ROW_HEIGHT: f32 = 24.0;
 /// A run of unchanged context lines this long collapses into one labelled
 /// band (orca's "18 hidden lines").
 const CONTEXT_BAND_MIN: usize = 4;
+/// Assumed advance width of one glyph of the 11.5px code family.
+///
+/// A *reservation*, deliberately not a measurement. GPUI can measure text,
+/// but only during layout, and this number is needed to build the layout:
+/// the two columns have to be told a width before either knows what it
+/// holds, because equal columns down the whole diff is the property that
+/// makes a split diff readable at all. A typical monospace advance at
+/// 11.5px is ≈6.9px, so this errs about 8% wide — which costs a little dead
+/// space to the right of the single widest line and never clips it. Erring
+/// the other way would put an ellipsis on the one line the reader most
+/// wanted to see.
+const SPLIT_CHAR_WIDTH: f32 = 7.5;
+/// The line-number gutter plus padding inside one split column: 28px of
+/// number, 6px of padding on each side, and 2px of slack.
+const SPLIT_GUTTER_WIDTH: f32 = 42.0;
+/// A split column is never narrower than this, so a diff of short lines
+/// still reads as two columns rather than two slivers.
+const SPLIT_COLUMN_MIN: f32 = 240.0;
+/// …and never wider than this — about 90 characters.
+///
+/// This cap is the whole reason the port can size to content at all, and
+/// the macOS original is why it exists. `SideBySideDiffLayout.columnWidth`
+/// halves the *viewport* and truncates long lines, and its comment records
+/// why: "Sizing to the content is what put the right-hand column past the
+/// right edge of the pane: one long line in the file was enough to leave a
+/// side-by-side view with only one visible side"
+/// (`DiffContentAdapter.swift:246`). Sizing to content is exactly what this
+/// port does, so it inherits that bug unless the reservation is bounded.
+///
+/// 720 is bounded against the narrowest pane this surface is actually used
+/// at — ~980px, measured on the 1715×972 lane with the Files panel open.
+/// Two 720px columns put the divider at 721, so it stays on screen and
+/// roughly a quarter of the pane still shows the new file at rest; the rest
+/// of a long line is reached by scrolling *inside the diff*, which the
+/// macOS build could not do at all. Past the cap a line truncates in its
+/// cell, exactly as that build always did.
+///
+/// The principled version measures the pane instead of assuming it — see
+/// the report's follow-up note; it needs a `canvas` measuring pass and a
+/// width field on the tab, which is more machinery than this row is owed.
+const SPLIT_COLUMN_MAX: f32 = 720.0;
+/// The 1px rule between the two columns.
+const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
+
+/// How an expanded file's diff is drawn.
+///
+/// What the macOS original actually did, read rather than assumed:
+/// `ChangesListView` was a list of *file rows only* — it rendered no diff
+/// lines at all — and its per-file `Open diff` opened a **separate tab**
+/// (`App/Workspace/DiffContentAdapter.swift:52`) whose one and only
+/// renderer was `SideBySideDiffView`. `GitDiffSideBySide` had exactly one
+/// caller in the whole app (`DiffContentAdapter.swift:283`).
+///
+/// This port made two changes to that, and the second one is the bug. It
+/// gave the Changes surface inline expandable diffs (orca's idea, not
+/// macOS's — `04-ux-patterns-waku-does-not-cover.md`), and it routed
+/// `OpenDiff` to *the same Changes surface* rather than to a diff tab
+/// (`main.rs` `add_changes_tab(Some(path))`). Folding the second surface
+/// into the first left the side-by-side rendering with no door anywhere in
+/// the app.
+///
+/// So the door is a mode on the surface that swallowed it, not a
+/// resurrected second surface — see [`ChangesTab::render_toolbar`] for
+/// where the control lives and why.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffViewMode {
+    /// One column, deletions and additions interleaved in file order.
+    #[default]
+    Unified,
+    /// Two columns: the old file on the left, the new one on the right,
+    /// context paired across both and deletion/addition runs zipped
+    /// (`tiller_git::GitDiffSideBySide`).
+    Split,
+}
+
+/// The app-wide diff view mode. A GPUI global rather than per-tab state on
+/// purpose: `main.rs` rebuilds every `ChangesTab` when a worktree rebinds
+/// (`rebind_changes_tabs`), and a per-tab field would silently snap back to
+/// Unified every time — a preference that forgets itself is worse than no
+/// preference. See the report for what a *durable* (across relaunch)
+/// preference additionally needs, which lives outside this crate.
+struct DiffViewModeSetting(DiffViewMode);
+
+impl gpui::Global for DiffViewModeSetting {}
+
+impl DiffViewMode {
+    /// Display order; index into this is the segmented control's index.
+    const ORDER: [DiffViewMode; 2] = [DiffViewMode::Unified, DiffViewMode::Split];
+    const LABELS: &'static [&'static str] = &["Unified", "Split"];
+
+    fn index(self) -> usize {
+        match self {
+            DiffViewMode::Unified => 0,
+            DiffViewMode::Split => 1,
+        }
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ORDER.get(index).copied().unwrap_or_default()
+    }
+
+    /// The current choice. Defaults to `Unified` when nothing has set it,
+    /// so a test (or a first launch) never has to install the global.
+    pub fn get(cx: &App) -> Self {
+        if cx.has_global::<DiffViewModeSetting>() {
+            cx.global::<DiffViewModeSetting>().0
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Records the choice for every Changes surface in the app.
+    pub fn set(mode: Self, cx: &mut App) {
+        cx.set_global(DiffViewModeSetting(mode));
+    }
+}
 
 /// Events emitted to the shell.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,6 +342,18 @@ enum ChangeRow {
         section: ChangeSection,
         path: PathBuf,
         line: DiffLine,
+    },
+    /// One row of the side-by-side rendering: old on the left, new on the
+    /// right, either side possibly absent where a run was longer than its
+    /// partner. Produced by `tiller_git::GitDiffSideBySide` — the pairing,
+    /// the zipping and the padding are the model's, never this file's.
+    SplitLine {
+        section: ChangeSection,
+        path: PathBuf,
+        /// Position of this row in the file's split-row stream, for a
+        /// unique element id.
+        key: usize,
+        row: DiffSideBySideRow,
     },
     /// A file whose diff could not be fetched. Rendered as an explicit
     /// "diff unavailable" row when expanded, so an empty expansion can
@@ -679,7 +809,7 @@ impl ChangesTab {
     /// changes, untracked}` — which exists precisely because a file can
     /// hold two independent states at once. An empty section is omitted;
     /// a collapsed section keeps only its header.
-    fn section_rows(&self) -> Vec<SectionRows> {
+    fn section_rows(&self, mode: DiffViewMode) -> Vec<SectionRows> {
         let snapshot = StatusSnapshot {
             entries: self.entries.clone(),
         };
@@ -710,7 +840,7 @@ impl ChangesTab {
                         expanded,
                     });
                     if expanded {
-                        self.expand_diff(&mut rows, section, entry);
+                        self.expand_diff(&mut rows, section, entry, mode);
                     }
                 }
             }
@@ -728,7 +858,13 @@ impl ChangesTab {
     /// expanded file, under the section that row belongs to. The diff is the
     /// worktree-vs-HEAD combined diff — the same one the +N −M counts come
     /// from.
-    fn expand_diff(&self, rows: &mut Vec<ChangeRow>, section: ChangeSection, entry: &StatusEntry) {
+    fn expand_diff(
+        &self,
+        rows: &mut Vec<ChangeRow>,
+        section: ChangeSection,
+        entry: &StatusEntry,
+        mode: DiffViewMode,
+    ) {
         let Some(diff) = self.diffs.get(&entry.path) else {
             // The diff failed to load: say so explicitly. Rows that render
             // nothing here would make an expanded file look like "no
@@ -746,8 +882,12 @@ impl ChangesTab {
         // A run of unchanged context lines collapses into one labelled band
         // (orca's "18 hidden lines"), expanded in place on click. `key` is
         // the run's first line's position in the file's flattened line
-        // stream — stable within one snapshot.
+        // stream — stable within one snapshot, and *identical in both view
+        // modes*, so switching Unified↔Split never reopens a different band
+        // than the one the reader opened.
         let mut line_index = 0usize;
+        // Running index of the split rows this file emits, for element ids.
+        let mut split_key = 0usize;
         for hunk in &diff.hunks {
             rows.push(ChangeRow::Hunk {
                 section,
@@ -756,47 +896,41 @@ impl ChangesTab {
             });
             let mut i = 0usize;
             while i < hunk.lines.len() {
-                if hunk.lines[i].origin == DiffOrigin::Context {
-                    let start = i;
-                    while i < hunk.lines.len() && hunk.lines[i].origin == DiffOrigin::Context {
-                        i += 1;
-                    }
-                    let count = i - start;
-                    let key = line_index + start;
-                    let expanded = self.is_band_expanded(section, &entry.path, key);
-                    if count >= CONTEXT_BAND_MIN {
-                        rows.push(ChangeRow::ContextBand {
-                            section,
-                            path: entry.path.clone(),
-                            key,
-                            count,
-                            expanded,
-                        });
-                        if expanded {
-                            for line in &hunk.lines[start..i] {
-                                rows.push(ChangeRow::Line {
-                                    section,
-                                    path: entry.path.clone(),
-                                    line: line.clone(),
-                                });
-                            }
-                        }
-                    } else {
-                        for line in &hunk.lines[start..i] {
-                            rows.push(ChangeRow::Line {
-                                section,
-                                path: entry.path.clone(),
-                                line: line.clone(),
-                            });
-                        }
-                    }
-                } else {
-                    rows.push(ChangeRow::Line {
+                // Walk the hunk in maximal same-kind runs. Context runs are
+                // what the bands collapse; a non-context run is exactly the
+                // deletion/addition stretch the side-by-side model zips, and
+                // handing it over whole is what makes Split's pairing the
+                // model's behaviour rather than a second implementation of
+                // it. Splitting at context boundaries changes nothing:
+                // `append_lines` flushes on every context line anyway.
+                let is_context = hunk.lines[i].origin == DiffOrigin::Context;
+                let start = i;
+                while i < hunk.lines.len()
+                    && (hunk.lines[i].origin == DiffOrigin::Context) == is_context
+                {
+                    i += 1;
+                }
+                let segment = &hunk.lines[start..i];
+                if !is_context {
+                    push_segment(rows, section, &entry.path, segment, mode, &mut split_key);
+                    continue;
+                }
+                let count = segment.len();
+                let key = line_index + start;
+                let expanded = self.is_band_expanded(section, &entry.path, key);
+                if count >= CONTEXT_BAND_MIN {
+                    rows.push(ChangeRow::ContextBand {
                         section,
                         path: entry.path.clone(),
-                        line: hunk.lines[i].clone(),
+                        key,
+                        count,
+                        expanded,
                     });
-                    i += 1;
+                    if expanded {
+                        push_segment(rows, section, &entry.path, segment, mode, &mut split_key);
+                    }
+                } else {
+                    push_segment(rows, section, &entry.path, segment, mode, &mut split_key);
                 }
             }
             line_index += hunk.lines.len();
@@ -832,6 +966,10 @@ impl ChangesTab {
                     path.display(),
                     header
                 ))
+                // Full width in both modes: a hunk header is context for
+                // the whole file, not for one of two columns
+                // (F-GIT-DIFF-03's "preserves full-width hunk context").
+                .debug_selector(|| "changes-hunk-row".into())
                 .h(px(HUNK_ROW_HEIGHT))
                 .w_full()
                 .flex_none()
@@ -856,6 +994,12 @@ impl ChangesTab {
                 path,
                 line,
             } => Self::render_diff_line(section, path, line, theme).into_any_element(),
+            ChangeRow::SplitLine {
+                section,
+                path,
+                key,
+                row,
+            } => Self::render_split_line(section, path, key, row, theme).into_any_element(),
             ChangeRow::Unavailable {
                 section,
                 path,
@@ -1152,18 +1296,76 @@ impl ChangesTab {
                         .child(
                             div()
                                 .id(format!("open-{}-{}", section.slug(), path.display()))
+                                .debug_selector(|| "changes-open-file".into())
                                 .text_color(theme.subtitle)
                                 .hover(|style| style.text_color(theme.title))
                                 .on_click(move |_, _, cx| {
                                     cx.stop_propagation();
-                                    entity_for_open.update(cx, |_, cx| {
-                                        cx.emit(ChangesTabEvent::OpenFile(path.clone()));
+                                    // `entry.path` is repo-relative, and the
+                                    // host opens an editor tab straight from
+                                    // whatever this event carries — a
+                                    // relative path made `FileView` resolve
+                                    // against the process CWD and render
+                                    // "This file does not exist: <name>" for
+                                    // a file that plainly does. Resolve
+                                    // against this surface's own root, the
+                                    // way the Files tree already emits
+                                    // absolute paths.
+                                    entity_for_open.update(cx, |tab, cx| {
+                                        let absolute = tab.repo_root.join(&path);
+                                        cx.emit(ChangesTabEvent::OpenFile(absolute));
                                     });
                                 })
                                 .child("↗"),
                         ),
                 )
             })
+    }
+
+    /// One side-by-side row. The two halves are laid out as equal flex
+    /// children of the row, so every row in the surface has its columns in
+    /// the same place regardless of what any single line contains — the
+    /// alignment that makes a split diff readable at all. The horizontal
+    /// room the longest line needs is reserved once, on the list's content
+    /// wrapper (`render_body`), never per row.
+    ///
+    /// A half that is `None` is a genuine absence — a deletion run longer
+    /// than the addition run it was zipped with — and renders as empty
+    /// ground rather than as an empty *line*, so "there is nothing on this
+    /// side" and "this side is a blank line" stay distinguishable.
+    fn render_split_line(
+        section: ChangeSection,
+        path: PathBuf,
+        key: usize,
+        row: DiffSideBySideRow,
+        theme: Theme,
+    ) -> impl IntoElement {
+        let shape = split_row_shape(&row);
+        div()
+            .id(format!("split-{}-{}-{key}", section.slug(), path.display()))
+            // The selector names the row's *shape*, so the four cases the
+            // clause enumerates — paired context, a zipped replacement, a
+            // deletion run with nothing opposite it, an addition run with
+            // nothing opposite it — are each assertable in a drawn frame
+            // rather than only in the model behind it.
+            .debug_selector(move || shape.to_owned())
+            .h(px(DIFF_LINE_HEIGHT))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_stretch()
+            .font_family(theme.typography.code_family)
+            .text_size(px(11.5))
+            .child(split_cell(row.left, true, theme).debug_selector(|| "changes-split-left".into()))
+            .child(
+                div()
+                    .w(px(SPLIT_DIVIDER_WIDTH))
+                    .flex_none()
+                    .bg(theme.hairline),
+            )
+            .child(
+                split_cell(row.right, false, theme).debug_selector(|| "changes-split-right".into()),
+            )
     }
 
     fn render_diff_line(
@@ -1185,6 +1387,7 @@ impl ChangesTab {
                 line.old_line_number.unwrap_or(0),
                 line.new_line_number.unwrap_or(0)
             ))
+            .debug_selector(|| "changes-diff-line".into())
             .h(px(DIFF_LINE_HEIGHT))
             .w_full()
             .flex_none()
@@ -1217,11 +1420,28 @@ impl ChangesTab {
             )
     }
 
-    fn render_toolbar(&self, entity: gpui::Entity<Self>, theme: Theme) -> impl IntoElement {
+    /// Sets the app-wide diff view mode (F-GIT-DIFF-03's door). No-ops on
+    /// an unchanged value so clicking the segment you are already on does
+    /// not schedule a repaint.
+    fn set_view_mode(&mut self, mode: DiffViewMode, cx: &mut Context<Self>) {
+        if DiffViewMode::get(cx) == mode {
+            return;
+        }
+        DiffViewMode::set(mode, cx);
+        cx.notify();
+    }
+
+    fn render_toolbar(
+        &self,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        mode: DiffViewMode,
+    ) -> impl IntoElement {
         let stage_entity = entity.clone();
         let discard_entity = entity.clone();
         let expand_entity = entity.clone();
         let collapse_entity = entity.clone();
+        let mode_entity = entity.clone();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
         let title = if self.git_error.is_some() {
@@ -1246,13 +1466,29 @@ impl ChangesTab {
                     .text_color(theme.title)
                     .child(title),
             )
-            .child(action_text_button(
-                "Stage all",
-                "stage-all".to_owned(),
+            // The view-mode control sits at the head of the action cluster,
+            // with the other two *view* controls (Expand All / Collapse
+            // All) beside it and the git *mutations* (Stage all, Discard
+            // all) after them. It is the same segmented primitive Settings
+            // uses for System/Light/Dark, and it belongs in this header for
+            // the same reason Expand All does: it changes how the whole
+            // surface reads, not one file.
+            //
+            // The precedent taken from macOS is the *placement and
+            // primitive*, not the semantics: `SideBySideDiffView.scopeBar`
+            // (`DiffContentAdapter.swift:179`) is a segmented `Picker` in
+            // exactly this position at the top of the diff surface — but it
+            // picks the diff's *scope* (whole file vs hunks), because that
+            // build had only one renderer and so never needed a view-mode
+            // choice at all. Do not read this control as a port of that one.
+            .child(controls::segmented(
+                "changes-view-mode",
+                DiffViewMode::LABELS,
+                mode.index(),
                 theme,
-                move |cx| {
-                    stage_entity.update(cx, |tab, cx| {
-                        tab.start_operation(stage_all, cx);
+                move |index, cx| {
+                    mode_entity.update(cx, |tab, cx| {
+                        tab.set_view_mode(DiffViewMode::from_index(index), cx);
                     });
                 },
             ))
@@ -1272,6 +1508,16 @@ impl ChangesTab {
                     collapse_entity.update(cx, |tab, cx| tab.collapse_all(cx));
                 },
             ))
+            .child(action_text_button(
+                "Stage all",
+                "stage-all".to_owned(),
+                theme,
+                move |cx| {
+                    stage_entity.update(cx, |tab, cx| {
+                        tab.start_operation(stage_all, cx);
+                    });
+                },
+            ))
             .child(destructive_action_text_button(
                 "Discard all",
                 "discard-all".to_owned(),
@@ -1287,6 +1533,155 @@ impl ChangesTab {
 
 impl EventEmitter<ChangesTabEvent> for ChangesTab {}
 impl EventEmitter<ChangesTabActionEvent> for ChangesTab {}
+
+/// Appends one contiguous run of unified diff lines in the requested view
+/// mode.
+///
+/// Unified emits the lines as they came. Split hands the run to
+/// `tiller_git::GitDiffSideBySide::rows_from_lines` — the tested model
+/// behind F-GIT-DIFF-03 — which pairs context onto both sides, zips the
+/// run's deletions against its additions, and pads the shorter side with
+/// `None`. Metadata never reaches here: it is not a member of `DiffLine`
+/// at all, so the clause's "omits metadata lines" holds by construction of
+/// the parser, not by a filter here.
+fn push_segment(
+    rows: &mut Vec<ChangeRow>,
+    section: ChangeSection,
+    path: &Path,
+    lines: &[DiffLine],
+    mode: DiffViewMode,
+    split_key: &mut usize,
+) {
+    match mode {
+        DiffViewMode::Unified => {
+            for line in lines {
+                rows.push(ChangeRow::Line {
+                    section,
+                    path: path.to_path_buf(),
+                    line: line.clone(),
+                });
+            }
+        }
+        DiffViewMode::Split => {
+            for row in GitDiffSideBySide::rows_from_lines(lines) {
+                rows.push(ChangeRow::SplitLine {
+                    section,
+                    path: path.to_path_buf(),
+                    key: *split_key,
+                    row,
+                });
+                *split_key += 1;
+            }
+        }
+    }
+}
+
+/// The four shapes a side-by-side row can take, as a stable selector.
+///
+/// These are exactly the cases F-GIT-DIFF-03 enumerates: a context line is
+/// *paired* onto both sides; a deletion run zipped against an addition run
+/// makes replacement rows; and whichever run was longer leaves rows with
+/// one side only — the padding that keeps the two files in step.
+fn split_row_shape(row: &DiffSideBySideRow) -> &'static str {
+    match (&row.left, &row.right) {
+        (Some(left), Some(right))
+            if left.origin == DiffOrigin::Context && right.origin == DiffOrigin::Context =>
+        {
+            "changes-split-pair-context"
+        }
+        (Some(_), Some(_)) => "changes-split-pair-replacement",
+        (Some(_), None) => "changes-split-left-only",
+        (None, Some(_)) => "changes-split-right-only",
+        // The model never emits one: `flush` pushes a row only while at
+        // least one of the two runs still has an element.
+        (None, None) => "changes-split-empty",
+    }
+}
+
+/// One half of a side-by-side row: the file's own line number, then the
+/// line. `old` selects which of the two line numbers this side shows — the
+/// left column is the old file, the right column the new one — which is
+/// what makes a paired context row show *both* numbers across the row while
+/// a zipped deletion/addition pair shows one on each side.
+fn split_cell(line: Option<DiffSideBySideLine>, old: bool, theme: Theme) -> gpui::Div {
+    let cell = div()
+        .flex_1()
+        // 0 basis with an equal grow on both halves: the two columns are
+        // exactly half of whatever width the row was given, so they line up
+        // down the whole diff.
+        .min_w(px(0.0))
+        .h_full()
+        .flex()
+        .items_center()
+        .px(px(6.0));
+    let Some(line) = line else {
+        // No content on this side of the zip: the deletion run and the
+        // addition run it was paired against had different lengths, and this
+        // is the padding that keeps the two files in step.
+        //
+        // Painted with the recessed `inset` fill rather than left as the
+        // surface's own ground, because "this file has no line here" and
+        // "this file has a blank line here" must not look the same. A blank
+        // *line* keeps its gutter number on the plain background; padding
+        // has no number and a recessed ground. Leaving it unpainted made
+        // the zip's own padding — half of what F-GIT-DIFF-03 asks the
+        // renderer to show — invisible in a photograph.
+        return cell.bg(theme.code_inset_fill);
+    };
+    let background = match line.origin {
+        DiffOrigin::Context => theme.background,
+        DiffOrigin::Addition => theme.diff_addition_background,
+        DiffOrigin::Deletion => theme.diff_deletion_background,
+    };
+    let number = if old {
+        line.old_line_number
+    } else {
+        line.new_line_number
+    };
+    cell.bg(background)
+        .child(
+            div()
+                .w(px(28.0))
+                .flex_none()
+                .flex()
+                // Right-aligned, like every diff gutter and like the macOS
+                // original's own `.frame(width: 40, alignment: .trailing)`.
+                // Left-aligned numbers make the ones and the hundreds start
+                // in different places, and the eye then reads the gutter as
+                // ragged text rather than as a column.
+                .justify_end()
+                .pr(px(4.0))
+                .text_color(theme.meta)
+                .child(number.map_or(String::new(), |number| number.to_string())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_color(theme.title)
+                .child(line.content),
+        )
+}
+
+/// The width one side-by-side column must be able to reach for this file,
+/// so its longest line is *scrollable to* rather than silently clipped.
+///
+/// Clamped at both ends: never so narrow that two columns become two
+/// slivers, never so wide that one minified line reserves a scroll extent
+/// nobody can use.
+fn split_column_width(diff: &FileDiff) -> f32 {
+    let widest = diff
+        .hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter())
+        .map(|line| line.content.chars().count())
+        .max()
+        .unwrap_or(0);
+    (SPLIT_GUTTER_WIDTH + widest as f32 * SPLIT_CHAR_WIDTH)
+        .clamp(SPLIT_COLUMN_MIN, SPLIT_COLUMN_MAX)
+}
 
 /// The collapsed-context runs of one diff, as `(key, count)` pairs — the
 /// same walk `expand_diff` performs when rendering, so Expand All and the
@@ -1324,7 +1719,12 @@ impl ChangesTab {
     ///    broken, not clean (F-CHG-09);
     /// 2. the first load in flight with nothing to show yet — "Loading…";
     /// 3. the sections list.
-    fn render_body(&self, entity: gpui::Entity<Self>, theme: Theme) -> AnyElement {
+    fn render_body(
+        &self,
+        entity: gpui::Entity<Self>,
+        theme: Theme,
+        mode: DiffViewMode,
+    ) -> AnyElement {
         if let Some(error) = &self.git_error {
             return Self::render_error_state(error, entity, theme).into_any_element();
         }
@@ -1341,7 +1741,7 @@ impl ChangesTab {
                 .child("Loading changes…")
                 .into_any_element();
         }
-        let sections = self.section_rows();
+        let sections = self.section_rows(mode);
         if sections.is_empty() {
             // F-CHG-02: a clean repo (or a worktree that was just closed and
             // reopened with nothing to show) fell through to an empty
@@ -1362,14 +1762,23 @@ impl ChangesTab {
                 .into_any_element();
         }
         let row_entity = entity;
-        div()
-            .id("changes-list")
-            .debug_selector(|| "changes-list".into())
-            .flex_1()
-            .min_h(px(0.0))
+        // Split mode reserves the horizontal room its widest expanded line
+        // needs, once, on the wrapper that holds every row — so the two
+        // columns stay exactly half of a width that is *wide enough*, and a
+        // long line is reached by scrolling **inside the diff**. The scroll
+        // lives on `changes-list`, which is `flex_1` inside a `size_full`
+        // surface, so nothing it contains can ever make the window itself
+        // scroll. In Unified mode the wrapper asks for nothing and the list
+        // behaves exactly as before.
+        let content_min = match mode {
+            DiffViewMode::Unified => 0.0,
+            DiffViewMode::Split => self.split_content_width(),
+        };
+        let content = div()
             .flex()
             .flex_col()
-            .overflow_y_scroll()
+            .w_full()
+            .min_w(px(content_min))
             .children(sections.into_iter().flat_map(move |section| {
                 let mut elements: Vec<AnyElement> = vec![
                     Self::render_section_header(
@@ -1385,8 +1794,36 @@ impl ChangesTab {
                     elements.push(Self::render_change_row(row, row_entity.clone(), theme));
                 }
                 elements
-            }))
+            }));
+        div()
+            .id("changes-list")
+            .debug_selector(|| "changes-list".into())
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .when(mode == DiffViewMode::Split, |this| this.overflow_x_scroll())
+            .child(content)
             .into_any_element()
+    }
+
+    /// The width the split rendering needs for the widest line currently
+    /// expanded: two columns plus the rule between them. Only expanded files
+    /// count — a collapsed file draws no diff rows, so reserving room for
+    /// its longest line would make the surface scroll sideways for content
+    /// nobody can see.
+    fn split_content_width(&self) -> f32 {
+        let widest = self
+            .expanded_changes
+            .iter()
+            .filter_map(|(_, path)| self.diffs.get(path))
+            .map(split_column_width)
+            .fold(0.0_f32, f32::max);
+        if widest == 0.0 {
+            return 0.0;
+        }
+        widest * 2.0 + SPLIT_DIVIDER_WIDTH
     }
 
     /// The F-CHG-09 error state: git's own message (enough detail to act
@@ -1431,13 +1868,14 @@ impl Render for ChangesTab {
         let theme = *Theme::get(cx);
         self.ensure_refresh(cx);
         let entity = cx.entity();
+        let mode = DiffViewMode::get(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(theme.background)
-            .child(self.render_toolbar(entity.clone(), theme))
-            .child(self.render_body(entity, theme))
+            .child(self.render_toolbar(entity.clone(), theme, mode))
+            .child(self.render_body(entity, theme, mode))
     }
 }
 
@@ -1802,7 +2240,7 @@ mod tests {
             })
         });
 
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         let staged = sections
             .iter()
             .find(|section| section.section == ChangeSection::Staged)
@@ -1837,7 +2275,7 @@ mod tests {
         tab.update(cx, |tab, cx| tab.refresh(cx));
         pump_until(cx, || tab.read_with(cx, |tab, _| tab.entries.len() == 3));
 
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         let kinds: Vec<ChangeSection> = sections.iter().map(|section| section.section).collect();
         assert_eq!(
             kinds,
@@ -1950,7 +2388,7 @@ mod tests {
             })
         });
 
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         assert_eq!(sections.len(), 2, "only the non-empty sections render");
         assert!(
             sections
@@ -2008,7 +2446,7 @@ mod tests {
         tab.update(cx, |tab, _| {
             tab.collapsed_sections.insert(ChangeSection::Untracked);
         });
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         let untracked = sections
             .iter()
             .find(|section| section.section == ChangeSection::Untracked)
@@ -2030,7 +2468,7 @@ mod tests {
         tab.update(cx, |tab, _| {
             tab.collapsed_sections.remove(&ChangeSection::Untracked);
         });
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         let untracked = sections
             .iter()
             .find(|section| section.section == ChangeSection::Untracked)
@@ -2062,7 +2500,7 @@ mod tests {
         tab.update(cx, |tab, cx| {
             tab.toggle_change(ChangeSection::Staged, &path, cx);
         });
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         let staged = sections
             .iter()
             .find(|section| section.section == ChangeSection::Staged)
@@ -2653,7 +3091,7 @@ mod tests {
             })
         });
 
-        let sections = tab.read_with(cx, |tab, _| tab.section_rows());
+        let sections = tab.read_with(cx, |tab, _| tab.section_rows(DiffViewMode::Unified));
         let staged = sections
             .iter()
             .find(|section| section.section == ChangeSection::Staged)
@@ -2723,7 +3161,12 @@ mod tests {
         };
         let entry = tab.entries[0].clone();
         let mut rows = Vec::new();
-        tab.expand_diff(&mut rows, ChangeSection::Changed, &entry);
+        tab.expand_diff(
+            &mut rows,
+            ChangeSection::Changed,
+            &entry,
+            DiffViewMode::Unified,
+        );
         assert!(
             matches!(
                 rows.as_slice(),
@@ -2992,5 +3435,235 @@ mod tests {
             &[ChangesTabActionEvent::ResolveInTerminal(path)],
             "the terminal seam receives the exact conflicted path"
         );
+    }
+
+    /// A repo whose one changed file carries every run shape the clause
+    /// enumerates: context-only runs, a pure deletion run, an addition run
+    /// longer than the deletion run it replaces (so the zip has to pad), and
+    /// the paired context around them.
+    fn side_by_side_fixture(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Tiller tests"]);
+        std::fs::write(
+            dir.join("sbs.txt"),
+            "ctx-1\nctx-2\nctx-3\nctx-4\nctx-5\ndel-a\ndel-b\nctx-6\nctx-7\nctx-8\nctx-9\nold-1\nold-2\nctx-10\nctx-11\nctx-12\nctx-13\nctx-14\n",
+        )
+        .expect("seed side-by-side file");
+        git(dir, &["add", "sbs.txt"]);
+        git(
+            dir,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "base"],
+        );
+        std::fs::write(
+            dir.join("sbs.txt"),
+            "ctx-1\nctx-2\nctx-3\nctx-4\nctx-5\nctx-6\nctx-7\nctx-8\nctx-9\nnew-1\nnew-2\nnew-3\nadd-only-x\nctx-10\nctx-11\nctx-12\nctx-13\nctx-14\n",
+        )
+        .expect("edit side-by-side file");
+    }
+
+    /// F-GIT-DIFF-03. The whole clause, in one drawn frame reached by real
+    /// clicks: expand the file, click the **Split** segment of the view-mode
+    /// control, and read the four row shapes plus the full-width hunk header
+    /// out of the rendered frame.
+    ///
+    /// Every assertion here is on `debug_bounds` — the drawn frame — not on
+    /// the model: the model half already had a green test in `tiller_git`
+    /// and no surface, which is precisely why this row was `UNREACHABLE`.
+    #[gpui::test]
+    async fn clicking_split_draws_paired_context_zipped_runs_and_full_width_hunks(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        side_by_side_fixture(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-diff-line").is_some(),
+            "the expanded file starts in Unified mode"
+        );
+        assert!(
+            cx.debug_bounds("changes-split-pair-context").is_none(),
+            "no side-by-side row is drawn before the mode is chosen"
+        );
+
+        let split_segment = cx
+            .debug_bounds("changes-view-mode-1")
+            .expect("the view-mode control draws a Split segment");
+        cx.simulate_click(split_segment.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("changes-diff-line").is_none(),
+            "Split replaces the unified rows rather than drawing both"
+        );
+
+        // The context runs of this fixture are all long enough to collapse
+        // into "N hidden lines" bands, in either mode — the band keys are
+        // computed from the same unified line stream in both, which is what
+        // lets Expand All open them here at all. Opening them is what puts
+        // paired context rows on screen.
+        let expand_all = cx
+            .debug_bounds("changes-expand-all")
+            .expect("Expand All is drawn");
+        cx.simulate_click(expand_all.center(), Modifiers::none());
+        cx.run_until_parked();
+        let paired = cx
+            .debug_bounds("changes-split-pair-context")
+            .expect("a context line is paired onto both sides");
+        assert!(
+            cx.debug_bounds("changes-split-pair-replacement").is_some(),
+            "a deletion is zipped against the addition that replaced it"
+        );
+        assert!(
+            cx.debug_bounds("changes-split-left-only").is_some(),
+            "the pure deletion run leaves the right side of its rows empty"
+        );
+        assert!(
+            cx.debug_bounds("changes-split-right-only").is_some(),
+            "the additions with no deletion opposite them pad the left side"
+        );
+        assert!(
+            cx.debug_bounds("changes-split-empty").is_none(),
+            "no row is drawn with both sides absent"
+        );
+
+        let left = cx
+            .debug_bounds("changes-split-left")
+            .expect("the left column is drawn");
+        let right = cx
+            .debug_bounds("changes-split-right")
+            .expect("the right column is drawn");
+        assert!(
+            (f32::from(left.size.width) - f32::from(right.size.width)).abs() < 1.0,
+            "the two columns are the same width ({} vs {}) — they have to line up down the whole diff",
+            f32::from(left.size.width),
+            f32::from(right.size.width)
+        );
+        let hunk = cx
+            .debug_bounds("changes-hunk-row")
+            .expect("the hunk header is drawn in Split mode");
+        assert!(
+            f32::from(hunk.size.width) > f32::from(left.size.width) * 1.5,
+            "the hunk header spans the full row ({}) rather than one column ({})",
+            f32::from(hunk.size.width),
+            f32::from(left.size.width)
+        );
+        assert!(
+            (f32::from(hunk.size.width) - f32::from(paired.size.width)).abs() < 2.0,
+            "the hunk header is exactly as wide as the paired rows under it"
+        );
+    }
+
+    /// The mode is a preference, not a per-tab accident: a second Changes
+    /// surface constructed after the choice opens in Split too. `main.rs`
+    /// rebuilds every `ChangesTab` when a worktree rebinds, so a per-tab
+    /// field would silently forget the choice.
+    #[gpui::test]
+    async fn the_chosen_view_mode_is_remembered_by_a_later_changes_surface(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        side_by_side_fixture(&dir.0);
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+        assert_eq!(
+            cx.update(|_, app| DiffViewMode::get(app)),
+            DiffViewMode::Unified,
+            "the default is the unified reading"
+        );
+
+        let split_segment = cx
+            .debug_bounds("changes-view-mode-1")
+            .expect("the view-mode control draws a Split segment");
+        cx.simulate_click(split_segment.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, app| DiffViewMode::get(app)),
+            DiffViewMode::Split,
+            "the click records the choice app-wide"
+        );
+
+        // A brand-new surface over the same checkout — what `main.rs` does
+        // on every worktree rebind.
+        let second = cx.update(|_, app| app.new(|cx| ChangesTab::new(dir.0.clone(), cx)));
+        let mode = second.read_with(&cx.cx, |_, cx| DiffViewMode::get(cx));
+        assert_eq!(
+            mode,
+            DiffViewMode::Split,
+            "a Changes surface built after the choice opens in the chosen mode"
+        );
+
+        let unified_segment = cx
+            .debug_bounds("changes-view-mode-0")
+            .expect("the view-mode control draws a Unified segment");
+        cx.simulate_click(unified_segment.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, app| DiffViewMode::get(app)),
+            DiffViewMode::Unified,
+            "the control switches back"
+        );
+        assert!(
+            cx.debug_bounds("changes-diff-line").is_some()
+                || cx.debug_bounds("changes-file-row").is_some(),
+            "the surface still draws after switching back"
+        );
+    }
+
+    /// The `↗` action opened an editor tab that read "This file does not
+    /// exist" for a file that plainly does: it emitted `entry.path`, which
+    /// is repo-relative, and the host opens the editor on whatever it is
+    /// handed. The path that crosses the seam must resolve on disk.
+    #[gpui::test]
+    async fn the_open_file_action_emits_a_path_that_exists_on_disk(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        clean_git_repo(&dir.0);
+        std::fs::write(dir.0.join("tracked.txt"), "changed\n").expect("modify file");
+
+        let (mut cx, tab) = changes_view(cx, dir.0.clone());
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let collected = events.clone();
+        cx.update(|_, app| {
+            app.subscribe(&tab, move |_, event: &ChangesTabEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        wait_for_tab(&cx, &tab, |tab| section_count(tab, "Changed") == 1);
+
+        let row = cx
+            .debug_bounds("changes-file-row")
+            .expect("the changed file row is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+        let open = cx
+            .debug_bounds("changes-open-file")
+            .expect("the expanded row draws the open-in-editor action");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let emitted = events.borrow();
+        let [ChangesTabEvent::OpenFile(path)] = emitted.as_slice() else {
+            panic!("expected exactly one OpenFile, got {emitted:?}");
+        };
+        assert!(
+            path.is_absolute(),
+            "the host opens the editor on this path verbatim, so it must be absolute: {}",
+            path.display()
+        );
+        assert!(
+            path.exists(),
+            "the emitted path does not exist on disk: {}",
+            path.display()
+        );
+        assert_eq!(path, &dir.0.join("tracked.txt"));
     }
 }
