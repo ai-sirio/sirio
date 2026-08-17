@@ -72,6 +72,39 @@ hand-rolled driver had no modifiers, no drag, no scroll, no screenshot — and i
 first try. **Check `Scripts/` before building an instrument.** The same lesson as the right-click
 finding below: the expensive wrong answer is the one that closes an avenue you never tested.
 
+## The box gets starved by leaked agent infrastructure, not by the build
+
+Measured 2026-08-18 00:00, with two builders mid-piece: **load average 67 on four cores, 202 MB
+free.** The build was not the cause. `cargo`/`rustc` accounted for three processes; the load came
+from **52 `bun` processes holding 3 GB and 380 % CPU** — every core, spent on nothing.
+
+Two distinct leaks, and it is worth telling them apart:
+
+- **Orphaned MCP servers.** Each Claude session and subagent spawns the Telegram plugin's
+  `bun server.ts`, and they do not exit when the session does. 28 had outlived their session, 19 of
+  those ignored `SIGTERM`. Killing them returned ~2 GB and dropped the load by 20.
+- **`ccstatusline` churn.** A fresh `bun` starts per status-line refresh, per live session. With
+  dozens of sessions alive that is a continuous storm of process startups, which is what a load
+  average of 67 against ~4 runnable processes actually measures.
+
+Find the orphans by walking each `bun`'s parent chain and keeping only those with a live `claude`
+ancestor — never by age or by `pkill -x bun`, which would kill the live sessions' own servers:
+
+```bash
+ps -eo pid=,ppid=,rss=,comm=      # then walk ppid up; no live claude ancestor => orphan
+```
+
+**Why this belongs in a file about correctness, not housekeeping.** Under that starvation the
+lane lies. A critic in this session recorded that roughly half its drives returned a blank first
+frame and that individual synthetic clicks were dropped — **two apparent `F-CORE-ACT-23` failures
+turned out to be dropped clicks**, and were only caught because that critic re-ran every case
+until it was unambiguous. A builder in the same window hit `collect2: ld terminated with signal 9`
+linking the test binary. Starvation reads exactly like "the app ignored my input" and exactly like
+"the linker is broken", and both are the shapes this project has already mistaken for findings.
+
+**Never record a negative from a single dropped input.** Check `free -h` and `uptime` before
+believing a blank frame.
+
 ## Rust toolchain
 
 `cargo` **is not on the PATH** in the codex panes, though it is installed:
