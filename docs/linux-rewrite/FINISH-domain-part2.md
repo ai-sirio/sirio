@@ -327,3 +327,87 @@ downgraded, not carried, since `half-proven` implies partial live wiring that a 
 shows is not there.
 
 ---
+
+## F-CORE-DOM-05 — PASSED (was half-proven) — evidence correction, not equivalence-by-assertion
+
+Ledger evidence being carried cited `domain::tests::ordering_ignores_unknown_and_noop_moves
+(domain.rs:156)`, a unit test of `tiller_project::move_item`. Checked the app caller first, as the
+brief requires: `grep -rn "move_item" rust/ --include="*.rs"` (whole tree, `target/` excluded)
+finds `move_item` only in its own definition, its own test, and the `lib.rs` re-export — **zero
+callers in `tiller_ui` or `tiller`**. That specific ported function is dead, exactly like
+`F-CORE-DOM-08`'s `OnceGate`.
+
+Unlike `F-CORE-DOM-08`, the *feature* is not absent — it lives under a different name. The real
+sidebar reorder path is `Sidebar::reorder_rows` (`sidebar.rs:758`), wired to genuine
+`.on_drag`/`.on_drop`/`RowDrag` handlers (`sidebar.rs:3267-3278`), with its own unknown-id
+(`.position()` → `None` → early `return false`) and no-op (`drag.id == target_id → return false`)
+guards — a real, independent reimplementation of the same clause, not the cited-but-dead one. This
+is the equivalence check the brief asks for, done explicitly rather than asserted: quoted the row's
+cited evidence, named the actual live function, and confirmed by exercise (below) that it is the
+one the app runs.
+
+**Two tiers of proof, not just a read:**
+
+1. Three named `VisualTestContext`-driven tests (`sidebar.rs:4598`, `5061`, `5214` —
+   `dragging_project_rows_reorders_the_live_sidebar_block`,
+   `dragging_worktree_rows_reorders_only_their_project_group`,
+   `dragging_tab_rows_reorders_only_their_worktree_group`) draw a real sidebar and dispatch real
+   `MouseDownEvent`/`MouseMoveEvent`/`MouseUpEvent` sequences — the UI tier's own accepted proof
+   per `EVIDENCE-STANDARD.md`. Re-ran fresh this pass: `cargo test -p tiller_ui reorders_the_live_sidebar_block`
+   and `cargo test -p tiller_ui reorders_only_their` — all 3 green.
+2. **This lane's own hard discriminator**: a genuine OS-level drag, not a simulated event —
+   `drag 130 338 130 210 8` through `wayland-drive.sh` picked up the `wf-term-clean` worktree row
+   (real virtual-pointer down → 8 waypoints → up) under the `tiller` project group.
+   `reference/linux-progress/wf-dom3/f-core-dom-05-before-drag.png` shows the starting order
+   (`rust/gpui-rewrite, linux/gpui-waku, wf-term-clean, 9a42249, wl-proof-branch, 984defa`);
+   `reference/linux-progress/wf-dom3/f-core-dom-05-after-drag.png`, captured after a forced
+   repaint, shows `wf-term-clean` moved down past `9a42249` and `wl-proof-branch` — the row
+   genuinely reordered, driven by real compositor input, not asserted.
+
+The exact landing position from a multi-waypoint synthetic drag is not pixel-precise (expected —
+this is the same imprecision a fast real drag has), but reordering-in-response-to-a-real-drag is
+exactly what the clause asks for, and it happened.
+
+---
+
+## F-CORE-DOM-02 — half-proven (carried, evidence sharpened) — a real gap found, not read alone
+
+Ledger evidence cited `domain::tests::defaults_prefer_explicit_values_then_primary_and_sibling
+(domain.rs:138)`, testing `tiller_project::resolve_worktree_defaults(project_root,
+explicit_base_branch, primary_branch, explicit_location)` — explicit > **primary branch** > `"HEAD"`
+for the branch, explicit > sibling directory for the location. Checked the app caller first:
+`grep -rn "resolve_worktree_defaults" rust/ --include="*.rs"` finds it **only** in its own
+definition, its own test, and the `lib.rs` re-export — zero callers, the same dead-function pattern
+as `F-CORE-DOM-05`/`F-CORE-DOM-08`.
+
+Same equivalence check as `F-CORE-DOM-05`, run through to completion rather than assumed — and this
+time it does **not** land clean. The real "New Worktree…" prompt's submit handler
+(`Sidebar::confirm_worktree_prompt`, `sidebar.rs:1937`) does have a live, independently-tested
+sibling for the **location** half: `tiller_git::worktree::resolve_parent_directory`
+(`worktree.rs:152`, explicit override else `root.parent()` — its own doc comment names it as the
+match for `WorktreeDefaults.resolveParentDirectory`, called directly at `sidebar.rs:1973`). That
+half of the clause is genuinely live.
+
+The **branch** half is not equivalent, and this is a specific, validated code-flow finding, not a
+guess: `confirm_worktree_prompt` (`sidebar.rs:1958-1961`) computes `base` as `Some(trimmed)` when
+the field is filled, else **`None`** — full stop. `prompt.primary_branch` (the field the struct
+does carry, `sidebar.rs:351`) is **never read inside `confirm_worktree_prompt`**; a blank field
+sends `None` through to `create_worktree`, which lets `git` fall back to its own current-HEAD
+default. `resolve_worktree_defaults`'s three-way precedence (explicit → **the project's primary
+worktree's branch specifically** → `"HEAD"`) is not what actually runs — the live prompt has only
+a two-way choice (explicit vs. git's own default), silently dropping the middle tier the row's own
+test asserts (`primary_branch = Some("main")`, `explicit_base_branch = None` → expects `"main"`,
+not whatever `HEAD` happens to resolve to).
+
+This is invisible in the common case (a project's primary worktree usually *is* sitting on
+whatever `HEAD` means), which is likely why no live drive so far has caught it — the observable
+difference only appears when the primary worktree is checked out on a non-default branch and the
+user leaves the base field blank. Not re-driven through the wayland lane this pass (would need a
+fixture project whose primary worktree already sits on a non-default branch, more setup than this
+pass's remaining budget), so the UI-observable half stays unconfirmed either way — carried at
+`half-proven`, but for a sharper, validated reason than "no live dialog drive": one third of the
+clause (location) is live and correct, one third (explicit-branch-wins) is trivially true, and the
+middle tier (primary-branch fallback) is demonstrably not wired into the code path a real submit
+runs, pending a live check with the right fixture to confirm the user-visible consequence.
+
+---
