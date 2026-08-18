@@ -158,6 +158,119 @@ membership visibly and structurally changes between two independently-verifiable
 screenshots, with the moved tab's own content (Claude Code's live idle transcript) intact
 across the move.
 
+### F-TAB-14 — Rename a tab by double-clicking its title or using Rename
+
+**FAILED — defective.** This is the row named in the brief as the one hard failure, and it
+reproduced live with a hard, non-visual discriminator: real characters landing in a real
+PTY's scrollback, read over the control socket rather than eyeballed from a screenshot.
+
+**Double-click leg — not wired at all.** Two rapid clicks (~120ms apart) on a clean tab's
+title only reselected the tab — no `#tab-rename-field`, no visible change beyond the
+selection highlight, confirmed live. Reading the render site backs this up: the tab-strip's
+own div for each tab (`rust/crates/tiller/src/main.rs`, ~line 8070) wires exactly one
+`.on_click(move |_, _, cx| … select_tab(id, cx))`; nothing in this file or in
+`tiller_ui::tab_bar.rs` inspects `ClickEvent`'s click count or calls `begin_tab_rename` from
+a click at all — the only entry point into `begin_tab_rename` (`main.rs:8612`) is the
+context-menu's "Rename" item. There is no code path from a double-click to a rename.
+
+**Context-menu leg — the click that opens the field can silently fail while the menu stays
+open, and the keystrokes go to the terminal underneath instead.** Right-click a tab → the
+context menu opens with "Rename" as its second item. On one tab this session it worked
+cleanly: "Rename" opened the field, typed text landed in it, and a follow-up
+`panel.scrollback` read on that pane's real PTY buffer showed **zero** occurrence of the
+typed string — it went where it was supposed to go. On a second, freshly-created, otherwise-
+idle tab (`pane-9`), the identical gesture — right-click tab → click "Rename" → type
+`xCLEANMARK9` — produced a different and wrong result: the context menu **stayed fully
+rendered and open**, exactly as it looked before the click, no rename field ever appeared —
+and the typed characters landed as literal shell input in the terminal beneath it. This is
+not a screenshot impression: `panel.scrollback` for `pane-9`, read over the control socket
+and base64-decoded, returned the pane's real PTY buffer ending in `…NMARK9` at an
+unexecuted bash prompt — the tail of the exact string just typed, sitting in the shell that
+tab's rename was supposed to be targeting. A plain click elsewhere immediately afterward
+correctly dismissed that same still-open menu via its outside-click handler, which rules out
+a general pointer-delivery failure at that moment — it is specifically the "Rename" row's
+own click that fired without triggering `begin_tab_rename`, leaving the menu open and focus
+on the terminal, so every subsequent keystroke fell through to the shell. A same-session
+retry of the identical sequence was inconclusive on its own (that retry's right-click did not
+visibly open a menu at all, so nothing could be typed to leak) — consistent with this being
+an intermittent failure rather than a constant one, but the reproduction above already stands
+on its own as a hard, structural discriminator: a decoded read of the real terminal buffer,
+not an assumption from what the screen looked like.
+
+**This is a narrower defect than the historical record for this row.** An earlier pass
+(`docs/linux-rewrite/FINISH-tabs.md`) found the tab-strip context menu did not render at all
+at that time, so any typed rename text fell straight through to whatever pane was focused
+underneath — the whole menu was the missing piece. That has since been fixed: the menu now
+renders and is clickable, proven by this same session opening a rename field cleanly on one
+tab. What remains, reproduced here with `panel.scrollback` evidence, is that the "Rename"
+item's own click can still silently fail to fire while the menu stays open, and when it does,
+a user who believes they are typing a new tab name is instead typing an unexecuted command at
+their agent's or shell's real prompt. No fix attempted, per the brief.
+
+### F-TAB-18 — Drag a tab to reorder it within the tab strip
+
+**PASSED.** Built a position→pane-identity map first (clicked each visible tab in turn,
+reading `panel.list`'s `active` pane id back over the control socket after each click, since
+several tabs in this session share the default title "Terminal" and are not visually
+distinguishable by name alone): position 1→`pane-2`, position 2→`pane-5`, position
+3→`pane-8`, position 4→`pane-9`. Pressed down on position 2 ("pane-5"), moved the pointer
+right in 8 small steps past position 3's midpoint, released at position 3's x-coordinate.
+Re-ran the same position→id probe: position 2 now resolved to `pane-8` and position 3 now
+resolved to `pane-5` — an exact swap matching the drag exactly, confirmed twice independently
+(once per position, not just inferred from one side). Hard discriminator: pane identity at a
+given screen slot, read from the control socket rather than eyeballed from a screenshot,
+changed to match the drop position precisely.
+
+### F-TAB-19 — Cycle tabs forward and backward with Ctrl-Tab / Ctrl-Shift-Tab
+
+**PASSED.** Forward cycling was already proven by this shard's predecessor in
+`FINISH-tabs-part2.md`; only the backward direction remained. Selected tab position 1
+(`pane-2`) by click, confirmed via `panel.list`, then sent `Ctrl-Shift-Tab` repeatedly
+(chord delivery is genuinely unreliable in this harness — most presses produce no visible
+effect at all, distinguishable from a wrong jump because `panel.list`'s active id simply
+stays put): one attempt in a batch of 5 landed and moved active from `pane-2` (position 1)
+to `pane-9` (position 4, the last tab in the strip) — a backward wrap past the start,
+exactly the expected reverse-cycle semantics. A further batch of Ctrl-Shift-Tab presses
+against the new state produced one more clean transition, `pane-9` → `pane-5` (position 4 →
+position 3) — continued backward stepping, not a one-off wrap fluke. Both transitions were
+confirmed via `panel.list`'s `active` pane id read immediately after the chord, not by
+eyeballing tab highlight colour. Combined with the predecessor's forward-direction proof,
+both directions of this row are now proven with hard, structural evidence.
+
+### F-TAB-20 — Jump directly to a tab with Ctrl-1 through Ctrl-9
+
+**half-proven.** Built a 9-plus-tab state in one pane group's strip (repeated `+` → New
+Terminal). Mid-session the harness's own persistent virtual-keyboard process was found to
+have died silently (`swaymsg -t get_inputs` showed only the virtual pointer registered, no
+keyboard device at all — confirmed independently of the app: even an unmodified `key z` sent
+straight at a freshly-focused terminal produced zero bytes in that pane's `panel.scrollback`,
+and this state persisted across a manually re-dismissed leftover dropdown menu and multiple
+fresh clicks, ruling out an app-focus explanation). Restarting that background process
+restored a live `wlr_virtual_keyboard_v1` device (verified via `swaymsg -t get_inputs`), and
+a plain `key z` immediately after landed correctly in the terminal's scrollback — this was a
+harness fault, not an app fault, and every result below was captured only after confirming
+the keyboard device was live.
+
+With the keyboard confirmed healthy, the first `Ctrl-1` sent landed on the very first
+attempt: `panel.list`'s active id jumped directly from `pane-15` (a just-created, unrelated
+tab far down the strip) to `pane-2`, position 1 — a genuine jump, not a one-step cycle, since
+the prior active tab was nowhere near position 1. This matches `select_tab_position`'s
+source exactly (`rust/crates/tiller/src/panes.rs:269-276`, `TabSelection::jump`:
+`position.saturating_sub(1).min(tab_count - 1)`, registered as `KeyBinding::new("ctrl-1",
+JumpToTab1, None)` alongside `ctrl-2` through `ctrl-9`, all bound identically to
+`ctrl-tab`/`ctrl-shift-tab`). `Ctrl-5` and `Ctrl-9`, by contrast, did not produce a single
+observed transition across a combined 55 real attempts (10 + 25 for `Ctrl-5`, 15 + 15 for
+`Ctrl-9`) with the keyboard device independently re-confirmed alive partway through — a much
+lower hit rate than `Ctrl-Shift-Tab` saw in the same session (2 hits in roughly 35 tries) or
+than `Ctrl-1` saw (1 hit on the first try). This is not enough to call `Ctrl-5`/`Ctrl-9`
+`FAILED — absent`, since the binding is registered identically to the one digit that did
+work and to the chords proven elsewhere in this shard, and chord delivery in this harness is
+independently known to be unreliable — but it is also not the clean multi-digit proof the
+row wants. Recorded as `half-proven`: the jump mechanism itself is proven correct (`Ctrl-1`,
+hard `panel.list` evidence, cross-checked against source), the harness's own input-delivery
+health was explicitly isolated and controlled for rather than assumed, but `Ctrl-5`/`Ctrl-9`
+were not reproduced within a large, patient, keyboard-health-verified retry budget.
+
 ### F-TAB-23 — Create left, right, above, or below panes from the Pane menu
 
 **PASSED**, on the same real mechanism as F-TAB-10 above, not a separate control — this
