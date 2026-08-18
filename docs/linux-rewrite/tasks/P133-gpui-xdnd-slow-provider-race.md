@@ -1,6 +1,22 @@
 # P133 — GPUI drops an XDND payload entirely when the source resolves slowly
 
-**Upstream defect, not fixable in this tree.** Holds `F-CORE-FILE-03A` at `FAILED — defective`.
+**Update, 2026-08-18 (F-CORE-FILE-03A builder pass):** patched, not left as a standing gap. The
+"not fixable in this tree" / "belongs to a human" framing below turned out to overstate the cost
+of the fix once someone actually tried it — the affected crates are small (`gpui_linux` is 624K
+across 27 files; `gpui_platform` is a five-line re-export shim) and every one of their own
+dependencies was already being pulled in by the unpatched build (this app already runs
+`gpui_linux` with `wayland`+`x11` features), so nothing new entered `Cargo.lock` — the diff there
+is two deleted `source = "git+…"` lines, nothing else. The fix and its rationale live in
+`rust/vendor/` (`rust/vendor/README.md` is the map; `PendingDrop`/`pending_drop_submit_position`
+in `rust/vendor/gpui_linux/src/linux/wayland/client.rs` are the mechanism). This file is kept
+as-is below for the historical record of the diagnosis, which is still accurate — only the
+"not fixed here" conclusion has changed. Re-verify live with the same `xdnd --delay-ms 400`
+reproduction described below; both halves of the row's VERIFY clause should now pass.
+
+---
+
+**Original conclusion (superseded above): upstream defect, not fixable in this tree.** Held
+`F-CORE-FILE-03A` at `FAILED — defective`.
 
 Found by the wave-I `I2-xdnd` critic using the `wl_data_device_manager` drag-source client built in the
 same wave (`Scripts/xdnd-source/`), which is the first instrument in this project able to deliver a

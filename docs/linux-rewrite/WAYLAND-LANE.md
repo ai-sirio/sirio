@@ -674,7 +674,14 @@ surface as "no one will ever take this drag" and cancels it outright — visible
 matching `gpui_linux`'s own `DataSourceKind::Drag` handler, which likewise treats `dnd_finished` and a
 trailing `cancelled` as interchangeable teardown signals and takes the first one it sees.
 
-### The "slow-resolving provider" clause — simulated, and it finds a real race
+### The "slow-resolving provider" clause — simulated, and it found a real race, now patched
+
+**Update, 2026-08-18:** the race described below is fixed — see `rust/vendor/README.md` and
+`docs/linux-rewrite/tasks/P133-gpui-xdnd-slow-provider-race.md`'s update note. `--delay-ms 400`
+now lands the drop correctly, same as `--delay-ms 0`; the paragraph below is kept for how the bug
+was found and diagnosed, not as current behavior.
+
+### (historical) The "slow-resolving provider" clause — simulated, and it finds a real race
 
 On `text/uri-list` the whole file list arrives through **one pipe in one write** (that is the
 substance of the "one pipe in one background task" half of `F-CORE-FILE-03A`'s diagnosis) — there is
@@ -717,6 +724,7 @@ Scripts/wayland-drive.sh /tmp/shots '
 presses; `(x2,y2)` is the drop target — pick a point inside a live Terminal pane's `.size_full()`
 drop-target region to exercise `F-CORE-FILE-03A`/`F-TERM-PTY-06`'s `on_drop::<gpui::ExternalPaths>`
 path. Each `<file>` is turned into a `file://` URI. Add `--delay-ms N` to simulate a slow provider
-(see above — it currently loses the drop for any interval past roughly 350ms). `xdnd`'s own log lands
+(see above — this used to lose the drop for any interval past roughly 350ms; fixed 2026-08-18,
+see `rust/vendor/README.md`). `xdnd`'s own log lands
 in `<label>-input/xdnd-source.log` (same directory the persistent pointer/keyboard logs already use)
 and is echoed to the driver's own stdout on both success and failure.
