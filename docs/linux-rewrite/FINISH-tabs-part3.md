@@ -382,8 +382,41 @@ tab works correctly.
 
 ### F-TAB-27 — Resume a past chat from the pane menu
 
-(continued below)
+**PASSED.** Opened the "Claude Code" ACP chat tab, typed a real message ("hello test
+message") and sent it — the composer flipped `idle` → `working`, and the agent replied for
+real a few seconds later: *"Hey! I'm here and ready to help. What would you like to work on
+in this repo?"* (timestamped `23:08`, `t27d-117-after-wait.png`), giving this chat a genuine,
+non-empty transcript. With that tab still open, right-clicked a sibling tab: the tab-strip
+context menu's "Resume Chat" item showed **disabled** — no retained session existed yet.
+Closed the "Claude Code" tab (its own `×`): it disappeared from both the tab strip and the
+sidebar tree. Reopened the context menu on a sibling tab: "Resume Chat" now rendered
+**enabled**, undimmed and without a disabled-reason label, unlike "Attach to Current
+Terminal" right above it in the same menu which *was* dimmed with a stated reason
+(`t27f-119-resume-chat-menu-check.png`) — direct evidence the enable/disable state tracks
+real retained-session data, not a static always-on menu row. Clicked it: a "Claude Code" tab
+reappeared in the strip and the sidebar, and its body showed the **exact prior transcript
+restored verbatim** — "hello test message" followed by the identical real reply text and
+`23:08` timestamp captured before the close (`t27g-120-after-resume-click.png`), composer
+now `connecting` a fresh ACP session to continue it. Hard discriminator: the resumed tab's
+displayed content is the literal prior conversation, not a blank new chat — a fabricated or
+broken resume could not reproduce that exact wording and timestamp by chance.
 
 ### F-TAB-28 — Close the active tab with Ctrl-W
 
-(continued below)
+**PASSED.** With the just-resumed "Claude Code" chat tab (`pane-16` from F-TAB-27) active,
+sent `Ctrl-W`: the very first attempt closed it — `panel.list` went from 14 panes including
+`pane-16` to 13 without it, matching a clean, confirmation-free close of a non-dirty tab.
+Continuing to retry the chord (per this shard's standing note that Ctrl-chords land roughly
+1-in-15 tries) produced two further real effects, both informative: a second landed hit
+closed the newly-active "Codex" tab the same way (it disappeared from both the tab strip and
+the sidebar tree), and a third landed hit on the newly-active "Terminal" tab instead raised a
+**"Close dirty tab? Discard unsaved work in Terminal?"** confirmation
+(`t28e-121-t28-current-state.png`) — a second, distinct confirmation family from F-TAB-26's
+"has running work" gate, this one for unsaved/uncommitted terminal content. Clicking
+**Cancel** left that tab open and selected (confirmed both via `panel.list` still listing its
+pane id as present and via the sidebar still showing "Terminal" highlighted,
+`t28g-122-t28-sidebar-check.png`) — Ctrl-W correctly respects the same
+confirm-before-discard gate as the other close paths in this shard rather than bypassing it.
+Hard discriminator: `panel.list`'s pane set is structural, control-socket state, not a
+screenshot impression, and it dropped by exactly one entry per clean close and stayed
+unchanged across the Cancel.
