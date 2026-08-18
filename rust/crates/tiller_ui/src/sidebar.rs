@@ -25,7 +25,7 @@ use tiller_git::{
     create_worktree, derive_worktree_path, remove_worktree, resolve_parent_directory,
 };
 use tiller_project::TabKind;
-use tiller_theme::Theme;
+use tiller_theme::{AgentBrandColor, Theme};
 
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconPicker, ProjectIconValue};
@@ -37,7 +37,39 @@ pub mod icons;
 
 use self::icons::{Icon, IconElement};
 use crate::right_panel::ActivityStatus;
-use crate::settings::AgentAccentColor;
+
+/// One agent's brand mark: the silhouette **and** the colour it is drawn in,
+/// carried together so the two can never disagree about which agent a row is
+/// showing.
+///
+/// The reference has a single `AgentIcon` view used by the worktree badge,
+/// the sidebar tab row and the tab bar alike, so a mark looks the same
+/// wherever it appears. This port had drifted into three different tints for
+/// the same mark — `theme.title` in the tab bar, `theme.tab_needs_input` on
+/// sidebar tab rows, `theme.tab_focus_accent` in the worktree badge — and the
+/// last of those is Claude's own brand coral, so every agent's mark was
+/// wearing Claude's colour. Pairing the icon with its brand at the type level
+/// is what makes one rule enforceable across all three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentMark {
+    /// The silhouette.
+    pub icon: Icon,
+    /// The brand it is drawn in. Ignored for a chromatic asset that paints
+    /// its own colours (`Icon::is_chromatic`, currently only omp's gradient),
+    /// exactly as the reference's `OmpShape` ignores any inherited tint.
+    pub brand: AgentBrandColor,
+}
+
+impl AgentMark {
+    /// The mark for an `AgentCatalog` id, or `None` for an id with no brand
+    /// silhouette (a plain shell, or an adapter this port has no asset for).
+    pub fn for_agent_id(agent_id: &str) -> Option<Self> {
+        Some(Self {
+            icon: Icon::for_agent_id(agent_id)?,
+            brand: AgentBrandColor::for_agent_id(agent_id),
+        })
+    }
+}
 
 /// What the leading status column of a worktree (or collapsed project) row
 /// draws — a port of `TillerCore/SidebarGlyph.swift`'s `SidebarGlyphKind`,
@@ -54,8 +86,9 @@ use crate::settings::AgentAccentColor;
 enum RowStatusGlyph {
     /// No glyph. The column keeps its width so rows stay aligned.
     None,
-    /// The running indicator, tinted with the agent's accent — Swift's
-    /// `RunningDots(color: AgentIcon.color(for: agentId))`.
+    /// The running indicator, tinted with the agent's **brand** — Swift's
+    /// `RunningDots(color: AgentIcon.color(for: agentId))`, whose whole
+    /// purpose is to say *whose* work is in progress.
     Running(Rgba),
     /// A static lifecycle dot: amber needs-input, green done, red error.
     Dot(Rgba),
@@ -64,13 +97,20 @@ enum RowStatusGlyph {
 impl RowStatusGlyph {
     fn for_status(
         status: Option<ActivityStatus>,
-        accent: Option<AgentAccentColor>,
+        brand: Option<AgentBrandColor>,
         theme: Theme,
     ) -> Self {
         match status {
             None | Some(ActivityStatus::Idle) => Self::None,
+            // The tint is the agent's brand, never a `Theme` status token.
+            // Routed through the eight-token settings palette it used to be
+            // one — Claude resolved to `Amber`, i.e. to `tab_needs_input` —
+            // so a *running* Claude worktree and one that *needed input*
+            // painted the same `#E0B36A` and differed only by dot geometry.
+            // An unidentified agent gets the neutral fallback, matching
+            // `AgentIcon.color(for: agentId ?? "")`'s `.gray`.
             Some(ActivityStatus::Running) => {
-                Self::Running(accent.map_or(theme.tab_focus_accent, |accent| accent.resolve(theme)))
+                Self::Running(brand.unwrap_or(AgentBrandColor::Unknown).color())
             }
             Some(ActivityStatus::NeedsInput) => Self::Dot(theme.tab_needs_input),
             Some(ActivityStatus::Done) => Self::Dot(theme.tab_done),
@@ -99,9 +139,20 @@ pub struct SidebarTab {
     /// The tab's semantic kind. Icons are derived from this value rather
     /// than guessed from the user-visible title.
     pub kind: TabKind,
-    /// The running agent's brand mark, when this tab belongs to an agent.
-    /// A plain terminal or chat keeps the surface icon instead.
-    pub agent_icon: Option<Icon>,
+    /// The agent's brand mark, when this tab belongs to an agent. A plain
+    /// terminal or chat keeps the surface icon instead.
+    ///
+    /// **This is a live fact, not a spawn-time one.** The host recomputes it
+    /// every `sync_activity` from `AgentActivityModel`'s `pane_agents`, so a
+    /// pane whose agent is identified *after* it started — by Layer B's OSC
+    /// title or Layer D's process walk, which is how every agent Tiller did
+    /// not itself spawn gets identified — grows its brand mark here as soon
+    /// as it is known. That is exactly what `WorkspaceTabIcon` does in the
+    /// reference: it reads `model.agentActivity.paneAgents[paneId]` at
+    /// render time and never caches. Taking it from a field fixed at spawn
+    /// is what left every tab row under an identified worktree still drawing
+    /// the generic terminal glyph.
+    pub agent: Option<AgentMark>,
 }
 
 const SIDEBAR_WIDTH: f32 = 325.0;
@@ -174,12 +225,16 @@ pub struct SidebarRow {
     /// brand belongs to the tab and the worktree row keeps its branch
     /// glyph. A worktree row never sets it.
     pub agent_icon: Option<Icon>,
-    /// F-CORE-ACT-17: the accent the worktree's own agent is drawn in — the
-    /// tint of the running indicator, and nothing else. Mirrors
-    /// `WorktreeStatusGlyph(status:agentId:)`, whose `agentId` argument is
-    /// used for exactly one thing: `RunningDots(color:)`. Only meaningful
-    /// for `RowKind::Worktree`.
-    pub agent_accent: Option<AgentAccentColor>,
+    /// The brand of the agent **this row is about** — one fact with one
+    /// drawing job per row kind:
+    ///
+    /// * `RowKind::Worktree` — F-CORE-ACT-17: the tint of the running
+    ///   indicator, and nothing else, mirroring
+    ///   `WorktreeStatusGlyph(status:agentId:)`, whose `agentId` argument
+    ///   reaches exactly one thing: `RunningDots(color:)`.
+    /// * `RowKind::Tab` — the colour of [`Self::agent_icon`]'s brand mark,
+    ///   mirroring the `AgentIcon` that `WorkspaceTabIcon` draws.
+    pub agent_brand: Option<AgentBrandColor>,
     /// F-SID-11: the worktree's durable comment annotation, carried through
     /// from `SidebarWorktree::comment`. Only meaningful for
     /// `RowKind::Worktree`.
@@ -190,7 +245,7 @@ pub struct SidebarRow {
     /// `RowKind::Worktree`; drawn as the row's trailing badge. Empty when
     /// nothing is running — this is strictly the `.running` set, never
     /// done/error/needs-input (those are the leading status dot's job).
-    pub running_agent_icons: Vec<Icon>,
+    pub running_agents: Vec<AgentMark>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -453,9 +508,9 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
-                agent_accent: None,
+                agent_brand: None,
                 comment: None,
-                running_agent_icons: Vec::new(),
+                running_agents: Vec::new(),
             }
         }
 
@@ -544,9 +599,9 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
-                agent_accent: None,
+                agent_brand: None,
                 comment: None,
-                running_agent_icons: Vec::new(),
+                running_agents: Vec::new(),
             });
             let worktree_count = project.worktrees.len();
             for (worktree_index, worktree) in project.worktrees.into_iter().enumerate() {
@@ -566,9 +621,9 @@ impl Sidebar {
                     tab_id: None,
                     tab_kind: None,
                     agent_icon: None,
-                    agent_accent: None,
+                    agent_brand: None,
                     comment: worktree.comment,
-                    running_agent_icons: Vec::new(),
+                    running_agents: Vec::new(),
                 });
             }
             if project_is_git {
@@ -586,9 +641,9 @@ impl Sidebar {
                     tab_id: None,
                     tab_kind: None,
                     agent_icon: None,
-                    agent_accent: None,
+                    agent_brand: None,
                     comment: None,
-                    running_agent_icons: Vec::new(),
+                    running_agents: Vec::new(),
                 });
             }
         }
@@ -1391,12 +1446,12 @@ impl Sidebar {
     ///   is a property of the row, not of the agents in it.
     /// * **what it is doing, and whose** — one leading indicator carrying
     ///   both: `status` picks the shape (a running indicator, a lifecycle
-    ///   dot, or nothing), `agent_accent` tints it. That is precisely what
+    ///   dot, or nothing), `agent_brand` tints it. That is precisely what
     ///   `WorktreeStatusGlyph(status:agentId:)` does; `agentId` reaches
     ///   nothing but `RunningDots(color:)` there, and reaches nothing but
     ///   the tint here.
     /// * **which agents are running** — the trailing badge
-    ///   (`running_agent_icons`, from
+    ///   (`running_agents`, from
     ///   `AgentActivityModel::running_agent_ids`), the only place a brand
     ///   mark appears on a worktree row.
     ///
@@ -1411,8 +1466,8 @@ impl Sidebar {
         &mut self,
         id: usize,
         status: Option<ActivityStatus>,
-        agent_accent: Option<AgentAccentColor>,
-        running_agent_icons: Vec<Icon>,
+        agent_brand: Option<AgentBrandColor>,
+        running_agents: Vec<AgentMark>,
         cx: &mut Context<Self>,
     ) {
         if let Some(row) = self
@@ -1421,14 +1476,14 @@ impl Sidebar {
             .find(|row| row.id == id && row.kind == RowKind::Worktree)
         {
             if row.agent_status == status
-                && row.agent_accent == agent_accent
-                && row.running_agent_icons == running_agent_icons
+                && row.agent_brand == agent_brand
+                && row.running_agents == running_agents
             {
                 return;
             }
             row.agent_status = status;
-            row.agent_accent = agent_accent;
-            row.running_agent_icons = running_agent_icons;
+            row.agent_brand = agent_brand;
+            row.running_agents = running_agents;
             cx.notify();
         }
     }
@@ -1538,6 +1593,12 @@ impl Sidebar {
                 .take_while(|row| row.kind == RowKind::Tab && row.tab_id.is_some())
                 .count();
 
+        // The diff includes the agent mark, and must: it is the only field
+        // here that changes without the tab list itself changing. A pane
+        // identified after spawn keeps its id, kind, title and selection and
+        // only grows a brand — comparing everything but the mark would make
+        // this an unconditional early return for exactly the case the mark
+        // exists to show.
         let unchanged = self.rows[insert_at..existing_end]
             .iter()
             .map(|row| {
@@ -1545,6 +1606,7 @@ impl Sidebar {
                     row.tab_id,
                     row.tab_kind,
                     row.agent_icon,
+                    row.agent_brand,
                     row.title.as_str(),
                     row.selected,
                 )
@@ -1553,7 +1615,8 @@ impl Sidebar {
                 (
                     Some(tab.id),
                     Some(tab.kind),
-                    tab.agent_icon,
+                    tab.agent.map(|agent| agent.icon),
+                    tab.agent.map(|agent| agent.brand),
                     tab.title.as_str(),
                     tab.selected,
                 )
@@ -1576,10 +1639,10 @@ impl Sidebar {
             path: None,
             tab_id: Some(tab.id),
             tab_kind: Some(tab.kind),
-            agent_icon: tab.agent_icon,
-            agent_accent: None,
+            agent_icon: tab.agent.map(|agent| agent.icon),
+            agent_brand: tab.agent.map(|agent| agent.brand),
             comment: None,
-            running_agent_icons: Vec::new(),
+            running_agents: Vec::new(),
         });
         self.rows.splice(insert_at..existing_end, new_rows);
         cx.notify();
@@ -1780,9 +1843,9 @@ impl Sidebar {
                 tab_id: None,
                 tab_kind: None,
                 agent_icon: None,
-                agent_accent: None,
+                agent_brand: None,
                 comment: None,
-                running_agent_icons: Vec::new(),
+                running_agents: Vec::new(),
             },
         );
         self.select_row(id, cx);
@@ -2592,15 +2655,15 @@ impl Sidebar {
         // per distinct running agent, 3px apart, 7px clear of the title. It
         // takes its width out of the title's, so a busy worktree truncates
         // its branch name instead of pushing the hover controls off the row.
-        let running_agent_icons: Vec<Icon> = if kind == RowKind::Worktree {
-            row.running_agent_icons.clone()
+        let running_agents: Vec<AgentMark> = if kind == RowKind::Worktree {
+            row.running_agents.clone()
         } else {
             Vec::new()
         };
-        let badge_width = if running_agent_icons.is_empty() {
+        let badge_width = if running_agents.is_empty() {
             0.0
         } else {
-            running_agent_icons.len() as f32 * 15.0 + 4.0
+            running_agents.len() as f32 * 15.0 + 4.0
         };
         let title_width = row_width - 16.0 - 12.0 - 16.0 - 21.0 - 16.0 - badge_width;
         let disclosure = match (kind, row.expanded) {
@@ -2614,7 +2677,7 @@ impl Sidebar {
         // onto the project row itself in `visible_rows`.
         let status_glyph =
             if kind == RowKind::Worktree || (kind == RowKind::Project && !row.expanded) {
-                RowStatusGlyph::for_status(row.agent_status, row.agent_accent, theme)
+                RowStatusGlyph::for_status(row.agent_status, row.agent_brand, theme)
             } else {
                 RowStatusGlyph::None
             };
@@ -2631,7 +2694,13 @@ impl Sidebar {
                 .as_ref()
                 .map(|icon| icon.tint.resolve(theme))
                 .unwrap_or_else(|| Self::project_color(&title)),
-            RowKind::Tab => theme.tab_needs_input,
+            // A brand mark is drawn in its brand, exactly as the reference
+            // draws one `AgentIcon` wherever a tab is listed. Only a
+            // non-agent tab keeps the surface tint.
+            RowKind::Tab => row
+                .agent_brand
+                .filter(|_| row.agent_icon.is_some())
+                .map_or(theme.tab_needs_input, AgentBrandColor::color),
             RowKind::Worktree | RowKind::NewWorktree => theme.meta,
         };
         let text_color = if selected {
@@ -2818,6 +2887,15 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-worktree-mark-{row_id}-{name}"))
                         .child(project_mark)
                         .into_any_element()
+                } else if kind == RowKind::Tab {
+                    // A tab row names its glyph the same way, so a drawn test
+                    // can assert that a pane identified after spawn actually
+                    // changed the mark on screen rather than only in a field.
+                    let name = Self::icon_selector_name(glyph);
+                    slot.id(("sidebar-tab-mark", row_id))
+                        .debug_selector(move || format!("sidebar-tab-mark-{row_id}-{name}"))
+                        .child(project_mark)
+                        .into_any_element()
                 } else {
                     slot.child(project_mark).into_any_element()
                 }
@@ -2862,7 +2940,7 @@ impl Sidebar {
             // de-duplicated these and put them in `AgentCatalog` order, so
             // the badge draws them left to right exactly as handed over —
             // it never re-sorts and never de-duplicates again.
-            .when(!running_agent_icons.is_empty(), |this| {
+            .when(!running_agents.is_empty(), |this| {
                 this.child(
                     div()
                         .id(("sidebar-running-agents", row_id))
@@ -2871,19 +2949,25 @@ impl Sidebar {
                         .flex_none()
                         .items_center()
                         .gap(px(3.0))
-                        .children(running_agent_icons.iter().enumerate().map(|(index, icon)| {
+                        .children(running_agents.iter().enumerate().map(|(index, mark)| {
                             div()
                                 .id(("sidebar-running-agent", row_id * 16 + index))
                                 .debug_selector({
-                                    let name = Self::icon_selector_name(*icon);
+                                    let name = Self::icon_selector_name(mark.icon);
                                     move || format!("sidebar-running-agent-{row_id}-{name}")
                                 })
                                 .flex()
                                 .flex_none()
                                 .items_center()
+                                // Each mark in its own brand. Every mark used
+                                // to be tinted `theme.tab_focus_accent`, which
+                                // is `#E2795B` — Claude's own brand coral — so
+                                // a Codex or Pi mark was drawn in Claude's
+                                // colour. Shape carried identity; colour
+                                // actively contradicted it.
                                 .child(
-                                    IconElement::new(*icon, px(12.0))
-                                        .text_color(theme.tab_focus_accent),
+                                    IconElement::new(mark.icon, px(12.0))
+                                        .text_color(mark.brand.color()),
                                 )
                         })),
                 )
@@ -3373,9 +3457,9 @@ mod tests {
             tab_id: Some(1),
             tab_kind: Some(TabKind::Terminal),
             agent_icon: None,
-            agent_accent: None,
+            agent_brand: None,
             comment: None,
-            running_agent_icons: Vec::new(),
+            running_agents: Vec::new(),
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::SquareTerminal);
@@ -3397,9 +3481,9 @@ mod tests {
             tab_id: Some(2),
             tab_kind: Some(TabKind::Terminal),
             agent_icon: Some(Icon::ClaudeCode),
-            agent_accent: None,
+            agent_brand: None,
             comment: None,
-            running_agent_icons: Vec::new(),
+            running_agents: Vec::new(),
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::ClaudeCode);
@@ -4114,8 +4198,17 @@ mod tests {
             sidebar.set_worktree_activity(
                 1,
                 Some(ActivityStatus::Running),
-                Some(AgentAccentColor::Amber),
-                vec![Icon::ClaudeCode, Icon::Codex],
+                Some(AgentBrandColor::Claude),
+                vec![
+                    AgentMark {
+                        icon: Icon::ClaudeCode,
+                        brand: AgentBrandColor::Claude,
+                    },
+                    AgentMark {
+                        icon: Icon::Codex,
+                        brand: AgentBrandColor::Codex,
+                    },
+                ],
                 cx,
             );
         });
@@ -4162,6 +4255,141 @@ mod tests {
         );
     }
 
+    /// The seam this port had one level down from the worktree row: a pane
+    /// whose agent is identified **after** it started must change the *tab*
+    /// row's mark, not only the worktree row's.
+    ///
+    /// The reference's `WorkspaceTabIcon` reads
+    /// `model.agentActivity.paneAgents[paneId]` at render time, so a Claude
+    /// the user launched by hand in a plain terminal — identified by Layer B
+    /// from its OSC title, or by Layer D from its process name, which is how
+    /// every agent Tiller did not spawn gets identified — shows its brand
+    /// mark as soon as it is known. This port took the mark from a field
+    /// fixed at spawn, so those tab rows kept the generic terminal glyph
+    /// forever while the worktree row above them already showed the brand.
+    #[gpui::test]
+    async fn drawn_tab_row_takes_the_mark_an_agent_earns_after_spawn(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let plain_terminal = || SidebarTab {
+            id: 7,
+            title: "Terminal".into(),
+            selected: false,
+            kind: TabKind::Terminal,
+            agent: None,
+        };
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(1, vec![plain_terminal()], cx);
+        });
+        cx.run_until_parked();
+
+        // `TAB_ROW_ID_OFFSET + 7`, spelled out: `debug_bounds` wants a
+        // `&'static str`, and a leaked format! per assertion reads worse
+        // than the two constants this test actually needs.
+        assert_eq!(TAB_ROW_ID_OFFSET + 7, 1_000_007);
+        const GENERIC: &str = "sidebar-tab-mark-1000007-terminal";
+        const CLAUDE: &str = "sidebar-tab-mark-1000007-claude-mark";
+
+        assert!(
+            cx.debug_bounds(GENERIC).is_some(),
+            "an unidentified terminal keeps the generic surface glyph"
+        );
+        assert!(cx.debug_bounds(CLAUDE).is_none(), "and nothing else");
+
+        // Layer B lands. Everything else about the tab is unchanged — same
+        // id, same kind, same title, same selection — which is exactly the
+        // case a diff that ignored the mark would swallow.
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(
+                1,
+                vec![SidebarTab {
+                    agent: AgentMark::for_agent_id("claude"),
+                    ..plain_terminal()
+                }],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds(CLAUDE).is_some(),
+            "an agent identified after spawn changes the tab row's mark on screen"
+        );
+        assert!(
+            cx.debug_bounds(GENERIC).is_none(),
+            "the generic glyph gives way rather than being drawn alongside"
+        );
+
+        // ...and it goes away again when the identity does, so this is a
+        // live read and not a one-way latch.
+        entity.update(&mut cx, |sidebar, cx| {
+            sidebar.set_worktree_tabs(1, vec![plain_terminal()], cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(GENERIC).is_some(),
+            "losing the identity restores the surface glyph"
+        );
+    }
+
+    /// The two collisions a user would have to measure pixels to resolve.
+    ///
+    /// 1. A **running** Claude worktree resolved its tint through the
+    ///    eight-token settings palette, where Claude was `Amber` — that is
+    ///    `theme.tab_needs_input` itself. Running and needs-input painted the
+    ///    same `#E0B36A`, leaving a 3x3 dot cluster versus a 6x6 dot as the
+    ///    only difference. The reference has no such collision: needs-input
+    ///    is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's
+    ///    own colour.
+    /// 2. Every badge mark was tinted `theme.tab_focus_accent` — `#E2795B`,
+    ///    which is Claude's brand coral — so a Codex or Pi mark was drawn in
+    ///    Claude's colour.
+    #[test]
+    fn running_tint_never_equals_a_status_colour_and_names_the_agent() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let needs_input =
+                RowStatusGlyph::for_status(Some(ActivityStatus::NeedsInput), None, theme);
+            for (agent, brand) in [
+                ("claude", AgentBrandColor::Claude),
+                ("codex", AgentBrandColor::Codex),
+                ("opencode", AgentBrandColor::OpenCode),
+                ("pi", AgentBrandColor::Pi),
+                ("omp", AgentBrandColor::Omp),
+            ] {
+                let running =
+                    RowStatusGlyph::for_status(Some(ActivityStatus::Running), Some(brand), theme);
+                assert_eq!(running, RowStatusGlyph::Running(brand.color()));
+                assert_ne!(
+                    running,
+                    RowStatusGlyph::Running(match needs_input {
+                        RowStatusGlyph::Dot(color) => color,
+                        other => panic!("needs-input must be a dot, got {other:?}"),
+                    }),
+                    "{agent} running must not paint the needs-input colour"
+                );
+            }
+        }
+    }
+
+    /// A worktree whose agent is unknown still gets a running indicator, in
+    /// the neutral grey `AgentIcon.color(for: agentId ?? "")` resolves to —
+    /// never the brand accent, which would name an agent nobody identified.
+    #[test]
+    fn an_unidentified_running_agent_gets_the_neutral_fallback() {
+        let theme = Theme::dark();
+        assert_eq!(
+            RowStatusGlyph::for_status(Some(ActivityStatus::Running), None, theme),
+            RowStatusGlyph::Running(AgentBrandColor::Unknown.color())
+        );
+    }
+
     /// The status table itself, against `SidebarGlyphKind.forStatus` in
     /// `Packages/TillerCore/Sources/TillerCore/SidebarGlyph.swift`. Two rows
     /// of it had been inverted: `Idle` drew the amber needs-input dot, so an
@@ -4196,10 +4424,10 @@ mod tests {
         assert_eq!(
             RowStatusGlyph::for_status(
                 Some(ActivityStatus::Running),
-                Some(AgentAccentColor::Blue),
+                Some(AgentBrandColor::Codex),
                 theme
             ),
-            RowStatusGlyph::Running(AgentAccentColor::Blue.resolve(theme))
+            RowStatusGlyph::Running(AgentBrandColor::Codex.color())
         );
         assert_ne!(
             RowStatusGlyph::for_status(Some(ActivityStatus::Idle), None, theme),
@@ -4242,7 +4470,7 @@ mod tests {
                     title: "Claude Code".into(),
                     selected: true,
                     kind: TabKind::Terminal,
-                    agent_icon: Some(Icon::ClaudeCode),
+                    agent: AgentMark::for_agent_id("claude"),
                 }],
                 cx,
             );
@@ -4496,14 +4724,14 @@ mod tests {
                         title: "First".into(),
                         selected: true,
                         kind: TabKind::Terminal,
-                        agent_icon: None,
+                        agent: None,
                     },
                     SidebarTab {
                         id: 43,
                         title: "Second".into(),
                         selected: false,
                         kind: TabKind::Terminal,
-                        agent_icon: None,
+                        agent: None,
                     },
                 ],
                 cx,
@@ -4590,7 +4818,7 @@ mod tests {
                     title: "Chat".into(),
                     selected: true,
                     kind: TabKind::AgentChat,
-                    agent_icon: None,
+                    agent: None,
                 }],
                 cx,
             );

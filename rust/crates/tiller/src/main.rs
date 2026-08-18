@@ -33,7 +33,7 @@ use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
     TerminalIdentity, TerminalLinkEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
 };
-use tiller_theme::{Theme, ThemeMode};
+use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
@@ -43,10 +43,10 @@ use tiller_ui::{
         ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
     row_reorder::{ReorderScope, RowDrag},
-    settings::{AgentAccentColor, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
+    settings::{Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
-        ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget, SidebarEvent,
-        SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
+        AgentMark, ProjectSettingsUpdate, Sidebar, SidebarContextAction, SidebarContextTarget,
+        SidebarEvent, SidebarProject, SidebarTab, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement},
     },
     status_bar::{StatusBar, UsageBarData},
@@ -2733,25 +2733,19 @@ struct WorktreeActivity {
     /// F-CORE-ACT-17: `agent_id_for_panes`, as the *tint* of the status
     /// indicator — `WorktreeStatusGlyph(status:agentId:)` uses `agentId`
     /// for nothing else.
-    agent_accent: Option<AgentAccentColor>,
+    ///
+    /// This used to be a `settings::AgentAccentColor`, i.e. one of the eight
+    /// *semantic theme tokens* the agent-colour picker offers, and Claude's
+    /// entry there is `Amber` — `theme.tab_needs_input`. A running Claude
+    /// worktree therefore painted the byte-identical colour as one that
+    /// needed input. `tiller_theme::AgentBrandColor` is a separate table for
+    /// a separate job, which is also how the reference keeps them apart:
+    /// `App/AgentAccentColor.swift` says in as many words that it is
+    /// "unrelated to `AgentIcon.color(for:)`" — and it is `color(for:)`, not
+    /// the picker, that `WorktreeStatusGlyph` reads.
+    agent_brand: Option<AgentBrandColor>,
     /// F-CORE-ACT-18: `running_agent_ids`, as brand marks in catalog order.
-    running: Vec<Icon>,
-}
-
-/// The accent a given agent's marks are drawn in. Mirrors the Swift
-/// `AgentIcon.color(for:)` switch, mapped onto the same eight-token palette
-/// the agent-colour picker offers (`SettingsSnapshot::agent_colors`
-/// defaults), so the sidebar tint and the settings swatch name the same
-/// colour instead of two hard-coded tables disagreeing.
-fn agent_accent_color(agent_id: &str) -> AgentAccentColor {
-    match agent_id.strip_suffix("-acp").unwrap_or(agent_id) {
-        "claude" => AgentAccentColor::Amber,
-        "codex" => AgentAccentColor::Coral,
-        "opencode" => AgentAccentColor::Blue,
-        "pi" => AgentAccentColor::Green,
-        "omp" => AgentAccentColor::Purple,
-        _ => AgentAccentColor::Slate,
-    }
+    running: Vec<AgentMark>,
 }
 
 fn tab_status_color(status: ActivityStatus, theme: Theme) -> gpui::Rgba {
@@ -4557,7 +4551,11 @@ impl TillerWorkspace {
         self.tabs
             .iter()
             .map(|tab| {
-                let icon = tab_icon(tab.kind, tab_has_file(tab), tab.agent_icon);
+                let icon = tab_icon(
+                    tab.kind,
+                    tab_has_file(tab),
+                    self.tab_agent_mark(tab).map(|agent| agent.icon),
+                );
                 let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
                 ActivitySurface::new(icon, tab.title.clone(), self.worktree_label.clone(), status)
             })
@@ -5113,6 +5111,51 @@ impl TillerWorkspace {
         cx.notify();
     }
 
+    /// The brand mark a tab is currently showing, resolved **live** on every
+    /// sync rather than frozen at spawn.
+    ///
+    /// This is the port of `App/WorkspaceTabIcon.swift`, and its order is
+    /// that view's order: a tab that knows its own agent (a chat, or a
+    /// terminal Tiller launched an adapter into) keeps that identity, and
+    /// otherwise the tab asks the activity model what its panes turned out
+    /// to be — Swift's
+    /// `tab.leafIds.compactMap { model.agentActivity.paneAgents[$0] }.first`,
+    /// leaf order, first match wins.
+    ///
+    /// That second clause is the whole point. `agent_spawned` is only one of
+    /// four ways a pane acquires an identity; the other three —
+    /// `handle_title_change` (Layer B, OSC title), `process_identified`
+    /// (Layer D, the foreground-process walk) and `register_agent_id` (a
+    /// restored session) — all land *after* the tab exists, and every agent
+    /// the user starts by hand arrives that way. Reading the field fixed at
+    /// spawn meant those tabs kept the generic terminal glyph for their whole
+    /// life, while the worktree row directly above them already showed the
+    /// brand, because that row reads the same model live.
+    ///
+    /// **This is a pure read of `pane_agents` and nothing else.** Pane
+    /// ownership — spawn-owned, title-owned (`titleOwnedPanes`),
+    /// process-owned (`processOwnedPanes`) — decides when an entry appears
+    /// and, more delicately, when it is allowed to be cleared; all of those
+    /// rules stay inside `AgentActivityModel`, where the layers can be kept
+    /// from wiping each other. An icon lookup must never participate in
+    /// them, so this never writes, never registers, and never clears.
+    fn tab_agent_mark(&self, tab: &OpenTab) -> Option<AgentMark> {
+        if let Some(icon) = tab.agent_icon {
+            return Some(AgentMark {
+                icon,
+                brand: tab
+                    .agent_id
+                    .as_deref()
+                    .map_or(AgentBrandColor::Unknown, AgentBrandColor::for_agent_id),
+            });
+        }
+        tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
+            self.activity
+                .agent_id(&format!("pane-{pane_id}"))
+                .and_then(AgentMark::for_agent_id)
+        })
+    }
+
     fn sync_activity(&mut self, cx: &mut Context<Self>) {
         // Layer E first: every view below reads the model, so the surfaces'
         // own facts have to be in it before any of them ask.
@@ -5135,7 +5178,7 @@ impl TillerWorkspace {
                 title: tab.title.clone(),
                 selected: index == self.active_tab,
                 kind: tab.kind,
-                agent_icon: tab.agent_icon,
+                agent: self.tab_agent_mark(tab),
             })
             .collect();
         if let Some(worktree_id) = self.sidebar_worktree_id(&self.working_directory) {
@@ -5197,15 +5240,15 @@ impl TillerWorkspace {
                 worktrees.push(WorktreeActivity {
                     row_id,
                     status,
-                    agent_accent: self
+                    agent_brand: self
                         .activity
                         .agent_id_for_panes(&refs)
-                        .map(agent_accent_color),
+                        .map(AgentBrandColor::for_agent_id),
                     running: self
                         .activity
                         .running_agent_ids(&refs, &tiller_activity::CATALOG_IDS)
                         .into_iter()
-                        .filter_map(Icon::for_agent_id)
+                        .filter_map(AgentMark::for_agent_id)
                         .collect(),
                 });
             }
@@ -5218,7 +5261,7 @@ impl TillerWorkspace {
                     sidebar.set_worktree_activity(
                         worktree.row_id,
                         worktree.status,
-                        worktree.agent_accent,
+                        worktree.agent_brand,
                         worktree.running.clone(),
                         cx,
                     );
@@ -7504,6 +7547,11 @@ impl TillerWorkspace {
 
     fn render_open_tab(
         tab: &OpenTab,
+        // The tab's live agent identity (see
+        // `TillerWorkspace::tab_agent_mark`) — resolved by the caller
+        // because it needs the activity model, which this associated
+        // function deliberately does not take.
+        agent: Option<AgentMark>,
         active: bool,
         status: Option<ActivityStatus>,
         exit_label: Option<String>,
@@ -7516,13 +7564,25 @@ impl TillerWorkspace {
     ) -> impl IntoElement {
         let id = tab.id;
         let is_file = tab_has_file(tab);
-        let icon = tab_icon(tab.kind, is_file, tab.agent_icon);
-        // Agent marks follow the primary text colour (the Swift app renders
-        // them with `.primary`); chromatic marks ignore this entirely and
-        // keep their brand colours. Everything else keeps the reference
-        // tinting.
+        let icon = tab_icon(tab.kind, is_file, agent.map(|agent| agent.icon));
+        // An agent mark is drawn in that agent's brand, here, on the sidebar
+        // tab row and in the worktree badge alike — the reference has one
+        // `AgentIcon` view that every one of those three places draws, so a
+        // mark looks the same wherever it appears. This port had drifted
+        // into three different tints for the same mark, and the badge's was
+        // `theme.tab_focus_accent` = `#E2795B`, Claude's own brand coral, so
+        // a Codex mark was painted in Claude's colour.
+        //
+        // This is a deliberate, narrow divergence from a literal port:
+        // Swift fills the Codex, OpenCode and Pi marks with `.primary` and
+        // only Claude (`#D97757`) and omp (its gradient) with a brand. It
+        // can afford to, because those are rendered assets; `IconElement`
+        // tints one flat colour into a `currentColor` silhouette, so the
+        // tint is the only channel a mark has. Chromatic assets still ignore
+        // it — `Icon::is_chromatic`, omp's gradient — exactly as `OmpShape`
+        // ignores any inherited tint.
         let glyph_color = if icon.is_agent_mark() {
-            theme.title
+            agent.map_or(theme.title, |agent| agent.brand.color())
         } else if tab.kind == TabKind::AgentChat {
             if is_file {
                 theme.file_link
@@ -8401,6 +8461,7 @@ impl TillerWorkspace {
                 .map(|rename| rename.focus.clone());
             tabs = tabs.child(Self::render_open_tab(
                 tab,
+                self.tab_agent_mark(tab),
                 index == self.active_tab,
                 self.tab_status(tab, cx),
                 Self::terminal_exit_label(tab, cx),
@@ -10763,7 +10824,22 @@ fn main() {
                 let activity = tabs
                     .iter()
                     .map(|tab| {
-                        let icon = tab_icon(tab.kind, tab_has_file(tab), tab.agent_icon);
+                        // Restored panes get their identity from
+                        // `register_agent_id` inside `restore_tabs`, i.e.
+                        // after the tab exists — the same after-the-fact
+                        // path Layers B and D use — so this first Activity
+                        // list reads the model rather than the tab's field.
+                        let icon = tab_icon(
+                            tab.kind,
+                            tab_has_file(tab),
+                            tab.agent_icon.or_else(|| {
+                                tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
+                                    activity_model
+                                        .agent_id(&format!("pane-{pane_id}"))
+                                        .and_then(Icon::for_agent_id)
+                                })
+                            }),
+                        );
                         ActivitySurface::new(
                             icon,
                             tab.title.clone(),
@@ -12547,6 +12623,159 @@ mod tests {
             cx.update(|window, _| focus.is_focused(window)),
             "committing a tab rename must hand keyboard focus back to the tab's own content"
         );
+    }
+
+    /// The seam a critic found one level below the worktree row: agent
+    /// identity reached the worktree row and never the **tab** rows under
+    /// it. In its frame a worktree row drew three brand marks while all four
+    /// tab rows below drew the generic terminal glyph.
+    ///
+    /// The cause was that the sidebar's tab rows took their mark from
+    /// `OpenTab::agent_icon`, fixed at spawn, while the worktree row read
+    /// `AgentActivityModel` live. `App/WorkspaceTabIcon.swift` reads
+    /// `model.agentActivity.paneAgents[paneId]` at render time, which is why
+    /// a hand-launched agent gets its brand there as soon as a layer
+    /// identifies it.
+    ///
+    /// This drives the **production** identification path, not a helper:
+    /// a real `TerminalActivityEvent::OscTitle` through
+    /// `panes::apply_terminal_activity_event` — Layer B, `. <task>` being
+    /// Claude's own working-title convention — into the workspace's one
+    /// activity model.
+    #[gpui::test]
+    async fn a_layer_b_identity_after_spawn_reaches_the_sidebar_tab_row(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Tab 0 owns pane 0, spawned as a plain shell: no adapter, so no
+        // spawn-time icon and nothing in `pane_agents` yet.
+        workspace.update(&mut cx, |workspace, cx| {
+            assert!(workspace.tabs[0].agent_icon.is_none());
+            assert!(workspace.tab_agent_mark(&workspace.tabs[0]).is_none());
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(TAB_ROW_ID_OFFSET, 1_000_000);
+        const GENERIC: &str = "sidebar-tab-mark-1000000-terminal";
+        const CLAUDE: &str = "sidebar-tab-mark-1000000-claude-mark";
+        assert!(
+            cx.debug_bounds(GENERIC).is_some(),
+            "a plain shell's tab row draws the generic terminal glyph"
+        );
+        assert!(cx.debug_bounds(CLAUDE).is_none());
+
+        // Layer B: the pane's own shell writes Claude's working title.
+        workspace.update(&mut cx, |workspace, cx| {
+            panes::apply_terminal_activity_event(
+                &mut workspace.activity,
+                "pane-0",
+                &TerminalActivityEvent::OscTitle(". building tiller".to_string()),
+                Instant::now(),
+            );
+            assert_eq!(
+                workspace.activity.agent_id("pane-0"),
+                Some("claude"),
+                "Layer B identifies `. <task>` as Claude"
+            );
+            assert!(
+                workspace.activity.is_title_owned("pane-0"),
+                "and takes title ownership of the pane, not spawn ownership"
+            );
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds(CLAUDE).is_some(),
+            "the tab row shows the brand as soon as a layer identifies the pane"
+        );
+        assert!(cx.debug_bounds(GENERIC).is_none());
+
+        // The mark is a pure read: resolving it must not have registered,
+        // cleared or otherwise touched pane ownership, which is what keeps
+        // one layer's signal from wiping state another layer relies on.
+        workspace.update(&mut cx, |workspace, _| {
+            assert!(workspace.activity.is_title_owned("pane-0"));
+            assert!(!workspace.activity.is_process_owned("pane-0"));
+            assert!(
+                workspace.tabs[0].agent_icon.is_none(),
+                "a live read never back-fills the spawn-time field"
+            );
+        });
+    }
+
+    /// The same live read, one layer over: Layer D's foreground-process walk
+    /// is the only signal that catches a native agent with no usable title
+    /// convention, and it lands after spawn too.
+    #[gpui::test]
+    async fn a_layer_d_identity_after_spawn_reaches_the_sidebar_tab_row(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.activity.process_identified("pane-0", "codex");
+            workspace.sync_activity(cx);
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("sidebar-tab-mark-1000000-openai-mark")
+                .is_some(),
+            "a process-owned pane's brand reaches its tab row"
+        );
+        workspace.update(&mut cx, |workspace, _| {
+            assert!(
+                workspace.activity.is_process_owned("pane-0"),
+                "reading the mark leaves process ownership exactly as it was"
+            );
+        });
+    }
+
+    /// F-CORE-ACT-17/18, the colours: a *running* Claude worktree must not
+    /// paint the same hex as one that *needs input*, and each badge mark
+    /// must wear its own agent's brand rather than one shared accent.
+    #[test]
+    fn worktree_activity_colours_name_the_agent_and_never_a_status() {
+        let theme = Theme::dark();
+        assert_ne!(
+            AgentBrandColor::for_agent_id("claude").color(),
+            theme.tab_needs_input,
+            "running Claude and needs-input used to be the identical #E0B36A"
+        );
+        for (id, brand) in [
+            ("claude", AgentBrandColor::Claude),
+            ("codex", AgentBrandColor::Codex),
+            ("opencode", AgentBrandColor::OpenCode),
+            ("pi", AgentBrandColor::Pi),
+            ("omp", AgentBrandColor::Omp),
+        ] {
+            assert_eq!(AgentBrandColor::for_agent_id(id), brand);
+            let mark = AgentMark::for_agent_id(id).expect("a catalog agent has a brand mark");
+            assert_eq!(mark.brand, brand);
+            assert_eq!(mark.icon, Icon::for_agent_id(id).expect("catalog icon"));
+            assert_ne!(
+                mark.brand.color(),
+                theme.tab_focus_accent,
+                "{id}'s mark used to be tinted tab_focus_accent -- Claude's own coral"
+            );
+        }
     }
 
     /// F-TAB-11 (`SplitDisabledReason::SoleTabInGroup` half): only
