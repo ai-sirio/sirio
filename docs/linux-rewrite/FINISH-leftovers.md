@@ -526,3 +526,47 @@ pass that the file has not changed since and the specific claim (no `USAGE_URL` 
 holds by direct grep, not by trusting a stale note.
 
 ---
+
+## Remaining rows: NOT EXERCISED (F-WIN-03, F-WIN-10, F-PER-01, F-PER-05, F-PER-07)
+
+This pass's priority order (per the assignment) was the F-SET/F-CORE-ACT rows, all eight of which are
+above, plus F-CORE-DOM-02/03/05/07/08 and F-CORE-USG-07 as a bonus (cheap: unit-test-backed, no live
+drive needed). The remaining five rows below all require a genuinely fresh, expensive live drive —
+a real file-picker portal round-trip, a real toast-triggering gesture hunt, or a real completed agent
+turn followed by a full app quit/relaunch cycle — and I ran out of remaining budget to do any of them
+honestly rather than superficially. Per the assignment's own instruction, these are reported as
+**NOT EXERCISED** rather than adopted from stale ledger evidence or guessed at:
+
+- **F-WIN-03** (⌘O/⌘S open/save). The existing ledger evidence (wave H, 2026-08-14) claims the
+  environment has no session D-Bus, making the ashpd portal call UNREACHABLE. I did *not* re-adopt
+  this: a quick check this pass (`dbus-send --session ... ListNames`) found a session bus **does**
+  exist at `/run/user/1000/bus` in this shell, which the wave-H note's own environment apparently
+  lacked or didn't check — and `Scripts/wayland-drive.sh` sets no `DBUS_SESSION_BUS_ADDRESS` of its
+  own, so the nested app likely inherits whatever this shell has. Whether an actual portal backend
+  (`org.freedesktop.portal.Desktop` with a `FileChooser` implementation) is registered on that bus
+  inside the nested compositor is a separate question I did not answer. Flagging this as a concrete
+  discrepancy worth a fresh live check next pass, rather than re-asserting UNREACHABLE on old
+  evidence that this pass's own quick probe already partially contradicts.
+- **F-WIN-10** (transient toast messages). Existing evidence: mechanism confirmed by source, but the
+  exact triggering gesture failed 5 times in the pass that wrote it. A sixth blind attempt without a
+  clearer plan for which operation reliably raises a toast would not be meaningfully stronger
+  evidence than what is already on record.
+- **F-PER-01** (persist projects/worktrees/tabs/chats/scrollback across quit/relaunch). Worth
+  recording precisely why this one is not a simple stale-evidence adoption: the same wave's ledger
+  contains a **second, contradicting** row bearing directly on this clause — `ACP-13` ("FAILED —
+  absent | the UI chat path never writes `chat_turn` or `session_ref` rows (0 rows after two
+  completed exchanges; WAL-aware read) — the store works, the surface does not call it (owning row
+  F-PER-01, overturned this pass)"). That is a hard discriminator (a real WAL-aware row count after a
+  real completed exchange) and it directly overturns F-PER-01's own half-proven text in the same
+  ledger. I traced the one persistence fix landed since wave H
+  (`7190fde5 fix(F-CHAT-34): stop save_tabs from cascading away chat transcripts`, 2026-08-15,
+  `tiller_persistence/src/db.rs`) and confirmed by commit date that ACP-13's own test already ran
+  *after* that fix and still found 0 rows — so the fix does not resolve the contradiction, and I have
+  no fresh live evidence of my own to settle which of the ledger's two self-contradicting entries is
+  current. Reporting NOT EXERCISED rather than picking a side without driving it myself.
+- **F-PER-05** (restore closed launch-snapshot tabs). Existing evidence is already NOT EXERCISED from
+  today's wave B pass; no new attempt made this pass either.
+- **F-PER-07** (persist project icon/name/settings across quit/relaunch). Same as F-PER-05: already
+  NOT EXERCISED from today's wave B pass, not attempted this pass.
+
+---
