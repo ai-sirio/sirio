@@ -46,6 +46,27 @@
 #   shot <name>              force a repaint, capture <outdir>/NN-<name>.png, print its colour count
 #   $SOCK $WD $APP_LOG       socket path, wayland display, the app's stdout+stderr
 #
+# NEVER call `shot` between a `down` and its matching `up` (or between `move` and a later
+# `down`/`up` of the same gesture). `shot`'s "force a repaint" is a real window resize (nudge to
+# W2xH2 and back) -- not a passive snapshot -- and PLUS-MENU-INVESTIGATION.md found that resizing
+# while a popup menu is open can leave GPUI's anchored-popup positioning (`tab_bar.rs`'s
+# `anchor_bounds`) stale for a frame, so the popup visibly detaches from its anchor and the `up`
+# lands somewhere else, or on nothing. Two critics independently read this as "the menu closes on
+# mousedown alone" / "clicking never creates a tab" before the real cause was traced: `click`
+# (atomic down+up, no repaint in between) and `down` immediately followed by `up` (no interleaved
+# `shot`) both work reliably. Capture the state BEFORE a gesture and AFTER it completes; never
+# in the middle of one.
+#
+# A second, unrelated trap in the same neighbourhood: `tab_bar.rs`'s dropdown menus are painted
+# through `deferred(...)`, which links the menu's subtree into the window's real dispatch tree only
+# after ~2 real frames past the click that opened it (see `TabBar::toggle_menu`'s own comment).
+# `click <open> ; click <item>` back to back, with NOTHING between them, can have the second click
+# arrive before that linking finishes -- the item is visibly painted but not yet truly hit-testable,
+# so the click silently does nothing and the menu stays open. A real person takes far longer than
+# 2 frames to move their pointer from the "+" to a menu row, so this never happens outside
+# synthetic input. Put a brief `sleep` (or another action that takes real time, like `shot`, kept
+# OUTSIDE the down/up pair per the note above) between opening a menu and clicking one of its items.
+#
 # Example — open Settings, switch section, and photograph both:
 #   Scripts/wayland-drive.sh /tmp/shots '
 #     ctl surface.settings.open

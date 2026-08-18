@@ -35,6 +35,13 @@
 #   shot <name>              force a repaint, capture <outdir>/NN-<name>.png, print its colour count
 #   $SOCK $DISPLAY $APP_LOG  socket path, the private X11 DISPLAY, the app's stdout+stderr
 #
+# NEVER call `shot` between a `down` and its matching `up` (or between `move` and a later
+# `down`/`up` of the same gesture) -- see PLUS-MENU-INVESTIGATION.md and wayland-drive.sh's own
+# usage header, which document this in full. `shot` here does the identical "resize to W2xH2 and
+# back" nudge to force a repaint, and it is not a passive snapshot: resizing mid-gesture can move
+# an open popup menu's anchor out from under an in-flight `down`. Capture state BEFORE a gesture
+# and AFTER it completes, never in the middle of one.
+#
 # Example — open the browser, navigate to a local page, prove the PAGE rendered:
 #   Scripts/x11-nested-drive.sh /tmp/x11-shots '
 #     ctl browser.open url=about:blank
