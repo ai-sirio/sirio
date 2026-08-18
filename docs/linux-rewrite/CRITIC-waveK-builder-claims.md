@@ -219,5 +219,74 @@ behind `pane-0`. Whether that is an intentional grace period or a minor PTY-reap
 narrower question from "does the idle pane visibly reload" — it does — so I record it here as a
 lead for a future pass rather than reclassifying this row.
 
+---
 
+## 5. F-PRJ-13 — Reset button click leaks through to the row underneath
+
+Ledger line 106, commit `043b1e71` (ancestor of HEAD). Wave-I builder's own gap: its live re-drive
+proved general click-occlusion (any in-sheet click), "which is a slightly broader claim than the
+original bug report (specifically about Reset)... A fresh critic could tighten this by reproducing
+the exact original repro shape — a decoy worktree row rendered directly under the Reset button's own
+pixel position in a live three-project sidebar — matching the regression test's fixture geometry
+exactly."
+
+**Reproduced the exact fixture geometry live**: two projects, `prj13-decoy` (12 real git worktrees,
+`git worktree add`, alphabetically sorted so `decoy-3` is the 7th sidebar row) and `prj13-target` (a
+bare git repo, no worktrees). Right-clicked `prj13-target`'s header, clicked "Project Settings",
+which opened the sheet for `prj13-target` while `prj13-decoy`'s own rows kept rendering underneath —
+`decoy-3`'s row lands directly under the icon-picker's Reset button (`project_identity.rs:720`,
+`id("project-icon-reset")`) at pixel `(161, 508)`, confirmed both by the sheet screenshot and by a
+**positive control**: a plain click at `decoy-3`'s own row position (`113, 479`, sheet closed)
+flipped `ctl workspace.list`'s `decoy-3` entry from `selected:"false"` to `selected:"true"` — proving
+this specific machine-readable field is a live, sensitive discriminator, not an inert one.
+
+**Post-fix, current HEAD** (`/tmp/wf-judge-tiller`, this pass's own binary): clicked Reset at exactly
+`(161, 508)` — the pixel position `decoy-3`'s row occupies underneath the sheet. `ctl workspace.list`
+immediately after: **every worktree in both projects, `decoy-3` included, still reads
+`selected:"false"`** — no leak, matching the fix's intent exactly at the fixture's own geometry.
+
+**Pre-fix binary, built and reproduced myself**: `git worktree add --detach /tmp/wfj-prefix-prj13
+984defa7` (the commit immediately before `043b1e71`, confirmed via `git log`), built with its own
+`--target-dir` (cold build, 3m50s, kept isolated from the shared `rust/target` four siblings were
+using). Drove the **identical** live gesture (same coordinates, same fixture) against this pre-fix
+binary: surprisingly, `ctl workspace.list` again showed no selection change, even after retrying at
+five different y-offsets (485–520) spanning the whole row — a live discrepancy against the fix
+commit's own claimed live pre-fix reproduction, worth recording rather than silently smoothing over.
+Rather than leave that live ambiguity as the only evidence, I went to the **code-level** reproduction
+the task brief explicitly allows: spliced the *exact* regression test
+(`reset_button_click_does_not_leak_through_to_the_row_underneath`, copied verbatim from current HEAD)
+onto the pre-fix source tree (`984defa7`'s `sidebar.rs`, which has neither the test nor the
+`.occlude()` fix) and ran it there:
+
+```
+cargo test --manifest-path rust/Cargo.toml -p tiller_ui --lib --target-dir /tmp/wfj-prefix-prj13-target \
+  -- reset_button_click_does_not_leak_through_to_the_row_underneath
+```
+```
+thread '...' panicked at crates/tiller_ui/src/sidebar.rs:5583:9:
+clicking Reset must not also select whichever decoy worktree row is rendered underneath it -- got
+[ProjectSettingsChanged(...), SelectWorktree("/tmp/prj13-decoy/wt-4")]
+test result: FAILED. 0 passed; 1 failed
+```
+Genuinely RED — a real leaked `SelectWorktree` event, exactly the defect the commit describes. Same
+test against current HEAD (`rust/crates/tiller_ui/src/sidebar.rs` as committed):
+```
+test sidebar::tests::reset_button_click_does_not_leak_through_to_the_row_underneath ... ok
+```
+Genuinely GREEN. This is a real, executed red→green pair at the exact commit boundary — a valid
+reproduction under this task's own rules ("build from an older commit into a scratch location") —
+even though my *live-UI* attempt at the same pre-fix binary did not itself surface the symptom.
+
+**Verdict: PASSED**, with the live/code discrepancy above stated plainly rather than hidden: the
+fix is proven both by an executed red→green test targeting the exact original defect, and by my own
+live re-drive at current HEAD with the exact original fixture geometry and a hard discriminator
+(`workspace.list`'s per-worktree `selected` field, positive-controlled). What I could **not**
+reproduce was the *live, pre-fix* UI symptom itself (my own drive against the pre-fix binary showed
+no leak at any of six tried y-offsets) — this doesn't weaken the fix's proof (the code-level red run
+is unambiguous), but a future pass attempting a live pre-fix repro should know this and not assume
+the live symptom reproduces trivially; it may depend on details (project count, click sequencing)
+this pass's fixture didn't match.
+
+Screenshots: `reference/linux-progress/waveK-critic/prj13-01-settings-open-on-target-decoy-underneath.png`,
+`prj13-02-after-reset-click-sheet-unchanged.png`.
 
