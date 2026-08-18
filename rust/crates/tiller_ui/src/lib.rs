@@ -3,6 +3,12 @@
 //! OWNERSHIP: this file declares modules only. Do not add rendering code here
 //! and do not edit it from a piece worktree — the integrator owns it.
 
+// PORT-1: browser.rs unconditionally imports wry/raw-window-handle, which
+// Cargo.toml declares only under [target.'cfg(target_os = "linux")'.dependencies].
+// Gate the module declaration itself so non-Linux targets never try to
+// compile it (matching how tray.rs/titlebar.rs's Linux-only pieces are
+// gated elsewhere in this codebase).
+#[cfg(target_os = "linux")]
 pub mod browser;
 pub mod changes;
 pub mod chat;
