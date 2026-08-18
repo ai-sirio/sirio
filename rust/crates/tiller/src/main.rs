@@ -4522,14 +4522,25 @@ impl TillerWorkspace {
             return;
         };
         let status = self.pane_activity_status(tab, pane_id, cx);
+        // F-TAB-26: `close_terminal_at` refuses to remove a tab's *last*
+        // leaf (the F-TAB-13 empty-state guard), so closing this pane when
+        // it is the tab's only one is really closing the whole tab. This
+        // used to be hardcoded `false` here regardless, so "Close Anyway" on
+        // a single-pane tab hit that guard and silently did nothing -- the
+        // confirm banner dismissed but the tab never closed.
+        let whole_tab = tab.panes.leaf_ids().len() <= 1;
         if pane_close_needs_confirmation(status) {
             self.pending_pane_close = Some(PendingPaneClose {
                 tab_id,
                 pane_id,
-                whole_tab: false,
+                whole_tab,
                 status,
             });
             cx.notify();
+            return;
+        }
+        if whole_tab {
+            self.close_tab_by_id(tab_id, cx);
             return;
         }
         self.close_terminal_at(tab_id, pane_id, None, cx);
@@ -12949,16 +12960,11 @@ mod tests {
                 .expect("workspace root")
         });
 
-        // Idle: the pane has no agent status at all.
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.request_close_terminal_at(0, 0, cx)
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("pane-close-confirm").is_none(),
-            "an idle pane closes without a prompt"
-        );
-
+        // Running/NeedsInput/Error all hold the close for confirmation, and
+        // Cancel must leave the pane alone -- run this loop *before* either
+        // no-confirmation case below, both of which (correctly, since
+        // F-TAB-26's fix) actually remove this fixture's sole tab rather
+        // than leaving it standing.
         for status in [
             AgentStatus::Running,
             AgentStatus::NeedsInput,
@@ -12993,6 +12999,16 @@ mod tests {
             );
         }
 
+        // Done: `ActivityStatus::from_agent_status` maps both `Done` and "no
+        // status notified at all" (Idle) to the same
+        // `requires_close_confirmation() == false` outcome
+        // (`tiller_activity/src/activity.rs`), so this one case stands for
+        // both -- closing this fixture's sole pane a second time to also
+        // cover a bare Idle close would leave no tab left for it to act on.
+        // F-TAB-26: this used to only need to show no prompt; now that the
+        // guard-clause bug is fixed, closing a status that needs no
+        // confirmation on a tab's *only* pane must really remove the tab,
+        // not silently leave it (that silent-leave was the bug).
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.activity.notify(
                 "pane-0",
@@ -13005,6 +13021,80 @@ mod tests {
         assert!(
             cx.debug_bounds("pane-close-confirm").is_none(),
             "a finished pane closes without a prompt"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            0,
+            "a finished pane that is its tab's only pane must actually close the tab"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-TAB-26, drawn: `close_terminal_at` deliberately refuses to remove a
+    /// tab's *last* leaf (the F-TAB-13 empty-state guard), so closing the
+    /// sole pane of a single-pane tab must be routed through the whole-tab
+    /// close path instead. `request_close_terminal_at` used to always build
+    /// `PendingPaneClose { whole_tab: false, .. }`, so "Close Anyway" on a
+    /// tab's only pane called `close_terminal_at`, hit that guard, and did
+    /// nothing at all -- the confirm banner closed but the tab stayed open.
+    /// Reproduced live under Wayland: `panel.list`'s pane count was
+    /// unchanged and the terminal process was still alive after clicking
+    /// "Close Anyway" on a sole-pane tab, while the identical control
+    /// removed a multi-pane tab's pane immediately.
+    #[gpui::test]
+    async fn close_anyway_removes_a_tabs_sole_pane_instead_of_silently_no_opping(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("close-sole-pane");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "the fixture starts with exactly one tab holding exactly one pane"
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.activity.notify(
+                "pane-0",
+                AgentStatus::Running,
+                Instant::now() + Duration::from_millis(1),
+            );
+            workspace.request_close_terminal_at(0, 0, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "a running pane's close is held for confirmation, same as the multi-pane case"
+        );
+
+        let close_anyway = cx
+            .debug_bounds("pane-close-confirm-close")
+            .expect("the held close offers a Close Anyway control");
+        cx.simulate_click(close_anyway.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_none(),
+            "the banner is dismissed after Close Anyway"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            0,
+            "Close Anyway on a tab's sole pane must remove the tab, not silently do nothing"
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);
