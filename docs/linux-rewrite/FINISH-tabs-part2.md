@@ -152,3 +152,29 @@ never observed to land despite 6 live attempts post-fix, and the app was never b
 a genuine 9-tab state to test the "Ctrl-9 selects the last tab" clause even had a chord
 landed. Not `FAILED`: no chord landing at all is indistinguishable from "never tried" on
 this instrument, and the underlying keybindings are demonstrably present in source.
+
+---
+
+**F-TAB-22** — pane-focus shortcuts (`Ctrl-Alt-arrow`, this port's equivalent of macOS
+`⌘⌥`-arrow, `rust/crates/tiller/src/panes.rs:121-124`:
+`KeyBinding::new("ctrl-alt-left", FocusPaneLeft, …)` / `-right` / `-up` / `-down` mapped to
+`FocusPaneAbove`/`FocusPaneBelow`). Driven against the live split-terminal pane group
+(two side-by-side PTYs from part 1's earlier `Split Right`, still open this pass). Clicked
+into the **left** pane, sent `chord ctrl+alt Right`, then typed `AFTERARROW` with no
+further click: it landed in the **right** pane's prompt while the left pane's prompt stayed
+exactly as it was (`/tmp/wf-tab-shots/106-p2-focusarrow.png` — both prompts visible in one
+frame, unambiguous). Reversed it: sent `chord ctrl+alt Left`, typed `BACKLEFT` with no
+click — it landed appended to the **left** pane's existing text
+(`QQETRYCHECKBACKLEFT`, `/tmp/wf-tab-shots/crop-leftprompt.png`), the right pane's
+`AFTERARROW` staying untouched (`/tmp/wf-tab-shots/crop-rightprompt.png`). This is a hard
+discriminator — keystrokes typed with **no intervening click** can only land in whichever
+pane holds keyboard focus, so the chord alone moved focus both directions.
+
+Up/Down (`FocusPaneAbove`/`FocusPaneBelow`) were not separately driven — no vertical split
+existed this pass to move focus between — but they are registered through the identical
+`bind_keys`/`actions!` mechanism in the same 4-line block as the proven Left/Right pair
+(`panes.rs:121-124`), not inferred from a different row's evidence.
+
+**PASSED** — horizontal pane-focus cycling proven live with a hard discriminator in both
+directions; vertical pair not separately exercised (no vertical split available this pass)
+but wired through the identical, already-proven mechanism.
