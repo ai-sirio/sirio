@@ -273,3 +273,29 @@ setting. The throttle type is correct and well-tested in isolation; the app neve
 question.
 
 ---
+
+## F-CORE-DOM-03 — PASSED (was half-proven)
+
+Ledger row text being carried: *"sidebar.rs:3961's own F-CORE-DOM-03-tagged test passes, asserting
+Sidebar::project_form_parent() == tiller_project::default_project_base() ... Unit-test proof, not a
+live dialog screenshot."* Closed the live half this pass — the real **Create Project** dialog, not
+the function in isolation.
+
+1. `Projects` header **+** → **Create Project…** (`Sidebar::start_create_project`, `sidebar.rs:1524`,
+   which seeds the form via `project_form_parent()` → `tiller_project::default_project_base()`,
+   `sidebar.rs:1502`). With `TILLER_PROJECTS_DIR` unset, **Parent location** reads
+   `/home/enzopalmisano/Tiller/projects` — the documented `$HOME/Tiller/projects` fallback —
+   `reference/linux-progress/wf-dom3/f-core-dom-03-default-parent.png`.
+2. Full **real quit/relaunch** with `TILLER_PROJECTS_DIR=/tmp/wf-dom3-custom-projects-dir` exported
+   into the app's own environment before the cold boot (not a fixture value written into the DB —
+   an actual env var the process reads at call time). Reopened the identical **Create Project…**
+   dialog: **Parent location** now reads exactly `/tmp/wf-dom3-custom-projects-dir`, and the
+   "Creates …/" caption line under it agrees —
+   `reference/linux-progress/wf-dom3/f-core-dom-03-override-parent.png`.
+
+Both halves of the VERIFY clause (`Sidebar::project_form_parent() == default_project_base()` with
+no override, and honoring `TILLER_PROJECTS_DIR` when set) driven live through the real dialog a
+user opens, across a genuine process boundary for the override case — not read off the unit test
+that already covered the same assertion in isolation.
+
+---
