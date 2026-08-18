@@ -3053,6 +3053,44 @@ mod view_tests {
         );
     }
 
+    /// F-TERM-PTY-04: `TerminalShell::System` prefers `$SHELL`, falling back
+    /// to the literal `/bin/zsh` when it is unset. This box has no `/bin/zsh`
+    /// installed (verified: `ls /bin/zsh` -> no such file), which turns
+    /// "which shell did the fallback choose" into an unusually sharp,
+    /// unfakeable discriminator: with `$SHELL` removed, spawning
+    /// `TerminalShell::System` must fail, and the failure message must name
+    /// exactly `/bin/zsh` -- not merely "a shell failed to start", not the
+    /// real login shell (`bash`), which would succeed and prove nothing
+    /// about the *fallback* branch at all.
+    #[test]
+    fn system_shell_falls_back_to_bin_zsh_when_shell_is_unset() {
+        let previous = std::env::var_os("SHELL");
+        unsafe { std::env::remove_var("SHELL") };
+
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-shell-fallback-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create working directory");
+
+        let result = TerminalHandle::new(&working_directory, &TerminalShell::System);
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("SHELL", value) },
+            None => unsafe { std::env::remove_var("SHELL") },
+        }
+        let _ = std::fs::remove_dir_all(&working_directory);
+
+        let error = result.err().expect(
+            "no /bin/zsh exists on this box, so the System shell fallback must fail to spawn",
+        );
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("/bin/zsh"),
+            "the spawn failure must name the exact fallback path /bin/zsh, got: {message}"
+        );
+    }
+
     /// A real PTY must expose the shell's OSC title and its settled scrollback
     /// through the terminal entity. This is intentionally a drawn test: the
     /// event pump must be alive, and every scheduler turn is fully drained.
