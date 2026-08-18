@@ -17,6 +17,11 @@ pub enum TerminalContextAction {
     SplitAbove,
     SplitDown,
     ClearTerminal,
+    /// F-TERM-PTY-07: tears down the live process and starts a fresh one in
+    /// the same pane, bumping its `TerminalSurfaceHost` generation. The app
+    /// crate owns the actual respawn (`TerminalView::restart`); this is just
+    /// the menu entry point.
+    RestartTerminal,
     CloseTerminal,
 }
 
@@ -37,7 +42,7 @@ pub struct TerminalContextItem {
     pub disabled_reason: Option<String>,
 }
 
-const ITEMS: [TerminalContextItem; 12] = [
+const ITEMS: [TerminalContextItem; 13] = [
     TerminalContextItem {
         label: "Copy",
         action: TerminalContextAction::Copy,
@@ -102,6 +107,12 @@ const ITEMS: [TerminalContextItem; 12] = [
         label: "Clear Terminal",
         action: TerminalContextAction::ClearTerminal,
         route: TerminalContextRoute::Terminal,
+        disabled_reason: None,
+    },
+    TerminalContextItem {
+        label: "Restart Terminal",
+        action: TerminalContextAction::RestartTerminal,
+        route: TerminalContextRoute::App,
         disabled_reason: None,
     },
     TerminalContextItem {
@@ -225,7 +236,7 @@ mod tests {
 
     #[test]
     fn menu_contains_every_terminal_and_app_action_in_stable_order() {
-        assert_eq!(items().len(), 12);
+        assert_eq!(items().len(), 13);
         assert_eq!(
             items().iter().map(|item| item.label).collect::<Vec<_>>(),
             vec![
@@ -240,6 +251,7 @@ mod tests {
                 "Split Above",
                 "Split Down",
                 "Clear Terminal",
+                "Restart Terminal",
                 "Close Terminal…",
             ]
         );
@@ -272,6 +284,7 @@ mod tests {
             TerminalContextAction::SplitRight,
             TerminalContextAction::SplitAbove,
             TerminalContextAction::SplitDown,
+            TerminalContextAction::RestartTerminal,
             TerminalContextAction::CloseTerminal,
         ];
         for action in delegated {
