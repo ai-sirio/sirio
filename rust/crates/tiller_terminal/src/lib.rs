@@ -951,7 +951,23 @@ impl TerminalView {
     /// can carry several paths in one drop). Both funnel into the same
     /// quoted-and-space-joined insertion `tiller_project::terminal_file_drop`
     /// already builds for a `Vec`.
-    fn receive_file_drop(&mut self, paths: Vec<PathBuf>, cx: &mut gpui::Context<Self>) {
+    ///
+    /// The drop also *returns focus to the terminal*, which is the second
+    /// conjunct of the clause and the half this port was missing. A drop
+    /// leaves the paths at the shell's cursor with no trailing newline
+    /// precisely so the reader can finish the command themselves — but they
+    /// can only do that if their next keystroke reaches the pane. Whatever
+    /// held focus when the drag started (in practice a text field elsewhere
+    /// in the window: the sidebar Filter, the chat composer) otherwise keeps
+    /// it, and the typing lands there. Swift's `PtyTerminalPane.handleDrop`
+    /// ends `write(paneId:data:)` with `runtime?.proxy.focus()` for the same
+    /// reason.
+    fn receive_file_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -961,6 +977,7 @@ impl TerminalView {
         }
         self.last_dropped_files = Some(paths.clone());
         self.input(insertion.into_bytes());
+        self.focus_handle.focus(window, cx);
         cx.emit(TerminalDropEvent::Files { paths });
         cx.notify();
     }
@@ -1745,9 +1762,9 @@ impl gpui::Render for TerminalView {
                         terminal.receive_diff_drop(payload.clone(), cx);
                     });
                 })
-                .on_drop::<PathBuf>(move |path: &PathBuf, _, cx| {
+                .on_drop::<PathBuf>(move |path: &PathBuf, window, cx| {
                     file_drop_entity.update(cx, |terminal, cx| {
-                        terminal.receive_file_drop(vec![path.clone()], cx);
+                        terminal.receive_file_drop(vec![path.clone()], window, cx);
                     });
                 })
                 // F-TERM-PTY-06: the in-app `on_drop::<PathBuf>` above only
@@ -1756,9 +1773,9 @@ impl gpui::Render for TerminalView {
                 // drag arrives as `gpui::ExternalPaths` (GPUI's XDND
                 // payload), which can carry more than one path in a single
                 // drop; both funnel into the same quoted insertion.
-                .on_drop::<gpui::ExternalPaths>(move |paths: &gpui::ExternalPaths, _, cx| {
+                .on_drop::<gpui::ExternalPaths>(move |paths: &gpui::ExternalPaths, window, cx| {
                     external_drop_entity.update(cx, |terminal, cx| {
-                        terminal.receive_file_drop(paths.paths().to_vec(), cx);
+                        terminal.receive_file_drop(paths.paths().to_vec(), window, cx);
                     });
                 })
                 .child(TerminalElement {
@@ -2666,6 +2683,149 @@ mod view_tests {
                 )
                 .child(self.terminal.clone())
         }
+    }
+
+    /// F-TERM-PTY-06, focus half. Same drag source as
+    /// [`ExternalFileDropFixture`], plus a *competing* focusable field
+    /// standing in for the real discriminator the lane uses: the sidebar's
+    /// Filter box. Without a second focus target in the window there is
+    /// nothing for the terminal to take focus back *from*, and the assertion
+    /// would pass on a window whose only focusable element is the terminal.
+    struct FocusReturnDropFixture {
+        terminal: gpui::Entity<TerminalView>,
+        paths: gpui::ExternalPaths,
+        decoy_focus: gpui::FocusHandle,
+    }
+
+    impl gpui::Render for FocusReturnDropFixture {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("terminal-focus-drag-source")
+                        .debug_selector(|| "terminal-focus-drag-source".to_owned())
+                        .h(px(40.0))
+                        .on_drag(self.paths.clone(), |_, _, _, cx| cx.new(|_| gpui::Empty))
+                        .child("external files source"),
+                )
+                .child(
+                    div()
+                        .id("decoy-filter-field")
+                        .debug_selector(|| "decoy-filter-field".to_owned())
+                        .h(px(40.0))
+                        .track_focus(&self.decoy_focus)
+                        .child("filter"),
+                )
+                .child(self.terminal.clone())
+        }
+    }
+
+    /// F-TERM-PTY-06: the clause's second conjunct — a drop "returns focus to
+    /// the terminal". Driven with the same discriminator the Wayland lane
+    /// uses on the real compositor: park focus on another field first, drop,
+    /// and see where focus ends up.
+    #[gpui::test]
+    async fn a_file_drop_returns_focus_to_the_terminal(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-terminal-drop-focus-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create drop directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "exec sleep 60".to_string()],
+        };
+        let dropped = gpui::ExternalPaths([PathBuf::from("src/one.rs")].into_iter().collect());
+        let window = cx.add_window(|_, cx| {
+            let terminal = cx.new(|cx| {
+                TerminalView::with_shell(&working_directory, shell, cx).expect("spawn terminal")
+            });
+            FocusReturnDropFixture {
+                terminal,
+                paths: dropped.clone(),
+                decoy_focus: cx.focus_handle(),
+            }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let fixture = cx.update(|window, _| {
+            window
+                .root::<FocusReturnDropFixture>()
+                .flatten()
+                .expect("fixture root")
+        });
+        let terminal = fixture.read_with(&cx.cx, |fixture, _| fixture.terminal.clone());
+        let decoy_focus = fixture.read_with(&cx.cx, |fixture, _| fixture.decoy_focus.clone());
+        let terminal_focus =
+            terminal.read_with(&cx.cx, |terminal, _| terminal.focus_handle.clone());
+
+        // The control: focus starts somewhere else entirely.
+        cx.update(|window, app| window.focus(&decoy_focus, app));
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, _| decoy_focus.is_focused(window)),
+            "the decoy field must really hold focus before the drop, or the \
+             assertion below proves nothing"
+        );
+        assert!(
+            !cx.update(|window, _| terminal_focus.is_focused(window)),
+            "the terminal must not already hold focus before the drop"
+        );
+
+        let target = cx
+            .debug_bounds("terminal-drop-target")
+            .expect("terminal is a drawn drop target");
+        let source = cx
+            .debug_bounds("terminal-focus-drag-source")
+            .expect("test source is drawn");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: point(source.center().x + px(8.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal
+                .last_dropped_files()
+                .map(<[PathBuf]>::to_vec)),
+            Some(dropped.paths().to_vec()),
+            "the paths half of the clause still holds"
+        );
+        assert!(
+            cx.update(|window, _| terminal_focus.is_focused(window)),
+            "the drop must return focus to the terminal, so the reader's next \
+             keystroke completes the command it just pasted"
+        );
+        assert!(
+            !cx.update(|window, _| decoy_focus.is_focused(window)),
+            "and must take it away from whatever held it during the drag"
+        );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
     }
 
     #[test]
