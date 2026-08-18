@@ -509,6 +509,17 @@ enum ErrorKind {
     /// of band, then retry": the agent has already exited by the time this
     /// reaches the caller, so there is no live prompt to authenticate on.
     AuthRequired,
+    /// The agent's own process is gone — the ACP event channel closed with
+    /// no terminal event, whether that happened mid-turn or while idle
+    /// (F-CHAT-03; Swift's `ChatController.ChatState.disconnected`, set by
+    /// the same "process terminated" observation). Distinct from
+    /// `Connection`: the fix here is offered as "Restart agent" rather than
+    /// "Retry" because there is no live prompt or request left to retry —
+    /// the whole process is gone and the only way back is a fresh one,
+    /// which is exactly what `Chat::retry` already does (it re-launches via
+    /// `AcpClient::launch` either way; the two labels name the same call by
+    /// what it does for each situation, not two different mechanisms).
+    Disconnected,
     /// An MCP-configuration-flavored stderr line observed during the turn
     /// (F-CHAT-33) — informational, not a transport failure: the session is
     /// still live, so this is never retryable and never clears the client.
@@ -536,6 +547,21 @@ fn classify_connection_error(message: String) -> (String, ErrorKind) {
             ),
             ErrorKind::AuthRequired,
         )
+    } else if message.to_ascii_lowercase().contains("transport closed") {
+        // F-CHAT-03: this substring is `tiller_acp`'s own wording for a
+        // genuinely dead transport, in two shapes — its worker's own
+        // end-of-connection cleanup ("ACP transport closed unexpectedly"),
+        // and, more commonly, whatever request happened to be in flight
+        // when the process actually died, wrapped by that request's own
+        // label ("prompt failed: Incoming transport closed: ..." — a real
+        // agent killed mid-turn lands exactly here, not in the worker's own
+        // cleanup, because the read loop resolves the pending request with
+        // the transport error before the connection future itself
+        // resolves). Both shapes mean the OS process is gone, unlike a
+        // same-shaped-message business rejection ("set mode failed: no such
+        // mode") that carries a JSON-RPC error, not a transport one, and
+        // leaves the agent alive — those keep the generic Retry treatment.
+        (message, ErrorKind::Disconnected)
     } else {
         (message, ErrorKind::Connection)
     }
@@ -2226,7 +2252,9 @@ impl Chat {
             !matches!(
                 entry,
                 Entry::Error {
-                    kind: ErrorKind::Connection | ErrorKind::AuthRequired,
+                    kind: ErrorKind::Connection
+                        | ErrorKind::AuthRequired
+                        | ErrorKind::Disconnected,
                     ..
                 }
             )
@@ -3137,18 +3165,29 @@ impl Chat {
 
                     // The event source closed without a terminal event — a
                     // worker crash, or a transport death that skipped the
-                    // error path. The composer must never be left working by
-                    // a state only a happy turn-ending event can leave, so
-                    // say what was lost and come back idle.
+                    // error path — mid-turn or, just as often, while
+                    // sitting idle: the composer must never keep offering
+                    // Send against a process that is simply gone, so this
+                    // fires either way, not only while streaming
+                    // (F-CHAT-03). `chat.client` still being `Some` here is
+                    // what tells the two apart from an already-handled
+                    // `TransportError`/`Timeout`, both of which already took
+                    // it — this only runs when nothing else has.
                     let _ = this.update(cx, |chat, cx| {
-                        if chat.streaming {
-                            chat.expire_unanswered();
+                        if chat.client.is_some() {
+                            chat.client.take();
+                            if chat.streaming {
+                                chat.expire_unanswered();
+                            }
                             chat.push_entry(Entry::Error {
-                                message: "agent transport closed".to_string(),
-                                // Relaunching is exactly the right response
-                                // here, so offer it rather than dead-ending.
+                                message: "Agent disconnected — the process has terminated."
+                                    .to_string(),
+                                // Restarting is exactly the right response
+                                // here, so offer it rather than dead-ending
+                                // (rendered as "Restart agent", not "Retry"
+                                // — F-CHAT-03).
                                 retryable: true,
-                                kind: ErrorKind::Connection,
+                                kind: ErrorKind::Disconnected,
                             });
                             chat.streaming = false;
                             cx.notify();
@@ -4896,6 +4935,12 @@ impl Chat {
                 // retry", not "the network hiccupped, retry", and the card
                 // should look like a different kind of problem.
                 let is_auth_required = kind == ErrorKind::AuthRequired;
+                // F-CHAT-03: the agent's own process is gone — there is no
+                // live request left to retry, only a fresh process to
+                // start, so this offers "Restart agent" instead of "Retry"
+                // (Swift's `ChatState.disconnected` banner names the same
+                // distinction; `ChatPaneView.swift:82`).
+                let is_disconnected = kind == ErrorKind::Disconnected;
                 let (banner_bg, banner_border, banner_text) = if is_auth_required {
                     (rgb(0xf5a623).opacity(0.12), rgb(0xf5a623), colors.title)
                 } else {
@@ -4909,6 +4954,9 @@ impl Chat {
                     .id(("chat-error-banner", entry_index))
                     .when(is_auth_required, |this| {
                         this.debug_selector(|| "chat-auth-required-banner".into())
+                    })
+                    .when(is_disconnected, |this| {
+                        this.debug_selector(|| "chat-disconnected-banner".into())
                     })
                     .w_full()
                     .rounded(theme.radii.code_block)
@@ -4935,7 +4983,13 @@ impl Chat {
                         this.child(
                             div()
                                 .id(("retry", entry_index))
-                                .debug_selector(|| "chat-retry".into())
+                                .debug_selector(move || {
+                                    if is_disconnected {
+                                        "chat-restart-agent".into()
+                                    } else {
+                                        "chat-retry".into()
+                                    }
+                                })
                                 // Never shrink: the message above now wraps
                                 // and gives up width instead of pushing this
                                 // sibling out of the row (F-CHAT-02).
@@ -4947,9 +5001,19 @@ impl Chat {
                                 .bg(colors.card_fill)
                                 .hover(|style| style.bg(colors.chat_row_hover))
                                 .on_click(move |_, _, cx| {
+                                    // Same underlying call as Retry
+                                    // (`Chat::retry` -> `start_connection`)
+                                    // for the same reason Swift's Restart
+                                    // agent button calls the identical
+                                    // `ChatController.start()` its Retry
+                                    // button does (F-CHAT-03): it always
+                                    // spawns a fresh agent process either
+                                    // way, so "restart" and "retry" name the
+                                    // same act from two different starting
+                                    // states rather than two mechanisms.
                                     retry_entity.update(cx, |chat, cx| chat.retry(cx));
                                 })
-                                .child("Retry"),
+                                .child(if is_disconnected { "Restart agent" } else { "Retry" }),
                         )
                     })
                     .into_any_element()
@@ -9281,10 +9345,12 @@ mod tests {
     }
 
     /// F-CHAT-03 + the stream-death seam: a transport that dies mid-reply
-    /// leaves a stated error card with a working Retry, and Retry reconnects
-    /// and completes a later turn.
+    /// is the agent's own process going away, not one request being
+    /// rejected — the stated error card offers "Restart agent" (not the
+    /// generic "Retry"), and clicking it reconnects and completes a later
+    /// turn.
     #[gpui::test]
-    async fn a_stream_that_dies_mid_reply_states_the_error_and_retry_recovers(
+    async fn a_stream_that_dies_mid_reply_states_the_error_and_restart_recovers(
         cx: &mut TestAppContext,
     ) {
         let dir = TempDir::new();
@@ -9298,14 +9364,16 @@ mod tests {
         cx.run_until_parked();
 
         // The fixture streams "partial" and dies; the transcript must state
-        // the death instead of looking like a normal empty reply.
+        // the death instead of looking like a normal empty reply — and
+        // correctly, as the agent's process being gone (F-CHAT-03), not a
+        // rejected request (`ErrorKind::Connection`).
         pump_chat_until(cx, &chat, |chat| {
             chat.entries.iter().any(|entry| {
                 matches!(
                     entry,
                     Entry::Error {
                         retryable: true,
-                        kind: ErrorKind::Connection,
+                        kind: ErrorKind::Disconnected,
                         ..
                     }
                 )
@@ -9320,13 +9388,19 @@ mod tests {
             "what arrived before the death stays in the transcript"
         );
         refresh_frame(cx);
-        let retry = cx
-            .debug_bounds("chat-retry")
-            .expect("the drawn error card offers Retry");
+        assert!(
+            cx.debug_bounds("chat-retry").is_none(),
+            "the agent's own process died, so this must not offer the \
+             generic Retry"
+        );
+        let restart = cx
+            .debug_bounds("chat-restart-agent")
+            .expect("the drawn error card offers Restart agent");
 
-        // Retry relaunches the agent; the second fixture invocation behaves,
-        // so the connection error card is cleared and a later turn completes.
-        cx.simulate_click(retry.center(), Modifiers::none());
+        // Restart relaunches the agent; the second fixture invocation
+        // behaves, so the disconnected card is cleared and a later turn
+        // completes.
+        cx.simulate_click(restart.center(), Modifiers::none());
         cx.run_until_parked();
         pump_chat_until(cx, &chat, |chat| {
             chat.client.is_some()
@@ -9334,7 +9408,7 @@ mod tests {
                     matches!(
                         entry,
                         Entry::Error {
-                            kind: ErrorKind::Connection,
+                            kind: ErrorKind::Disconnected,
                             ..
                         }
                     )
@@ -10182,6 +10256,114 @@ mod tests {
                 "clicking the reachable Retry must start a new connection \
                  attempt, which lands its own error entry: before={} after={:?}",
                 entries_before_retry,
+                chat.entries
+            );
+        });
+    }
+
+    /// F-CHAT-03: a `grep -rn "Restart" crates/tiller_ui/src` found zero
+    /// matches — the only retry-shaped control anywhere was the generic
+    /// `chat.retry`-tied "Retry" button, which is a different, differently
+    /// labeled control than a disconnected-agent's "Restart agent" affordance
+    /// (`App/Chat/ChatPaneView.swift:82`). This connects an agent
+    /// successfully, then breaks the transport itself (a malformed reply
+    /// the protocol layer can't parse into any response, so it is the
+    /// connection dying, not one request being rejected — the shape that
+    /// lands `tiller_acp`'s own "ACP transport closed unexpectedly"
+    /// wording, as opposed to a per-request "prompt failed: ..." message
+    /// with the agent otherwise still alive) and asserts the dedicated
+    /// "Agent disconnected" banner renders with a "Restart agent" (not
+    /// "Retry") button that, when clicked, launches a fresh connection.
+    #[gpui::test]
+    async fn a_disconnected_agent_offers_restart_agent_not_retry(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        // Answers initialize and session/new successfully, then on the
+        // first prompt replies with a line the protocol layer cannot parse
+        // as a response to anything, and exits — a transport failure, not
+        // an answerable request failure.
+        let command = AgentCommand::new("/bin/sh").args([
+            "-c",
+            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{}}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"sessionId":"test"}}' ;; *session/prompt*) printf 'not json at all\n'; exit 1 ;; esac; done"#,
+        ]);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
+            configure_test_chat(&mut chat);
+            chat
+        });
+
+        cx.executor().allow_parking();
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::Disconnected,
+                        ..
+                    }
+                )
+            })
+        });
+        cx.update(|window, _| window.refresh());
+
+        assert!(
+            cx.debug_bounds("chat-disconnected-banner").is_some(),
+            "a process that exits while idle must render the dedicated \
+             disconnected banner, not the generic connection card"
+        );
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                chat.client.is_none(),
+                "a dead process must not leave a stale live client handle behind"
+            );
+            let disconnected_entry = chat.entries.iter().find(|entry| {
+                matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::Disconnected,
+                        ..
+                    }
+                )
+            });
+            assert!(
+                disconnected_entry.is_some(),
+                "expected a Disconnected error entry, got {:?}",
+                chat.entries
+            );
+        });
+
+        assert!(
+            cx.debug_bounds("chat-retry").is_none(),
+            "a disconnected agent must not also draw the generic Retry control"
+        );
+        let restart = cx
+            .debug_bounds("chat-restart-agent")
+            .expect("the disconnected banner must offer Restart agent");
+
+        // Clicking Restart agent launches a fresh process (this fixture
+        // handles initialize/session/new cleanly on every invocation, so
+        // this one succeeds and then just sits idle — no second prompt is
+        // sent here). The observable effect is exactly what a successful
+        // reconnect always does: a live client again, and the stale
+        // disconnected banner cleared rather than left stacking up.
+        cx.simulate_click(restart.center(), Modifiers::none());
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                !chat.entries.iter().any(|entry| matches!(
+                    entry,
+                    Entry::Error {
+                        kind: ErrorKind::Disconnected,
+                        ..
+                    }
+                )),
+                "a successful Restart agent must clear the stale disconnected \
+                 banner(s), not leave them behind: {:?}",
                 chat.entries
             );
         });
