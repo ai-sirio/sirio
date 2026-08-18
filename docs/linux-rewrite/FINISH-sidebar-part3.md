@@ -155,4 +155,19 @@ claim. The row is also gone from the rendered sidebar
 (`reference/linux-progress/wf-sid2/f-sid-15-after-remove-row-gone.png`, `wf-sid2-main` now shows
 only `master` then "New Worktree...").
 
+**F-SID-11** — PASSED (upgraded from half-proven). Branch, folder path, Primary pill and comment
+were already proven live; the missing half — the agent-status element on a worktree row — was
+driven live this pass. Fixture: `wf-sid2-nongit`'s `master` worktree, with a real registered
+control pane (`pane-1`, a live `claude` process, confirmed via `tillerctl panel list` against the
+live socket: `pane-1  Claude Code  Claude Code  claude  false`). Captured the row BEFORE
+(`reference/linux-progress/wf-sid2/f-sid-11-before-notify.png`: no status glyph next to the
+`Primary` badge, status bar's Activity section collapsed/empty). Ran
+`TILLER_SOCKET=/tmp/wf-sid2.sock tillerctl notify --session pane-1 --status running` against the
+real pane, forced a repaint, and captured AFTER
+(`reference/linux-progress/wf-sid2/f-sid-11-after-notify-running.png`): a new orange activity
+glyph appears on the `master` worktree row immediately next to the `Primary` badge, and the
+bottom status bar now reads "Activity 1 running" where it previously showed nothing. Hard
+discriminator: the glyph's appearance is driven purely by the control-socket notify call against
+a real registered pane id, not by any UI interaction — before/after is a clean delta.
+
 (remaining rows filled in incrementally below, each followed by a commit)
