@@ -96,3 +96,77 @@ touched (confirmed by running it alone: `ok`).
 All three arms of F-CHAT-25 now have named, replayable, real-event-dispatching evidence: text
 answer, listed option, and cancel.
 
+### F-TERM-PTY-04 — PASSED (upgraded, shell-fallback leg)
+
+Clause: prefers `$SHELL` then `/bin/zsh`, chooses `xterm-ghostty` when available otherwise
+`xterm-256color` (PLATFORM: terminfo choice is a macOS/reference concern — Linux's
+`rust/crates/tiller_terminal/src/lib.rs` hardcodes `TERM=xterm-256color` unconditionally, no
+ghostty branch exists to drive, so that half is N/A on this platform by the row's own PLATFORM
+note). The unproven leg named in the brief: "shell-fallback chain confirmed by **code**" —
+EVIDENCE-STANDARD.md is explicit that a code read is not a verdict.
+
+This host has no `/bin/zsh` at all (`ls /bin/zsh` -> no such file), which turns "which shell did
+the fallback choose" into an unusually sharp, unfakeable discriminator. Added a named test,
+`system_shell_falls_back_to_bin_zsh_when_shell_is_unset` (`rust/crates/tiller_terminal/src/lib.rs`):
+removes `$SHELL` from the process env (save/restore, matching the existing
+`boot_settings_honor_tiller_socket_enable_environment_override` precedent in `main.rs`), spawns a
+real `TerminalShell::System` PTY, and asserts the resulting spawn error's message contains the
+literal string `/bin/zsh` — not merely "a shell failed", the *exact* fallback path.
+
+```
+cargo test --manifest-path rust/Cargo.toml -p tiller_terminal system_shell_falls_back_to_bin_zsh_when_shell_is_unset
+test view_tests::system_shell_falls_back_to_bin_zsh_when_shell_is_unset ... ok
+```
+
+The other half of "prefers `$SHELL`" — the success path — was already live-evidenced this pass
+incidentally: every `wayland-drive.sh` screenshot this session shows the auto-opened Terminal
+tab's own neofetch banner reading `Shell: bash 5.2.21`, i.e. `$SHELL` (`/bin/bash` on this box) is
+what a real spawned pane actually runs. Combined with the new test's fallback proof, both halves
+of "prefers `$SHELL` then `/bin/zsh`" now have a real discriminator, not a code citation.
+
+**Scrollback-restore leg**: unchanged from the existing evidence
+(`terminal_state_can_capture_and_replay_a_nonce_without_writing_to_the_child`) — not re-touched
+this pass, no new gap found there.
+
+### Environmental emergency this pass hit and could not fix — read before continuing this lane
+
+Partway through this sweep the shared machine's root disk (`/dev/nvme1n1p1`, 452G) filled to
+**100%, 144M free**, and stayed pinned there for a sustained stretch (tens of minutes) during which
+every `Bash`/`Edit`/`Write` call in this session failed with `ENOSPC`. Root cause, confirmed by
+`du -h -d 2 /var`: **`/var/log/syslog` had grown to 357G and was climbing at roughly 24 GB/minute**
+(measured twice, ~1 minute apart) — `rsyslogd` (`ps aux` showed it at 63.9% CPU, 447 CPU-minutes
+accumulated) apparently caught in a runaway logging loop, most likely fed by the repeated
+GPU/compositor-contention crashes (`MESA: error: ZINK: failed to choose pdev`, D-Bus
+connection-refused) that every concurrent Wayland-lane agent on this box — mine included — was
+generating in bursts. **This is not a Tiller defect and not this lane's to fix**: `/var/log/syslog`
+is `root:adm` owned, mode `640`; this account is in group `adm` (read-only) and `sudo` requires an
+interactive password not available here. `/var/crash` (apport) was checked and is not the culprit
+(107M only) — `tiller` itself does not core-dump on the ZINK failure, it exits cleanly.
+
+**This needs the user's direct attention** — truncating `/var/log/syslog` (not touching systemd,
+not restarting rsyslogd, just emptying the file so it can keep appending) would very likely be
+enough, but doing that from an agent session crosses well outside "drive your own nested lane" and
+into machine-wide administration, so it was left undone. Every sibling agent sharing this box was
+almost certainly hit by the same outage at the same time, not just this lane.
+
+**Effect on this report**: the disk emergency hit mid-session and stayed down long enough that the
+remaining rows below could not be driven or, in one case, could not be saved to disk at all:
+
+- A new named test for **F-CORE-FILE-03A** (drop order) was drafted — construct `ExternalPaths`
+  with `[BRAVO.txt, ALPHA.txt]` in that literal order via `chat.rs`'s existing
+  `dropping_external_files_attaches_chips_and_rejects_the_oversized_one` pattern, and assert
+  `draft.mention_paths` preserves that order rather than alphabetising — but every `Edit` attempt
+  to write it failed with `ENOSPC` and nothing was saved. **F-CORE-FILE-03A is unchanged**: still
+  half-proven, drop-ordering clause still undriven, exactly as the orchestrator's brief described
+  it, through no new fault — the attempt left no trace to build on.
+- **F-SID-10, F-SID-11, F-SID-14, F-SID-15, F-PRJ-14, F-TERM-03, F-TERM-SCR-02, F-TERM-UI-02,
+  F-CORE-FILE-04** were not reached this pass. Each is unchanged from its prior ledger state; none
+  were touched, degraded, or claimed.
+
+The disk recovered enough (144M free) for one narrow window at the very end of this session, used
+entirely to write this section and commit already-verified work (F-SID-08, F-CHAT-25,
+F-TERM-PTY-04) rather than start new live drives that would very likely be interrupted mid-gesture
+by the same outage recurring — a resize or click stranded mid-flight by an `ENOSPC` is exactly the
+kind of half-completed state this project's own evidence standard warns against recording as
+either a pass or a fail.
+
