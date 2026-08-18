@@ -191,5 +191,33 @@ the same root-focus path Ctrl+T's fix repairs, fires correctly from the identica
 state with nothing else focused. This is my own fresh drive on this pass's own pinned binary,
 against a brand-new scratch project (not reusing any prior state).
 
+---
+
+## 4. F-TERM-10 — the negative case: a genuinely idle shell must still reload
+
+Ledger line 328, commit `984defa7` (ancestor of HEAD). Wave-I builder re-confirmed the positive
+case (a live `sleep 300` survives) live; its named gap: confirm the fix "didn't overshoot into
+pinning every terminal forever regardless of activity" — a genuinely idle bare shell (no foreground
+child) should still get reloaded/recycled on switch-away, same as before this fix. This is the exact
+contrapositive of CENTER-01's safety-gate row above (§1), driven back to back on the same
+mechanism for a clean before/after pair.
+
+**Drive**: fresh repos `/tmp/wfj-term10n-repoA`/`repoB`. In repoA's terminal, typed
+`echo IDLE_MARKER_A` + Return and let it **complete** — the shell returns to a bare prompt with no
+foreground child (screenshot `term10-negative-01-idle-marker.png`). Identified the pane's real host
+shell PID by walking Tiller's own process children (`ps --ppid <tiller-pid>`): `285565`, confirmed
+alive (`etimes 10`). `ctl workspace.select` to repoB, then back to repoA. Read the pane back over
+the socket (`panel.read id=pane-0`, raw PTY bytes, not a screenshot) — result: a **fresh neofetch
+banner with no trace of `IDLE_MARKER_A`**, i.e. the tab was genuinely reloaded with new content, not
+left stale.
+
+**Verdict: PASSED**, on the row's own clause (an idle pane's *visible content* reloads rather than
+being pinned). One side observation, noted but not counted against this verdict since it is outside
+what the clause asks: the original host PID (`285565`) was still alive and still a direct child of
+`tiller` (`ps --ppid`) a minute after the round trip, even though it was no longer the content
+behind `pane-0`. Whether that is an intentional grace period or a minor PTY-reap lag is a separate,
+narrower question from "does the idle pane visibly reload" — it does — so I record it here as a
+lead for a future pass rather than reclassifying this row.
+
 
 
