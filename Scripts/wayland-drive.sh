@@ -115,6 +115,30 @@ kill_ours() {
     tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "$var=$want" && kill "$p" 2>/dev/null
   done
 }
+# Everything Tiller spawned in a pane -- the agent CLIs a critic launches over ACP, and whatever
+# those spawn in turn -- inherits Tiller's environment, and an inherited environ SURVIVES
+# REPARENTING. So `TILLER_SOCKET=$SOCK` in /proc/N/environ identifies this lane's descendants
+# exactly, including the ones whose parent already died and left them on init. A descendant walk
+# (pgrep -P) cannot: reparented children are precisely the ones it loses.
+#
+# Measured 2026-08-18: without this, five shard critics leaked 31 orphaned `claude`/`codex`/`node`
+# processes holding 11.9 GB in forty minutes, because cleanup only ever killed the app and its
+# compositor. Reaping those by hand is not a substitute -- doing it while other critics are
+# mid-drive killed a live agent, since a pane's CLI can be reparented while still under test.
+kill_lane_descendants() {
+  local p env
+  for p in /proc/[0-9]*; do
+    p="${p#/proc/}"
+    [ "$p" = "$$" ] && continue
+    # Other users' processes are unreadable here; the redirect itself errors, so guard it rather
+    # than relying on the reader's own 2>/dev/null.
+    [ -r "/proc/$p/environ" ] || continue
+    env=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null) || continue
+    case $'\n'"$env" in
+      *$'\n'"TILLER_SOCKET=$SOCK"$'\n'*|*$'\n'"TILLER_SOCKET=$SOCK") kill "$p" 2>/dev/null ;;
+    esac
+  done
+}
 cleanup() {
   [ -n "${TILLER_WL_KEEP:-}" ] && {
     echo "NOTE: leaving $LABEL running (SOCK=$SOCK WAYLAND_DISPLAY=$WD VP_FIFO=$VP_FIFO)"
@@ -122,6 +146,7 @@ cleanup() {
   }
   [ -n "${VP_PID:-}" ] && kill "$VP_PID" 2>/dev/null || true
   [ -n "${VK_PID:-}" ] && kill "$VK_PID" 2>/dev/null || true
+  kill_lane_descendants
   # Match the binary's real process name, not the literal "tiller": TILLER_WL_BIN lets a critic
   # drive a renamed snapshot (/tmp/L3-tiller), and pgrep -x never matched those, so every pinned
   # instance leaked past cleanup and survived `pkill -x tiller` too.
