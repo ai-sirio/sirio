@@ -31,8 +31,8 @@ use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme
 use tiller_project::{TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository};
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
-    TerminalIdentity, TerminalLinkEvent, TerminalPromptAction, TerminalPromptEvent, TerminalShell,
-    TerminalStateSnapshot, TerminalView,
+    TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
+    TerminalPromptEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
 };
 use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
@@ -2944,6 +2944,9 @@ enum TerminalContextCommand {
         placement: SplitPlacement,
     },
     Close,
+    /// F-TERM-PTY-07: "Restart Terminal" -- respawns the PTY in place,
+    /// bumping the pane's `TerminalSurfaceHost` generation.
+    Restart,
 }
 
 fn delegated_terminal_context_action(
@@ -2968,6 +2971,7 @@ fn delegated_terminal_context_action(
             placement: SplitPlacement::After,
         }),
         TerminalContextAction::CloseTerminal => Some(TerminalContextCommand::Close),
+        TerminalContextAction::RestartTerminal => Some(TerminalContextCommand::Restart),
         TerminalContextAction::Copy
         | TerminalContextAction::Paste
         | TerminalContextAction::CopyContext
@@ -3074,6 +3078,16 @@ struct TillerWorkspace {
     /// the moment it gets one back, so `render_group_surfaces` can just
     /// look one up instead of deciding whether to build one mid-render.
     empty_pane_prompts: BTreeMap<usize, Entity<TerminalView>>,
+    /// F-TERM-PTY-08: records where every live terminal pane in this
+    /// worktree currently sits, keyed by the same `terminal-{pane_id}`
+    /// content id `bind_terminal` gives its `TerminalIdentity`. Kept in step
+    /// by `track_terminal_panes_in_cache` (called from `apply_tab_machinery`,
+    /// so it covers every pane-group move) and `select_pane` (which also
+    /// records focus) -- moving the *entity* itself already happens by
+    /// construction (`OpenTab`/`PaneNode` own it by value, never rebuilt on
+    /// a move), so this is the seam's own durable record of that placement,
+    /// not what makes the PTY/scrollback survive.
+    terminal_pane_cache: TerminalPaneCache<Entity<TerminalView>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3543,6 +3557,7 @@ impl TillerWorkspace {
             update_state: UpdateState::Idle,
             auto_naming_throttle: BTreeMap::new(),
             empty_pane_prompts: BTreeMap::new(),
+            terminal_pane_cache: TerminalPaneCache::new(),
         };
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
@@ -3780,6 +3795,7 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let expected_pane_id = format!("pane-{pane_id}");
+        let terminal_entity = terminal.clone();
         cx.subscribe(
             terminal,
             move |workspace, _, event: &TerminalContextEvent, cx| {
@@ -3803,6 +3819,9 @@ impl TillerWorkspace {
                     }
                     Some(TerminalContextCommand::Close) => {
                         workspace.request_close_terminal_at(tab_id, pane_id, cx);
+                    }
+                    Some(TerminalContextCommand::Restart) => {
+                        terminal_entity.update(cx, |terminal, cx| terminal.restart(cx));
                     }
                     None => {}
                 }
@@ -5596,6 +5615,50 @@ impl TillerWorkspace {
         } else {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
+        // F-TERM-PTY-08: every tab placement transition (MoveTabToOtherPane,
+        // MoveTabToCurrentPane, "Move to New Pane", and tab reordering all
+        // funnel through here) is a real seam moment -- record each terminal
+        // pane's current placement so the cache stays a true mirror of the
+        // pane tree, not just of the specific moves the row names.
+        let tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
+        for tab_id in tab_ids {
+            self.track_terminal_panes_in_cache(tab_id);
+        }
+    }
+
+    /// F-TERM-PTY-08: mirrors every terminal leaf in `tab_id`'s pane tree
+    /// into `terminal_pane_cache`, addressed by the same `terminal-{pane_id}`
+    /// content id `bind_terminal` stamps into each pane's `TerminalIdentity`.
+    /// Uses `move_within_worktree` when the content id is already tracked
+    /// (the normal case for a real move) and falls back to `insert` the
+    /// first time a given pane is seen -- exercising both halves of the
+    /// cache's own contract rather than only ever inserting.
+    fn track_terminal_panes_in_cache(&mut self, tab_id: usize) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let group_id = tab.group_id;
+        let mut panes: Vec<(usize, Entity<TerminalView>)> = Vec::new();
+        tab.panes.for_each(&mut |pane_id, content| {
+            if let TabContent::Terminal { view } = content {
+                panes.push((pane_id, view.clone()));
+            }
+        });
+        if panes.is_empty() {
+            return;
+        }
+        let worktree_id = self.working_directory.to_string_lossy().into_owned();
+        for (pane_id, view) in panes {
+            let content_id = format!("terminal-{pane_id}");
+            let placement = format!("group-{group_id}-pane-{pane_id}");
+            if !self
+                .terminal_pane_cache
+                .move_within_worktree(&content_id, &worktree_id, placement.clone())
+            {
+                self.terminal_pane_cache
+                    .insert(worktree_id.clone(), placement, content_id, view);
+            }
+        }
     }
 
     /// F-TERM-02: keeps `empty_pane_prompts` in step with which pane groups
@@ -6962,6 +7025,7 @@ impl TillerWorkspace {
             && tab.panes.contains(pane_id)
         {
             tab.focused_pane = pane_id;
+            let tab_id = tab.id;
             let mut focused_content = None;
             tab.panes.for_each(&mut |id, content| {
                 if id == pane_id {
@@ -6977,6 +7041,15 @@ impl TillerWorkspace {
             if let (Some(window), Some(focus_handle)) = (window, focused_content) {
                 window.focus(&focus_handle, cx);
             }
+            // F-TERM-PTY-08 (`TerminalPaneCache::focus`): a fresh pane may
+            // not be tracked yet (nothing has moved it), so record its
+            // placement first -- otherwise `focus` would silently no-op on
+            // the very first click, and the cache's `restore_focus` would
+            // never have anything to return for a pane nobody ever moved.
+            self.track_terminal_panes_in_cache(tab_id);
+            let worktree_id = self.working_directory.to_string_lossy().into_owned();
+            self.terminal_pane_cache
+                .focus(&worktree_id, &format!("terminal-{pane_id}"));
             self.sync_control_panes(cx);
             cx.notify();
         }
@@ -13366,6 +13439,116 @@ mod tests {
         }));
     }
 
+    /// F-TERM-PTY-08: the exact same UI gesture as the test above (a real
+    /// MoveTabToOtherPane through the tab context menu), but asserting on
+    /// `terminal_pane_cache` -- the seam row's own row -- rather than only
+    /// on `OpenTab::group_id`. `move_selected_tab`/`apply_tab_machinery`
+    /// already moved the live `Entity<TerminalView>` by value before this
+    /// wiring existed (nothing rebuilds it, so a PTY/scrollback never had a
+    /// bug to fix here); what was missing is this durable record of where
+    /// the pane ended up, which `TerminalPaneCache::restore_focus` needs.
+    #[gpui::test]
+    async fn drawn_tab_context_menu_move_records_the_terminal_in_the_pane_cache(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[2].group_id = 1;
+            workspace.tab_machinery = TabMachinery::new(
+                vec![
+                    TabGroup::new(0, vec![0, 1], Some(0)),
+                    TabGroup::new(1, vec![2], Some(2)),
+                ],
+                0,
+            )
+            .expect("test groups are valid");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let worktree_id = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.working_directory.to_string_lossy().into_owned()
+        });
+
+        right_click_tab(&mut cx, 1);
+        let move_to_pane = cx
+            .debug_bounds("tab-command-move-to-pane-1")
+            .expect("the other pane destination is drawn");
+        cx.simulate_click(move_to_pane.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let cached = workspace
+                .terminal_pane_cache
+                .get("terminal-1")
+                .expect("the moved terminal pane must be tracked in the cache");
+            assert_eq!(cached.pane_id, "group-1-pane-1");
+            assert_eq!(cached.worktree_id, worktree_id);
+        });
+    }
+
+    /// F-TERM-PTY-07: proves the app crate is a real caller, not just the
+    /// pure `delegated_terminal_context_action` mapping this test's sibling
+    /// (`terminal_context_app_actions_have_workspace_routes`) already
+    /// covers. Emits the same `TerminalContextEvent` a real "Restart
+    /// Terminal" menu click produces on the fixture's own live pane and
+    /// confirms `subscribe_terminal`'s dispatch reaches
+    /// `TerminalView::restart` and its generation actually bumps --
+    /// `tiller_terminal`'s own test proves the mechanism is correct in
+    /// isolation; this proves `main.rs` now calls it.
+    #[gpui::test]
+    async fn drawn_terminal_restart_command_reaches_the_real_pane_and_bumps_its_generation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let terminal = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut found = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    found = Some(view.clone());
+                }
+            });
+            found.expect("the fixture's first tab is a terminal pane")
+        });
+        let identity = terminal.read_with(&cx.cx, |terminal, _| terminal.identity().clone());
+        let generation_before =
+            terminal.read_with(&cx.cx, |terminal, _| terminal.surface_generation());
+
+        terminal.update(&mut cx.cx, |_, cx| {
+            cx.emit(TerminalContextEvent {
+                target: identity,
+                action: TerminalContextAction::RestartTerminal,
+            });
+        });
+        cx.run_until_parked();
+
+        let generation_after =
+            terminal.read_with(&cx.cx, |terminal, _| terminal.surface_generation());
+        assert_eq!(
+            generation_after,
+            generation_before + 1,
+            "the app crate's TerminalContextEvent dispatch must reach TerminalView::restart, \
+             not just define the command"
+        );
+    }
+
     #[gpui::test]
     async fn ctrl_w_uses_the_same_dirty_close_door_as_the_tab_menu(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -14111,6 +14294,10 @@ mod tests {
         assert_eq!(
             delegated_terminal_context_action(TerminalContextAction::CloseTerminal),
             Some(TerminalContextCommand::Close)
+        );
+        assert_eq!(
+            delegated_terminal_context_action(TerminalContextAction::RestartTerminal),
+            Some(TerminalContextCommand::Restart)
         );
         assert_eq!(
             delegated_terminal_context_action(TerminalContextAction::Copy),

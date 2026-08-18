@@ -708,6 +708,15 @@ pub struct TerminalView {
     /// computed locally — `tiller_terminal` cannot depend on `tiller`'s tab
     /// machinery.
     sole_tab_in_group: bool,
+    /// F-TERM-PTY-07: this content's own [`TerminalSurfaceHost`], keyed by
+    /// the same `terminal_id` its [`TerminalIdentity`] carries. `generation`
+    /// bumps on every real respawn after the process is gone (a user
+    /// "Restart Terminal", or [`Self::retry`] after a failed spawn) and gates
+    /// [`Self::pump_terminal_events`]'s background task: that task is
+    /// spawned per-process and outlives a respawn, so without this a late
+    /// `ChildExit` from an already-replaced PTY would otherwise overwrite the
+    /// *new* process's live state with the old one's exit status.
+    host: TerminalSurfaceHost,
 }
 
 /// Output is forwarded to the activity model only after this quiet period.
@@ -783,6 +792,7 @@ impl TerminalView {
         let focus_handle = cx.focus_handle();
         let identity = generated_identity();
 
+        let host = TerminalSurfaceHost::new(identity.terminal_id());
         Ok(Self {
             terminal: TerminalState::Pending,
             spawn,
@@ -794,6 +804,7 @@ impl TerminalView {
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
+            host,
         })
     }
 
@@ -802,6 +813,8 @@ impl TerminalView {
     /// user chooses one of the two actions.
     pub fn empty_prompt(cx: &mut gpui::Context<Self>) -> Self {
         let working_directory = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let identity = generated_identity();
+        let host = TerminalSurfaceHost::new(identity.terminal_id());
         Self {
             terminal: TerminalState::Pending,
             spawn: SpawnParams {
@@ -811,11 +824,12 @@ impl TerminalView {
             empty_prompt: true,
             focus_handle: cx.focus_handle(),
             exit_status: None,
-            identity: generated_identity(),
+            identity,
             context_menu: None,
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
+            host,
         }
     }
 
@@ -840,6 +854,12 @@ impl TerminalView {
         message: impl Into<String>,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
+        let identity = generated_identity();
+        // Starts torn down: there is no live process behind a pane that
+        // begins in the failed state, so a subsequent Restart Terminal
+        // correctly reads as the *first* relaunch, not a second one.
+        let mut host = TerminalSurfaceHost::new(identity.terminal_id());
+        host.teardown();
         Self {
             terminal: TerminalState::Failed {
                 message: message.into(),
@@ -851,11 +871,12 @@ impl TerminalView {
             empty_prompt: false,
             focus_handle: cx.focus_handle(),
             exit_status: None,
-            identity: generated_identity(),
+            identity,
             context_menu: None,
             last_dropped_diff: None,
             last_dropped_files: None,
             sole_tab_in_group: false,
+            host,
         }
     }
 
@@ -1030,23 +1051,40 @@ impl TerminalView {
         }
         match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
             Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(terminal.clone(), wakeup_rx, cx);
+                Self::pump_terminal_events(
+                    terminal.clone(),
+                    wakeup_rx,
+                    self.host.generation(),
+                    cx,
+                );
                 self.terminal = TerminalState::Running(terminal);
             }
             Err(error) => {
                 self.terminal = TerminalState::Failed {
                     message: format!("{error:#}"),
                 };
+                self.host.teardown();
             }
         }
     }
 
     /// Re-attempts the spawn after a failure: on success the pane switches
     /// to the live terminal, on failure the message is updated in place.
+    /// F-TERM-PTY-07: this is also a relaunch -- the previous attempt never
+    /// reached `Running`, so there is no live process this one could race
+    /// against, but the generation still bumps so the surface host's count
+    /// reflects every real "started a fresh process" event, not just the
+    /// ones reached through [`Self::restart`].
     fn retry(&mut self, cx: &mut gpui::Context<Self>) {
+        self.host.relaunch();
         match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
             Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(terminal.clone(), wakeup_rx, cx);
+                Self::pump_terminal_events(
+                    terminal.clone(),
+                    wakeup_rx,
+                    self.host.generation(),
+                    cx,
+                );
                 self.terminal = TerminalState::Running(terminal);
                 self.exit_status = None;
             }
@@ -1054,9 +1092,40 @@ impl TerminalView {
                 self.terminal = TerminalState::Failed {
                     message: format!("{error:#}"),
                 };
+                self.host.teardown();
             }
         }
         cx.notify();
+    }
+
+    /// F-TERM-PTY-07 (`TerminalSurfaceHost::relaunch`): tears down the live
+    /// process (if any) and starts a fresh one in place, in the *same*
+    /// `Entity<TerminalView>` and therefore the same pane/split -- the host
+    /// bumps to a new generation first, so the outgoing PTY's own
+    /// `pump_terminal_events` task cannot clobber the incoming one's state
+    /// (see that function's doc comment). Public: this is the "relaunch it"
+    /// half of the row's own VERIFY clause, driven from a context-menu
+    /// action the app crate owns.
+    pub fn restart(&mut self, cx: &mut gpui::Context<Self>) {
+        self.shutdown();
+        self.host.relaunch();
+        self.terminal = TerminalState::Pending;
+        self.exit_status = None;
+        self.ensure_started(cx);
+        cx.notify();
+    }
+
+    /// The surface host's current generation -- bumps by one on every real
+    /// respawn ([`Self::restart`], and [`Self::retry`] after a failure).
+    /// Exposed for the app crate's tests and any UI that wants to show it.
+    pub fn surface_generation(&self) -> u64 {
+        self.host.generation()
+    }
+
+    /// Whether a live process currently backs this content id. False after
+    /// an exit/failure and before the next successful (re)spawn.
+    pub fn is_host_mounted(&self) -> bool {
+        self.host.is_mounted()
     }
 
     fn exit_status_from_event(event: &Event) -> Option<TerminalExitStatus> {
@@ -1076,6 +1145,13 @@ impl TerminalView {
     fn pump_terminal_events(
         terminal: TerminalHandle,
         mut wakeup_rx: UnboundedReceiver<Event>,
+        // F-TERM-PTY-07: the surface-host generation this specific PTY was
+        // spawned under. This task outlives a respawn (nothing cancels it),
+        // so every application below is gated on the view's *current*
+        // generation still matching -- otherwise a late `ChildExit` from a
+        // process a "Restart Terminal" already replaced would overwrite the
+        // new process's live state with the old one's exit status.
+        generation: u64,
         cx: &mut gpui::Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
@@ -1119,8 +1195,14 @@ impl TerminalView {
                 }
                 if this
                     .update(cx, |view, cx| {
+                        if view.host.generation() != generation {
+                            // Superseded by a later respawn -- this batch is
+                            // from a PTY the view has already moved past.
+                            return;
+                        }
                         if let Some(exit_status) = exit_status {
                             view.exit_status = Some(exit_status);
+                            view.host.teardown();
                             cx.emit(TerminalActivityEvent::ChildExited {
                                 status: exit_status,
                             });
@@ -1314,6 +1396,7 @@ impl TerminalView {
             | TerminalContextAction::SplitRight
             | TerminalContextAction::SplitAbove
             | TerminalContextAction::SplitDown
+            | TerminalContextAction::RestartTerminal
             | TerminalContextAction::CloseTerminal => {
                 cx.emit(TerminalContextEvent {
                     target: self.identity.clone(),
@@ -3096,6 +3179,104 @@ mod view_tests {
             "stable pane identity must reach the PTY child: {:?}",
             scrollback.borrow()
         );
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
+    /// F-TERM-PTY-07: `restart` bumps `TerminalSurfaceHost`'s generation and
+    /// starts a genuinely fresh process, and the *old* process's own
+    /// `pump_terminal_events` task -- still alive, still draining its own
+    /// channel -- must not be allowed to stamp its late `ChildExit` onto the
+    /// new process's state. Both processes are real PTYs; the old one is
+    /// killed by `shutdown()` inside `restart`, and this asserts its exit
+    /// event, once it does arrive, left `exit_status` alone.
+    #[gpui::test]
+    async fn restart_bumps_the_generation_and_ignores_the_old_generations_late_exit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-restart-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "printf 'gen1\\n'; exec sleep 5".to_string()],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn first PTY")
+        });
+
+        let wait_for = |cx: &mut gpui::VisualTestContext, needle: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                cx.run_until_parked();
+                cx.background_executor
+                    .advance_clock(Duration::from_millis(5));
+                cx.run_until_parked();
+                let snapshot = terminal.update(&mut cx.cx, |terminal, _| terminal.snapshot());
+                if String::from_utf8_lossy(&snapshot.scrollback).contains(needle) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("{needle:?} never appeared in scrollback");
+        };
+
+        wait_for(cx, "gen1");
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.surface_generation()),
+            1,
+            "the first spawn is generation 1"
+        );
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.is_host_mounted()),
+            "a live process must report the host as mounted"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, cx| {
+            terminal.spawn.shell = TerminalShell::WithArguments {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "printf 'gen2\\n'; exec sleep 5".to_string()],
+            };
+            terminal.restart(cx);
+        });
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.surface_generation()),
+            2,
+            "restart must bump the generation synchronously, not on the PTY's own schedule"
+        );
+
+        wait_for(cx, "gen2");
+        // Give the killed first process's own pump task every chance to
+        // observe and apply its ChildExit before asserting it did not. The
+        // PTY-exit watcher runs on a real OS thread outside GPUI's simulated
+        // clock, so this needs genuine wall-clock time to pass (like
+        // `wait_for` above), not just fast-forwarded timers.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(50));
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status()),
+            None,
+            "the superseded generation's ChildExit must not clobber the new process's state"
+        );
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.is_host_mounted()),
+            "the new process is still live -- restart must not leave the host torn down"
+        );
+        let snapshot = terminal.update(&mut cx.cx, |terminal, _| terminal.snapshot());
+        assert!(
+            !String::from_utf8_lossy(&snapshot.scrollback).contains("gen1"),
+            "restart starts a genuinely fresh terminal buffer, unlike a pane move"
+        );
+
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
     }
