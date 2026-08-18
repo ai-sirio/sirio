@@ -865,6 +865,23 @@ impl ChangesTab {
             }
             return;
         };
+        // F-CHG-15: a binary file has no text diff by definition -- git
+        // reports it with zero hunks, so falling through to the hunk loop
+        // below renders an empty body next to sibling rows that do show
+        // real diff lines, which reads as "this file has no changes" when
+        // the entry is plainly dirty. Say so explicitly instead, matching
+        // the Swift original's inline `ContentUnavailableView("Binary diff
+        // unavailable", …)` in `ChangesListView.diffBody` -- as opposed to
+        // `editor.rs`'s separate file-viewer message, which is a different
+        // surface entirely.
+        if diff.is_binary {
+            rows.push(ChangeRow::Unavailable {
+                section,
+                path: entry.path.clone(),
+                message: "Binary diff unavailable".to_string(),
+            });
+            return;
+        }
         // A run of unchanged context lines collapses into one labelled band
         // (orca's "18 hidden lines"), expanded in place on click. `key` is
         // the run's first line's position in the file's flattened line
@@ -3141,6 +3158,58 @@ mod tests {
                         && message.contains("fatal: no such file")
             ),
             "the expanded row names the failure instead of rendering nothing"
+        );
+    }
+
+    /// F-CHG-15: a binary file's expanded diff says so explicitly, rather
+    /// than rendering an empty body next to sibling rows whose real diff
+    /// lines are on the same frame — which would read as "no changes" for
+    /// a file the status list plainly shows as dirty.
+    #[test]
+    fn an_expanded_binary_file_says_binary_diff_unavailable() {
+        let tab = ChangesTab {
+            repo_root: PathBuf::from("/tmp"),
+            entries: vec![StatusEntry {
+                path: PathBuf::from("image.bin"),
+                original_path: None,
+                index_status: None,
+                worktree_status: Some(StatusKind::Modified),
+            }],
+            diffs: HashMap::from([(
+                PathBuf::from("image.bin"),
+                FileDiff {
+                    path: PathBuf::from("image.bin"),
+                    hunks: Vec::new(),
+                    additions: 0,
+                    deletions: 0,
+                    is_binary: true,
+                    is_submodule: false,
+                },
+            )]),
+            stats: HashMap::new(),
+            diff_errors: HashMap::new(),
+            expanded_changes: HashSet::new(),
+            collapsed_sections: HashSet::new(),
+            expanded_bands: HashSet::new(),
+            git_task: None,
+            git_error: None,
+            refresh_started: false,
+            pending_focus: None,
+        };
+        let entry = tab.entries[0].clone();
+        let mut rows = Vec::new();
+        tab.expand_diff(
+            &mut rows,
+            ChangeSection::Changed,
+            &entry,
+            DiffViewMode::Unified,
+        );
+        assert!(
+            matches!(
+                rows.as_slice(),
+                [ChangeRow::Unavailable { message, .. }] if message == "Binary diff unavailable"
+            ),
+            "a binary file's expansion must say so, not render nothing: {rows:?}"
         );
     }
 
