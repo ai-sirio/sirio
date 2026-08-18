@@ -3038,6 +3038,19 @@ struct TillerWorkspace {
     /// Prevents scheduling restored scrollback more than once before the
     /// first frame mounts the terminal entities.
     restored_scrollback_scheduled: bool,
+    /// F-CORE-ACT-20: whether the OS considers this window focused, per
+    /// `Window::is_window_active` -- a real, already-portable GPUI API
+    /// (backed uniformly by every platform's own window, no linux-specific
+    /// code needed here). Polled once per frame in `render` (the same
+    /// "Layer E is polled, not pushed" pattern that function already uses
+    /// for streaming/exit state), because `NotificationPolicy::should_notify`
+    /// is decided from `post_activity_notification`, which fires from
+    /// Layer B/C/D activity-transition callbacks that carry no `Window` of
+    /// their own -- only `render` and the control-socket dispatch loop do.
+    /// Starts `true` (matching this argument's previous hardcoded value)
+    /// so the very first transition, before any frame has painted, keeps
+    /// today's behaviour rather than guessing unfocused.
+    window_active: bool,
     browser_origins: BTreeSet<String>,
     /// F-TERM-08: an interactive pane close (Cmd-W, right-click "Close
     /// Terminal…") that would kill a pane whose `ActivityStatus` reports
@@ -3262,12 +3275,19 @@ impl TillerWorkspace {
                                     cx.notify();
                                 }
                                 ControlAction::SelectWorktree { selector, reply } => {
-                                    let result = workspace.control_select_worktree(&selector, cx);
+                                    let result = workspace.control_select_worktree(
+                                        &selector,
+                                        Some(&mut *window),
+                                        cx,
+                                    );
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::TrayJump { selector, reply } => {
-                                    let result = workspace
-                                        .control_select_worktree_and_jump(&selector, cx);
+                                    let result = workspace.control_select_worktree_and_jump(
+                                        &selector,
+                                        Some(&mut *window),
+                                        cx,
+                                    );
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::AddProject { path, reply } => {
@@ -3292,8 +3312,11 @@ impl TillerWorkspace {
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::OpenChanges { worktree, reply } => {
-                                    let result =
-                                        workspace.control_open_changes(worktree.as_deref(), cx);
+                                    let result = workspace.control_open_changes(
+                                        worktree.as_deref(),
+                                        Some(&mut *window),
+                                        cx,
+                                    );
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::ReadChanges { reply } => {
@@ -3373,7 +3396,11 @@ impl TillerWorkspace {
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::Chat { action, reply } => {
-                                    let result = workspace.handle_chat_action(action, cx);
+                                    let result = workspace.handle_chat_action(
+                                        action,
+                                        Some(&mut *window),
+                                        cx,
+                                    );
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::RefreshSidebar => {
@@ -3413,7 +3440,11 @@ impl TillerWorkspace {
                                     // exact same call the control socket's `tray.jump`
                                     // makes, so a socket drive proves this arm's own
                                     // behaviour, not a parallel stand-in for it.
-                                    let _ = workspace.select_worktree_and_jump(path, cx);
+                                    let _ = workspace.select_worktree_and_jump(
+                                        path,
+                                        Some(&mut *window),
+                                        cx,
+                                    );
                                     window.activate_window();
                                 }
                                 tray::TrayRequest::Quit => {
@@ -3454,7 +3485,11 @@ impl TillerWorkspace {
                 SidebarEvent::RemoveProject(id) => workspace.remove_project(id, cx),
                 SidebarEvent::SelectTab(id) => workspace.select_tab(*id, cx),
                 SidebarEvent::SelectWorktree(path) => {
-                    let _ = workspace.select_worktree(path.clone(), cx);
+                    // No `&mut Window` reaches an entity-event `cx.subscribe`
+                    // callback -- `restore_tabs` tolerates `None` the same
+                    // way boot's own call does, skipping only `browser`
+                    // tabs. See `select_worktree`'s doc comment.
+                    let _ = workspace.select_worktree(path.clone(), None, cx);
                 }
                 SidebarEvent::CloseTab(id) => workspace.close_tab_by_id(*id, cx),
                 SidebarEvent::OpenProjectSettings(id) => {
@@ -3547,6 +3582,7 @@ impl TillerWorkspace {
             palette_previous_focus: None,
             activity,
             restored_scrollback_scheduled: false,
+            window_active: true,
             browser_origins,
             show_settings: false,
             restore_focus_pending: false,
@@ -4237,7 +4273,7 @@ impl TillerWorkspace {
             }
             (SidebarContextTarget::Worktree { path, .. }, SidebarContextAction::NewTab(action)) => {
                 if *path != self.working_directory
-                    && self.select_worktree(path.clone(), cx).is_err()
+                    && self.select_worktree(path.clone(), None, cx).is_err()
                 {
                     return;
                 }
@@ -4561,21 +4597,20 @@ impl TillerWorkspace {
     /// Returns `Ok(Some((tab_id, tab_title)))` when a tab was actually
     /// activated, `Ok(None)` when the selection succeeded but no tab in
     /// `self.tabs` carried a non-idle status to jump to (or the worktree has
-    /// no tabs at all), and `Err` when `select_worktree` itself failed. Note
-    /// the honest limitation this makes observable: `self.tabs` is this
-    /// window's single, un-scoped-to-worktree tab list (`F-CHG-19`'s
-    /// "single-open-worktree model"), and `select_worktree` does not
-    /// rehydrate it from a different worktree's persisted session -- so a
-    /// jump lands correctly for a tab already inside whichever worktree
-    /// happens to be materialized in `self.tabs` at call time, not
-    /// necessarily inside `path` if `path` differs from what was previously
-    /// on screen.
+    /// no tabs at all), and `Err` when `select_worktree` itself failed.
+    ///
+    /// CENTER-01: `select_worktree` now does rehydrate `self.tabs` from
+    /// `path`'s own persisted session when the switch is safe to make (see
+    /// its own doc comment) -- so this jumps into the tab `path`'s database
+    /// row actually names, not whichever worktree happened to be
+    /// materialized in `self.tabs` before the call, the way it used to.
     fn select_worktree_and_jump(
         &mut self,
         path: PathBuf,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<Option<(usize, String)>, String> {
-        self.select_worktree(path, cx)?;
+        self.select_worktree(path, window, cx)?;
         let Some(id) = self.worst_status_tab_id(cx) else {
             return Ok(None);
         };
@@ -4750,9 +4785,17 @@ impl TillerWorkspace {
         }
     }
 
+    /// `window` is `None` from every call site that has no `&mut Window` to
+    /// give (a `cx.subscribe` callback, a headless control-socket path) --
+    /// [`restore_tabs`] tolerates that the same way boot's own call does,
+    /// skipping only `browser` tabs (which need a window to construct their
+    /// child view) rather than failing the whole switch. Pass `Some(window)`
+    /// wherever one is already in scope so a runtime switch restores with
+    /// full fidelity.
     fn select_worktree(
         &mut self,
         requested_path: PathBuf,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let Some(selected_path) = self
@@ -4778,6 +4821,80 @@ impl TillerWorkspace {
             return Err(format!("unknown worktree: {}", selected_path.display()));
         }
         self.evict_over_capacity_worktrees(&selected_path, cx);
+
+        // CENTER-01: `self.tabs` is this window's single, un-scoped-to-worktree
+        // tab list (F-CHG-19's "single-open-worktree model", also documented
+        // on `session`'s own module doc). Until now, a switch left it
+        // materialized for whichever worktree happened to already be on
+        // screen -- the stale-centre-pane defect: the sidebar highlight,
+        // status bar and right panel all flip to the new selection, but the
+        // centre pane keeps showing the old one, exactly relabelled by
+        // `sync_control_panes` under the new path on the very next sync.
+        //
+        // Reloading is only safe when nothing in the outgoing tabs is live.
+        // Dropping an `OpenTab` drops its `TerminalView`/`Chat` entities, and
+        // `TerminalView::drop` tears its PTY down (`shutdown`) -- the exact
+        // consequence `pane_close_needs_confirmation` already exists to gate
+        // (F-TERM-08's held-close banner) and the same one
+        // `evict_over_capacity_worktrees`'s own `status_of` closure exists to
+        // prevent for the *control-registered* pane list. A worktree switch
+        // must not silently kill live, needs-input, or just-errored work
+        // (its last output may still be the thing the user is about to read)
+        // just because its tabs happen to be the ones on screen, so this
+        // reload reuses that exact predicate rather than a hand-rolled
+        // subset of it. When the gate trips, today's behaviour (stale
+        // content, nothing killed) is left in place rather than risking the
+        // worse failure -- see docs/linux-rewrite/CENTER-PANE-DESYNC.md for
+        // the real fix this stands in for (a genuine multi-worktree mount
+        // model, which is a much larger change touching F-SID-14/
+        // F-CORE-ACT-26/F-CHG-19/F-TERM-11, previously scoped out for the
+        // same reason by the I3-tray-jump wave).
+        if selected_path != old_path {
+            let outgoing_is_safe = !self.tabs.iter().any(|tab| {
+                self.tab_status(tab, cx)
+                    .is_some_and(pane_close_needs_confirmation)
+            });
+            if outgoing_is_safe {
+                // The debounced `schedule_save` below (and every ordinary
+                // mutation's `schedule_save`) always persists under whatever
+                // `self.working_directory` is *at flush time* -- about to
+                // become `selected_path`. Anything from the outgoing
+                // worktree not yet flushed must be saved now, synchronously,
+                // under its own directory, or it is silently lost rather
+                // than merely delayed.
+                let outgoing_layout = self.layout(cx);
+                self.session.save_layout_now(&outgoing_layout);
+
+                let restored = self.session.restore_tabs_for(&selected_path);
+                let saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions
+                {
+                    self.session.load_session_refs()
+                } else {
+                    BTreeMap::new()
+                };
+                let (new_tabs, active) = restore_tabs(
+                    &restored,
+                    &selected_path,
+                    window,
+                    &mut self.activity,
+                    &saved_session_refs,
+                    cx,
+                );
+                Self::bind_terminal_tabs(&new_tabs, cx);
+                for tab in &new_tabs {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Chat(chat) = content {
+                            Self::bind_chat(chat, cx);
+                        }
+                    });
+                }
+                self.tabs = new_tabs;
+                self.next_tab_id = self.tabs.len();
+                self.next_pane_id = next_pane_id(&self.tabs);
+                self.active_tab = active.min(self.tabs.len().saturating_sub(1));
+                self.rebuild_tab_machinery();
+            }
+        }
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
@@ -4845,6 +4962,7 @@ impl TillerWorkspace {
     fn control_select_worktree(
         &mut self,
         selector: &str,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let path = self
@@ -4853,7 +4971,7 @@ impl TillerWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path_for_selector(selector)
             .ok_or_else(|| format!("unknown worktree: {selector}"))?;
-        self.select_worktree(path, cx)?;
+        self.select_worktree(path, window, cx)?;
         let state = self
             .control_state
             .lock()
@@ -4877,6 +4995,7 @@ impl TillerWorkspace {
     fn control_select_worktree_and_jump(
         &mut self,
         selector: &str,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let path = self
@@ -4885,7 +5004,7 @@ impl TillerWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path_for_selector(selector)
             .ok_or_else(|| format!("unknown worktree: {selector}"))?;
-        let jump = self.select_worktree_and_jump(path, cx)?;
+        let jump = self.select_worktree_and_jump(path, window, cx)?;
         let state = self
             .control_state
             .lock()
@@ -5052,7 +5171,7 @@ impl TillerWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let snapshot = self.launch_snapshot.clone();
-        self.select_worktree(snapshot.working_directory.clone(), cx)?;
+        self.select_worktree(snapshot.working_directory.clone(), Some(window), cx)?;
 
         let current = self.layout(cx).tabs;
         let merged = merge_launch_snapshot_tabs(&snapshot.tabs, &current);
@@ -5344,7 +5463,15 @@ impl TillerWorkspace {
                     .is_ok_and(|pane_id| tab.panes.contains(pane_id))
             })
         });
-        if !NotificationPolicy::should_notify(transition.old, transition.new, true, visible) {
+        // F-CORE-ACT-20: real window-focus, not a hardcoded `true` -- see
+        // `window_active`'s own doc comment for why this reads a
+        // once-per-frame cache instead of a live `Window` query.
+        if !NotificationPolicy::should_notify(
+            transition.old,
+            transition.new,
+            self.window_active,
+            visible,
+        ) {
             return;
         }
         let agent_display_name = AGENT_CATALOG
@@ -6823,6 +6950,7 @@ impl TillerWorkspace {
     fn control_open_changes(
         &mut self,
         worktree: Option<&str>,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         if let Some(selector) = worktree {
@@ -6833,7 +6961,7 @@ impl TillerWorkspace {
                 .path_for_selector(selector)
                 .ok_or_else(|| format!("unknown worktree: {selector}"))?;
             if path != self.working_directory {
-                self.select_worktree(path, cx)?;
+                self.select_worktree(path, window, cx)?;
             } else if !self.has_current_worktree() {
                 // The requested worktree is already the live shell's
                 // directory, but a prior `worktree.close` cleared
@@ -6946,12 +7074,13 @@ impl TillerWorkspace {
     fn handle_chat_action(
         &mut self,
         action: ChatControlAction,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         match action {
             ChatControlAction::Open { worktree } => {
                 if let Some(worktree) = worktree {
-                    self.control_select_worktree(&worktree, cx)?;
+                    self.control_select_worktree(&worktree, window, cx)?;
                 } else if self
                     .control_state
                     .lock()
@@ -9924,6 +10053,14 @@ impl Render for TillerWorkspace {
         if self.sync_entity_evidence(cx) {
             self.sync_worktree_activity(cx);
         }
+        // F-CORE-ACT-20: same "polled, not pushed" reasoning as the comment
+        // above -- `Window::is_window_active` is a real, portable GPUI call
+        // (every platform's own window backs it; nothing linux-specific is
+        // needed to read it), but the callbacks that actually decide
+        // whether to notify (`post_activity_notification`, off Layer B/C/D
+        // activity transitions) carry no `Window`. `render` does, every
+        // frame, so the value is cached here for those to read.
+        self.window_active = window.is_window_active();
         // Fetched fresh every frame from the global, so a change of appearance
         // is picked up without the workspace holding a stale copy.
         let theme = *Theme::get(cx);
@@ -12013,6 +12150,179 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// CENTER-01: a runtime worktree switch must load the *newly selected*
+    /// worktree's own tabs, not leave whichever tabs were already
+    /// materialized on screen. Before this fix `select_worktree` never
+    /// touched `self.tabs` at all -- proven live by an earlier wave
+    /// (`docs/linux-rewrite/wave-i/I3-tray-jump-report.md`: "the center pane
+    /// kept showing repo1's live terminal" after `workspace.select
+    /// workspace=/tmp/i3jump-repo2`) and reproduced deterministically here
+    /// instead of over a live socket: `wt-1` gets a distinct persisted tab
+    /// seeded directly into the database (standing in for "the user opened
+    /// this worktree before and it remembered its own layout"), then a
+    /// switch away from `wt-0` and back proves both halves of the round
+    /// trip -- the incoming worktree's own tabs load, and the outgoing
+    /// worktree's tabs are saved before being replaced rather than merely
+    /// forgotten.
+    #[gpui::test]
+    async fn switching_worktree_reloads_the_centre_pane_from_that_worktrees_own_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("center01");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt0 = worktrees[0].clone();
+        let wt1 = worktrees[1].clone();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            assert_eq!(workspace.working_directory, wt0);
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "the fixture starts with exactly one tab on wt-0"
+            );
+            assert_eq!(workspace.tabs[0].title, "Terminal");
+
+            // Seed wt-1's own row directly, as if it had been opened and
+            // saved on an earlier visit -- distinct title, so a switch that
+            // merely relabels wt-0's tab (the bug) is distinguishable from
+            // one that genuinely reloads wt-1's own persisted content.
+            workspace.session.save_layout_now(&SessionLayout {
+                working_directory: wt1.clone(),
+                branch: "branch-1".into(),
+                tabs: vec![SessionTab {
+                    id: "wt1-marker-tab".into(),
+                    title: "WT1 Marker".into(),
+                    kind: "terminal".into(),
+                    agent_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState::default()],
+            });
+
+            workspace
+                .select_worktree(wt1.clone(), None, cx)
+                .expect("select wt-1");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.working_directory, wt1,
+                "the metadata (working_directory) side of the switch, which \
+                 already worked before this fix"
+            );
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "wt-1's own persisted tab replaces wt-0's, rather than \
+                 wt-0's tab staying mounted under the new working_directory"
+            );
+            assert_eq!(
+                workspace.tabs[0].title, "WT1 Marker",
+                "the centre pane must show wt-1's own content -- CENTER-01's \
+                 exact frame-vs-socket disagreement, reproduced as data: the \
+                 socket-equivalent (working_directory) already said wt-1, \
+                 and now the tab list agrees"
+            );
+        });
+
+        // Switch back: wt-0's own tab (saved-before-switch, not merely
+        // dropped) must come back, proving the outgoing half of the fix as
+        // well as the incoming half just checked above.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace
+                .select_worktree(wt0.clone(), None, cx)
+                .expect("select wt-0 again");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(workspace.working_directory, wt0);
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "wt-0's own tab, saved synchronously on the way out, must \
+                 come back rather than the switch having silently lost it"
+            );
+            assert_eq!(workspace.tabs[0].title, "Terminal");
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CENTER-01: the safety gate. A live (needs-input) tab in the outgoing
+    /// worktree must survive a switch untouched -- reloading would drop its
+    /// `TerminalView`, and `TerminalView::drop` tears the PTY down. This is
+    /// the same predicate `tray_jump_lands_on_the_target_worktrees_worst_status_tab`
+    /// already exercises incidentally (its own outgoing tab reports `Error`,
+    /// which the gate also protects); this test names the mechanism
+    /// directly, with the plainer `NeedsInput` case, so the gate's own
+    /// contract has one test that is about nothing else.
+    #[gpui::test]
+    async fn switching_away_from_a_needs_input_tab_leaves_it_mounted(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("center01-gate");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt1 = worktrees[1].clone();
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // wt-0's sole tab (pane 0, the fixture's live `sleep 60` shell)
+            // is waiting on the user.
+            workspace
+                .activity
+                .notify("pane-0", AgentStatus::NeedsInput, Instant::now());
+            workspace
+                .select_worktree(wt1.clone(), None, cx)
+                .expect("select wt-1");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.working_directory, wt1,
+                "the metadata side of the switch still happens -- only the \
+                 tab reload is gated"
+            );
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "the needs-input tab is left mounted rather than dropped"
+            );
+            assert_eq!(
+                workspace.tabs[0].title, "Terminal",
+                "still wt-0's own tab -- today's stale-but-safe behaviour, \
+                 not wt-1's (empty) persisted layout"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// F-CORE-ACT-22, drawn end to end: a needs-input worktree is lifted
     /// above the siblings the user's manual (catalog) order put it under,
     /// while those siblings keep their order relative to each other — the
@@ -12175,7 +12485,7 @@ mod tests {
         // Now select it — the one gesture that used to erase the status.
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace
-                .select_worktree(third.clone(), cx)
+                .select_worktree(third.clone(), None, cx)
                 .expect("select the errored worktree");
         });
         cx.run_until_parked();
@@ -12269,7 +12579,7 @@ mod tests {
             }
             workspace.sync_activity(cx);
             let jumped = workspace
-                .select_worktree_and_jump(worktrees[0].clone(), cx)
+                .select_worktree_and_jump(worktrees[0].clone(), None, cx)
                 .expect("jump into the fixture worktree");
             (jumped.map(|(id, _)| id), panes)
         });
@@ -13592,6 +13902,55 @@ mod tests {
         assert!(
             cx.debug_bounds("settings-category-General").is_some(),
             "Linux ctrl-, must open the settings surface"
+        );
+    }
+
+    /// F-CORE-ACT-20: `window_active` must track the real
+    /// `Window::is_window_active`, not stay pinned to its own `true`
+    /// starting value -- that pinned value is exactly what the production
+    /// call site hardcoded before this fix (`main.rs`, the
+    /// `NotificationPolicy::should_notify` call
+    /// `post_activity_notification` makes), silently making the
+    /// desktop-focus half of that clause unable to vary. `gpui`'s own test
+    /// platform makes this a real, non-tautological assertion: a freshly
+    /// opened `TestWindow` reports `is_active() == false` unconditionally
+    /// (`platform/test/window.rs`), so `Window::is_window_active()` reads
+    /// `false` here from the moment the window opens -- the *opposite* of
+    /// `window_active`'s `true` default. Only a render that actually reads
+    /// the live value flips the field; a reverted fix (the field just
+    /// sitting at its constructor default) would leave this `true` and the
+    /// test would fail.
+    #[gpui::test]
+    async fn render_polls_the_real_window_activation_state(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let (window_reports_active, workspace_cached_active) = cx.update(|window, app| {
+            let workspace = window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root");
+            (
+                window.is_window_active(),
+                workspace.read(app).window_active,
+            )
+        });
+
+        assert!(
+            !window_reports_active,
+            "the gpui test platform's own TestWindow reports is_active() == \
+             false unconditionally -- this assertion documents that fact so \
+             a future gpui upgrade that changes it fails loudly here rather \
+             than silently turning the assertion below tautological"
+        );
+        assert_eq!(
+            workspace_cached_active, window_reports_active,
+            "render() must poll Window::is_window_active() every frame -- a \
+             hardcoded `true` (the F-CORE-ACT-20 defect) would leave this \
+             field stuck at its constructor default and disagree with the \
+             window's real (false, in this harness) state"
         );
     }
 
@@ -16696,7 +17055,7 @@ mod tests {
                 .close_workspace(&selector, cx)
                 .expect("close selected test worktree");
             assert_eq!(
-                workspace.control_open_changes(None, cx),
+                workspace.control_open_changes(None, None, cx),
                 Err("no current workspace".to_string()),
                 "Changes must not reopen against the last closed worktree"
             );
@@ -17154,7 +17513,7 @@ mod tests {
             });
 
             workspace
-                .select_worktree(paths[2].clone(), cx)
+                .select_worktree(paths[2].clone(), None, cx)
                 .expect("select the third worktree");
 
             let state = workspace.control_state.lock().expect("control state");
@@ -17375,7 +17734,7 @@ mod tests {
                 .notify("pane-1", AgentStatus::NeedsInput, Instant::now());
 
             let jump = workspace
-                .select_worktree_and_jump(target_path.clone(), cx)
+                .select_worktree_and_jump(target_path.clone(), None, cx)
                 .expect("select_worktree_and_jump succeeds for a known worktree");
             assert_eq!(
                 jump,
