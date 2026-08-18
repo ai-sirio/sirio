@@ -1286,11 +1286,17 @@ impl Sidebar {
         .detach();
     }
 
+    /// F-CORE-DOM-03: the Clone/Create forms' starting `parent` is the
+    /// deterministic default-project-location proposal — mirrors Swift's
+    /// `ProjectDefaults.defaultProjectsRoot()` seeding `CreateNewProjectView`'s
+    /// `parentDir` (`App/AddProjectSheet.swift:291`). A user with no
+    /// configured default sees `$TILLER_PROJECTS_DIR`, else
+    /// `$XDG_DATA_HOME/Tiller/projects`, else `$HOME/Tiller/projects` —
+    /// `tiller_project::default_project_base()` is the single source of
+    /// truth for that proposal; forms remain free to override it via
+    /// `set_parent` (the folder-picker "Change" affordance).
     fn project_form_parent() -> PathBuf {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_dir())
-            .unwrap_or_else(|| std::env::temp_dir())
+        tiller_project::default_project_base()
     }
 
     fn start_clone_project(&mut self, cx: &mut Context<Self>) {
@@ -3487,6 +3493,60 @@ mod tests {
         };
 
         assert_eq!(Sidebar::row_icon(&row), Icon::ClaudeCode);
+    }
+
+    /// F-CORE-DOM-03: the Clone/Create forms must propose
+    /// `tiller_project::default_project_base()`'s deterministic default —
+    /// not some independent HOME/temp_dir guess — and the proposal must
+    /// track a Linux-specific override (`TILLER_PROJECTS_DIR`), matching
+    /// the VERIFY clause's "observe the proposed project location ...
+    /// repeat with a Linux replacement root and confirm it is
+    /// deterministic". Serialized on `env_lock` because it mutates process
+    /// environment shared with every other `#[test]` in this binary.
+    #[test]
+    fn project_form_parent_proposes_the_deterministic_default_base() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+
+        let saved_projects_dir = std::env::var_os("TILLER_PROJECTS_DIR");
+        let saved_xdg = std::env::var_os("XDG_DATA_HOME");
+
+        // No overrides configured: falls back through to $HOME/Tiller/projects,
+        // exactly what `tiller_project::default_project_base()` returns.
+        unsafe {
+            std::env::remove_var("TILLER_PROJECTS_DIR");
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        assert_eq!(
+            Sidebar::project_form_parent(),
+            tiller_project::default_project_base(),
+            "with no overrides, the sidebar's proposed parent must equal the deterministic default"
+        );
+
+        // A Linux replacement root (TILLER_PROJECTS_DIR) changes the
+        // proposal deterministically, and the sidebar must track it rather
+        // than proposing a fixed HOME-derived path of its own.
+        let replacement = std::env::temp_dir().join("tiller-f-core-dom-03-replacement-root");
+        unsafe {
+            std::env::set_var("TILLER_PROJECTS_DIR", &replacement);
+        }
+        assert_eq!(
+            Sidebar::project_form_parent(),
+            replacement,
+            "TILLER_PROJECTS_DIR must be honored as the proposed location"
+        );
+
+        unsafe {
+            std::env::remove_var("TILLER_PROJECTS_DIR");
+            match saved_projects_dir {
+                Some(value) => std::env::set_var("TILLER_PROJECTS_DIR", value),
+                None => std::env::remove_var("TILLER_PROJECTS_DIR"),
+            }
+            match saved_xdg {
+                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
     }
 
     #[test]
