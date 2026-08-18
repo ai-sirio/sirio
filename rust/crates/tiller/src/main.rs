@@ -4416,6 +4416,44 @@ impl TillerWorkspace {
         status
     }
 
+    /// F-TERM-10: `tab_status`/`pane_close_needs_confirmation` only reflect
+    /// the *agent* activity model (Layers A-D) -- a real signal, but scoped
+    /// to recognized agent CLIs and OSC-title/ACP conventions. A bare shell
+    /// command with no agent identity (`sleep 300`, a build, anything typed
+    /// at a plain prompt) reads as `ActivityStatus::Idle` there, which made
+    /// a worktree switch's reload-from-disk in `select_worktree` silently
+    /// tear its PTY down -- contradicting CLAUDE.md's documented contract
+    /// that terminal hosts "stay mounted (PTYs alive) across sidebar
+    /// selection changes". This checks the terminal's actual process tree
+    /// instead of the activity model: any descendant of the login shell
+    /// (`tiller_activity::inspect_process_names`, the same Layer-D walk
+    /// that powers agent detection) means a real command is running right
+    /// now, agent or not, and this tab must not be silently reloaded.
+    /// `Err` (non-Linux, or the shell process already gone) is treated as
+    /// "nothing found running" -- the existing agent-status check still
+    /// gates the genuinely-tracked cases, so this only ever narrows the gap,
+    /// never widens what a switch is allowed to tear down.
+    fn tab_has_live_foreground_process(&self, tab: &OpenTab, cx: &App) -> bool {
+        let mut found = false;
+        tab.panes.for_each(&mut |_, content| {
+            if found {
+                return;
+            }
+            let Some(terminal) = content.terminal() else {
+                return;
+            };
+            let Some(shell_pid) = terminal.read(cx).shell_pid() else {
+                return;
+            };
+            if let Ok(names) = tiller_activity::inspect_process_names(shell_pid)
+                && !names.is_empty()
+            {
+                found = true;
+            }
+        });
+        found
+    }
+
     /// One pane's status, straight out of the one model. `tab-{id}` is the
     /// fallback key a hook push that names the tab rather than the leaf
     /// lands under.
@@ -4866,6 +4904,11 @@ impl TillerWorkspace {
             let outgoing_is_safe = !self.tabs.iter().any(|tab| {
                 self.tab_status(tab, cx)
                     .is_some_and(pane_close_needs_confirmation)
+                    // F-TERM-10: catches a live foreground command the
+                    // agent-activity check above cannot see at all (no
+                    // recognized agent, no OSC title, no ACP) -- see
+                    // `tab_has_live_foreground_process`'s own comment.
+                    || self.tab_has_live_foreground_process(tab, cx)
             });
             if outgoing_is_safe {
                 // The debounced `schedule_save` below (and every ordinary
@@ -12219,7 +12262,7 @@ mod tests {
         let wt0 = worktrees[0].clone();
         let wt1 = worktrees[1].clone();
 
-        workspace.update(&mut cx.cx, |workspace, cx| {
+        workspace.update(&mut cx.cx, |workspace, _cx| {
             assert_eq!(workspace.working_directory, wt0);
             assert_eq!(
                 workspace.tabs.len(),
@@ -12227,7 +12270,44 @@ mod tests {
                 "the fixture starts with exactly one tab on wt-0"
             );
             assert_eq!(workspace.tabs[0].title, "Terminal");
+        });
 
+        // F-TERM-10: the fixture's shell runs `sleep 60` in the foreground
+        // purely to report a live, non-`Error` status (see
+        // `worktree_urgency_test_workspace`'s own comment) -- this test is
+        // about reload *content*, not about F-TERM-10's own liveness gate
+        // (`tab_has_live_foreground_process`), which now also refuses to
+        // reload a tab with a genuinely running foreground command.
+        // Interrupt it and wait for the shell to go idle before switching,
+        // the same way a real user's finished command would leave it.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            let mut terminal = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if terminal.is_none() {
+                    terminal = content.terminal();
+                }
+            });
+            if let Some(terminal) = terminal {
+                terminal.update(cx, |terminal, _| terminal.input([3]));
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let still_live = workspace.read_with(&cx.cx, |workspace, cx| {
+                workspace.tab_has_live_foreground_process(&workspace.tabs[0], cx)
+            });
+            if !still_live {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fixture's sleep 60 never went idle after Ctrl-C"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
             // Seed wt-1's own row directly, as if it had been opened and
             // saved on an earlier visit -- distinct title, so a switch that
             // merely relabels wt-0's tab (the bug) is distinguishable from
@@ -12350,6 +12430,94 @@ mod tests {
                 workspace.tabs[0].title, "Terminal",
                 "still wt-0's own tab -- today's stale-but-safe behaviour, \
                  not wt-1's (empty) persisted layout"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-TERM-10: the sibling test above proves the gate holds for a
+    /// *recognized agent* in `NeedsInput`. Live-drive found a plainer,
+    /// uncovered case: a bare shell command with no agent identity at all
+    /// (`sleep 300` in one worktree, switch away and back, "the pane came
+    /// back as a brand-new fresh shell with no marker and no sleep
+    /// process") -- `tab_status`/`pane_close_needs_confirmation` read that
+    /// tab as `Idle` (nothing in the agent-activity model has ever heard of
+    /// it), so the switch reloaded and dropped it, contradicting CLAUDE.md's
+    /// documented "PTYs stay alive across sidebar selection changes"
+    /// contract. This deliberately never calls `workspace.activity.notify`
+    /// at all -- unlike the sibling test -- so only
+    /// `tab_has_live_foreground_process`'s direct `/proc` walk over the
+    /// fixture's real `sleep 60` child can save this tab.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    async fn switching_away_from_a_bare_running_command_leaves_it_mounted(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("center01-bare-process");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        let wt1 = worktrees[1].clone();
+
+        // Poll the real process tree until the fixture's `sh -c "sleep 60"`
+        // has actually forked/exec'd `sleep` -- a real OS fork race the
+        // virtual test clock cannot settle.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let has_process = workspace.read_with(&cx.cx, |workspace, cx| {
+                workspace
+                    .tabs
+                    .first()
+                    .is_some_and(|tab| workspace.tab_has_live_foreground_process(tab, cx))
+            });
+            if has_process {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fixture's `sleep 60` never became visible in /proc"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            // Deliberately no `workspace.activity.notify(...)` call: this
+            // tab's status stays `Idle` in the agent-activity model for the
+            // whole test, unlike `switching_away_from_a_needs_input_tab_leaves_it_mounted`.
+            workspace
+                .select_worktree(wt1.clone(), None, cx)
+                .expect("select wt-1");
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.working_directory, wt1,
+                "the metadata side of the switch still happens -- only the \
+                 tab reload is gated"
+            );
+            assert_eq!(
+                workspace.tabs.len(),
+                1,
+                "a tab with a live foreground command -- no agent involved \
+                 at all -- must be left mounted rather than dropped"
+            );
+            assert_eq!(
+                workspace.tabs[0].title, "Terminal",
+                "still wt-0's own tab, not wt-1's (empty) persisted layout"
             );
         });
 
