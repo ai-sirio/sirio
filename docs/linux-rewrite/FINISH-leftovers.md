@@ -244,3 +244,56 @@ as environment-blocked (no CLI in this sandbox can complete an authenticated, re
 rather than softened into a claim this pass did not earn.
 
 ---
+
+## F-SET-18 — Install, update, retry, and unsupported/not-found states for agents
+
+**Live drive, both directions, via `ctl surface.settings.open` + real clicks — settings rendered
+fully inside the lane's fixed 1715x972 frame with no scrolling needed** (all five agent rows and
+their action pills fit on screen; the documented instrument gap about scroll not moving the
+Settings surface did not come up this pass because nothing here required scrolling).
+
+**Positive control — all 5 CLIs really on PATH**: `surface.settings.select section=agents` (via
+click) showed every row `Available` / `ACP chat available` or `No ACP server`, sourced from a
+genuinely fresh `ps`-visible filesystem probe (`Refreshed 22:20:22`), not a cached guess.
+
+**Negative control, PATH stripped to `/usr/bin:/bin` for the app process itself** (not a UI
+fabrication — the actual environment `tiller` resolves agents against): all five rows flipped live
+to a red **"Not found on PATH"** pill, each with "Not installed — install the &lt;X&gt; CLI to use
+it."; Claude/Codex/OpenCode (the three ids `AgentAvailability::install_command`,
+`tiller_agents/src/lib.rs:85`, has a real command for) additionally show an **Install** button, while
+Pi/Oh-My-Pi correctly show none — matching the source's exhaustive match arm exactly, live.
+Screenshot: `reference/linux-progress/wf-rest3/08-set18-negative-control-not-found.png`.
+
+**Clicked Install on the Codex row** (real click, not simulated): a genuine `"Installing… running in
+a new terminal tab."` line appeared under the row
+(`reference/linux-progress/wf-rest3/09-set18-installing-inprogress.png`), and a real new tab was
+created — confirmed over the control socket, not just visually: `panel.list` →
+`{"id":"pane-4","tab":"Install codex","title":"Install codex"}`. That pane's own content
+(`reference/linux-progress/wf-rest3/10-set18-install-tab-real-shell.png`) showed a real shell that
+had already run and exited (`?2` in the prompt's own exit-code segment) — `npm install -g
+@openai/codex` genuinely failed because `npm` is not on the stripped PATH, not a staged failure.
+
+**After the real failure, restarted the app (same quit+relaunch mechanism as F-CORE-ACT-24 above)
+and reopened Agents settings**: the Codex row is **back to the plain "Not found on PATH" + Install**
+state — no `Retry` label, no `Update to latest`, no distinguishable "failed" indication anywhere. A
+real failed install is visually indistinguishable from never having tried. Screenshot:
+`reference/linux-progress/wf-rest3/11-set18-after-failed-install-no-retry.png`.
+
+Cross-checked against the type system, not just a grep: `AgentAvailability::status_label()`
+(`tiller_agents/src/lib.rs:68-74`) is an exhaustive two-arm match — `"Available"` or
+`"Not found on PATH"` — and the struct carries no version/progress/error field at all, so a
+"failed"/"update"/"unsupported" state has nowhere to be stored even before reaching a renderer. This
+validates the prior sweep's grep-based finding (`EVIDENCE-STANDARD`'s "validate the negative before
+trusting the zero": here the *positive* half of the same clause — Install, itself — DID render and
+DID fire a real subprocess, so the probe is proven capable of finding a state when one exists; its
+zero for the other four states is therefore trustworthy, not a narrow-grep miss).
+
+**Verdict: half-proven.** Install and its in-progress ("Installing…") feedback are real and now
+proven live end-to-end (button → new real terminal tab → real subprocess spawn, confirmed via the
+control socket). Update-to-latest, failed-Retry, and unsupported are confirmed **absent** — live,
+not just by source-reading — by driving a real install to a real failure and observing no
+distinguishable state survives it. Not `FAILED — absent` outright only because the row's own first
+verb ("Install") and the not-found/available binary state genuinely work; the row is a conjunction
+and only some of its conjuncts hold.
+
+---
