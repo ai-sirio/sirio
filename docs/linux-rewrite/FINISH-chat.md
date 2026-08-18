@@ -290,3 +290,175 @@ F-CHAT-05, 22, 31, 34 were judged PASSED live earlier today by other critics per
 and confirmed again independently rather than taken on trust. F-CHAT-23 was also re-driven and
 this time surfaced a real defect (the transcript-wipe-on-dismiss bug), which supersedes today's
 earlier PASSED for that row.
+
+## Second finish-line pass — fixes re-verified, remaining rows freshly driven
+
+Fresh critic pass, second lane: `TILLER_WL_LABEL=wf-chat`, pinned binary `/tmp/wf-chat-tiller`,
+scratch project `/tmp/wf-chat-project`. Screenshots referenced below live under
+`/tmp/wf-chat*-shots/` (scratch, not committed). This pass covers two things: (1) verifying three
+defects the builder claims to have just fixed in commits `1b2b0c68`, `86307c70`, `ad1d783e`, and
+(2) real, freshly-driven verdicts for the 11 rows the first pass above left NOT EXERCISED or
+half-proven. No prior PASSED was taken on trust; every row below was re-driven live today.
+
+### F-CHAT-02 — auth-required banner's Retry button reachable at both widths (fix re-verify)
+PASSED. The `min_w_0()` fix (message `div().flex_1().min_w_0()`, `chat.rs:4973-4981`) now lets the
+long auth-guidance text wrap instead of pushing Retry out of the row. Re-driven at both required
+widths with a genuine click-discriminator (transcript entry count growing after each click, not
+just "button visible"): at 1715px, `/tmp/wf-chat02d-shots/02-chat-open-1715.png` shows the wrapped
+banner with Retry visible, `03-after-retry-click-1715.png` confirms the click landed (new attempt
+in transcript). At 2400px, `/tmp/wf-chat02g-shots/02-wide-2400-before-click.png` →
+`03-wide-2400-after-click.png` show the same at the second required width. Both clicks used the
+button's actual on-screen coordinates read from the screenshot, not a hardcoded guess.
+
+### F-CHAT-03 — disconnected agent offers a genuine "Restart agent", not a relabeled Retry (fix re-verify)
+PASSED. Confirmed live with a PID-based discriminator, not the button caption: baseline agent
+process PID recorded, agent killed to produce the `ErrorKind::Disconnected` banner
+(`/tmp/wf-chat03b-shots/03-after-disconnect.png`, `chat-disconnected-banner` /
+`chat-restart-agent` selectors present, `chat-retry` absent — matches `chat.rs:4982-5018`'s
+`is_disconnected` branch), then clicked "Restart agent"
+(`/tmp/wf-chat03d-shots/03-after-restart-click.png`). The foreground agent process PID after the
+click differs from the pre-disconnect PID — a genuinely new OS process was spawned, not a caption
+change on the same dead session. This is the discriminator the brief specifically asked for
+(PID, not label).
+
+### F-CHAT-23 — dismiss removes exactly the dismissed permission entry, tool-card links work (fix re-verify)
+PASSED, both halves. **Half A (expand/follow):** against the real `claude` CLI,
+`/tmp/wf-chat23c-shots/02-before-toggle.png` → `03-after-toggle-collapsed-or-expanded.png` →
+`04-after-toggle-back.png` show a tool card's output toggling collapsed/expanded on click;
+`05-after-location-click.png` confirms clicking a file/location link inside the card navigates
+(Files panel / editor state changes accordingly). **Half B (exact-entry dismiss):** via
+`chat_fixture.py permission-unrenderable`, two permission requests were staged across two turns;
+dismissing the *first* turn's unrenderable permission
+(`/tmp/wf-chat23e-shots/02-after-turn1-dismiss.png`) and then, in a fresh run, dismissing the
+*second* turn's permission (`04-after-turn2-dismiss.png` /
+`/tmp/wf-chat23h-shots/03-after-turn2-dismiss.png`) were each checked against
+`ctl surface.chat.read` — in every case exactly the dismissed permission entry disappeared from
+the transcript and every other entry (the other turn's user message, its own permission or
+reply) survived intact. No case reproduced the original whole-transcript wipe. This matches the
+`an_unrenderable_permission_can_be_dismissed` /
+`dismissing_a_later_permission_does_not_wipe_earlier_turns` regression tests already in
+`chat.rs:~8580-8690`, now confirmed live as well as in-process.
+
+### F-CHAT-10 — `@` file mentions: open and insert (re-verify, was half-proven)
+PASSED. Re-driven end to end this pass, fixing the prior pass's gap (chip-insertion half was
+unconfirmed). Clicked into the composer, typed `@` (`type "@"`, not the named-key DSL, which
+does not accept `@` as a key name), confirmed the popup opens fed by the real bounded filesystem
+walk, typed `read` to filter it down to `README.md` and matches
+(`/tmp/wf-chat1011-shots/02-mention-popup-filtered2.png`), then clicked the `README.md` row.
+`03-mention-chip-inserted.png` shows the raw `@readme` text replaced by an actual chip
+(`README.md` with a file icon and its own remove control) sitting in the composer — the
+insert-a-chip half the prior pass could not confirm is now directly screenshotted.
+
+### F-CHAT-11 — attach one PNG/JPEG image via the native picker
+UNREACHABLE — attempted live, and the blocker is now precisely identified rather than just
+assumed. `attach_image()` (`chat.rs:2422-2446`) is not stubbed in the running app; it calls
+`cx.prompt_for_paths(...)`, which on Linux GPUI (`rust/vendor/gpui_linux/src/linux/platform.rs:396+`)
+goes through `ashpd::desktop::file_chooser::OpenFileRequest` over the desktop portal D-Bus
+interface. Clicking the composer's `attach-image` `+` button in the nested sway session produced,
+within ~2s, the transient "Could not open the file picker." banner
+(`/tmp/wf-chat11-shots/02-after-click-attach-1.png`), which then cleared on its own
+(`03-after-click-attach-2.png`) — i.e. the `ashpd` request genuinely failed (no
+`xdg-desktop-portal` backend answers D-Bus in this headless nested-compositor test box) and
+Tiller's own `Ok(Err(_)) | Err(_) => show_attach_error(...)` catch handled that failure
+correctly. This confirms the code path is real (not faked) and that Tiller's own error handling
+for a missing portal is correct; it does not and cannot reach the picker-open happy path or the
+picker's own multi-select/unsupported-type rejection UI, because no portal backend exists in this
+environment to open a dialog with. Not NOT-EXERCISED: it was driven, and the exact blocker
+(absent xdg-desktop-portal backend) is named, matching the evidence standard's
+UNREACHABLE-vs-NOT-EXERCISED distinction.
+
+### F-CHAT-12 — remove an attachment chip (previously UNREACHABLE, blocked on F-CHAT-11)
+PASSED. Re-scoped off the native picker (which F-CHAT-11 shows is unreachable here) onto the
+`xdnd`-drop attach path, which reaches the same `apply_attached_paths`/chip UI without going
+through `cx.prompt_for_paths`. A real xdnd drag attached `wf-chat-attach-me.txt` as a generic
+File chip, then a click on the chip's own remove ("x") control was driven at the coordinates read
+from the prior attach screenshot. `/tmp/wf-chat1213-shots/03-chip-removed.png` shows the composer
+back to its empty pre-attach state — the chip is gone, nothing else in the composer changed.
+
+### F-CHAT-13 — drop files onto the chat pane to attach (previously UNREACHABLE)
+PASSED, both clauses. A real xdnd drag (`Scripts/xdnd-source`, not GPUI's own simulated drag) of
+a supported file onto the chat pane was driven and completed the full handshake
+(`/tmp/wf-chat13-shots/02-after-xdnd-drop.png` shows the resulting chip). The "unsupported file"
+half was driven as the codebase's own regression test frames it — `chat.rs`'s
+`dropping_external_files_attaches_chips_and_rejects_the_oversized_one` names the oversized-image
+case as the drop path's one rejection route (`drop_external_paths`'s `MAX_IMAGE_BYTES` check,
+`chat.rs:2533-2589`; a plain non-image file is never rejected there, only accepted as a generic
+File chip). Dropping an 11MB dummy PNG produced the transient rejection banner
+(`/tmp/wf-chat1213-shots/04-after-oversized-drop.png`, red text "wf-chat-big.png is too large
+(max 10 MB)"), matching `show_attach_error`'s message and the `attach-error` debug selector.
+
+### F-CHAT-18 — context-ring popover: fraction/remaining and full breakdown
+PASSED. Via `chat_fixture.py composer` (advertises `usage_update(170000, 200000)` on
+session/new), clicking the context ring opened the popover showing the 85% fraction/remaining
+(`/tmp/wf-chat1819c-shots/03-ring-popover.png`). The full input/output/cache/cost breakdown rows
+were exercised with a second, wire-level fixture (`/tmp/wf-chat-usage-breakdown.sh`) that sends a
+real ACP `PromptResponse.usage` object (camelCase `totalTokens`/`inputTokens`/`outputTokens`/
+`cachedReadTokens`, matching the `agent-client-protocol` v2 `unstable_end_turn_token_usage`
+schema exactly, not a Tiller-internal shape) on the session/prompt response —
+`/tmp/wf-chat18d-shots/02-breakdown-popover.png` shows Input/Output/Cache read rows and a cost
+line populated from that real wire payload, via the `context-usage-breakdown` selector.
+
+### F-CHAT-19 — context ring warning color above 80% usage
+PASSED, and the brief's "whose fault" question is settled. The same `composer` fixture's 85%
+fill (`170000/200000`, above the 80% threshold) turns the ring into its warning color in
+`/tmp/wf-chat1819-shots/02-after-connect.png` /
+`/tmp/wf-chat1819c-shots/02-idle-85pct.png`. Tiller correctly implements and renders both the
+`session/update` usage-ring path (F-CHAT-19) and the ACP-unstable end-turn `usage` breakdown
+extension (F-CHAT-18) end to end — the wire-level fixture above proves Tiller's parsing/mapping
+of the real `PromptResponse.usage` shape is correct. Separately confirmed (by grepping
+`tiller_acp`) that the real `claude-agent-acp` bridge simply never populates that unstable field
+on its own prompt responses in practice — that is an upstream agent-bridge gap, not a Tiller
+defect, and does not affect this row's ring-color VERIFY clause, which only needs the
+`session/update` usage path (proven above) to pass.
+
+### F-CHAT-20 — transcript follows streaming, releases on manual scroll, re-pins at the end
+PASSED, all three sub-behaviors, via `chat_fixture.py staged` gated on a go-file plus a
+real-size (1715x972) transcript padded with turns so genuine overflow exists (small artificial
+viewports were tried first and abandoned as unreliable/inconclusive — not reported as a result).
+`/tmp/wf-chat20n-shots/02-scrolled-away.png` shows scrolling up mid-stream stops the view
+following; `03-after-marker-still-scrolled.png` confirms new streamed content (a distinct marker
+string, not the fixture's identical default "reply") arriving while scrolled away does *not*
+force the view back down; `04-scrolled-back-to-bottom.png` →
+`05-after-repin-marker.png` show that manually scrolling back to the true end re-pins Tail-follow,
+and a subsequent turn's new output is followed again.
+
+### F-CHAT-21 — expand/collapse a Thinking row
+PASSED. Corrects the prior pass's assumption that `chat_fixture.py` lacks a thinking mode: its
+existing `staged` mode already emits a real `thought_chunk` update ("thinking hard"), so no
+fixture extension was needed (per the brief, noting this explicitly since extending the fixture
+without saying so is disallowed — no extension was made). `/tmp/wf-chat21b-shots/02-collapsed.png`
+→ `03-expanded.png` → `04-collapsed-again.png` show the Thinking row starting collapsed, expanding
+on click, and collapsing again on a second click, against the `thought-toggle-0` selector.
+
+### F-CHAT-33 — turn errors and MCP warnings with acknowledgement
+FAILED — defective (upgraded from half-proven with a confirmed root cause, not just "no button
+observed"). The VERIFY clause requires "confirm each banner, and click OK to dismiss it" for
+*both* a turn error and an MCP warning. Cross-checked against the macOS reference
+(`App/Chat/ChatPaneView.swift:177-192`): both cases are meant to be transient bottom-overlay
+banners with an explicit `actionTitle: "OK"` that clears the underlying state
+(`controller.promptError = nil` / `controller.mcpWarning = nil`) without touching the transcript.
+The Linux port instead embeds both as permanent `Entry::Error` transcript rows
+(`chat.rs:4925-5019`) with only one button branch, `.when(retryable, ...)` (`chat.rs:4982-5018`),
+which renders "Retry" (or "Restart agent") — never "OK", and never for the non-retryable case.
+`ErrorKind::McpWarning` is constructed with `retryable: false` (`chat.rs:1201-1202`), so its
+banner renders with **zero** interactive controls at all: no OK, no Retry, nothing — confirmed
+live via a real stderr line matching `looks_like_mcp_warning`'s vocabulary
+(`/tmp/wf-chat-mcpwarn.sh`), `/tmp/wf-chat33-shots/02-after-mcp-turn.png` shows the red "MCP
+server 'search' failed to connect" banner with no button of any kind, permanently sitting in the
+transcript. The turn-error (retryable `Connection`-kind) half does show a working button, but it
+is labeled "Retry" and re-runs the turn rather than dismissing the banner — it is not the "OK to
+dismiss" affordance the VERIFY clause and the Swift reference both specify. Neither banner kind
+can be dismissed/acknowledged without retrying (or, for MCP warnings, at all) on Linux today.
+
+### F-CHAT-35 — no-past-chats empty state (previously UNREACHABLE)
+PASSED. A brand-new worktree (`/tmp/wf-chat-project`, freshly created, `.sqlite` state wiped
+before the drive) was opened and Chat History was checked *before* sending any turn.
+`/tmp/wf-chat35b-shots/02-chat-history-empty.png` shows the "No past chats" empty state
+(`chat-history-empty` selector) with no accumulated session polluting it.
+
+### F-CHAT-36 — no-models fallback agent control (previously UNREACHABLE)
+PASSED. Via `chat_fixture.py plain` (never calls `advertise()`, so no
+`config_option_update` ever arrives — a genuinely no-model-list agent over the wire, not a
+UI-level fake), the composer's model control shows the no-models fallback state rather than a
+picker (`/tmp/wf-chat36-shots/02-no-models-composer.png`), and clicking the agent badge
+(`03-after-click-agent-badge.png`) confirms it degrades gracefully rather than erroring.
