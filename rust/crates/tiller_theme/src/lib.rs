@@ -966,6 +966,83 @@ fn appearance_from_color_scheme(scheme: ashpd::desktop::settings::ColorScheme) -
     }
 }
 
+/// A supported agent's own brand colour — deliberately **not** a [`Theme`]
+/// token.
+///
+/// The reference keeps these two things apart on purpose. `Theme`'s eight
+/// semantic tokens say what a thing *means* (needs input, done, error…);
+/// a brand colour says *whose* it is, and must therefore stay stable across
+/// appearances and never be reachable from the semantic palette. Swift makes
+/// the same split explicitly, in `App/AgentAccentColor.swift`'s own words:
+/// it is "unrelated to `AgentIcon.color(for:)`, which is a different,
+/// pre-existing mapping".
+///
+/// The values are Swift's `AgentAccentColor.defaultHexByAgentId` — the one
+/// reference table that (a) is written as literal brand hexes rather than
+/// platform system colours, (b) covers all five catalog agents, and (c) the
+/// Rust settings surface already ships as `SettingsSnapshot::agent_colors`
+/// defaults. Two of them are corroborated by the marks themselves:
+/// `AgentIcon.claudeOrange` fills the Claude mark with this exact `D97757`,
+/// and `9B4DFF` is the middle stop of `OmpShape`'s `ED4ABF → 9B4DFF →
+/// 5AD8E6` gradient.
+///
+/// **Why this exists at all.** The worktree row's running indicator used to
+/// take its tint from the eight-token `AgentAccentColor` picker enum, where
+/// Claude resolved to `Amber` — i.e. to `theme.tab_needs_input` itself. A
+/// Claude worktree that was *running* therefore painted the byte-identical
+/// `#E0B36A` as a worktree that **needed input**, leaving a 3×3 triple dot
+/// and a 6×6 single dot as the only difference between two states a user has
+/// to tell apart at sidebar scale. Swift has no such collision: needs-input
+/// is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's own
+/// colour. Routing brand identity through its own table restores that, for
+/// every agent, by construction rather than by careful token choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AgentBrandColor {
+    Claude,
+    Codex,
+    OpenCode,
+    Pi,
+    Omp,
+    /// Any agent id outside the catalog. Swift's `AgentAccentColor.fallbackHex`
+    /// — "future adapters land here until given a real default".
+    Unknown,
+}
+
+impl AgentBrandColor {
+    /// Resolves an `AgentCatalog` id to its brand. The `-acp` suffix is
+    /// stripped first, matching `AgentIcon.normalizedId`, so the ACP-bridged
+    /// variant of an agent wears the same colour as the CLI it fronts.
+    pub fn for_agent_id(agent_id: &str) -> Self {
+        match agent_id.strip_suffix("-acp").unwrap_or(agent_id) {
+            "claude" => Self::Claude,
+            "codex" => Self::Codex,
+            "opencode" => Self::OpenCode,
+            "pi" => Self::Pi,
+            "omp" => Self::Omp,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// The brand hex, as an opaque `0xRRGGBB` literal. Appearance-invariant:
+    /// a brand does not have a light and a dark variant, and Swift stores
+    /// exactly one hex per agent for the same reason.
+    pub fn hex(self) -> u32 {
+        match self {
+            Self::Claude => 0xD97757,
+            Self::Codex => 0x0A84FF,
+            Self::OpenCode => 0xFF9500,
+            Self::Pi => 0x34C759,
+            Self::Omp => 0x9B4DFF,
+            Self::Unknown => 0x8E8E93,
+        }
+    }
+
+    /// The brand colour itself.
+    pub fn color(self) -> Rgba {
+        rgb_hex(self.hex())
+    }
+}
+
 fn color(r: f32, g: f32, b: f32, a: f32) -> Rgba {
     Rgba { r, g, b, a }
 }
@@ -1714,5 +1791,113 @@ mod tests {
     #[test]
     fn theme_carries_browser_chrome() {
         assert_eq!(Theme::dark().browser_chrome, BrowserChrome::default());
+    }
+}
+
+#[cfg(test)]
+mod agent_brand_tests {
+    use super::*;
+
+    /// Swift `AgentAccentColor.defaultHexByAgentId`, transcribed.
+    #[test]
+    fn brand_hexes_match_the_reference_table() {
+        for (id, hex) in [
+            ("claude", 0xD97757_u32),
+            ("codex", 0x0A84FF),
+            ("opencode", 0xFF9500),
+            ("pi", 0x34C759),
+            ("omp", 0x9B4DFF),
+        ] {
+            assert_eq!(
+                AgentBrandColor::for_agent_id(id).hex(),
+                hex,
+                "{id} must wear its own brand hex"
+            );
+        }
+    }
+
+    /// `AgentIcon.normalizedId`: the ACP-bridged variant of an agent is the
+    /// same brand, not an unknown one wearing the grey fallback.
+    #[test]
+    fn acp_suffix_is_stripped_before_matching() {
+        assert_eq!(
+            AgentBrandColor::for_agent_id("claude-acp"),
+            AgentBrandColor::Claude
+        );
+        assert_eq!(
+            AgentBrandColor::for_agent_id("opencode-acp"),
+            AgentBrandColor::OpenCode
+        );
+    }
+
+    /// Swift's `AgentAccentColor.fallbackHex` — an adapter with no default
+    /// yet gets neutral grey, never a catalog agent's colour.
+    #[test]
+    fn unknown_agents_get_the_neutral_fallback() {
+        assert_eq!(
+            AgentBrandColor::for_agent_id("some-future-agent"),
+            AgentBrandColor::Unknown
+        );
+        assert_eq!(AgentBrandColor::Unknown.hex(), 0x8E8E93);
+    }
+
+    /// The regression this type exists for. `AgentAccentColor::Amber`
+    /// resolved to `theme.tab_needs_input`, so a **running** Claude worktree
+    /// painted the byte-identical `#E0B36A` as one that **needed input** —
+    /// two states separated by nothing but a 3×3 versus a 6×6 dot cluster.
+    /// No brand colour may equal any status token, in either appearance.
+    #[test]
+    fn no_brand_colour_collides_with_a_status_token() {
+        let brands = [
+            AgentBrandColor::Claude,
+            AgentBrandColor::Codex,
+            AgentBrandColor::OpenCode,
+            AgentBrandColor::Pi,
+            AgentBrandColor::Omp,
+            AgentBrandColor::Unknown,
+        ];
+        for theme in [Theme::dark(), Theme::light()] {
+            let statuses = [
+                ("tab_needs_input", theme.tab_needs_input),
+                ("tab_done", theme.tab_done),
+                ("tab_error", theme.tab_error),
+            ];
+            for brand in brands {
+                let brand_color = brand.color();
+                for (name, status) in statuses {
+                    assert!(
+                        (brand_color.r - status.r).abs() > f32::EPSILON
+                            || (brand_color.g - status.g).abs() > f32::EPSILON
+                            || (brand_color.b - status.b).abs() > f32::EPSILON,
+                        "{brand:?} is byte-identical to {name}: a running \
+                         worktree would be indistinguishable from that status"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Brands are appearance-invariant by design: `hex()` takes no
+    /// appearance, so light and dark cannot drift apart the way an
+    /// `adaptive` token pair can.
+    #[test]
+    fn brands_are_distinct_from_each_other() {
+        let brands = [
+            AgentBrandColor::Claude,
+            AgentBrandColor::Codex,
+            AgentBrandColor::OpenCode,
+            AgentBrandColor::Pi,
+            AgentBrandColor::Omp,
+            AgentBrandColor::Unknown,
+        ];
+        for (index, left) in brands.iter().enumerate() {
+            for right in &brands[index + 1..] {
+                assert_ne!(
+                    left.hex(),
+                    right.hex(),
+                    "{left:?} and {right:?} would be indistinguishable"
+                );
+            }
+        }
     }
 }
