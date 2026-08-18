@@ -3713,10 +3713,20 @@ impl TillerWorkspace {
     fn refresh_sidebar(&mut self, cx: &mut Context<Self>) {
         let projects = self.sidebar_projects();
         let identities = sidebar_project_identities(&self.project_catalog);
+        // F-PRJ-17/F-PRJ-18: pushed the same way identities are, right after
+        // `set_projects` rebuilds the row tree and resets both maps to
+        // empty -- an already-open Project Settings sheet was seeded from
+        // `project_worktree_defaults` in `open_project_settings`, so a
+        // reopen after this refresh shows whatever `update_project_settings`
+        // just persisted.
+        let worktree_defaults = sidebar_project_worktree_defaults(&self.project_catalog);
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_projects(projects, cx);
             for (id, display_name, icon) in identities {
                 sidebar.set_project_identity(&id, display_name, icon, cx);
+            }
+            for (id, default_base, location_override) in worktree_defaults {
+                sidebar.set_project_worktree_defaults(&id, default_base, location_override, cx);
             }
         });
         // `set_projects` rebuilds every row from the catalog, which drops the
@@ -4041,18 +4051,24 @@ impl TillerWorkspace {
 
     fn update_project_settings(&mut self, update: &ProjectSettingsUpdate, cx: &mut Context<Self>) {
         let (icon_kind, icon_value) = update.icon.persisted_parts();
-        // Carry forward the worktree-base/location-override fields (F-PRJ-17,
-        // F-PRJ-18): this call site only edits icon/color/name, so a
-        // hard-coded `None` here would silently wipe any user-set base or
-        // override on the next unrelated identity edit.
-        let existing = self.project_catalog.project_settings(&update.id);
+        // F-PRJ-17/F-PRJ-18: `update.default_worktree_base`/
+        // `worktree_location_override` are always the sheet's *current*
+        // drafts, not just "what the user just typed into those two
+        // fields" -- `open_project_settings` seeds them from
+        // `project_worktree_defaults` when the sheet opens, and every edit
+        // (icon, display name, base, location alike) re-emits the card's
+        // full state via `project_settings_update`. So using them directly
+        // here already carries forward an untouched value; falling back to
+        // `self.project_catalog.project_settings(&update.id)` would instead
+        // only be correct before this sheet ever seeded its drafts from it,
+        // which `open_project_settings` guarantees it always does.
         let settings = CatalogProjectSettings {
             color_hex: Some(update.icon.tint.id().to_string()),
             display_name: update.display_name.clone(),
             icon_kind,
             icon_value,
-            default_worktree_base: existing.default_worktree_base,
-            worktree_location_override: existing.worktree_location_override,
+            default_worktree_base: update.default_worktree_base.clone(),
+            worktree_location_override: update.worktree_location_override.clone(),
         };
         match self
             .project_catalog
@@ -10314,6 +10330,26 @@ fn sidebar_project_identities(
                 settings.color_hex.as_deref(),
             );
             (project.id.clone(), settings.display_name, icon)
+        })
+        .collect()
+}
+
+/// F-PRJ-17/F-PRJ-18: the persisted per-project worktree-base pin and
+/// location override, pushed into the sidebar the same way
+/// `sidebar_project_identities` pushes icons.
+fn sidebar_project_worktree_defaults(
+    catalog: &ProjectCatalog,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    catalog
+        .projects()
+        .iter()
+        .map(|project| {
+            let settings = catalog.project_settings(&project.id);
+            (
+                project.id.clone(),
+                settings.default_worktree_base,
+                settings.worktree_location_override,
+            )
         })
         .collect()
 }
