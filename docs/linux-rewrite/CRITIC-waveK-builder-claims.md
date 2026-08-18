@@ -87,5 +87,83 @@ binary, not a reused screenshot. I did not separately re-drive the plain forward
 demonstrates it live; the safety gate itself — the half nobody had driven — is what this pass
 closes.
 
+---
+
+## 2. F-CORE-ACT-20 — notification suppression must follow REAL window focus (mandatory gap)
+
+Commit `1abc7b2c` (ancestor of HEAD), doc `CENTER-PANE-DESYNC.md`. The builder's own gap: its live
+proof used "a private, ad hoc D-Bus session bus **because the box's real user session bus was
+down**" with "a minimal Python `org.freedesktop.Notifications` stub" — and it explicitly asked for
+this to be "repeat[ed]... independently" with "a real notification daemon (not a stub) in the loop
+... to rule out any difference between a stub answering `Notify()` and a real listener." Driven here
+with the **real, installed `notification-daemon` (GNOME) 3.20.0 package** — not a stub — on a
+private bus, per the brief's own recipe.
+
+**Rig** (all on one throwaway, isolated bus — the operator's real `/run/user/1000/bus` was never
+touched):
+1. `dbus-daemon --session --fork` → private `DBUS_SESSION_BUS_ADDRESS`.
+2. A dedicated tiny nested sway (`WLR_BACKENDS=headless`, `xwayland enable`) just to give the real
+   GTK3 daemon somewhere to run — `GDK_BACKEND=wayland` alone segfaulted this build
+   (`Gtk-WARNING **: cannot open display:` then SIGSEGV under the headless pixman Wayland path);
+   `DISPLAY=:N` (Xwayland, lazily started by that same private sway) + `GDK_BACKEND=x11` runs
+   cleanly.
+3. Launched the real binary: `/usr/lib/notification-daemon/notification-daemon` with the private
+   `DBUS_SESSION_BUS_ADDRESS` and that `DISPLAY`. Positive control before touching Tiller:
+   `dbus-send ... GetServerInformation` → `"Notification Daemon" "GNOME" "3.20.0" "1.2"` (confirms
+   the real daemon, not a stub, owns the name); `notify-send "sanity" "..."` → exit 0.
+4. `dbus-monitor --session` attached to the same private bus, logging every frame verbatim.
+5. Tiller (`TILLER_WL_BIN=/tmp/wf-judge-tiller`, this pass's own current-HEAD build) launched via
+   `Scripts/wayland-drive.sh` with `DBUS_SESSION_BUS_ADDRESS` exported into my shell first (the
+   script's `env` invocation for the app process does not clear it, so Tiller inherits it —
+   verified: `post_desktop_notification` in `main.rs` just `Command::new("notify-send").spawn()`s,
+   so it uses whatever `DBUS_SESSION_BUS_ADDRESS` its own process environment carries).
+
+**Drive**, one worktree (`/tmp/wfj-c01-repoA`), one terminal tab (the only/active tab throughout,
+so `pane_visible` is true the whole time):
+1. `title ✳ notif-test` on the pane (OSC 0) — confirmed via a fresh forced-repaint screenshot the
+   tab picked up the Claude-style `✳` icon and the sidebar worktree row lit up with the matching
+   glyph (Layer B title identification, title-owned).
+2. **Baseline, window genuinely focused** (Tiller is the only mapped window; confirmed later by
+   contrast, see step 3): `ctl notify session=pane-0 status=needs-input` → queued. No new bus
+   traffic (ambiguous case — `should_notify(None, NeedsInput, app_active=true, pane_visible=true)`
+   is `false` either way; not yet a discriminating step, matches the builder's own baseline).
+3. **Window genuinely defocused**: launched a second real Wayland client, `foot`, into the *same*
+   nested compositor Tiller runs in. `swaymsg get_tree` on that compositor's own socket confirms
+   `foot` `focused: true` and Tiller's own window node `focused: false` at this instant — a real
+   compositor-level focus change, not a flag. Pane still the visible/active tab (untouched).
+   `ctl notify session=pane-0 status=done` (genuine transition, `needs-input` → `done`) →
+   **`dbus-monitor` captured a real `Notify` method call**, verbatim (full transcript committed at
+   `reference/linux-progress/waveK-critic/act20-real-daemon-notify-transcript.txt`):
+   ```
+   method call ... sender=:1.20 -> destination=:1.6 ...; interface=org.freedesktop.Notifications; member=Notify
+      string "Tiller"
+      uint32 0
+      string ""
+      string "Claude Code — wfj-c01-repoA/master"
+      string "master · wfj-c01-repoA"
+      ...
+   method return ... sender=:1.6 -> destination=:1.20 ... reply_serial=9
+      uint32 2
+   ```
+   `:1.6` is the real notification-daemon (same connection that answered `GetServerInformation`
+   with `"Notification Daemon"/"GNOME"/"3.20.0"` earlier on this same bus); the `uint32 2` reply is
+   a genuine notification id allocated by the real daemon's own internal counter, not an echoed
+   stub value.
+4. **Window refocused**: `foot` killed; `swaymsg get_tree` confirms Tiller's window node
+   `focused: true` again (sway auto-refocused it). Another genuine status change,
+   `done` → `error`: `ctl notify session=pane-0 status=error` → queued, then a forced repaint. The
+   monitor log's line count is **byte-identical before and after** (784 lines both times) — zero
+   new bus traffic of any kind, let alone a second `Notify` — confirming suppression is restored by
+   real focus alone, with pane visibility held constant across all three steps exactly as the
+   builder's methodology intended.
+
+**Verdict: PASSED.** This closes the named gap precisely: the same fire/suppress contrast the
+builder demonstrated with a stub now holds against the real, installed GNOME notification daemon —
+a real `GetServerInformation` handshake, a real `Notify` call with a real allocated id, and true
+silence (not just "no visible popup") when the window is genuinely focused. Rig detail worth
+recording for the next critic: this daemon's GTK3 build segfaults under `GDK_BACKEND=wayland` on a
+headless/pixman compositor — use `DISPLAY=:N` + `GDK_BACKEND=x11` against a private sway with
+`xwayland enable` instead.
+
 
 
