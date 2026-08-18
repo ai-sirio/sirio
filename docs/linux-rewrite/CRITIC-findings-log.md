@@ -2344,3 +2344,61 @@ against the real reference-literal behavior: offline (prior pass) and permission
 (this pass) each disable the composer with their own distinct placeholder and refuse
 typed input outright, and the permission-wait half also resolves correctly through a
 live Deny with no side effect on disk.
+
+## PASS — F-CORE-FILE-03A critic, fresh session (cfile, 2026-08-18 ~11:25-11:35)
+
+- Judged against the row's own VERIFY clause ("Drop several files in a known order,
+  including a provider that resolves slowly, and confirm classification and insertion
+  preserve that order"), not the builder's narrative. Re-drove live, own filenames, on
+  a workspace build I built myself (`cargo build --manifest-path rust/Cargo.toml
+  --workspace`, exit 0) — did not trust the binary from the ledger entry.
+- **Own-name discriminator, ordinary speed**: `xdnd` from (600,250) to (600,505) on the
+  Terminal pane's prompt with `/tmp/cfile-fast-BRAVO.txt` then `/tmp/cfile-fast-ALPHA.txt`
+  (deliberately non-alphabetical drop order). Prompt read
+  `'/tmp/cfile-fast-BRAVO.txt' '/tmp/cfile-fast-ALPHA.txt'` — correct order, both paths,
+  frame `02-20-fast-order.png`.
+- **Slow-provider discriminator, `--delay-ms 500`** (above the ~150ms race window the
+  root-cause doc names): same gesture with `/tmp/cfile-slow-ZULU.txt` then
+  `/tmp/cfile-slow-YANKEE.txt`. Prompt read
+  `'/tmp/cfile-slow-ZULU.txt' '/tmp/cfile-slow-YANKEE.txt'` — not lost, correct order,
+  frame `04-22-slow-order.png`. Confirms the row's own reproduction (prompt previously
+  stayed empty at this delay, per `P133-gpui-xdnd-slow-provider-race.md`) is fixed, and
+  that fixing the slow case did not cost the fast case — both ran in the same session
+  back to back with a `chord ctrl u` clear between them.
+- **Position half of my brief's item 3** — a slow-provider (`--delay-ms 500`) drop whose
+  drag started at (350,80) (up in the pane's neofetch banner, nowhere near an input) and
+  walked with real intermediate motion to (600,505) (the prompt) landed the text exactly
+  at (600,505), not at the stale entry point — `'/tmp/cfile-move-XRAY.txt'
+  '/tmp/cfile-move-WHISKEY.txt'` sitting cleanly at the prompt cursor, frame
+  `06-14-moved-drop.png`. Backed by reading (not just running) the unit test the fix
+  added for exactly this: `a_pending_drop_submits_at_the_latest_tracked_position_not_the_
+  entry_point` constructs a `DragState`, advances `drag.position` past the entry point,
+  marks a `PendingDrop`, and asserts `pending_drop_submit_position` returns the *latest*
+  position, not the first — a real assertion against the production function, not a
+  tautology.
+- **Trap I hit and want on record for `WAYLAND-LANE.md`'s `xdnd` section**: `xdnd <x1>
+  <y1> <x2> <y2> …` with `x1==x2 && y1==y2` (anchor and drop at the identical point)
+  reliably prints `CANCELLED` with no `TARGET`/`DROP_PERFORMED` at all — the pointer
+  never leaves the `xdnd-source` overlay surface mapped at that point, so Tiller's
+  window underneath never gets `wl_data_device` focus. Reads exactly like an app-side
+  drop failure and is not one; use a real offset between anchor and target, always.
+  Cost me two throwaway runs before I caught it from the source's own log echoed by the
+  action.
+- **Independent build/test verification, not carried from the ledger's numbers**:
+  `cargo test --manifest-path rust/vendor/gpui_linux/Cargo.toml --lib` → `34 passed; 0
+  failed`, output read directly, both new regression tests present and green. `cargo
+  test --manifest-path rust/Cargo.toml -p tiller_terminal -p tiller_ui -p tiller --lib`
+  → `45 passed; 0 failed` / `344 passed; 0 failed`, no panics, no `FAILED`. The vendoring
+  does not appear to have broken anything else it touches.
+- Host/lane: x86 desktop, nested Wayland (`Scripts/wayland-drive.sh`,
+  `TILLER_WL_LABEL=cfile`), binary pinned at `/tmp/cfile-tiller` before driving, built
+  fresh from `15cebcbf` at the top of this pass. Frames under `/tmp/cfile-shots/` are
+  local, not committed (not asked to be; this file is the durable record). Test files
+  (`/tmp/cfile-{fast,slow,move}-*.txt`) are disposable scratch, outside the repo.
+
+**Verdict (mine): `F-CORE-FILE-03A` half-proven → PASSED.** Both VERIFY-clause halves
+(order preservation, ordinary and slow-provider) are live-proven with a discriminating
+drop order and my own filenames; the position-tracking claim in the builder's story is
+independently confirmed both live and by the production-function unit test; the fast
+case is not regressed; and the vendored crate's own test suite plus the three
+consuming packages closest to the change are all green under a build I ran myself.
