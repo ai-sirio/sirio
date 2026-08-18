@@ -9043,6 +9043,104 @@ mod tests {
         );
     }
 
+    /// F-CHAT-25: the "listed option" arm -- a structured question with
+    /// populated wire options renders clickable pills instead of a
+    /// free-text field; clicking one records the choice on the card,
+    /// clears the pending bar, and the agent receives the chosen option id.
+    /// Sibling of `a_text_answer_leaves_the_surface_and_clears_the_pending_bar`
+    /// below, which drives the text-field arm; this is the arm that was
+    /// never re-driven when a later pass touched an unrelated part of the
+    /// row.
+    #[gpui::test]
+    async fn a_listed_option_leaves_the_surface_and_clears_the_pending_bar(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["question-options"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "which color?");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        // The question is pending: option pills are drawn, not a text
+        // field, and the pending bar names the asker.
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("question-answer-input").is_none(),
+            "populated wire options must render pills, not the text field"
+        );
+        assert!(
+            cx.debug_bounds("permission-option-blue").is_some()
+                && cx.debug_bounds("permission-option-green").is_some(),
+            "both listed options are drawn as clickable pills"
+        );
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_some(),
+            "the pending-question bar is drawn while the question is open"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.pending_question()
+                    .is_some_and(|(_, title)| title == "Ask user question")
+            }),
+            "the pending bar names the asking tool"
+        );
+
+        // Click the Blue pill.
+        let blue = cx
+            .debug_bounds("permission-option-blue")
+            .expect("the Blue pill is drawn");
+        cx.simulate_click(blue.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // The choice left the surface: the card records it, the pending
+        // bar is gone, and the agent received it (echoed back in the turn).
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: Some(choice),
+                        ..
+                    } if choice == "Blue"
+                )
+            }) && chat.has_completed_turn
+        });
+        assert!(
+            !chat.read_with(&cx.cx, |chat, _| chat.pending_question().is_some()),
+            "clicking a listed option clears the pending state"
+        );
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("pending-question-bar").is_none(),
+            "the pending-question bar is gone after the click"
+        );
+        assert!(
+            chat.read_with(&cx.cx, |chat, _| {
+                chat.entries.iter().any(|entry| {
+                    matches!(
+                        entry,
+                        Entry::Assistant { text, .. } if text.contains("You picked: blue")
+                    )
+                })
+            }),
+            "the agent received the clicked option's id and echoed it back"
+        );
+    }
+
     /// F-CHAT-25 + F-CHAT-26: a structured question renders with a free-text
     /// field while the pending-question bar sits above the composer; typing
     /// an answer and pressing Enter records it on the card, clears the bar,

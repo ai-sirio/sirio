@@ -19,6 +19,10 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   question         On every prompt, ask a structured question with no wire
                    options (F-CHAT-25 text answers), read the answer, echo
                    it back as an assistant chunk, and end the turn.
+  question-options On every prompt, ask a structured question WITH wire
+                   options (F-CHAT-25 listed-option answers): the client
+                   must render clickable pills instead of a text field.
+                   Read the chosen option id, echo it back, end the turn.
   question-expire  Ask a question and end the turn without reading an
                    answer: the client must expire the card (F-CHAT-27).
   plan             Publish a plan, request approval with Approve/Keep
@@ -267,6 +271,47 @@ def request_question():
     )
 
 
+def request_question_with_options():
+    """A structured question WITH wire options: unlike `request_question`
+    (top-level `options: []`, forcing a free-text field), this populates the
+    top-level `options` the client renders as clickable pills -- the "listed
+    option" arm of F-CHAT-25 that `request_question` deliberately does not
+    exercise. Same rendering path as a plain permission request's options,
+    just carrying the "Ask user question" title and a `rawInput.questions`
+    payload like a real structured question would."""
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 9001,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId": "tool-q-opts",
+                    "title": "Ask user question",
+                    "status": "pending",
+                    "rawInput": {
+                        "questions": [
+                            {
+                                "header": "Which color?",
+                                "question": "Which color should the button be?",
+                                "options": [
+                                    {"label": "Blue", "description": "The ocean"},
+                                    {"label": "Green", "description": "The grass"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+                "options": [
+                    {"optionId": "blue", "name": "Blue", "kind": "allow_once"},
+                    {"optionId": "green", "name": "Green", "kind": "allow_once"},
+                ],
+            },
+        }
+    )
+
+
 def wait_for_go(dir_path):
     deadline = time.time() + 120
     while time.time() < deadline:
@@ -367,6 +412,24 @@ def main():
                     error(request["id"], message="expected selected answer")
                     return
                 message_chunk("You chose: " + outcome.get("optionId", ""))
+                response(request["id"], {"stopReason": "end_turn"})
+            elif mode == "question-options":
+                # F-CHAT-25's "listed option" arm: wire options are
+                # populated, so the client must render clickable pills
+                # (not a free-text field). Echo the chosen option id.
+                request_question_with_options()
+                answer_line = sys.stdin.readline()
+                if not answer_line:
+                    return
+                answer = json.loads(answer_line)
+                outcome = answer.get("result", {}).get("outcome", {})
+                if outcome.get("outcome") == "cancelled":
+                    response(request["id"], {"stopReason": "end_turn"})
+                    return
+                if outcome.get("outcome") != "selected":
+                    error(request["id"], message="expected selected answer")
+                    return
+                message_chunk("You picked: " + outcome.get("optionId", ""))
                 response(request["id"], {"stopReason": "end_turn"})
             elif mode == "question-expire":
                 # First prompt: ask a question, then wait for the client to
