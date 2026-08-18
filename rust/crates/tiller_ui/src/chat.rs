@@ -3217,6 +3217,27 @@ impl Chat {
         self.start_connection(cx);
     }
 
+    /// F-CHAT-33: the "OK to dismiss" affordance the VERIFY clause and the
+    /// Swift reference both require (`ChatPaneView.swift:177-192`'s
+    /// `promptError`/`mcpWarning` banners, each with `actionTitle: "OK"`
+    /// clearing the flag and nothing else). This port keeps errors as
+    /// permanent transcript rows rather than Swift's transient bottom
+    /// overlay, so the closest equivalent of "clear the banner without
+    /// touching the transcript" is removing exactly this one row and
+    /// leaving every other entry untouched -- unlike `retry`, which
+    /// re-launches the agent, this never does anything but acknowledge.
+    /// A stale `entry_index` (the entry already gone, e.g. a double click
+    /// racing a re-render) is a no-op rather than panicking or removing the
+    /// wrong row.
+    fn dismiss_error(&mut self, index: usize, cx: &mut Context<Self>) {
+        if !matches!(self.entries.get(index), Some(Entry::Error { .. })) {
+            return;
+        }
+        self.entries.remove(index);
+        self.list_state.splice(index..index + 1, 0);
+        cx.notify();
+    }
+
     #[cfg(test)]
     fn from_test_command(command: AgentCommand, cwd: PathBuf, cx: &mut Context<Self>) -> Self {
         let mut chat = Self::new(command, cwd, cx);
@@ -4928,6 +4949,8 @@ impl Chat {
                 kind,
             } => {
                 let retry_entity = entity.clone();
+                let dismiss_entity = entity.clone();
+                let is_mcp_warning = kind == ErrorKind::McpWarning;
                 // F-CHAT-02: AuthRequired gets its own amber treatment
                 // (matching the connecting/working status-dot color already
                 // used elsewhere in this file) instead of the generic red
@@ -4957,6 +4980,9 @@ impl Chat {
                     })
                     .when(is_disconnected, |this| {
                         this.debug_selector(|| "chat-disconnected-banner".into())
+                    })
+                    .when(is_mcp_warning, |this| {
+                        this.debug_selector(|| "chat-mcp-warning-banner".into())
                     })
                     .w_full()
                     .rounded(theme.radii.code_block)
@@ -5016,6 +5042,31 @@ impl Chat {
                                 .child(if is_disconnected { "Restart agent" } else { "Retry" }),
                         )
                     })
+                    // F-CHAT-33: "OK to dismiss" -- present for every error,
+                    // retryable or not (Swift's `promptError`/`mcpWarning`
+                    // banners both carry exactly this one action). It never
+                    // retries or restarts anything, only removes this one
+                    // row, so it stays available even when Retry/Restart is
+                    // also shown above: dismissing without retrying is a
+                    // real, distinct choice.
+                    .child(
+                        div()
+                            .id(("dismiss-error", entry_index))
+                            .debug_selector(|| "chat-error-ok".into())
+                            .flex_shrink_0()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(theme.radii.control)
+                            .text_color(colors.title)
+                            .bg(colors.card_fill)
+                            .hover(|style| style.bg(colors.chat_row_hover))
+                            .on_click(move |_, _, cx| {
+                                dismiss_entity.update(cx, |chat, cx| {
+                                    chat.dismiss_error(entry_index, cx);
+                                });
+                            })
+                            .child("OK"),
+                    )
                     .into_any_element()
             }
         }
@@ -10365,6 +10416,116 @@ mod tests {
                 "a successful Restart agent must clear the stale disconnected \
                  banner(s), not leave them behind: {:?}",
                 chat.entries
+            );
+        });
+    }
+
+    /// F-CHAT-33: an MCP warning is constructed `retryable: false`
+    /// (`surface_mcp_warnings`), so before this fix its banner drew zero
+    /// interactive controls at all -- there was no way to acknowledge and
+    /// move on. The VERIFY clause (and the Swift reference,
+    /// `ChatPaneView.swift:177-192`'s `mcpWarning` banner with
+    /// `actionTitle: "OK"`) requires an "OK to dismiss" control here.
+    #[gpui::test]
+    async fn an_mcp_warning_offers_ok_to_dismiss(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::User("earlier turn".into()));
+            chat.push_entry(Entry::Error {
+                message: "MCP server \"scratch\" failed to start".into(),
+                retryable: false,
+                kind: ErrorKind::McpWarning,
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-mcp-warning-banner").is_some(),
+            "the MCP warning must render its own banner"
+        );
+        assert!(
+            cx.debug_bounds("chat-retry").is_none(),
+            "a non-retryable MCP warning must not offer Retry"
+        );
+        let ok = cx
+            .debug_bounds("chat-error-ok")
+            .expect("a non-retryable MCP warning must still offer OK to dismiss");
+
+        cx.simulate_click(ok.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                !chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Error { .. })),
+                "clicking OK must remove the MCP warning: {:?}",
+                chat.entries
+            );
+            assert!(
+                chat.entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::User(text) if text == "earlier turn")),
+                "dismissing the warning must not touch the rest of the transcript: {:?}",
+                chat.entries
+            );
+        });
+    }
+
+    /// F-CHAT-33: a retryable turn error (e.g. a transport timeout) must
+    /// offer "OK to dismiss" *alongside* Retry, not instead of it -- Swift's
+    /// `promptError` banner's `actionTitle: "OK"` only ever clears the
+    /// banner, distinct from any retry mechanism, so dismissing without
+    /// retrying has to stay a real, separate choice here too.
+    #[gpui::test]
+    async fn a_retryable_turn_error_offers_ok_alongside_retry(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::Error {
+                message: "prompt timed out after 30.0s".into(),
+                retryable: true,
+                kind: ErrorKind::Connection,
+            });
+            chat
+        });
+        refresh_frame(cx);
+
+        assert!(
+            cx.debug_bounds("chat-retry").is_some(),
+            "a retryable turn error must still offer Retry"
+        );
+        let ok = cx
+            .debug_bounds("chat-error-ok")
+            .expect("a retryable turn error must also offer OK to dismiss");
+
+        cx.simulate_click(ok.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                !chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Error { .. })),
+                "clicking OK must remove the turn error: {:?}",
+                chat.entries
+            );
+            assert!(
+                chat.client.is_none(),
+                "OK must only dismiss the banner, never call retry/start_connection \
+                 the way the Retry button does"
             );
         });
     }
