@@ -2268,3 +2268,79 @@ trigger:'manual'`, the alpha.txt resource link, the no-file-part send, the
 post-New-Conversation send) extracted to `reference/linux-progress/p92-payload-evidence.jsonl.txt`
 — full session JSONLs remain at `~/.claude/projects/-home-enzopalmisano-p92src-p92wt/`.
 App, lock and portal dialog released at session end.
+
+## PASS — F-CHAT-05 critic, fresh session (chat05, 2026-08-18 ~10:45–11:05)
+
+- Judged F-CHAT-05's unproven half: the permission-wait clause (the offline half was
+  already live-proven in the prior pass). Live-drove it end to end on
+  `Scripts/wayland-drive.sh` (`TILLER_WL_LABEL=chat05`, nested Wayland lane on
+  `wayland-1`) against the real installed `claude` CLI over ACP — no fixture stand-in
+  needed for this row.
+- **Unblocked the prior pass's "environment-blocked" note.** A worktree-local
+  `.claude/settings.local.json` with `{"permissions":{"defaultMode":"default"}}` in a
+  disposable scratch repo (`/tmp/chat05-repo`, outside the project tree; `.claude/` is
+  gitignored) overrides the user's global `defaultMode: auto` for that one worktree —
+  `ClaudeCodeAdapter::prepare` (`rust/crates/tiller_agents/src/claude.rs`) only merges
+  the five hook arrays and leaves any existing `permissions` key untouched; read back
+  unchanged after boot to confirm. Prompting the agent to write a file then produced a
+  genuine ACP `permission_request` for the Write tool — not a bypass auto-approval, and
+  not the Plan-mode ExitPlanMode path either (the composer showed "Opus Plan Mode"
+  throughout, but Claude still asked for the actual Write, Deny/Allow Once/Always
+  Allow card and all).
+- **Proof, not a screenshot that merely contains the control.** At the pending moment
+  (`reference/linux-progress/f-chat-05-permission-wait-pending.png` — composer's own
+  "Waiting for permission response…" placeholder, "Question waiting · Write …" bar,
+  Deny/Allow Once/Always Allow card in the transcript) I clicked the composer, typed a
+  marker (`ZQX-CRITIC-MARKER-PERM-9932-should-not-appear`) via real wtype keystrokes,
+  and pressed Return. The next frame
+  (`reference/linux-progress/f-chat-05-permission-wait-blocked-type.png`) is
+  pixel-identical to the pending one — no marker text landed in the composer, no
+  "Queued: …" chip appeared, transcript entry count unchanged: the whole editor really
+  is out of service, matching `ChatComposerView.canInteract`'s exclusion and the
+  `permission_wait_disables_the_composer_and_shows_its_own_placeholder` unit test, now
+  confirmed live. Clicking Deny then resolved it correctly: the tool card flips to
+  "Failed", the permission card reads "Answered: Deny", Claude's own follow-up
+  acknowledges the refusal ("Got it — I won't create that file…"), and the target file
+  never touched disk — confirmed after teardown with `ls`/`cat` (absent) and
+  `git status --short` in the scratch repo (clean) —
+  `reference/linux-progress/f-chat-05-permission-wait-denied-settled.png`.
+- **Timing trap worth recording** (WAYLAND-LANE.md candidate): the gap between "user
+  turn sent" and "the actual `Entry::Permission` lands" is not fixed. One run had the
+  Deny/Allow card up by t=6s; another was still `Preparing file… / Pending` (tool
+  announced, no Deny/Allow buttons yet) at t=6s and only resolved into the real
+  permission ask a few seconds later. A marker typed during that gap lands in the
+  ordinary D-CHAT-03 mid-turn "queue for next turn" slot instead — visibly, as a
+  removable "Queued: …" chip. That is correct F-CHAT-06 behavior for that earlier
+  moment, not a violation of F-CHAT-05, but it is pixel-similar enough to the real
+  target state to misjudge from a fixed sleep. Always wait for the visible Deny/Allow
+  card before running the refusal gesture, not a fixed timer.
+- **A second, unrelated, higher-severity trap this pass tripped over — flagged for
+  whoever owns worktree/tab bootstrap, not scored against any row here.** On a truly
+  fresh `TILLER_DB` (the first-ever `project.add` for a path, `"added":"true"`), the
+  new worktree's auto-created default Chat tab launched its ACP agent bound to the
+  *app's own initial cwd* (the real project checkout this instance was started from),
+  not the new worktree's path — even though the sidebar, Files panel and the
+  composer's own cwd label all correctly showed the new worktree as selected. A prompt
+  sent through that tab reached the **real project repo**, and because that checkout's
+  effective settings are the user's global `defaultMode: auto`, Claude wrote a file
+  there with no permission gate at all before I caught it (deleted immediately;
+  `git status --short` confirmed nothing else was touched — the tree's pre-existing
+  unrelated changes from other concurrent agents were left alone). Killing and
+  rebooting the app once against the same, now non-empty (`"added":"false"`), DB
+  reliably fixed the cwd on every later boot this pass. This matches the already-
+  recorded PASS 19 anomaly ("worktree terminal spawns in app cwd on creation but
+  correct cwd on restore-respawn") but extends it: it also hits the **Chat** tab, and
+  Chat's version has a live-agent side effect, not just a cosmetically wrong prompt.
+  Anyone driving `surface.chat`/agent panes against a fresh DB should reboot once and
+  verify the cwd label before typing anything a live agent could act on.
+- Host/lane: x86 desktop, nested Wayland (`Scripts/wayland-drive.sh`,
+  `TILLER_WL_LABEL=chat05`); no `chat_fixture.py` stand-in used for this row — the real
+  `claude` CLI produced the permission request throughout. Scratch repo
+  `/tmp/chat05-repo` (untracked, outside the project tree) and its
+  `.claude/settings.local.json` override are disposable and were not committed.
+
+**Verdict (mine): `F-CHAT-05` half-proven → PASSED.** Both halves are now live-proven
+against the real reference-literal behavior: offline (prior pass) and permission-wait
+(this pass) each disable the composer with their own distinct placeholder and refuse
+typed input outright, and the permission-wait half also resolves correctly through a
+live Deny with no side effect on disk.
