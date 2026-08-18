@@ -348,3 +348,103 @@ Screenshots: `reference/linux-progress/waveK-critic/prj1718-01-settings-open.png
 `prj1718-02-typed-pin.png`, `prj1718-03-after-use-primary.png`, `prj1718-04-reopened.png`,
 `prj1718-05-choose-clicked-no-picker.png`.
 
+---
+
+## 8. F-CHAT-33 — the MCP-warning (non-retryable) half of the OK-to-dismiss control
+
+Ledger line 182, commit `83be7a14` (ancestor of HEAD). The wave-I builder's own re-drive covered
+only the retryable turn-error banner live; its named gap: "I did not myself live-drive the
+MCP-warning (non-retryable) half this pass... A fresh critic should reproduce a real
+broken-`.mcp.json`-driven MCP warning live and confirm OK renders/works there too."
+
+**Turn-error half — independently re-driven fresh, clean single-invocation drive (earlier
+same-session leftover screenshots from this lane's own interrupted predecessor attempt were
+internally inconsistent — one showed the *entire* transcript wiped by OK, not just the error row —
+so rather than rely on them this pass redrove the whole sequence from a freshly-launched instance in
+one uninterrupted `wayland-drive.sh` script, avoiding the relaunch-vs-KEEP race that produced that
+inconsistency):** fresh scratch repo `/tmp/wfj-chat33err-repo`, `TILLER_ACP_PROGRAM` pointed at a
+wrapper around `chat_fixture.py death-then-ok`, sidebar right-click → New Chat (the override-honoring
+route), typed `WFJCE_ERR_MARKER_2`, Return. Result
+(`reference/linux-progress/waveK-critic/chat33-01-turn-error-with-ok-button.png`): user bubble,
+"partial" assistant chunk, red error banner "prompt failed: Incoming transport closed: ..." with both
+"Restart agent" and "OK". Clicked OK: error banner gone, marker bubble and "partial" chunk both
+**still present**, composer still reads "Agent offline — reconnecting when you send..." (OK does not
+restart) — `reference/linux-progress/waveK-critic/chat33-02-after-ok-marker-and-partial-retained.png`.
+Matches the row's own clause and the builder's claim exactly, on my own fresh binary and fresh drive.
+
+**MCP-warning half — driven to its actual, structural conclusion rather than assumed reachable.**
+Before attempting a live drive, `rust/crates/tiller_acp/src/mcp_config.rs`'s doc comment and a
+dedicated `#[ignore]`d integration test
+(`real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json`, `tiller_acp/src/lib.rs:2634`)
+already document a prior sweep's exhaustive by-hand investigation of exactly this path, concluding it
+is unreachable through two independent gates: (1) **Trust** — the first time any project's
+`.mcp.json` names a server, the real agent marks it "Pending approval" and never attempts a
+connection, and that approval lives in the user's own global `~/.claude.json`, which nothing in
+Tiller's launch path populates; (2) **Channel** — even manually pre-approved, the real failure text
+(`Failed to connect — ENOENT...`) arrives as ordinary `session/update` conversational content, never
+on the child process's own stderr, which is the only channel `drain_stderr`/`looks_like_mcp_warning`
+reads. I did not take this on trust (reading code is not evidence): I **re-ran the ignored test
+myself**, fresh, with real network access and a real `npx @agentclientprotocol/claude-agent-acp@latest`
+process spawned against a real broken `.mcp.json` (`{"mcpServers":{"broken-server":{"command":
+"/definitely/missing/mcp-nonexistent-binary"...`), waited the full 10s past startup, and got:
+
+```
+cargo test --manifest-path rust/Cargo.toml -p tiller_acp --lib \
+  real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json -- --ignored --nocapture
+test tests::real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json ... ok
+```
+
+A genuinely executed, network-touching, real-agent-spawning test, green at current HEAD — confirming
+`mcp_warnings()` stays empty for exactly the scenario a live UI drive would need. Reproducing the
+*live UI* end of this would require either asking the agent to explicitly run `claude mcp list` (which
+routes the failure text through ordinary chat content, not the `McpWarning` banner mechanism at all —
+a different code path than the one this row's clause is about) or editing the real user's global
+`~/.claude.json` to pre-approve the project — mutating shared state outside this repo and outside any
+sandboxed lane, which I did not do and which none of this project's prior sweeps did either for this
+same reason.
+
+What I *did* independently confirm live is the **rendering mechanism itself**: re-ran
+`an_mcp_warning_offers_ok_to_dismiss` fresh at current HEAD —
+```
+cargo test --manifest-path rust/Cargo.toml -p tiller_ui --lib offers_ok
+test chat::tests::an_mcp_warning_offers_ok_to_dismiss ... ok
+test chat::tests::a_retryable_turn_error_offers_ok_alongside_retry ... ok
+```
+This is legitimate UI-tier evidence under `EVIDENCE-STANDARD.md` (drawn via `TestAppContext`,
+`cx.debug_bounds` hit-tests the real banner/button geometry, `cx.simulate_click` dispatches a real
+click, then asserts the entry is actually removed) — not a data-model check. It proves: an
+`Entry::Error{kind: McpWarning, retryable: false}` row, however it comes to exist, renders no Retry,
+does render OK, and OK removes it. What it cannot prove, and what nothing in this project's history
+has ever proven, is that the real agent+`.mcp.json` path can ever construct that row live.
+
+**Verdict: half-proven**, and this pass narrows the gap to something sharper and more useful than
+"nobody tried yet": the turn-error/retryable half is **PASSED** on my own fresh live drive; the
+MCP-warning/non-retryable half's *rendering control* is proven by a real drawn-and-clicked test, but
+the *live scenario* the row's clause implicitly assumes exists (a real broken `.mcp.json` producing a
+real McpWarning banner through ordinary use) is **not reachable** by any means this pass could
+exercise without mutating the real user's global Claude config — confirmed by my own fresh execution
+of the real-agent integration test, not merely inherited from a code comment. A future pass could only
+close this by either getting explicit sign-off to mutate `~/.claude.json` in a disposable way, or by
+the agent's own behavior changing to write connection failures to stderr (exactly the signal the
+ignored test is watching for and will go red on if it ever happens).
+
+---
+
+## Summary
+
+| Row | Verdict | Notes |
+| --- | --- | --- |
+| CENTER-01 | PASSED | mandatory safety-gate exercised live: real host PID survived 5 worktree switches while `needs-input` |
+| F-CORE-ACT-20 | PASSED | mandatory gap closed: real, installed GNOME `notification-daemon` (not a stub) on a private bus, real `Notify`/`GetServerInformation` handshake |
+| F-SID-19 | PASSED | generalizes: a second root keybinding (`Ctrl+Shift+P`) also fires from the same zero-tab empty state |
+| F-TERM-10 | PASSED | negative case confirmed: a genuinely idle bare shell's tab content still reloads on switch-away, fix did not overshoot |
+| F-PRJ-13 | PASSED | exact original fixture geometry reproduced live (decoy row under Reset's own pixel position); also a real red→green test at the exact commit boundary |
+| F-PRJ-17 | PASSED | "Use Primary" clicked live, persists across reopen and in the on-disk DB |
+| F-PRJ-18 | half-proven | typed-path leg PASSED live with DB cross-check; "Choose..." native picker leg is `NOT EXERCISED` — no portal in this lane |
+| F-CHAT-33 | half-proven | turn-error/retryable half PASSED live; MCP-warning/non-retryable half's UI control is proven by a real drawn+click test, but the live scenario that would produce it is confirmed unreachable without mutating the user's global Claude config |
+
+Six of eight rows close clean. The remaining two are not evasions: `F-PRJ-18`'s gap is an
+environment ceiling (no Wayland portal in this lane, stated plainly in `WAYLAND-LANE.md`), and
+`F-CHAT-33`'s gap is a structural property of the real agent this project ships against, confirmed by
+this pass's own fresh execution of the relevant tests rather than inherited from a comment.
+
