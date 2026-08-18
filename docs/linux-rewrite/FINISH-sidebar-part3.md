@@ -126,4 +126,33 @@ through that same path, with the CLI's own workspace-accessed line as the hard d
 this is not an evidence gap, it is a reproducible defect, so the row is `FAILED - defective`
 rather than `half-proven`.
 
+**Safety note**: after F-SID-14's investigation, the auto-discovered `tiller` project (this
+worktree's own real repo — see the F-SID-10 note above) had a corrupted agent tab attached to
+its real `rust/gpui-rewrite` worktree row, and its row positions kept shifting the sidebar
+underneath other in-flight coordinate math, twice nearly causing a click meant for a fixture to
+land on a real worktree's own "Remove Worktree" confirm dialog. Rather than keep computing
+coordinates around a hazard, `tiller` was removed from **this Tiller instance's own project list**
+via the sidebar's Remove Project (proven safe by F-SID-10: DB-only, never touches disk) — verified
+before and after via `git worktree list` in the real repo and via `ls` on
+`/home/enzopalmisano/Scrivania/Progetti/tiller` that every real worktree, including this one, was
+untouched. This stabilized every row position for the rest of the pass.
+
+**F-SID-15** — PASSED (upgraded from half-proven). The prior evidence only triggered the
+confirm dialog by mis-click and cancelled it; the missing half — actually confirming and
+watching the worktree disappear — was completed live this pass. Fixture: created a second
+worktree (`extra`, branch `extra`) on `wf-sid2-main` via the sidebar's own "New Worktree..."
+control, confirmed on disk via `git worktree list` showing both `master` and `extra`.
+Right-clicked the `extra` worktree row: menu opened with the same 9 items as F-SID-14, target
+confirmed correct via the row's own hover-highlight and close (`×`) affordance. Clicked
+**Remove Worktree**: the "Remove worktree? This permanently deletes the worktree's dir[ectory]"
+confirm dialog opened (`reference/linux-progress/wf-sid2/f-sid-15-remove-worktree-confirm.png`).
+Clicked **Remove Worktree** on the dialog itself, all within one continuous drive. Hard
+discriminator: `git -C /home/enzopalmisano/wf-sid2-main worktree list` afterward shows only
+`master` — `extra` is gone — and `/home/enzopalmisano/wf-sid2-main-extra` no longer exists on
+disk at all (`ls` fails with "File o directory non esistente"), confirming the dialog's
+"permanently deletes the worktree's directory" text is accurate, not the previously-flagged false
+claim. The row is also gone from the rendered sidebar
+(`reference/linux-progress/wf-sid2/f-sid-15-after-remove-row-gone.png`, `wf-sid2-main` now shows
+only `master` then "New Worktree...").
+
 (remaining rows filled in incrementally below, each followed by a commit)
