@@ -5140,19 +5140,31 @@ impl TillerWorkspace {
     /// from wiping each other. An icon lookup must never participate in
     /// them, so this never writes, never registers, and never clears.
     fn tab_agent_mark(&self, tab: &OpenTab) -> Option<AgentMark> {
-        if let Some(icon) = tab.agent_icon {
-            return Some(AgentMark {
-                icon,
-                brand: tab
-                    .agent_id
-                    .as_deref()
-                    .map_or(AgentBrandColor::Unknown, AgentBrandColor::for_agent_id),
-            });
-        }
-        tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
-            self.activity
-                .agent_id(&format!("pane-{pane_id}"))
-                .and_then(AgentMark::for_agent_id)
+        // `WorkspaceTabIcon`'s order: the tab's own agent, then its panes'.
+        // Falling through for the *id* as well as the icon matters for one
+        // frame that really happens: `add_agent_tab` calls `agent_spawned`
+        // (so the pane knows the agent), then `insert_terminal_tab`, which
+        // syncs before the caller has set `OpenTab::agent_id`. Without the
+        // fallback that sync draws the right silhouette in the unknown-agent
+        // grey.
+        let agent_id = tab.agent_id.clone().or_else(|| {
+            tab.panes.leaf_ids().into_iter().find_map(|pane_id| {
+                self.activity
+                    .agent_id(&format!("pane-{pane_id}"))
+                    .map(str::to_owned)
+            })
+        });
+        // A tab that already carries a brand icon keeps it even when no id
+        // resolves — it is still an agent tab, just an unnamed one, and the
+        // neutral grey is what `AgentIcon.color(for: "")` gives.
+        let icon = tab
+            .agent_icon
+            .or_else(|| Icon::for_agent_id(agent_id.as_deref()?))?;
+        Some(AgentMark {
+            icon,
+            brand: agent_id
+                .as_deref()
+                .map_or(AgentBrandColor::Unknown, AgentBrandColor::for_agent_id),
         })
     }
 
