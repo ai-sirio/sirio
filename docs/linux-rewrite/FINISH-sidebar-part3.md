@@ -187,4 +187,49 @@ screenshots committed for it since wave K's evidence already carries the row.
 ledger as `d8f35980` and `0df584f5`) before this pass reached them. Not re-driven, per the same
 rule.
 
-(remaining rows: F-PRJ-14, F-PRJ-18, filled in below, each followed by a commit)
+**F-PRJ-14 and F-PRJ-18** — still half-proven; the missing halves (PNG upload leg, folder-picker
+leg) were attempted live today with the private D-Bus/portal recipe from
+`docs/linux-rewrite/FINISH-sidebar-proj-part2.md`, and the recipe did not reproduce that pass's
+result on this host at this time. Recorded as a harder-edged version of the same gap, not a
+retraction of the app's own behaviour.
+
+Setup matched the recipe exactly: `dbus-daemon --session --fork` outliving the drive,
+`XDG_CURRENT_DESKTOP=GNOME`, `dbus-update-activation-environment --verbose WAYLAND_DISPLAY=$WD
+GDK_BACKEND=wayland XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS`
+called with the real, just-announced `$WD`, then `/usr/libexec/xdg-desktop-portal -v` launched
+before the first portal-triggering click. Reached Project Settings for `wf-sid2-nongit` (right-click
+→ Project Settings — both the Avatar tab's **Choose PNG…** and the Worktree Location section's
+**Choose…** are on this one sheet, no separate navigation needed) and clicked **Choose…**: D-Bus
+activation *did* fire — `org.freedesktop.impl.portal.desktop.gtk` appeared on the private bus and
+`xdg-desktop-portal-gtk` spawned (confirmed via `ps`) — but no dialog window ever appeared in
+`swaymsg -t get_tree`, polled for 45+ seconds past the click.
+
+To rule out an app-side or coordinate mistake, re-tested with the app removed from the loop
+entirely: a raw `gdbus call --session --dest org.freedesktop.impl.portal.desktop.gtk
+--object-path /org/freedesktop/portal/desktop --method
+org.freedesktop.impl.portal.FileChooser.OpenFile ...` against the same running
+`xdg-desktop-portal-gtk`, run four separate times (two via `gdbus call`'s own default timeout,
+two against a foreground instance with `G_MESSAGES_DEBUG=all`), timed out identically every time
+(20-25s). The foreground debug log shows exactly where it stops: `providing
+org.freedesktop.impl.portal.Settings` → `org.freedesktop.impl.portal.desktop.gtk acquired` →
+(the request arrives) → `Unhandled parent window type` / `Failed to associate portal window with
+parent window` (both non-fatal warnings — expected with an empty parent-window string) → two
+`dconf` watch/change_notify pairs for `/org/gtk/settings/file-chooser/window-position` → nothing
+further, ever. `/proc/<pid>/wchan` on the stalled process reads
+`poll_schedule_timeout.constprop.0` — a genuine kernel-level block on an fd event that never
+arrives, not a slow-but-progressing render under load (checked twice, ~40s apart, identical
+log tail both times; system load was 16-21 on 12 cores throughout, ruled out as the cause by the
+same stall recurring after a much longer wait).
+
+This is a harder discriminator than the current ledger text for either row ("no visible change" /
+"portal/D-Bus environment constraint") because it isolates the failure to
+`xdg-desktop-portal-gtk`'s own `FileChooser.OpenFile` handler hanging past the dconf
+window-position notification, independent of Tiller, independent of the click coordinates, and
+independent of the specific request (folder-only vs file). It does not by itself explain why
+`FINISH-sidebar-proj-part2.md` reports this same recipe succeeding for six rows in the `wf-prj`
+lane — the recipe as documented is faithfully reproduced here and does not currently reproduce
+that result; whether that is host/kernel-state drift since 2026-08-14, private-bus contention
+from the many concurrent critic lanes' own dbus-daemons and virtual-input processes currently
+alive on this host, or something else, is not established and is left as the named gap for
+whoever picks this back up. Both rows remain **half-proven**, unchanged in the ledger's own
+vocabulary, with this note narrowing the gap rather than closing it.
