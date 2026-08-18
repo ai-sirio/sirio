@@ -62,6 +62,35 @@ them as carried-over-from-another-host with the date and the host named in the e
 The same question applies, more weakly, to every other row whose pass predates 2026-08-17 — the
 code did not change, the platform did.
 
+### OWED: wave O is built and UNJUDGED — do not read its commits as verdicts
+
+Four commits landed after the wave-N verdicts and **no critic has judged any of them.** The
+workflow's integration and critic phases never ran; the process hosting them exited first.
+
+    e5d4a355  fix(F-TERM-PTY-06): return focus to the terminal after a file drop
+    01ec3915  fix(sidebar): close the identity seam one level down, and stop two states sharing a hex
+    a72eb8ef  feat(F-CHAT-22/23/31): fold older turns, and make the diff preview a surface
+    <plus a follow-up to 01ec3915 in main.rs's tab_agent_mark>
+
+**Their ledger rows were deliberately left alone.** `F-TERM-PTY-06`, `F-CHAT-22`, `F-CHAT-23` and
+`F-CHAT-31` still read `FAILED — defective` with the evidence a critic measured *before* these
+commits, because that is the last thing anyone actually verified. Upgrading a row because a builder
+says it fixed something is the precise mechanism that produced this project's false passes; a
+builder's claim is not a verdict, however good the diff looks.
+
+The next critic pass on these four rows should judge them **from scratch against their clauses**,
+not against the commit messages. What the builders were briefed to fix, so it can be checked:
+
+- **F-TERM-PTY-06** — the drop must return focus to the terminal. Needs a discriminator, not a
+  screenshot: type a marker, move focus away, drop, type another marker, see where it landed.
+- **F-CHAT-22** — a collapsed older-turn row that "re-opens in place". A fold that cannot be
+  reopened, or that loses scroll position, fails.
+- **F-CHAT-23** — the tool-call location must be a real link opening the right file, checked by
+  the tab's *content*, not its title.
+- **F-CHAT-31** — the diff preview owes line numbers and selectable text. Both are pixel claims.
+- **The sidebar seam** — agent identity must reach the *tab* row live, for a pane identified after
+  spawn through Layer B, not only for one Tiller launched itself.
+
 ### What moved today
 
 `PASSED 353 → 357 · FAILED — defective 1 → 5 · UNREACHABLE 28 → 20`, plus four rows wired.
