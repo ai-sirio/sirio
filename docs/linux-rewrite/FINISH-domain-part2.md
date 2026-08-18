@@ -180,3 +180,35 @@ All three identity fields the VERIFY clause names (name, icon, and — via colou
 survive a real quit/relaunch.
 
 ---
+
+## F-PER-01 — PASSED (was half-proven)
+
+The predecessor's own gap, named honestly: schema/table presence was confirmed but no complete
+live chat turn was landed. Closed it this pass with a **real** agent turn, not the schema alone.
+
+1. Clicked into the `Chat` tab's composer, typed `reply with exactly the single word:
+   PONGWFDOM3`, sent it. The real backing agent answered `PONGWFDOM3` —
+   `reference/linux-progress/wf-dom3/f-per-01-chat-turn-live.png` shows the completed exchange
+   with a timestamp and the tab's checkmark (turn complete).
+2. Switched to `Terminal`, ran `echo PERSIST_TERMINAL_WFDOM3_88213`, output appeared inline.
+3. **Real quit/relaunch, not a script fiction**: the next `wayland-drive.sh` invocation was run
+   with `TILLER_WL_KEEP` unset both before and after — the app was genuinely killed (SIGTERM via
+   the drive script's own cleanup) and cold-started fresh against the same `/tmp/wf-dom3.sqlite`.
+4. `reference/linux-progress/wf-dom3/f-per-01-chat-after-restart.png`: the `Chat` tab, with zero
+   interaction after boot, shows the identical transcript — user message, `PONGWFDOM3` reply,
+   `23:46` timestamp.
+5. `reference/linux-progress/wf-dom3/f-per-01-terminal-after-restart.png`: the `Terminal` tab shows
+   `echo PERSIST_TERMINAL_WFDOM3_88213` / `PERSIST_TERMINAL_WFDOM3_88213` in its scrollback,
+   replayed history ahead of a fresh live prompt (matches `F-TERM-PTY-04`'s documented
+   capture-and-replay-without-writing-to-the-child restore mechanism).
+6. **Hard discriminator, independent of the UI**: `SELECT tab_id, ordinal, payload, updated_at FROM
+   chat_turn` against the real on-disk file returns one row, `tab_id='default-chat'`, payload
+   `{"entries":[{"UserMessage":{"text":"reply with exactly the single word:
+   PONGWFDOM3"}},{"AssistantMessage":{"text":"PONGWFDOM3"}},{"TurnFooter":{"text":"23:46"}}]}` — the
+   real conversation content, at rest in SQLite, not a rendered pixel.
+
+Every noun in the VERIFY clause — projects, worktrees, tabs, **a sent chat**, **terminal output** —
+driven and independently confirmed to survive a genuine quit/relaunch, closing the row the
+predecessor could only get partway through.
+
+---
