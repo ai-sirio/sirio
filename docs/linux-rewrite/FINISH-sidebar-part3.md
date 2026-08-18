@@ -170,4 +170,21 @@ bottom status bar now reads "Activity 1 running" where it previously showed noth
 discriminator: the glyph's appearance is driven purely by the control-socket notify call against
 a real registered pane id, not by any UI interaction — before/after is a clean delta.
 
-(remaining rows filled in incrementally below, each followed by a commit)
+**F-SID-19** — out of scope by the time this pass reached it. A concurrent wave (wave K,
+commit `6695b4c3`) already flipped it to PASSED using a different second keybinding
+(Ctrl+Shift+P, the command palette) from the same zero-tab empty state, landing while this
+pass was mid-flight. Before checking the live ledger I independently drove the same
+generalization claim with a third keybinding (Ctrl+Shift+S, toggle sidebar): fresh app launch
+selected `wf-sid2-empty`'s `master` worktree already at "No Terminals" (the zero-tab state
+survived a full kill+restart, not merely a UI session), pressed Ctrl+Shift+S — Projects panel
+and Files panel both vanished, content area expanded to fill the window — pressed it again,
+sidebar and Files panel both returned exactly, "No Terminals" still showing throughout. This
+would have been a clean second corroboration, but per this pass's own rule against re-proving
+an already-proven half, it is recorded here as a note rather than a ledger-facing row; no
+screenshots committed for it since wave K's evidence already carries the row.
+
+**F-PRJ-13, F-PRJ-17** — also closed by the same concurrent wave K (commits referenced in the
+ledger as `d8f35980` and `0df584f5`) before this pass reached them. Not re-driven, per the same
+rule.
+
+(remaining rows: F-PRJ-14, F-PRJ-18, filled in below, each followed by a commit)
