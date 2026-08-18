@@ -128,3 +128,27 @@ Full live sequence, one continuous `wayland-drive.sh` invocation, real portal di
    live and distinguished from the lookalike persistent banner.
 
 ---
+
+## F-PER-05 — PASSED (was NOT EXERCISED)
+
+Boot state (persisted DB, `linux/gpui-waku` worktree) had exactly two launch-snapshot tabs: `Chat`
+and `Terminal`. Live sequence, one continuous `wayland-drive.sh` invocation:
+
+1. Clicked the `Terminal` tab, `chord ctrl w` → a real "Close dirty tab? Discard unsaved work in
+   Terminal?" confirmation appeared (the terminal had a real neofetch-style banner as scrollback,
+   correctly flagged dirty) — clicked **Close**.
+2. `reference/linux-progress/wf-dom3/f-per-05-after-close.png`: tab bar and sidebar both now show
+   only `Chat` — `Terminal` genuinely gone, not just visually hidden (sidebar's per-worktree tab
+   list dropped it too).
+3. `chord ctrl+shift o` → `handle_restore_launch_snapshot`
+   (`rust/crates/tiller/src/main.rs:9083`, `RestoreLaunchSnapshot`).
+4. `reference/linux-progress/wf-dom3/f-per-05-after-restore.png`: tab bar now shows **both** `Chat`
+   and `Terminal` again — exactly one `Terminal` (not duplicated), and `Chat` is the same tab,
+   untouched throughout (never closed, never recreated). Matches `restore_launch_snapshot`'s own
+   merge logic (`main.rs:5249`: `merge_launch_snapshot_tabs` then only appends tabs past
+   `current.len()`) exercised end-to-end, not read.
+
+Both clauses of the VERIFY text — "the tab returns" and "an unrelated current tab remains" — driven
+live in the same session with a real dirty-tab confirmation in between, not glossed over.
+
+---
