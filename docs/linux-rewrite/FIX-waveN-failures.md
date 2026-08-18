@@ -365,3 +365,137 @@ completed **drop** (not a cancel) still correctly clears `tab_drag_snapshot` liv
 (covered by the unit test and reasoned through inline, but not independently re-driven this pass).
 
 ---
+
+## F-CHG-02 — Files panel shows an unrelated real file tree on a genuinely empty catalog
+
+**Reproduced live first**, fresh boot, no `project.add` at all (label `wf-fix2repro`). `panel.list`/
+`ctl project.list`/`ctl workspace.list`/`ctl workspace.current` confirmed a genuinely empty catalog
+(`projects:[]`, `workspaces:[]`, `workspace.current` errors `no current workspace`). The centre pane
+correctly showed "No worktree selected. Add a project, then select a worktree." — but the Files
+panel on the right simultaneously rendered this repo's own real tree (`.agents`, `.claude`, `App`,
+`rust`, `Scripts`, …) rooted at `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, exactly as
+the ledger row describes.
+`reference/linux-progress/wf-fix2-chg02/01-empty-catalog-boot-BEFORE-FIX.png`.
+
+### Root cause
+
+`RightPanel` tracks its own `worktree_selected: bool`, separate from `TillerWorkspace::has_current_worktree()`
+(which the centre pane already checks fresh on every render and got right). `RightPanel::new`
+always starts `worktree_selected: true`, and the only two places that ever changed it were
+`select_worktree` (replaces the whole entity on an explicit switch) and `close_workspace`'s
+`clear_worktree` call. Neither runs at boot. `right_panel` is constructed at startup bound to
+`working_directory`, which on an empty catalog is `initial_working_directory()`'s fallback — it
+walks up from the process's cwd looking for a git ancestor and finds this real repo (a real,
+existing directory; just not a selected worktree) — so the panel showed it as if it were current.
+
+A second, adjacent instance of the *same* class of bug was found live-driving the fix itself (not
+in the ledger row, but the identical failure shape): calling `project.add` on exactly the directory
+`working_directory` already pointed at makes `sync_control_state` silently match it to the new
+project's worktree and flips `has_current_worktree()` to `true` — the centre pane picks this up for
+free since it re-checks every render, but `right_panel`'s cached bool has no mutation point on that
+path either, so with only the boot-time fix it would swap from "wrong tree at boot" to "correctly
+placeholder at boot, then permanently stuck on the placeholder forever after — even once a worktree
+genuinely is current." A fix that only covered the literal ledger reproduction would have traded a
+`FAILED — defective` for a different, plausibly worse one (first-run user adds the project their own
+dev checkout already sits in — not a contrived case), so both are fixed together.
+
+### Fix
+
+`RightPanel` gains `bind_worktree` (`rust/crates/tiller_ui/src/right_panel.rs`), the mirror of the
+existing `clear_worktree`: sets `worktree_selected = true`, rebinds `repo_root`, and resets the walk
+state — idempotent (a no-op) when neither the selection state nor the bound path actually changed.
+`TillerWorkspace::sync_activity` (`rust/crates/tiller/src/main.rs`) — already the app's one
+continuous reconciliation point, called unconditionally on every `render()` and from ~44 other
+mutation call sites — now reads `has_current_worktree()` on every pass and calls `bind_worktree` or
+`clear_worktree` accordingly, instead of only ever calling `set_activity`. This is deliberately not
+a one-off check at construction: because `render()` calls `sync_activity` every frame, *any* future
+path that changes what "current" means self-heals the Files panel within one repaint, not just the
+two call sites this pass happened to find.
+
+### Regression tests
+
+Two, `rust/crates/tiller/src/main.rs`:
+
+- `tests::drawn_empty_catalog_boot_shows_the_right_panels_no_worktree_placeholder` — a new
+  `empty_catalog_test_workspace` fixture (empty `ProjectCatalog`, `working_directory` a real,
+  existing scratch directory — mirroring the real fallback exactly) boots a `TillerWorkspace` and
+  asserts `right-panel-no-worktree` is drawn and `right-panel-files` is not.
+- `tests::drawn_adding_a_project_matching_the_fallback_directory_binds_the_right_panel` — from that
+  same empty boot, calls `control_add_project` on `working_directory` itself (a plain folder
+  synthesizes a worktree at its own root, per `session.rs`'s `catalog_project`), asserts
+  `has_current_worktree()` is now true, and asserts the panel switched to `right-panel-files` instead
+  of staying on the placeholder.
+
+**Red, on the code with only `set_activity` (both tests, unfixed):**
+```
+thread 'tests::drawn_empty_catalog_boot_shows_the_right_panels_no_worktree_placeholder' panicked at
+crates/tiller/src/main.rs:17862:9:
+an empty-catalog boot must draw the right panel's own no-worktree placeholder
+
+thread 'tests::drawn_adding_a_project_matching_the_fallback_directory_binds_the_right_panel' panicked at
+crates/tiller/src/main.rs:17891:9:
+sanity: boot must start on the placeholder before the project is added
+```
+(The second test's *sanity* assertion is what goes red first on fully-unfixed code — proving the
+whole chain, not just the narrower "explicit extra call in `control_add_project`" variant which was
+tried and found redundant with the `render()`-driven reconciliation, and reverted rather than kept
+as dead weight.)
+
+**Green, after the fix:**
+```
+test tests::drawn_empty_catalog_boot_shows_the_right_panels_no_worktree_placeholder ... ok
+test tests::drawn_adding_a_project_matching_the_fallback_directory_binds_the_right_panel ... ok
+```
+Full suites: `cargo test --manifest-path rust/Cargo.toml -p tiller --bin tiller` → **187 passed, 0
+failed** (one pre-existing, unrelated flake seen once under this box's concurrent load —
+`session::tests::the_debounce_collapses_a_burst_into_one_write`, a timing-sensitive debounce test
+that passed clean in isolation and touches neither file this row changed);
+`cargo test --manifest-path rust/Cargo.toml -p tiller_ui --lib` → **355 passed, 1 failed** — the
+failure is `titlebar::tests::double_click_action_from_system_resolves_without_panicking`, which
+reads this COSMIC desktop's real `action-double-click` setting (`Minimize`) against a hardcoded
+`ToggleMaximize` expectation; pre-existing, environment-dependent, reproduces in isolation, and
+`git status` confirms `titlebar.rs` carries none of this pass's edits.
+`right_panel::tests::*` alone: **21 passed, 0 failed**.
+
+### Re-driven live after the fix
+
+Fresh label `wf-fix2final`, rebuilt+re-pinned `/tmp/wf-fix2-tiller`:
+
+```
+ctl project.list                         → []
+ctl workspace.list                       → []
+shot 01-boot-empty                       → Files panel: "No worktree selected" placeholder
+ctl project.add path=<repo>              → added:true, worktreeCount:6
+shot 02-after-project-add                → Files panel: header now reads the repo path, "Loading files…"
+ctl workspace.current                    → real workspace, path=<repo>, branch=linux/gpui-waku
+shot 03-after-settle                     → Files panel: full real tree, loaded
+```
+
+**Hard discriminator**: the Files panel's own drawn header/content across three frames of the *same*
+running instance — placeholder text, then a path + "Loading files…", then the real tree — tracking
+`workspace.current`'s control-socket answer at each step, not a single static screenshot.
+`reference/linux-progress/wf-fix2-chg02/02-after-project-add-loading.png` and
+`03-after-settle-full-tree.png`.
+
+### Verdict: half-proven (builder-driven, not critic-passed)
+
+Proven: reproduction of the ledger's exact original bug, root cause, a second related bug found by
+live-driving the fix itself (not merely read), two regression tests each red→green on the real
+unfixed code (not a doctored revert), full crate suites green modulo two pre-existing
+environment/load-related failures unrelated to either changed file, and a three-frame live re-drive
+covering both boot-empty and add-project-that-matches-the-fallback-directory.
+
+**Gap for a fresh critic**: (1) the live re-drive's "add project" case happens to have this
+project's own dev checkout as the fallback directory, which is what makes the match possible to
+demonstrate at all on this box — a critic should also drive the more common real-world shape (add a
+project at some *other* path while the fallback stays unrelated) and confirm the panel correctly
+stays on the placeholder throughout, not just that it correctly switches when they do match. (2) The
+`bind_worktree`/`clear_worktree` reconciliation now lives inside `sync_activity`, which is called
+from ~44 other sites for unrelated reasons (agent status, chat state, …); this pass reasoned through
+why each is a no-op when nothing about worktree selection changed and confirmed no visible regression
+in the full test suites, but did not individually re-drive each of those 44 call sites live. (3) The
+`titlebar.rs` double-click-action test failure is real and pre-existing on this desktop but is not
+this row's to fix; flagged here so it isn't miscounted against this change by whoever reads the test
+totals next.
+
+---

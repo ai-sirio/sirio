@@ -255,6 +255,38 @@ impl RightPanel {
         cx.notify();
     }
 
+    /// The mirror of [`Self::clear_worktree`]: (re-)bind the panel to a
+    /// genuinely selected checkout. F-CHG-02: `select_worktree` already
+    /// covers a real, explicit worktree switch by throwing this whole entity
+    /// away and building a fresh one via [`Self::with_activity`] -- but a
+    /// worktree can also become the *current* one passively, e.g.
+    /// `sync_control_state` re-matching `working_directory` against a
+    /// project the user just added over the control socket, with no dedicated
+    /// switch call in between. `TillerWorkspace::sync_activity` -- already
+    /// the app's one continuous reconciliation point, run after essentially
+    /// every state-changing action -- calls this every time so the panel
+    /// cannot drift from `has_current_worktree()`'s answer no matter which
+    /// path changed it. Idempotent when neither the selection state nor the
+    /// bound path actually changed, so a tree the user has been expanding is
+    /// left alone on the other 44-and-counting call sites that were already
+    /// unrelated to worktree selection.
+    pub fn bind_worktree(&mut self, repo_root: impl Into<PathBuf>, cx: &mut Context<Self>) {
+        let repo_root = repo_root.into();
+        if self.worktree_selected && self.repo_root == repo_root {
+            return;
+        }
+        self.worktree_selected = true;
+        self.repo_root = repo_root;
+        self.file_tree.clear();
+        self.git_markers = GitMarkers::default();
+        self.selected_path = None;
+        self.refresh_error = None;
+        self.file_context_menu = None;
+        self.settled = false;
+        self.walk_generation += 1;
+        cx.notify();
+    }
+
     /// Refreshes the changed-paths set and the directory tree off the
     /// render thread. Single-flight on the walk task.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
