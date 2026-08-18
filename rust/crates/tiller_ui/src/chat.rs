@@ -14,7 +14,7 @@ use gpui::{
     canvas, div, list, point, prelude::*, px, quad, rgb, transparent_black,
 };
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -260,22 +260,7 @@ impl Entry {
                 content,
                 locations,
                 ..
-            } => {
-                let mut lines = vec![format!("{title}\n{status}")];
-                for item in content {
-                    match item {
-                        ToolCallContentInfo::Text(text) => lines.push(text.clone()),
-                        ToolCallContentInfo::Diff(diff) => {
-                            lines.push(format!("diff: {}", diff.path.to_string_lossy()))
-                        }
-                        ToolCallContentInfo::Other => {}
-                    }
-                }
-                for location in locations {
-                    lines.push(location.path.to_string_lossy().into_owned());
-                }
-                lines.join("\n")
-            }
+            } => tool_call_plain_text(title, status, content, locations).text(),
             Self::SubagentTask {
                 title,
                 status,
@@ -925,6 +910,17 @@ pub struct Chat {
     list_state: ListState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
+    /// F-CHAT-22, turn half: turns the reader has explicitly re-opened,
+    /// keyed by the entry index of the [`Entry::TurnFooter`] that closes
+    /// each one — the analogue of Swift's `controller.unfoldedTurns`, whose
+    /// key is `divider.id`.
+    ///
+    /// An index is a safe identity only because entries are otherwise
+    /// append-only; the two paths that do remove entries
+    /// ([`Self::clear_recovered_connection_errors`] and the two resets) empty
+    /// this set as well, rather than leave keys pointing at whatever slid
+    /// into their place.
+    unfolded_turns: BTreeSet<usize>,
     copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
     persistence: Option<ChatPersistence>,
@@ -1122,6 +1118,7 @@ impl Chat {
             list_state,
             transcript_selection: None,
             transcript_dragging: false,
+            unfolded_turns: BTreeSet::new(),
             copied_target: None,
             edit_summaries: BTreeMap::new(),
             persistence: None,
@@ -1249,6 +1246,25 @@ impl Chat {
             call.expanded = !call.expanded;
             self.remeasure_entry(task_index);
         }
+        cx.notify();
+    }
+
+    /// F-CHAT-22, turn half: flips one older turn between its collapsed
+    /// stand-in row and its full contents, in place.
+    ///
+    /// `turn_id` is the turn's footer index. Every row of the turn changes
+    /// height at once, so the whole span is remeasured — remeasuring only
+    /// the clicked row would leave the virtualizer holding stale heights for
+    /// the rows that just appeared, and the transcript would jump.
+    fn toggle_turn_unfolded(&mut self, turn_id: usize, cx: &mut Context<Self>) {
+        let turns = segment_turns(&self.entries);
+        let Some(turn) = turns.iter().find(|turn| turn.footer == Some(turn_id)) else {
+            return;
+        };
+        if !self.unfolded_turns.remove(&turn_id) {
+            self.unfolded_turns.insert(turn_id);
+        }
+        self.list_state.remeasure_items(turn.start..turn.end + 1);
         cx.notify();
     }
 
@@ -2009,6 +2025,10 @@ impl Chat {
         };
         persistence.tab_id = tab_id;
         self.entries.clear();
+        // F-CHAT-22: `unfolded_turns` is keyed by entry index, so anything
+        // that renumbers entries must drop it rather than let a key point at
+        // whatever slid into its place.
+        self.unfolded_turns.clear();
         for turn in transcript.turns {
             for entry in turn.entries {
                 self.push_entry(restored_entry(entry));
@@ -2212,6 +2232,7 @@ impl Chat {
             )
         });
         if self.entries.len() != old_count {
+            self.unfolded_turns.clear();
             self.list_state.splice(0..old_count, self.entries.len());
         }
     }
@@ -2595,6 +2616,7 @@ impl Chat {
     fn new_conversation(&mut self, cx: &mut Context<Self>) {
         let old_count = self.entries.len();
         self.entries.clear();
+        self.unfolded_turns.clear();
         self.list_state.splice(0..old_count, 0);
         self.composer = Composer::new();
         self.reset_composer_popups();
@@ -4119,12 +4141,35 @@ impl Chat {
     /// F-CHAT-31: a diff preview for a tool call that changed a file —
     /// removed lines then added lines at each point of divergence, capped
     /// so one huge rewrite cannot make the transcript unusable.
-    fn render_tool_diff(diff: &ToolCallDiff, theme: &Theme) -> AnyElement {
+    ///
+    /// Each row carries the line number of the file it belongs to, the way
+    /// Swift's `ChatDiffPreviewView.row` leads with `String(format: "%3d",
+    /// row.lineNumber)`; the header path is a real control that opens the
+    /// file, where Swift puts a `Button` calling `openFileReference`; and
+    /// the row text is selectable through the transcript's own selection
+    /// mechanism, standing in for Swift's `.textSelection(.enabled)`.
+    fn render_tool_diff(
+        diff: &ToolCallDiff,
+        theme: &Theme,
+        context: DiffPreviewContext,
+    ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
         let lines = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text);
         let total = lines.len();
-        let shown = lines.into_iter().take(DIFF_PREVIEW_MAX_LINES);
+        let shown = lines
+            .into_iter()
+            .take(DIFF_PREVIEW_MAX_LINES)
+            .collect::<Vec<_>>();
+        let DiffPreviewContext {
+            id_prefix,
+            entity,
+            selection,
+        } = context;
+        let open_path = diff.path.clone();
+        let open_entity = entity.clone();
+        let header_id = format!("{id_prefix}-open");
+        let header_selector = header_id.clone();
         let mut column = div()
             .w_full()
             .flex()
@@ -4134,37 +4179,96 @@ impl Chat {
             .py(px(6.0))
             .child(
                 div()
+                    .id(SharedString::from(header_id))
+                    .debug_selector(move || header_selector.clone())
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
                     .text_size(typography.footnote)
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.meta)
+                    .text_color(colors.accent)
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.text_color(colors.title))
                     .px(px(10.0))
                     .pb(px(4.0))
+                    .on_click(move |_, _, cx| {
+                        open_entity.update(cx, |_, cx| {
+                            cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                        });
+                    })
+                    .child(IconElement::new(Icon::File, px(10.0)).text_color(colors.accent))
                     .child(diff.path.display().to_string()),
             );
-        for line in shown {
-            let (prefix, text, text_color, background) = match line {
-                DiffLine::Context(text) => (" ", text, colors.primary_text_color, None),
-                DiffLine::Removed(text) => (
+        for (index, line) in shown.iter().enumerate() {
+            let (prefix, text_color, background) = match line {
+                DiffLine::Context { .. } => (" ", colors.primary_text_color, None),
+                DiffLine::Removed { .. } => (
                     "-",
-                    text,
                     colors.diff_deletion,
                     Some(colors.diff_deletion_background),
                 ),
-                DiffLine::Added(text) => (
+                DiffLine::Added { .. } => (
                     "+",
-                    text,
                     colors.diff_addition,
                     Some(colors.diff_addition_background),
                 ),
             };
+            let text = line.text().to_string();
+            let body = match selection
+                .as_ref()
+                .and_then(|selection| selection.line_starts.get(index).copied())
+            {
+                // The transcript's own selection element, not a second
+                // mechanism: the range is expressed in `transcript_text`
+                // coordinates, so a drag started on assistant prose and
+                // ended on a diff row produces one continuous selection and
+                // one Ctrl+C.
+                Some(start) => TranscriptSelectableText::new(
+                    ElementId::Name(SharedString::from(format!("{id_prefix}-text-{index}"))),
+                    StyledText::new(text.clone()),
+                    start..start + text.len(),
+                    selection
+                        .as_ref()
+                        .expect("selection present in this arm")
+                        .interaction
+                        .clone(),
+                    theme.colors.selection_fill,
+                    Vec::new(),
+                )
+                .into_any_element(),
+                None => div().child(text).into_any_element(),
+            };
+            let row_selector = format!("{id_prefix}-line-{index}");
+            let number_selector = format!("{id_prefix}-number-{index}");
+            let text_selector = format!("{id_prefix}-text-{index}");
             let mut row = div()
+                .id(SharedString::from(row_selector.clone()))
+                .debug_selector(move || row_selector.clone())
                 .flex()
+                .items_start()
                 .px(px(10.0))
                 .font_family(typography.code_family)
                 .text_size(typography.code_size)
                 .line_height(typography.code_line_height)
                 .text_color(text_color)
-                .child(format!("{prefix} {text}"));
+                .child(
+                    div()
+                        .debug_selector(move || number_selector.clone())
+                        .flex_none()
+                        .w(px(DIFF_GUTTER_WIDTH))
+                        .pr(px(8.0))
+                        .flex()
+                        .justify_end()
+                        .text_color(colors.meta)
+                        .child(line.number().to_string()),
+                )
+                .child(div().flex_none().w(px(12.0)).child(prefix))
+                .child(
+                    div()
+                        .debug_selector(move || text_selector.clone())
+                        .flex_1()
+                        .child(body),
+                );
             if let Some(background) = background {
                 row = row.bg(background);
             }
@@ -4507,6 +4611,8 @@ impl Chat {
                 locations,
                 expanded,
                 edit_summary,
+                source_start,
+                interaction.clone(),
                 theme,
                 entity.clone(),
             ),
@@ -4993,27 +5099,59 @@ impl Chat {
                 .pl(px(CARD_H_PADDING + 26.0))
                 .pr(px(CARD_H_PADDING))
                 .pb(px(CARD_V_PADDING));
+            let mut diff_ordinal = 0usize;
             for item in &content {
                 match item {
                     ToolCallContentInfo::Text(text) => {
                         body = body.child(Self::render_tool_output_text(text, theme));
                     }
                     ToolCallContentInfo::Diff(diff) => {
-                        body = body.child(Self::render_tool_diff(diff, theme));
+                        body = body.child(Self::render_tool_diff(
+                            diff,
+                            theme,
+                            DiffPreviewContext {
+                                id_prefix: format!(
+                                    "subagent-diff-{task_index}-{child_index}-{diff_ordinal}"
+                                ),
+                                entity: entity.clone(),
+                                // See `DiffPreviewContext::selection`: a
+                                // nested call contributes no text of its own
+                                // to `transcript_text`, so its rows are
+                                // numbered and its header opens the file, but
+                                // they are honestly not selectable.
+                                selection: None,
+                            },
+                        ));
+                        diff_ordinal += 1;
                     }
                     ToolCallContentInfo::Other => {}
                 }
             }
             if !locations.is_empty() {
                 body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
-                    locations.iter().map(|location| {
+                    locations.iter().enumerate().map(|(index, location)| {
                         let label = match location.line {
                             Some(line) => format!("{}:{line}", location.path.display()),
                             None => location.path.display().to_string(),
                         };
+                        let open_path = location.path.clone();
+                        let open_entity = entity.clone();
+                        let selector = format!(
+                            "subagent-tool-call-location-{task_index}-{child_index}-{index}"
+                        );
+                        let element_id = selector.clone();
                         div()
+                            .id(SharedString::from(element_id))
+                            .debug_selector(move || selector.clone())
                             .text_size(typography.footnote)
-                            .text_color(colors.meta)
+                            .text_color(colors.accent)
+                            .cursor(CursorStyle::PointingHand)
+                            .hover(|style| style.text_color(colors.title))
+                            .on_click(move |_, _, cx| {
+                                open_entity.update(cx, |_, cx| {
+                                    cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                                });
+                            })
                             .child(label)
                     }),
                 ));
@@ -5028,6 +5166,7 @@ impl Chat {
     /// the single-entry render path and by `render_tool_call_group`'s
     /// expanded view, so a run's members look identical whether they are
     /// standing alone or inside a group.
+    #[allow(clippy::too_many_arguments)]
     fn render_tool_call_card(
         entry_index: usize,
         title: String,
@@ -5037,12 +5176,18 @@ impl Chat {
         locations: Vec<ToolCallLocationInfo>,
         expanded: bool,
         edit_summary: Option<EditSummaryState>,
+        source_start: usize,
+        interaction: TranscriptInteraction,
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
         let colors = theme.colors;
         let typography = theme.typography;
         let toggle_entity = entity.clone();
+        // F-CHAT-31: the same projection `Entry::plain_text` contributes to
+        // the transcript, so every diff row drawn below can name its own
+        // offset in the global selection coordinate space.
+        let plain = tool_call_plain_text(&title, &status, &content, &locations);
         let header = div()
             .id(("tool-call-toggle", entry_index))
             .debug_selector(move || format!("tool-call-toggle-{entry_index}"))
@@ -5104,29 +5249,67 @@ impl Chat {
                 .gap(px(6.0))
                 .px(px(CARD_H_PADDING))
                 .pb(px(CARD_V_PADDING));
+            let mut diff_ordinal = 0usize;
             for item in &content {
                 match item {
                     ToolCallContentInfo::Text(text) => {
                         body = body.child(Self::render_tool_output_text(text, theme));
                     }
                     ToolCallContentInfo::Diff(diff) => {
-                        body = body.child(Self::render_tool_diff(diff, theme));
+                        let drawn = diff_preview_lines(diff.old_text.as_deref(), &diff.new_text)
+                            .len()
+                            .min(DIFF_PREVIEW_MAX_LINES);
+                        body = body.child(Self::render_tool_diff(
+                            diff,
+                            theme,
+                            DiffPreviewContext {
+                                id_prefix: format!("tool-diff-{entry_index}-{diff_ordinal}"),
+                                entity: entity.clone(),
+                                selection: Some(DiffPreviewSelection {
+                                    interaction: interaction.clone(),
+                                    line_starts: plain.diff_line_starts(
+                                        diff_ordinal,
+                                        source_start,
+                                        drawn,
+                                    ),
+                                }),
+                            },
+                        ));
+                        diff_ordinal += 1;
                     }
                     ToolCallContentInfo::Other => {}
                 }
             }
             if !locations.is_empty() {
+                // F-CHAT-23: a location is a *link*, not a label. Swift makes
+                // each one a `Button { appModel.openFileReference(...) }`;
+                // the equivalent here is the same `ChatEvent::OpenFile` the
+                // edit-summary card already opens an editor tab with, so
+                // there is one door into the file, not two.
                 body = body.child(div().flex().flex_wrap().gap(px(8.0)).children(
-                    locations.iter().map(|location| {
+                    locations.iter().enumerate().map(|(index, location)| {
                         let label = match location.line {
                             Some(line) => {
                                 format!("{}:{line}", location.path.display())
                             }
                             None => location.path.display().to_string(),
                         };
+                        let open_path = location.path.clone();
+                        let open_entity = entity.clone();
+                        let selector = format!("tool-call-location-{entry_index}-{index}");
+                        let element_id = selector.clone();
                         div()
+                            .id(SharedString::from(element_id))
+                            .debug_selector(move || selector.clone())
                             .text_size(typography.footnote)
-                            .text_color(colors.meta)
+                            .text_color(colors.accent)
+                            .cursor(CursorStyle::PointingHand)
+                            .hover(|style| style.text_color(colors.title))
+                            .on_click(move |_, _, cx| {
+                                open_entity.update(cx, |_, cx| {
+                                    cx.emit(ChatEvent::OpenFile(open_path.clone()));
+                                });
+                            })
                             .child(label)
                     }),
                 ));
@@ -5152,6 +5335,56 @@ impl Chat {
         card.into_any_element()
     }
 
+    /// F-CHAT-22, turn half: the single row an older turn collapses to.
+    ///
+    /// Swift's `TurnFoldRow` — a chevron, `Turn: <label>`, the turn's clock
+    /// time pushed to the right, on a quiet rounded plate — and, as there,
+    /// the whole row is the control: clicking anywhere on it re-opens the
+    /// turn in place.
+    fn render_turn_fold_row(
+        turn_id: usize,
+        label: String,
+        at: String,
+        theme: &Theme,
+        entity: gpui::Entity<Self>,
+    ) -> AnyElement {
+        let colors = theme.colors;
+        let typography = theme.typography;
+        div()
+            .id(("turn-fold", turn_id))
+            .debug_selector(move || format!("turn-fold-{turn_id}"))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(theme.radii.code_block)
+            .bg(colors.raised)
+            .cursor(CursorStyle::PointingHand)
+            .hover(|style| style.bg(colors.chat_row_hover))
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |chat, cx| {
+                    chat.toggle_turn_unfolded(turn_id, cx);
+                });
+            })
+            .child(IconElement::new(Icon::ChevronRight, px(10.0)).text_color(colors.meta))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(typography.footnote)
+                    .text_color(colors.subtitle)
+                    .child(format!("Turn: {label}")),
+            )
+            .child(
+                div()
+                    .text_size(typography.caption2)
+                    .text_color(colors.meta)
+                    .child(at),
+            )
+            .into_any_element()
+    }
+
     /// F-CHAT-22: a consecutive run of tool calls, collapsed by default to
     /// one "N steps" header. `members` is every entry in the run in order;
     /// `group_index` is the run's last entry, the only index the transcript
@@ -5162,9 +5395,10 @@ impl Chat {
     /// would standing alone, keyed by its own transcript index so its own
     /// F-CHAT-23 detail toggle still works independently.
     fn render_tool_call_group(
-        members: Vec<(usize, Entry)>,
+        members: Vec<(usize, usize, Entry)>,
         group_index: usize,
         group_expanded: bool,
+        transcript_focus: FocusHandle,
         theme: &Theme,
         entity: gpui::Entity<Self>,
     ) -> AnyElement {
@@ -5207,7 +5441,7 @@ impl Chat {
             });
         let mut column = div().w_full().flex().flex_col().gap(px(2.0)).child(header);
         if group_expanded {
-            for (member_index, member) in members {
+            for (member_index, member_source_start, member) in members {
                 if let Entry::ToolCall {
                     title,
                     status,
@@ -5227,13 +5461,20 @@ impl Chat {
                         locations,
                         expanded,
                         None,
+                        member_source_start,
+                        TranscriptInteraction {
+                            chat: entity.clone(),
+                            focus: transcript_focus.clone(),
+                            entry_index: Some(member_index),
+                            copied_target: None,
+                        },
                         theme,
                         entity.clone(),
                     ));
                 }
             }
         } else {
-            for (_, member) in members {
+            for (_, _, member) in members {
                 if let Entry::ToolCall { title, status, .. } = member {
                     column = column.child(
                         div()
@@ -6692,6 +6933,10 @@ impl Render for Chat {
         let entity = cx.entity();
         let entity_for_bar = entity.clone();
         let transcript_ranges = self.transcript_entry_ranges();
+        // F-CHAT-22, turn half: resolved once per frame, not once per drawn
+        // row — segmenting the transcript is O(entries), and the virtualizer
+        // calls its row processor separately for every visible index.
+        let turn_roles = turn_row_roles(&self.entries, &self.unfolded_turns);
         let transcript_focus = self.transcript_focus.clone();
         let question_answer = self.question_answer.clone();
         // F-CHAT-13: captured once per render, same as Swift's `canAcceptDrop`
@@ -6746,6 +6991,85 @@ impl Render for Chat {
                         list(
                             self.list_state.clone(),
                             cx.processor(move |this, entry_index: usize, _window, _cx| {
+                                // F-CHAT-22, turn half: an older turn stands
+                                // in for itself with one row. Resolved before
+                                // the tool-call grouping below, because a
+                                // folded turn hides its tool calls too.
+                                match turn_roles
+                                    .get(entry_index)
+                                    .cloned()
+                                    .unwrap_or(TurnRowRole::Normal)
+                                {
+                                    TurnRowRole::Hidden => {
+                                        return div()
+                                            .id(("chat-entry", entry_index))
+                                            .into_any_element();
+                                    }
+                                    TurnRowRole::Fold { turn_id, label, at } => {
+                                        return div()
+                                            .id(("chat-entry", entry_index))
+                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .pb(px(8.0))
+                                            .child(Chat::render_turn_fold_row(
+                                                turn_id,
+                                                label,
+                                                at,
+                                                &transcript_theme,
+                                                entity.clone(),
+                                            ))
+                                            .into_any_element();
+                                    }
+                                    // The footer of an unfolded older turn
+                                    // keeps its hairline-and-timestamp look
+                                    // and becomes the way back: the clause is
+                                    // "expand *and collapse*", and a fold the
+                                    // reader can only ever open once is a
+                                    // one-way door.
+                                    TurnRowRole::Refoldable { turn_id } => {
+                                        let refold_entity = entity.clone();
+                                        let source_start = transcript_ranges
+                                            .get(entry_index)
+                                            .map(|range| range.start)
+                                            .unwrap_or(0);
+                                        return div()
+                                            .id(("chat-entry", entry_index))
+                                            .w(px(TRANSCRIPT_WIDTH))
+                                            .pb(px(8.0))
+                                            .child(
+                                                div()
+                                                    .id(("turn-refold", turn_id))
+                                                    .debug_selector(move || {
+                                                        format!("turn-refold-{turn_id}")
+                                                    })
+                                                    .w_full()
+                                                    .cursor(CursorStyle::PointingHand)
+                                                    .on_click(move |_, _, cx| {
+                                                        refold_entity.update(cx, |chat, cx| {
+                                                            chat.toggle_turn_unfolded(turn_id, cx);
+                                                        });
+                                                    })
+                                                    .children(
+                                                        this.entries.get(entry_index).cloned().map(
+                                                            |entry| {
+                                                                Chat::render_entry(
+                                                                    entry,
+                                                                    entry_index,
+                                                                    &transcript_theme,
+                                                                    entity.clone(),
+                                                                    transcript_focus.clone(),
+                                                                    source_start,
+                                                                    &question_answer,
+                                                                    this.copied_target.clone(),
+                                                                    None,
+                                                                )
+                                                            },
+                                                        ),
+                                                    ),
+                                            )
+                                            .into_any_element();
+                                    }
+                                    TurnRowRole::Normal => {}
+                                }
                                 // F-CHAT-22: a run of consecutive tool calls
                                 // renders as one group, keyed to the run's
                                 // last index. Every other index in that run
@@ -6760,12 +7084,15 @@ impl Render for Chat {
                                             .id(("chat-entry", entry_index))
                                             .into_any_element();
                                     }
-                                    let members: Vec<(usize, Entry)> = (start..=end)
+                                    let members: Vec<(usize, usize, Entry)> = (start..=end)
                                         .filter_map(|index| {
-                                            this.entries
-                                                .get(index)
-                                                .cloned()
-                                                .map(|entry| (index, entry))
+                                            this.entries.get(index).cloned().map(|entry| {
+                                                let source_start = transcript_ranges
+                                                    .get(index)
+                                                    .map(|range| range.start)
+                                                    .unwrap_or(0);
+                                                (index, source_start, entry)
+                                            })
                                         })
                                         .collect();
                                     let group_expanded = matches!(
@@ -6783,6 +7110,7 @@ impl Render for Chat {
                                             members,
                                             end,
                                             group_expanded,
+                                            transcript_focus.clone(),
                                             &transcript_theme,
                                             entity.clone(),
                                         ))
@@ -7195,6 +7523,145 @@ fn tool_call_run_bounds(entries: &[Entry], index: usize) -> Option<(usize, usize
     (end > start).then_some((start, end))
 }
 
+/// F-CHAT-22, turn half: how many of the most recent turns stay open. Swift's
+/// `TimelineBuilder.openTurnCount` — "current + previous".
+const OPEN_TURN_COUNT: usize = 2;
+
+/// F-CHAT-22: the fold row's label is the turn's opening question, clipped.
+/// Swift's `Turn.label` takes `String(line.prefix(60))`.
+const TURN_LABEL_MAX_CHARS: usize = 60;
+
+/// F-CHAT-22: one segmented turn — the contiguous entries between two turn
+/// footers. `footer` is `None` for the trailing, still-open turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TurnSegment {
+    start: usize,
+    end: usize,
+    footer: Option<usize>,
+}
+
+impl TurnSegment {
+    /// Swift's `!turn.items.isEmpty`: a turn whose only entry is its own
+    /// footer has nothing to fold away.
+    fn has_body(&self) -> bool {
+        self.footer != Some(self.start)
+    }
+}
+
+/// Splits the transcript into turns at each [`Entry::TurnFooter`], the way
+/// Swift's `TimelineBuilder.segment` splits at each `.turnDivider`. The
+/// footer belongs to the turn it closes; a trailing run with no footer is
+/// the open turn, and is only recorded when it actually has entries.
+fn segment_turns(entries: &[Entry]) -> Vec<TurnSegment> {
+    let mut turns = Vec::new();
+    let mut start = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        if matches!(entry, Entry::TurnFooter(_)) {
+            turns.push(TurnSegment {
+                start,
+                end: index,
+                footer: Some(index),
+            });
+            start = index + 1;
+        }
+    }
+    if start < entries.len() {
+        turns.push(TurnSegment {
+            start,
+            end: entries.len() - 1,
+            footer: None,
+        });
+    }
+    turns
+}
+
+/// F-CHAT-22's fold POLICY, transcribed from `TimelineBuilder.rows`:
+///
+/// ```swift
+/// let isFoldable = index < turns.count - openTurnCount
+///     && turn.divider != nil && !turn.items.isEmpty
+/// ```
+///
+/// A turn folds when it is *closed* (it has a footer — a turn still being
+/// answered is never taken away from the reader), when it has a body worth
+/// hiding, and when at least `OPEN_TURN_COUNT` newer turns exist. The
+/// current turn and the one before it therefore always stay open, and a
+/// turn folds by itself the moment a second newer turn closes — nothing
+/// folds on a timer or on scrolling away.
+///
+/// Written as `position + OPEN_TURN_COUNT < turns.len()` rather than Swift's
+/// subtraction because `turns.len() - 2` underflows on `usize` for a
+/// transcript with fewer than two turns.
+fn turn_is_foldable(turns: &[TurnSegment], position: usize) -> bool {
+    turns.get(position).is_some_and(|turn| {
+        turn.footer.is_some() && turn.has_body() && position + OPEN_TURN_COUNT < turns.len()
+    })
+}
+
+/// The fold row's label: the first line of the turn's first user message,
+/// clipped to [`TURN_LABEL_MAX_CHARS`]. Swift's `Turn.label`, including its
+/// `"Turn"` fallback for a turn that opened without one.
+fn turn_label(entries: &[Entry], turn: &TurnSegment) -> String {
+    for index in turn.start..=turn.end {
+        if let Some(Entry::User(text)) = entries.get(index) {
+            let line = text.lines().next().unwrap_or(text.as_str());
+            return line.chars().take(TURN_LABEL_MAX_CHARS).collect();
+        }
+    }
+    "Turn".to_string()
+}
+
+/// F-CHAT-22: what the virtualized transcript list should draw at one entry
+/// index once turn folding is applied.
+///
+/// The list keeps exactly one row per entry, so a folded turn cannot delete
+/// rows; it draws its stand-in at the turn's first index and reports every
+/// other index as [`Self::Hidden`] — the same trick the tool-call group
+/// already uses for a run's non-tail members.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TurnRowRole {
+    Normal,
+    Hidden,
+    /// The collapsed stand-in for a whole turn. `turn_id` is the turn's
+    /// footer index, its identity in `unfolded_turns`.
+    Fold {
+        turn_id: usize,
+        label: String,
+        at: String,
+    },
+    /// The footer of a foldable turn the reader has unfolded: clicking it
+    /// folds the turn back up.
+    Refoldable {
+        turn_id: usize,
+    },
+}
+
+/// One [`TurnRowRole`] per entry, computed once per frame.
+fn turn_row_roles(entries: &[Entry], unfolded: &BTreeSet<usize>) -> Vec<TurnRowRole> {
+    let turns = segment_turns(entries);
+    let mut roles = vec![TurnRowRole::Normal; entries.len()];
+    for (position, turn) in turns.iter().enumerate() {
+        if !turn_is_foldable(&turns, position) {
+            continue;
+        }
+        let turn_id = turn.end;
+        if unfolded.contains(&turn_id) {
+            roles[turn_id] = TurnRowRole::Refoldable { turn_id };
+            continue;
+        }
+        let label = turn_label(entries, turn);
+        let at = match entries.get(turn_id) {
+            Some(Entry::TurnFooter(text)) => text.clone(),
+            _ => String::new(),
+        };
+        for role in &mut roles[turn.start..=turn.end] {
+            *role = TurnRowRole::Hidden;
+        }
+        roles[turn.start] = TurnRowRole::Fold { turn_id, label, at };
+    }
+    roles
+}
+
 /// F-CHAT-23: caps a tool call's rendered text output. Kept as the tail
 /// rather than the head — a long run's result or error is usually at the
 /// end, not the start.
@@ -7211,16 +7678,140 @@ fn truncate_tool_output(text: &str) -> (String, bool) {
 }
 
 /// F-CHAT-31: one line of a diff preview.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// `number` is the line's position in the file it belongs to — the *new*
+/// file for context and added lines, the *old* file for removed ones —
+/// exactly as Swift's `ChatDiffPreviewRow.lineNumber` is assigned
+/// (`newIndex + 1` / `oldIndex + 1`) before `ChatDiffPreviewView.row` prints
+/// it with `String(format: "%3d", …)`. Without it a reader has no way to
+/// say *where* in the file a proposed change lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum DiffLine {
-    Context(String),
-    Removed(String),
-    Added(String),
+    Context { number: usize, text: String },
+    Removed { number: usize, text: String },
+    Added { number: usize, text: String },
+}
+
+impl DiffLine {
+    fn number(&self) -> usize {
+        match self {
+            Self::Context { number, .. }
+            | Self::Removed { number, .. }
+            | Self::Added { number, .. } => *number,
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Self::Context { text, .. } | Self::Removed { text, .. } | Self::Added { text, .. } => {
+                text
+            }
+        }
+    }
 }
 
 /// Caps the number of diff lines rendered in the transcript; a full-file
 /// rewrite should not make the transcript unusable.
 const DIFF_PREVIEW_MAX_LINES: usize = 60;
+
+/// Width of a diff preview's line-number gutter. Swift reserves 30pt for a
+/// `%3d` field plus 8pt of trailing padding; four digits is the realistic
+/// worst case in a file this preview would ever show.
+const DIFF_GUTTER_WIDTH: f32 = 34.0;
+
+/// Everything a drawn diff preview needs beyond the diff itself (F-CHAT-31).
+struct DiffPreviewContext {
+    /// Stable prefix for this preview's interactive element ids, unique
+    /// across the transcript so two previews never collide.
+    id_prefix: String,
+    /// The chat the header's open-file click emits through.
+    entity: Entity<Chat>,
+    /// `Some` when this diff belongs to a top-level transcript entry, whose
+    /// [`ToolCallPlainText`] projection defines the selection coordinate
+    /// space its rows live in. The nested subagent card passes `None`: its
+    /// entry's `plain_text` arm lists only child titles and statuses, so
+    /// there is no honest offset to anchor a selection at, and inventing one
+    /// would make Ctrl+C copy text that is not what the highlight covers.
+    selection: Option<DiffPreviewSelection>,
+}
+
+struct DiffPreviewSelection {
+    interaction: TranscriptInteraction,
+    /// Absolute transcript offset of each drawn preview line, in order.
+    line_starts: Vec<usize>,
+}
+
+/// The plain-text projection of one tool-call entry, kept as lines rather
+/// than one string so a caller can address a single line inside it.
+///
+/// [`Entry::plain_text`] joins these with `"\n"` to contribute this entry's
+/// slice of the transcript's global selection coordinate space, and
+/// [`Chat::render_tool_diff`] reads `diff_starts` to anchor each *drawn*
+/// diff row in that same space (F-CHAT-31). One producer for both is the
+/// whole point: a selection highlight painted over a diff row and the text
+/// `selected_transcript_text` copies for that highlight cannot drift apart
+/// if neither side is allowed its own idea of what the text is.
+struct ToolCallPlainText {
+    lines: Vec<String>,
+    /// Index into `lines` of the first *preview* line (i.e. past the
+    /// `diff: <path>` header line) of each diff, in `content` order.
+    diff_starts: Vec<usize>,
+}
+
+impl ToolCallPlainText {
+    fn text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// Byte offset of `lines[index]` within [`Self::text`].
+    fn offset_of(&self, index: usize) -> usize {
+        self.lines[..index.min(self.lines.len())]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum()
+    }
+
+    /// Absolute transcript offsets of the `ordinal`-th diff's drawn preview
+    /// lines, given where this entry starts in the transcript.
+    fn diff_line_starts(&self, ordinal: usize, entry_start: usize, count: usize) -> Vec<usize> {
+        let Some(first) = self.diff_starts.get(ordinal).copied() else {
+            return Vec::new();
+        };
+        (0..count)
+            .map(|offset| entry_start + self.offset_of(first + offset))
+            .collect()
+    }
+}
+
+fn tool_call_plain_text(
+    title: &str,
+    status: &str,
+    content: &[ToolCallContentInfo],
+    locations: &[ToolCallLocationInfo],
+) -> ToolCallPlainText {
+    let mut lines = vec![format!("{title}\n{status}")];
+    let mut diff_starts = Vec::new();
+    for item in content {
+        match item {
+            ToolCallContentInfo::Text(text) => lines.push(text.clone()),
+            ToolCallContentInfo::Diff(diff) => {
+                lines.push(format!("diff: {}", diff.path.to_string_lossy()));
+                diff_starts.push(lines.len());
+                lines.extend(
+                    diff_preview_lines(diff.old_text.as_deref(), &diff.new_text)
+                        .into_iter()
+                        .take(DIFF_PREVIEW_MAX_LINES)
+                        .map(|line| line.text().to_string()),
+                );
+            }
+            ToolCallContentInfo::Other => {}
+        }
+    }
+    for location in locations {
+        lines.push(location.path.to_string_lossy().into_owned());
+    }
+    ToolCallPlainText { lines, diff_starts }
+}
 
 /// Builds a readable diff preview without a full LCS diff: matching lines
 /// stay in context, a mismatch emits the old line then the new line at the
@@ -7236,16 +7827,25 @@ fn diff_preview_lines(old_text: Option<&str>, new_text: &str) -> Vec<DiffLine> {
             && new_index < new_lines.len()
             && old_lines[old_index] == new_lines[new_index]
         {
-            rows.push(DiffLine::Context(old_lines[old_index].clone()));
+            rows.push(DiffLine::Context {
+                number: new_index + 1,
+                text: old_lines[old_index].clone(),
+            });
             old_index += 1;
             new_index += 1;
         } else {
             if old_index < old_lines.len() {
-                rows.push(DiffLine::Removed(old_lines[old_index].clone()));
+                rows.push(DiffLine::Removed {
+                    number: old_index + 1,
+                    text: old_lines[old_index].clone(),
+                });
                 old_index += 1;
             }
             if new_index < new_lines.len() {
-                rows.push(DiffLine::Added(new_lines[new_index].clone()));
+                rows.push(DiffLine::Added {
+                    number: new_index + 1,
+                    text: new_lines[new_index].clone(),
+                });
                 new_index += 1;
             }
         }
@@ -9115,11 +9715,26 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                DiffLine::Context("one".into()),
-                DiffLine::Removed("two".into()),
-                DiffLine::Added("TWO".into()),
-                DiffLine::Context("three".into()),
-                DiffLine::Added("four".into()),
+                DiffLine::Context {
+                    number: 1,
+                    text: "one".into()
+                },
+                DiffLine::Removed {
+                    number: 2,
+                    text: "two".into()
+                },
+                DiffLine::Added {
+                    number: 2,
+                    text: "TWO".into()
+                },
+                DiffLine::Context {
+                    number: 3,
+                    text: "three".into()
+                },
+                DiffLine::Added {
+                    number: 4,
+                    text: "four".into()
+                },
             ]
         );
     }
@@ -9127,7 +9742,43 @@ mod tests {
     #[test]
     fn diff_preview_lines_treats_a_missing_old_text_as_a_pure_addition() {
         let rows = diff_preview_lines(None, "brand new\n");
-        assert_eq!(rows, vec![DiffLine::Added("brand new".into())]);
+        assert_eq!(
+            rows,
+            vec![DiffLine::Added {
+                number: 1,
+                text: "brand new".into()
+            }]
+        );
+    }
+
+    /// F-CHAT-31: the numbers a reader uses to find the change in the file.
+    /// A removed line carries its position in the *old* file and the added
+    /// line replacing it carries its position in the *new* one — the same
+    /// pair Swift's `ChatDiffPreviewModel.rows` assigns from `oldIndex` and
+    /// `newIndex`, which is why both read `2` for a one-line replacement
+    /// while a line inserted later shifts only the new side.
+    #[test]
+    fn diff_preview_lines_number_each_side_against_its_own_file() {
+        let rows = diff_preview_lines(Some("a\nb\nc\n"), "a\nB\nc\nd\n");
+        assert_eq!(
+            rows.iter().map(DiffLine::number).collect::<Vec<_>>(),
+            vec![1, 2, 2, 3, 4]
+        );
+
+        // A pure insertion in the middle: the new side advances past the old.
+        let inserted = diff_preview_lines(Some("a\nc\n"), "a\nb\nc\n");
+        assert_eq!(
+            inserted
+                .iter()
+                .map(|line| (line.number(), line.text().to_string()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "a".to_string()),
+                (2, "c".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string()),
+            ]
+        );
     }
 
     fn test_tool_call(id: &str) -> Entry {
@@ -10886,5 +11537,400 @@ mod tests {
             "the comment line should highlight as a comment"
         );
         assert!(saw_keyword, "if/then/fi should highlight as keywords");
+    }
+
+    // ---------------------------------------------------------------
+    // F-CHAT-22 (turn half), F-CHAT-23 (locations), F-CHAT-31 (diff)
+    // ---------------------------------------------------------------
+
+    /// The fold POLICY, transcribed from Swift's `TimelineBuilder`: the two
+    /// most recent turns stay open, a turn still being answered is never
+    /// folded, and a turn with nothing but its own footer has nothing to
+    /// fold. Mirrors `olderTurnsFoldKeepingLastTwoOpen`.
+    #[test]
+    fn only_turns_older_than_the_last_two_fold() {
+        let entries = vec![
+            Entry::User("first question".into()),
+            Entry::TurnFooter("10:00".into()),
+            Entry::User("second question".into()),
+            Entry::TurnFooter("10:01".into()),
+            Entry::User("third question".into()),
+            Entry::TurnFooter("10:02".into()),
+            Entry::User("fourth question".into()),
+        ];
+        let turns = segment_turns(&entries);
+        assert_eq!(turns.len(), 4, "three closed turns plus the open one");
+        let foldable = (0..turns.len())
+            .filter(|position| turn_is_foldable(&turns, *position))
+            .collect::<Vec<_>>();
+        assert_eq!(foldable, vec![0, 1], "the last two turns stay open");
+        assert_eq!(turns[3].footer, None, "the trailing turn is still open");
+    }
+
+    /// A transcript with only one or two turns folds nothing — and, because
+    /// Swift's `turns.count - openTurnCount` is a `usize` subtraction here,
+    /// this is also the case that would panic on underflow if the comparison
+    /// were transcribed literally.
+    #[test]
+    fn a_short_transcript_folds_nothing_and_does_not_underflow() {
+        for count in 0..=2usize {
+            let mut entries = Vec::new();
+            for index in 0..count {
+                entries.push(Entry::User(format!("question {index}")));
+                entries.push(Entry::TurnFooter(format!("10:0{index}")));
+            }
+            let turns = segment_turns(&entries);
+            assert!(
+                (0..turns.len()).all(|position| !turn_is_foldable(&turns, position)),
+                "nothing folds with {count} closed turns"
+            );
+        }
+    }
+
+    /// Swift's `Turn.label`: the first line of the turn's first user
+    /// message, clipped to 60 characters, with a `"Turn"` fallback.
+    #[test]
+    fn a_fold_row_is_labelled_by_the_question_that_opened_the_turn() {
+        let entries = vec![
+            Entry::Assistant {
+                text: "leading note".into(),
+                document: parse("leading note"),
+            },
+            Entry::User("what does this do?\nsecond line".into()),
+            Entry::TurnFooter("10:00".into()),
+        ];
+        let turns = segment_turns(&entries);
+        assert_eq!(turn_label(&entries, &turns[0]), "what does this do?");
+
+        let long = "x".repeat(100);
+        let entries = vec![Entry::User(long), Entry::TurnFooter("10:00".into())];
+        let turns = segment_turns(&entries);
+        assert_eq!(turn_label(&entries, &turns[0]).chars().count(), 60);
+
+        let entries = vec![
+            Entry::Assistant {
+                text: "no question here".into(),
+                document: parse("no question here"),
+            },
+            Entry::TurnFooter("10:00".into()),
+        ];
+        let turns = segment_turns(&entries);
+        assert_eq!(turn_label(&entries, &turns[0]), "Turn");
+    }
+
+    /// F-CHAT-22, turn half, driven: a folded turn draws exactly one row in
+    /// place of its whole body, a real click on that row puts the body back,
+    /// and a real click on the re-exposed footer folds it again — without
+    /// moving the rows below it.
+    #[gpui::test]
+    async fn a_real_click_unfolds_an_older_turn_and_folds_it_back(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            // 0..=2 first turn, 3..=4 second, 5..=6 third, 7 still open.
+            chat.push_entry(Entry::User("first question".into()));
+            chat.push_entry(test_tool_call("step-one"));
+            chat.push_entry(Entry::TurnFooter("10:00".into()));
+            chat.push_entry(Entry::User("second question".into()));
+            chat.push_entry(Entry::TurnFooter("10:01".into()));
+            chat.push_entry(Entry::User("third question".into()));
+            chat.push_entry(Entry::TurnFooter("10:02".into()));
+            chat.push_entry(Entry::User("fourth question".into()));
+            chat
+        });
+        refresh_frame(cx);
+
+        let fold = cx
+            .debug_bounds("turn-fold-2")
+            .expect("the oldest turn draws its collapsed stand-in row");
+        assert!(
+            cx.debug_bounds("turn-fold-4").is_some(),
+            "so does the second-oldest"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-1").is_none(),
+            "and the folded turn's contents are not drawn at all"
+        );
+        let settled_below = cx
+            .debug_bounds("turn-fold-4")
+            .expect("second fold row is drawn");
+
+        cx.simulate_click(fold.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("tool-call-toggle-1").is_some(),
+            "a click on the fold row re-opens the turn in place"
+        );
+        assert!(
+            cx.debug_bounds("turn-fold-2").is_none(),
+            "and the stand-in row gives way to the real contents"
+        );
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat
+                .unfolded_turns
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()),
+            vec![2],
+            "the reopened turn is recorded by its footer index, the way \
+             Swift records `divider.id` in `unfoldedTurns`"
+        );
+        let refold = cx
+            .debug_bounds("turn-refold-2")
+            .expect("the re-opened turn's footer is the way back");
+
+        cx.simulate_click(refold.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("turn-fold-2").is_some(),
+            "clicking the footer folds the turn back up"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-1").is_none(),
+            "and its contents are hidden again"
+        );
+        assert_eq!(
+            cx.debug_bounds("turn-fold-4").map(|bounds| bounds.origin),
+            Some(settled_below.origin),
+            "an unfold/refold cycle leaves everything below it exactly where \
+             it was -- a fold that scrolls the transcript out from under the \
+             reader fails the clause as surely as one that cannot re-open"
+        );
+    }
+
+    /// F-CHAT-23: a tool call's location is a control that opens the file,
+    /// not a label that looks like one. Swift makes each one a
+    /// `Button { appModel.openFileReference(...) }`.
+    #[gpui::test]
+    async fn a_real_click_on_a_tool_call_location_opens_the_file(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::ToolCall {
+                id: "read".into(),
+                title: "Read lib.rs".into(),
+                status: "Completed".into(),
+                kind: "Read".into(),
+                content: vec![],
+                locations: vec![
+                    ToolCallLocationInfo {
+                        path: PathBuf::from("src/lib.rs"),
+                        line: Some(42),
+                    },
+                    ToolCallLocationInfo {
+                        path: PathBuf::from("src/other.rs"),
+                        line: None,
+                    },
+                ],
+                raw_input: None,
+                raw_output: None,
+                expanded: true,
+                group_expanded: false,
+            });
+            chat
+        });
+        let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let opened_events = opened.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                if let ChatEvent::OpenFile(path) = event {
+                    opened_events.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+        refresh_frame(cx);
+
+        let second = cx
+            .debug_bounds("tool-call-location-0-1")
+            .expect("a location with no line number is drawn too");
+        let first = cx
+            .debug_bounds("tool-call-location-0-0")
+            .expect("the location link is drawn");
+        cx.simulate_click(first.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_click(second.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [PathBuf::from("src/lib.rs"), PathBuf::from("src/other.rs")],
+            "each location opens its own file, not the card's first one"
+        );
+    }
+
+    /// F-CHAT-31: the diff preview's header path opens the file, its rows
+    /// carry line numbers, and a real drag across a row selects its text
+    /// through the transcript's own selection mechanism.
+    #[gpui::test]
+    async fn a_diff_preview_opens_its_file_and_its_rows_are_numbered_and_selectable(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(
+                AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                std::env::temp_dir(),
+                cx,
+            );
+            chat.push_entry(Entry::ToolCall {
+                id: "edit".into(),
+                title: "Edit lib.rs".into(),
+                status: "Completed".into(),
+                kind: "Edit".into(),
+                content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
+                    path: PathBuf::from("src/lib.rs"),
+                    old_text: Some("alpha\nbravo\n".into()),
+                    new_text: "alpha\nCHARLIE\n".into(),
+                })],
+                locations: vec![],
+                raw_input: None,
+                raw_output: None,
+                expanded: true,
+                group_expanded: false,
+            });
+            chat
+        });
+        let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let opened_events = opened.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                if let ChatEvent::OpenFile(path) = event {
+                    opened_events.borrow_mut().push(path.clone());
+                }
+            })
+            .detach();
+        });
+        refresh_frame(cx);
+
+        // Three rows: one context line, then the removed/added pair.
+        for selector in [
+            "tool-diff-0-0-number-0",
+            "tool-diff-0-0-number-1",
+            "tool-diff-0-0-number-2",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} draws a line-number gutter"
+            );
+        }
+        assert!(
+            cx.debug_bounds("tool-diff-0-0-number-3").is_none(),
+            "and only those three rows exist"
+        );
+
+        let header = cx
+            .debug_bounds("tool-diff-0-0-open")
+            .expect("the preview's header path is drawn");
+        cx.simulate_click(header.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            [PathBuf::from("src/lib.rs")],
+            "the diff preview's header path opens the file, as Swift's \
+             ChatDiffPreviewView header Button does"
+        );
+
+        // A real press-drag-release from the removed row into the added one,
+        // through the same TranscriptSelectableText element assistant prose
+        // uses. Crossing rows is the part that matters: it can only work if
+        // both rows are addressed in one transcript-wide coordinate space.
+        let from = cx
+            .debug_bounds("tool-diff-0-0-text-1")
+            .expect("the removed row's text is drawn");
+        let to = cx
+            .debug_bounds("tool-diff-0-0-text-2")
+            .expect("the added row's text is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: point(from.left() + px(1.0), from.center().y),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(to.left() + px(20.0), to.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: point(to.left() + px(20.0), to.center().y),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let selected = chat
+            .read_with(cx, |chat, _| chat.selected_transcript_text())
+            .expect("dragging across the diff selects text");
+        // How far into "CHARLIE" 20px lands depends on the measured glyph
+        // advance, which is not the claim; that the selection *crossed the
+        // row boundary at all* is, because only a shared transcript-wide
+        // coordinate space can express it.
+        assert!(
+            selected.starts_with("bravo\n") && selected.len() > "bravo\n".len(),
+            "the selection runs from the removed row into the added one, in \
+             one continuous transcript range -- so Ctrl+C copies exactly what \
+             the highlight covers; got {selected:?}"
+        );
+    }
+
+    /// F-CHAT-31: the projection `Entry::plain_text` publishes and the one
+    /// `render_tool_diff` anchors its rows in are the same object. If they
+    /// ever diverge a selection highlights one string and copies another.
+    #[test]
+    fn a_tool_call_diffs_rows_are_addressable_in_the_transcript_text() {
+        let entry = Entry::ToolCall {
+            id: "edit".into(),
+            title: "Edit lib.rs".into(),
+            status: "Completed".into(),
+            kind: "Edit".into(),
+            content: vec![ToolCallContentInfo::Diff(ToolCallDiff {
+                path: PathBuf::from("src/lib.rs"),
+                old_text: Some("alpha\nbravo\n".into()),
+                new_text: "alpha\nCHARLIE\n".into(),
+            })],
+            locations: vec![],
+            raw_input: None,
+            raw_output: None,
+            expanded: true,
+            group_expanded: false,
+        };
+        let Entry::ToolCall {
+            title,
+            status,
+            content,
+            locations,
+            ..
+        } = &entry
+        else {
+            unreachable!()
+        };
+        let plain = tool_call_plain_text(title, status, content, locations);
+        assert_eq!(plain.text(), entry.plain_text());
+        let starts = plain.diff_line_starts(0, 0, 3);
+        let text = plain.text();
+        assert_eq!(
+            starts
+                .iter()
+                .map(|start| text[*start..].lines().next().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo", "CHARLIE"],
+            "each drawn diff row can name its own offset in the transcript"
+        );
+        assert!(
+            text.contains("diff: src/lib.rs"),
+            "the diff still names its file in the copied transcript"
+        );
     }
 }
