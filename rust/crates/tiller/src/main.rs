@@ -5987,6 +5987,25 @@ impl TillerWorkspace {
         agent_icon: Option<Icon>,
         cx: &mut Context<Self>,
     ) {
+        self.add_terminal_tab_with_shell_and_agent(title, shell, agent_icon, None, cx);
+    }
+
+    /// Like `add_terminal_tab_with_shell`, but also threads the agent id
+    /// through to `insert_terminal_tab` so the very first `schedule_save`
+    /// snapshot already carries it. F-AGENT-OPENCODE-01: setting
+    /// `tab.agent_id` on the pushed tab *after* `insert_terminal_tab` has
+    /// already called `schedule_save(cx)` persists a layout snapshot with
+    /// `agent_id: None` — `layout(cx)` is computed eagerly at schedule time,
+    /// not lazily at write time, so a restart before any later save relaunches
+    /// the pane as plain shell instead of the agent command.
+    fn add_terminal_tab_with_shell_and_agent(
+        &mut self,
+        title: impl Into<String>,
+        shell: TerminalShell,
+        agent_icon: Option<Icon>,
+        agent_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let working_directory = self.working_directory.clone();
         let terminal = cx.new(
             |cx| match TerminalView::with_shell(&working_directory, shell, cx) {
@@ -6002,7 +6021,7 @@ impl TillerWorkspace {
                 ),
             },
         );
-        self.insert_terminal_tab(title, terminal, agent_icon, cx);
+        self.insert_terminal_tab_with_agent(title, terminal, agent_icon, agent_id, cx);
     }
 
     fn insert_terminal_tab(
@@ -6010,6 +6029,17 @@ impl TillerWorkspace {
         title: impl Into<String>,
         terminal: Entity<TerminalView>,
         agent_icon: Option<Icon>,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_terminal_tab_with_agent(title, terminal, agent_icon, None, cx);
+    }
+
+    fn insert_terminal_tab_with_agent(
+        &mut self,
+        title: impl Into<String>,
+        terminal: Entity<TerminalView>,
+        agent_icon: Option<Icon>,
+        agent_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let tab_id = self.next_tab_id;
@@ -6023,7 +6053,7 @@ impl TillerWorkspace {
             title: title.into(),
             kind: TabKind::Terminal,
             agent_icon,
-            agent_id: None,
+            agent_id,
             session_state: SessionTabState::with_root(pane_id),
             panes: PaneNode::leaf(pane_id, TabContent::Terminal { view: terminal }),
             focused_pane: pane_id,
@@ -6565,10 +6595,13 @@ impl TillerWorkspace {
         // A's entry point (a later `tillerctl notify` push updates it).
         self.activity
             .agent_spawned(&pane_id, adapter.id(), Instant::now());
-        self.add_terminal_tab_with_shell(adapter.display_name(), shell, Some(agent_icon), cx);
-        if let Some(tab) = self.tabs.last_mut() {
-            tab.agent_id = Some(adapter.id().to_string());
-        }
+        self.add_terminal_tab_with_shell_and_agent(
+            adapter.display_name(),
+            shell,
+            Some(agent_icon),
+            Some(adapter.id().to_string()),
+            cx,
+        );
         self.sync_activity(cx);
     }
 
@@ -15964,6 +15997,65 @@ mod tests {
             activity.status("pane-7"),
             None,
             "restore registers identity without claiming running"
+        );
+    }
+
+    #[gpui::test]
+    async fn add_agent_tab_persists_agent_id_in_its_very_first_save(cx: &mut TestAppContext) {
+        // F-AGENT-OPENCODE-01: add_agent_tab used to set `tab.agent_id` only
+        // *after* add_terminal_tab_with_shell (-> insert_terminal_tab) had
+        // already called schedule_save(cx) with an eagerly-computed
+        // layout(cx) snapshot -- layout() reads tab.agent_id at schedule
+        // time, not at write time, so the very first persisted row for a
+        // freshly-added agent tab always carried agent_id: None. A restart
+        // before any later save happened to fire relaunched the pane as
+        // plain shell instead of `opencode --session <ref>`. This proves the
+        // fix the same way the codex round-trip test below does: schedule,
+        // flush the debounced writer explicitly, then read the row back
+        // through session::restore exactly as a second launch would.
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let working_directory =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        let session_path = working_directory
+            .parent()
+            .expect("palette test workspace scratch root")
+            .join("tiller.sqlite");
+
+        let adapter = AGENT_CATALOG
+            .iter()
+            .find(|adapter| adapter.id() == "opencode")
+            .expect("opencode adapter is registered in the catalog");
+        let icon = Icon::for_agent_id(adapter.id()).expect("opencode has a brand icon");
+        let adapter_display_name = adapter.display_name().to_string();
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_agent_tab(*adapter, icon, cx);
+            // Flush the debounced writer now, capturing exactly the snapshot
+            // schedule_save took inside add_terminal_tab_with_shell --
+            // before this test's fix, that snapshot's agent_id was still None.
+            workspace.session.flush_now();
+        });
+        cx.run_until_parked();
+
+        let restored = session::restore(&session_path, &working_directory);
+        let agent_tab = restored
+            .tabs
+            .iter()
+            .find(|tab| tab.title == adapter_display_name)
+            .expect("the persisted layout must include the freshly-added agent tab");
+        assert_eq!(
+            agent_tab.agent_id.as_deref(),
+            Some("opencode"),
+            "the first save after add_agent_tab must already carry the agent id, \
+             or a restart before any later save relaunches the pane as plain shell"
         );
     }
 
