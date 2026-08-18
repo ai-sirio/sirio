@@ -22,4 +22,21 @@ disposable fixtures each row's per-row section names.
 
 ## Per-row results
 
-(filled in incrementally below, one row at a time, each followed by a commit)
+**F-SID-08** — PASSED (upgraded from half-proven). The prior evidence drove Initialize Git
+through the Project Settings sheet's button; the missing half — the sidebar row's own
+right-click context menu, which this clause/SRC names — was driven live this pass. Fixture:
+`/home/enzopalmisano/wf-sid2-nongit`, a plain folder with no `.git`, added via `project.add`.
+Right-clicked the `wf-sid2-nongit` project row: menu opened with **Project Settings /
+Initialize Git repository / Show in File Manager / Remove Project**
+(`reference/linux-progress/wf-sid2/f-sid-08-context-menu-open.png`). Clicked **Initialize Git
+repository**: the sidebar row gained a `master` worktree with a branch icon and Primary badge
+where before it only showed the bare folder path
+(`reference/linux-progress/wf-sid2/f-sid-08-after-initialize-git.png`). Hard discriminator: a
+real `.git` directory now exists on disk (`ls -la /home/enzopalmisano/wf-sid2-nongit/.git`) and
+`git -C /home/enzopalmisano/wf-sid2-nongit branch --show-current` prints `master` — not just a
+UI change, a genuine git init. Both arms of the clause's OR ("confirm the project changes to
+Git-backed behavior or shows the initialization error") are now covered: this row proves the
+success arm through the named entry point; the error arm was already covered elsewhere (not
+re-driven, not this row's missing half).
+
+(remaining rows filled in incrementally below, each followed by a commit)
