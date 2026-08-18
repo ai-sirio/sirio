@@ -70,4 +70,60 @@ of its worktree rows** (`rust/gpui-rewrite`, `linux/gpui-waku`, `wf-term-clean`,
 `/tmp`-rooted ones) — these are real linked worktrees of the actual repo this task runs in and
 other sibling agents' lanes, not fixtures.
 
+**F-SID-14** — FAILED - defective (downgraded from half-proven; this is a genuine app defect,
+not a re-proof gap). The prior evidence drove the empty-state "New Terminal" button; the missing
+half — the worktree context menu's New Terminal / agent-panel / New Chat trio, which this clause
+specifically names — was driven live this pass across three separate fixture worktrees
+(`wf-sid2-main`, `wf-sid2-decoy`, and an earlier one on `wf-sid2-nongit`). Right-click always
+opens a 9-item worktree menu at the same fixed screen position regardless of which row was
+clicked (Set/Unset Primary, New Terminal, Claude Code, Codex, OpenCode, Pi, Oh-My-Pi, New Chat,
+Remove Worktree — `reference/linux-progress/wf-sid2/f-sid-14-worktree-context-menu.png`).
+
+- **New Terminal**: right-clicked `wf-sid2-main`'s `master` worktree, clicked New Terminal — a
+  real terminal tab opened with the correct breadcrumb and shell cwd
+  (`reference/linux-progress/wf-sid2/f-sid-14-new-terminal-correct-worktree.png`); confirmed via
+  direct sqlite read that the new tab row's `worktree_id` genuinely equals
+  `wf-sid2-main`'s worktree id. **Correct.**
+- **New Chat**: right-clicked `wf-sid2-decoy`'s `master` worktree, clicked New Chat — a Chat tab
+  opened with the Files panel correctly showing `/home/enzopalmisano/wf-sid2-decoy`
+  (`reference/linux-progress/wf-sid2/f-sid-14-new-chat-and-corrupted-siblings.png`); its
+  `worktree_id` genuinely equals `wf-sid2-decoy`'s worktree id. **Correct.**
+- **Agent panel (Claude Code, and separately Codex)**: right-clicked `wf-sid2-main`'s `master`
+  worktree (confirmed by sidebar highlight and by the Files-panel/status-bar breadcrumb both
+  reading `wf-sid2-main` at click time) and clicked **Claude Code** — the tab that opened
+  reported **`Accessing workspace: /home/enzopalmisano/wf-sid2-nongit`**, a completely different
+  fixture's directory (`reference/linux-progress/wf-sid2/f-sid-14-claude-code-wrong-workspace.png`).
+  Reproduced twice more (once from a fresh process's very first interaction, once with **Codex**
+  instead of Claude Code from `wf-sid2-removeproj`'s own worktree before it was deleted) — every
+  agent-panel click from every tested worktree landed the CLI in `wf-sid2-nongit`, never the
+  right-clicked worktree. **Defective.**
+
+**Hard discriminator** (the CLI's own reported cwd, not just sidebar chrome) plus a direct sqlite
+proof that the stored `worktree_id` foreign key itself is wrong, not merely a rendering glitch:
+
+```
+sqlite> select id, worktree_id, kind, title from tab;
+p-05288b005dafa447-wt-0-tab-...-0 | p-a1de4dfcae803386-wt-0 | terminal | Codex
+p-be79d7b106999617-wt-0-tab-...-0 | p-be79d7b106999617-wt-0 | terminal | Terminal
+p-05288b005dafa447-wt-0-tab-...-1 | p-a1de4dfcae803386-wt-0 | terminal | Claude Code
+p-05288b005dafa447-wt-0-tab-...-2 | p-a1de4dfcae803386-wt-0 | terminal | Claude Code
+p-a1de4dfcae803386-wt-0-tab-...-3 | p-a1de4dfcae803386-wt-0 | chat     | Chat
+```
+
+Note the first three rows: their own `id` is namespaced under `p-05288b...` (`wf-sid2-nongit`,
+matching where each was actually rendered when it was created) but their `worktree_id` column —
+the actual foreign key the app renders from — reads `p-a1de4dfcae803386-wt-0` (`wf-sid2-decoy`,
+the LAST project touched by any worktree action at the time this snapshot was taken). Creating
+each new agent-panel tab appears to retroactively rewrite every earlier agent tab's
+`worktree_id` to whatever worktree most recently had an agent tab created on it, not just fail to
+target the row that was actually clicked. `New Terminal`'s and `New Chat`'s own rows never
+exhibit this — their `id` prefix and `worktree_id` agree with each other and with the
+right-clicked row every time.
+
+Two of the clause's three named entry points (New Terminal, New Chat) are proven correct through
+the exact context-menu path the clause names. The third (agent panel) is proven **broken**
+through that same path, with the CLI's own workspace-accessed line as the hard discriminator —
+this is not an evidence gap, it is a reproducible defect, so the row is `FAILED - defective`
+rather than `half-proven`.
+
 (remaining rows filled in incrementally below, each followed by a commit)
