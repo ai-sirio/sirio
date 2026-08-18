@@ -288,7 +288,30 @@ port's real, verified one-control design.
 
 ### F-TAB-24 — Cancel a pane-tab drag with Escape
 
-(continued below)
+**FAILED — absent.** Built a position→pane-id map for the tab strip (13 tabs open by this
+point in the shard) via the click-then-`panel.list` technique used elsewhere in this report.
+Started a drag on a known tab, moved the pointer through several intermediate steps toward a
+nearby tab, pressed `Escape` while still holding the button down, then released — and
+re-mapped the strip via `panel.list`. The dragged tab did **not** stay in its original slot
+and did **not** land where the pointer was released either: it ended up several slots further
+along the strip. Repeating the identical drag with no `Escape` at all produced the same kind
+of displaced landing, indistinguishable from the `Escape` run — the two are not
+distinguishable by outcome, which is itself the finding: `Escape` changed nothing about the
+result.
+
+Read from source, this is not a subtle race, it is the intended architecture doing exactly
+what it does: `preview_tab_reorder` (`rust/crates/tiller/src/main.rs:4185-4198`), wired to
+`.on_drag_move::<RowDrag>` on every tab div (`main.rs:8059-8064`), calls
+`reorder_tabs_by_id` — which directly `remove`s and re-`insert`s the real `self.tabs` vector
+— on **every single hover crossing while the drag is still in progress**, not once on drop.
+By the name "preview" this reads like a staged/undoable operation, but there is no staging:
+each hover over a new tab immediately and permanently mutates the live tab order and calls
+`schedule_save`. There is no snapshot of the pre-drag order kept anywhere near this code, and
+grepping this file for `Escape` turns up handlers for the settings surface and the tab-rename
+field, but nothing anywhere in the drag/reorder path. There is nothing for `Escape` to revert
+to and nothing that would revert it — the row's expected behavior (drag, then `Escape`,
+tab stays put) was never implemented, and the live repro (`Escape` and no-`Escape` producing
+the same outcome) is the direct, observable consequence of that absence, not a coincidence.
 
 ### F-TAB-25 — Attach an eligible pane to the current terminal
 
