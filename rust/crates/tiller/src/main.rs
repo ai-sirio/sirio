@@ -3030,6 +3030,18 @@ struct TillerWorkspace {
     palette_selected: usize,
     palette_focus: FocusHandle,
     palette_previous_focus: Option<FocusHandle>,
+    /// F-SID-19: GPUI's key dispatch falls back to the *true* window root
+    /// (above this workspace's own element tree, hence above every
+    /// `on_action`/`capture_key_down` registered on it) whenever nothing
+    /// holds keyboard focus -- so a global keybinding like `ctrl-t` is
+    /// silently unreachable, not merely unhandled, the moment focus has
+    /// nowhere live to land (e.g. a worktree with zero terminal tabs, whose
+    /// "No Terminals" placeholder has no focusable element of its own).
+    /// This handle gives the workspace root itself a permanent, always-
+    /// mounted focus target so `render` can reclaim focus whenever it goes
+    /// missing, keeping every root-level keybinding reachable regardless of
+    /// what surface is showing.
+    root_focus: FocusHandle,
     /// The single source of truth for agent lifecycle status. Every one of
     /// the sidebar dot, the tab checkmark, and the Activity row reads
     /// through this (or, for a chat pane, through `Chat`'s own state) —
@@ -3580,6 +3592,7 @@ impl TillerWorkspace {
             palette_selected: 0,
             palette_focus: cx.focus_handle(),
             palette_previous_focus: None,
+            root_focus: cx.focus_handle(),
             activity,
             restored_scrollback_scheduled: false,
             window_active: true,
@@ -10061,6 +10074,25 @@ impl Render for TillerWorkspace {
         // activity transitions) carry no `Window`. `render` does, every
         // frame, so the value is cached here for those to read.
         self.window_active = window.is_window_active();
+        // F-SID-19: if nothing at all holds keyboard focus this frame (e.g.
+        // the previously-focused surface -- a terminal, a sidebar row --
+        // was just unmounted, and nothing claimed focus in its place, as
+        // happens landing on a worktree with zero tabs), GPUI's key
+        // dispatch falls back to the true window root, which sits *above*
+        // every `on_action`/`capture_key_down` this workspace registers on
+        // its own root element. Every global keybinding (`ctrl-t` among
+        // them) then reaches nothing at all, silently. Reclaiming focus
+        // onto `root_focus` -- tracked on this same root element every
+        // frame, below, so it is always part of the frame this call is
+        // building -- keeps this workspace's own element tree always
+        // holding *some* live focus target, so those bindings stay
+        // reachable. Unlike `restore_focus_pending` below (which targets a
+        // handle -- the sidebar's -- that is not guaranteed to already be
+        // in this exact frame and so must wait a frame), `root_focus` is
+        // this element's own handle and needs no such deferral.
+        if window.focused(cx).is_none() {
+            window.focus(&self.root_focus, cx);
+        }
         // Fetched fresh every frame from the global, so a change of appearance
         // is picked up without the workspace holding a stale copy.
         let theme = *Theme::get(cx);
@@ -10083,6 +10115,7 @@ impl Render for TillerWorkspace {
                 .flex_col()
                 .size_full()
                 .bg(theme.canvas)
+                .track_focus(&self.root_focus)
                 .capture_key_down(cx.listener(Self::handle_root_key_down))
                 .on_action(cx.listener(Self::handle_close_settings_surface))
                 .child(
@@ -10116,6 +10149,7 @@ impl Render for TillerWorkspace {
             .flex_col()
             .size_full()
             .bg(theme.canvas)
+            .track_focus(&self.root_focus)
             .capture_key_down(cx.listener(Self::handle_root_key_down))
             .on_action(cx.listener(Self::handle_new_terminal_tab))
             .on_action(cx.listener(Self::handle_open_file))
@@ -16901,6 +16935,52 @@ mod tests {
             workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
             1,
             "New Terminal must replace the empty state with a terminal tab"
+        );
+    }
+
+    /// F-SID-19: `ctrl-t` (`WindowCommand::NewTerminalTab`) must reach the
+    /// workspace even when the "No Terminals" empty state holds no
+    /// focusable element of its own. GPUI's key dispatch falls back to the
+    /// true window root -- above every `on_action`/`capture_key_down` this
+    /// workspace registers on its own root element -- whenever nothing at
+    /// all holds focus, so this reproduces the live-drive finding: land on
+    /// a zero-tab worktree, drop focus the way an unmounted terminal would,
+    /// and confirm the global keybinding still creates a tab rather than
+    /// silently reaching nothing.
+    #[gpui::test]
+    async fn ctrl_t_from_the_empty_worktree_state_creates_a_terminal(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_tab_machinery();
+            cx.notify();
+        });
+        // Drop focus outright, the same way it goes missing in the live
+        // app: the terminal that used to hold it is gone from this frame,
+        // and nothing else has claimed it yet.
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("empty-worktree").is_some(),
+            "must land on the empty-worktree state before the chord is sent"
+        );
+
+        cx.simulate_keystrokes("ctrl-t");
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "ctrl-t must create a terminal tab from the empty-worktree state, \
+             the same as clicking its New Terminal button does"
         );
     }
 
