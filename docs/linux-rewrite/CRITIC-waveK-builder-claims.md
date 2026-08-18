@@ -290,3 +290,61 @@ this pass's fixture didn't match.
 Screenshots: `reference/linux-progress/waveK-critic/prj13-01-settings-open-on-target-decoy-underneath.png`,
 `prj13-02-after-reset-click-sheet-unchanged.png`.
 
+---
+
+## 6/7. F-PRJ-17 / F-PRJ-18 — default worktree base and worktree location controls
+
+Ledger lines 110–111, commit `2d66b3ce` (ancestor of HEAD, built by the wave-I builder pass itself,
+not a pre-existing fix). Named gaps: F-PRJ-17 — "the 'Use Primary' shortcut button itself was
+exercised only by the drawn unit test... a fresh critic should click it live and confirm the field
+snaps to the primary branch name and that this also persists across reopen." F-PRJ-18 — "the
+folder-picker 'Choose...' flow... was exercised only by the drawn unit test's mocked path-prompt...
+a fresh critic should click Choose..., select a folder in the real picker, and confirm the location
+field updates and persists."
+
+**Setup**: fresh scratch git repo (`prj1718`, primary branch `main`), one project, right-click →
+Project Settings.
+
+**F-PRJ-17, "Use Primary" — driven live, both halves.** Typed `featurebranch` into the branch-search
+field: the field updated to show `featurebranch` / `Pinned` (screenshot `prj1718-02-typed-pin.png`).
+Clicked the real "Use Primary" button (`(277, 606)`, via the persistent virtual-pointer FIFO directly
+against the still-running instance — confirmed with an ack, not assumed): the field snapped back to
+`main` / `Following primary branch (main)`, and the branch-search field cleared
+(`prj1718-03-after-use-primary.png`). Closed the sheet and reopened it (fresh right-click → Project
+Settings): **still `main` / `Following primary branch (main)`** — persisted, not just an in-memory
+redraw (`prj1718-04-reopened.png`). Independently confirmed via a direct read-only query against the
+live on-disk DB: `default_worktree_base` reads `None` for this project's row (`NULL` = "follow
+primary" — exactly what "Use Primary" is supposed to write), not the leftover `featurebranch` string.
+
+**Verdict for F-PRJ-17: PASSED.** Both the click and its persistence are independently confirmed live,
+closing the named gap exactly.
+
+**F-PRJ-18, typed location — persistence independently reconfirmed** (I made a mid-drive editing
+mistake here worth recording rather than hiding: after typing a first path, a `ctrl+a`+backspace
+"clear" attempt didn't visibly take in the screenshot I captured immediately after — I initially
+misread this as a possible bug, but the close/reopen capture and a direct DB read both show the
+*final* typed value, `abcxyztestpath`, cleanly and consistently in both places, meaning my
+intermediate screenshot simply raced the repaint (the documented "the first capture after an action
+often shows the frame from before it" trap) — not an app defect. `worktree_location_override` in the
+live DB reads `abcxyztestpath`, matching the field shown on reopen exactly.)
+
+**F-PRJ-18, "Choose..." folder picker — attempted, NOT EXERCISED.** Clicked the real "Choose..."
+button (`(275, 757)`) against the live running instance. No visible change in the captured frame, no
+error in the app log, `worktree_location_override` unchanged in the DB — consistent with
+`WAYLAND-LANE.md`'s documented limitation that the portal file picker is Wayland-side and invisible
+to this lane (no `xdg-desktop-portal` runs inside the nested headless compositor, so
+`cx.prompt_for_paths` has nothing to talk to). I could not drive this leg, and say so rather than
+inferring a verdict for it from the surrounding evidence.
+
+**Verdict for F-PRJ-18: half-proven.** The typed-path leg of the conjunction (type → persists across
+reopen) is independently confirmed, live, with a DB cross-check. The `Choose...` native-picker leg is
+`NOT EXERCISED` — this lane has no portal to answer it, and (per `ENVIRONMENT.md`) a human hand or the
+`DISPLAY=:1` lane would be needed to drive a real platform file dialog. This is the row's own named
+gap, and it remains a genuine gap rather than a closed one; the row cannot honestly read `PASSED`
+while a full third of its own clause (Choose...) has never been driven by anyone at any point in this
+project's history.
+
+Screenshots: `reference/linux-progress/waveK-critic/prj1718-01-settings-open.png`,
+`prj1718-02-typed-pin.png`, `prj1718-03-after-use-primary.png`, `prj1718-04-reopened.png`,
+`prj1718-05-choose-clicked-no-picker.png`.
+
