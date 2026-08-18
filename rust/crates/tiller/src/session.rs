@@ -1095,15 +1095,31 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
         return default_restored(fallback_directory);
     }
 
-    let records = match db.tabs_of_worktree(&worktree.id) {
-        Ok(records) => records,
+    match tabs_for_worktree(db, &worktree.id, working_directory) {
+        Ok(restored) => restored,
         Err(error) => {
             eprintln!("[session] failed to read tabs: {error}; using the default layout");
-            return default_restored(fallback_directory);
+            default_restored(fallback_directory)
         }
-    };
+    }
+}
 
-    let state_records = match db.tab_states_of_worktree(&worktree.id) {
+/// The shared tail of [`restore_from`] and [`SessionStore::restore_tabs_for`]:
+/// given a worktree's own stable id (see [`persisted_worktree_id`]) and the
+/// directory it lives at, reads its persisted tabs and their pane state.
+/// Factored out so a runtime worktree switch (CENTER-01) can load a
+/// worktree's own tabs the same way boot already does, rather than only
+/// ever reading whichever worktree the database happens to remember as
+/// last-selected.
+fn tabs_for_worktree(
+    db: &AppDatabase,
+    worktree_id: &str,
+    working_directory: PathBuf,
+) -> Result<RestoredSession, PersistenceError> {
+    let records = db.tabs_of_worktree(worktree_id)?;
+
+    let mut diagnostics = Vec::new();
+    let state_records = match db.tab_states_of_worktree(worktree_id) {
         Ok(records) => records
             .into_iter()
             .map(|record| (record.tab_id, record.state))
@@ -1159,12 +1175,12 @@ fn restore_from(db: &AppDatabase, fallback_directory: &Path) -> RestoredSession 
         tabs[0].active = true;
     }
 
-    RestoredSession {
+    Ok(RestoredSession {
         working_directory,
         tabs,
         tab_states,
         diagnostics,
-    }
+    })
 }
 
 fn default_restored(fallback_directory: &Path) -> RestoredSession {
@@ -1262,6 +1278,73 @@ impl SessionStore {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(layout);
+    }
+
+    /// Loads `working_directory`'s own persisted tabs from *this store's*
+    /// database (CENTER-01), independent of whatever the database currently
+    /// remembers as the last-selected worktree. `select_worktree` (main.rs)
+    /// calls this on every runtime worktree switch so the centre pane
+    /// mounts the *newly selected* worktree's own tabs rather than leaving
+    /// the previous selection's tabs mounted and simply relabelled -- the
+    /// stale-centre-pane defect. A worktree with nothing persisted yet (or
+    /// a database that never opened) yields the same empty-but-valid layout
+    /// `default_restored` gives a first-ever launch. Reuses the connection
+    /// `self` already holds open rather than opening a second one at the
+    /// app-wide [`database_path`] -- the distinction matters for a test
+    /// that opens its own isolated database (as several in `main.rs` do),
+    /// where reaching for `database_path()` here would silently read the
+    /// wrong file.
+    pub fn restore_tabs_for(&self, working_directory: &Path) -> RestoredSession {
+        if !working_directory.is_dir() {
+            return default_restored(working_directory);
+        }
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return default_restored(working_directory);
+        };
+        let worktree_id = persisted_worktree_id(working_directory);
+        match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
+            Ok(restored) => restored,
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to read tabs for {worktree_id}: {error}; using an empty layout"
+                );
+                default_restored(working_directory)
+            }
+        }
+    }
+
+    /// Persists `layout` immediately, bypassing the debounce. CENTER-01: a
+    /// runtime worktree switch that reloads `self.tabs` for the newly
+    /// selected worktree drops the outgoing worktree's in-memory state at
+    /// the same moment, and the regular debounced [`Self::schedule`] write
+    /// that follows the switch always captures whichever `working_directory`
+    /// is current *by the time it flushes* -- i.e. the new one. Anything
+    /// from the outgoing worktree not yet flushed (an unsent chat draft, a
+    /// title not yet auto-named) would otherwise be silently lost rather
+    /// than merely delayed, so the switch calls this first, synchronously,
+    /// for the worktree it is about to leave.
+    pub fn save_layout_now(&self, layout: &SessionLayout) {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return;
+        };
+        match write_layout(db, layout) {
+            Ok(()) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!("[session] failed to save the outgoing worktree before switch: {error}");
+            }
+        }
     }
 
     /// Persists the user's complete project catalog while preserving tabs on
