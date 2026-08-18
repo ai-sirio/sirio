@@ -6,35 +6,69 @@ should be able to read this file and continue without re-deriving anything.
 Branch `linux/gpui-waku`, worktree **`/home/enzopalmisano/Scrivania/Progetti/tiller-linux`** on an
 x86 desktop. Everything is committed — the working tree is no longer the state.
 
-> **Head refreshed 2026-08-18. The machine changed a THIRD time** — off the Raspberry Pi, back onto
-> x86. Read `ENVIRONMENT.md`'s 2026-08-18 section before anything else here: every absolute path in
-> the Pi sections below is wrong, the two-agents-at-a-time ceiling is gone (fan-out is now 10), and
-> **`DISPLAY=:1` is alive again**, which reopens the one lane the `F-BRW` bucket had nowhere to run.
+> **Head refreshed 2026-08-18 evening. The machine changed a THIRD time** — off the Raspberry Pi,
+> back onto x86. Read `ENVIRONMENT.md`'s 2026-08-18 section before anything else here: every
+> absolute path in the Pi sections below is wrong, and **`DISPLAY=:1` is alive again**, which
+> reopens the one lane the `F-BRW` bucket had nowhere to run.
+>
+> **The fan-out figure written here earlier (10) was wrong and was measured wrong.** Ten
+> lane-driving agents took this box to load 41 with 232 MB of swap left. The real ceiling is
+> **about 5 concurrent lane-driving agents** — see `ENVIRONMENT.md`'s concurrency section.
 
 ---
 
 ## 2026-08-18 — where this actually stands
 
-Measured this morning, not inferred:
+Measured, not inferred:
 
 | | |
 |---|---|
-| `cargo build --workspace` | **exit 0**, 14.5 s warm, 2 dead-code warnings |
-| the app | **renders in full** under the nested Wayland lane — sidebar, tab bar, Chat/Terminal tabs, Files panel on the real repo, status bar with live Claude usage (`1715x972 · 6792 colours`) |
-| the ledger | **363 / 389 PASSED**, per `python3 Scripts/ledger-totals.py`. Open: 5 `FAILED — defective`, 14 `UNREACHABLE`, 1 `half-proven`, 6 `N/A — platform` |
+| `cargo build --workspace` | **exit 0** |
+| the app | **renders in full** under the nested Wayland lane — sidebar, tab bar, Chat/Terminal tabs, Files panel on the real repo, status bar with live Claude usage (`1715x972 · ~6500 colours`) |
+| the ledger | **309 / 389 PASSED** after the day's re-census. Open: 55 `half-proven`, 13 `NOT EXERCISED`, 5 `UNREACHABLE`, 1 `FAILED — defective`, 0 `FAILED — absent`, 6 `N/A — platform` |
 | agent CLIs | `claude`, `codex`, `opencode`, `pi` all installed — so **every `UNREACHABLE` parked on "not installed" is stale** |
 
-So neither of the goal's two by-definition gaps is open: it compiles and it renders. What is left is
-the tail of the inventory plus one honesty problem, stated below.
+Neither of the goal's two by-definition gaps is open: it compiles and it renders.
 
-### The honesty problem the finish line has to answer
+### The count went DOWN today, on purpose
 
-363 rows passed — but they passed across **three different hosts**. The code did not change under
-them; the platform did, twice. `EVIDENCE-STANDARD.md` already says verdicts expire, and this project
-has twice paid for stale ones in both directions. The goal's bar is *a full-app critic that ticks
-every entry by exercising it live*, so the finish line is not "close the last 26 rows" — it is a
-**full re-exercise of all 389 on this host**, sharded across parallel critics. Plan for that, not
-for the tail alone.
+It read 363 this morning and reads 309 now. Nothing regressed. Those 363 had been earned across
+**three different hosts**; the code did not change under them, the platform did, twice. The goal's
+bar is a full-app critic that ticks every entry *by exercising it live*, so the finish line was
+never "close the last 26 rows" — it is a **full re-exercise of all 389 on this host**. Re-driving
+replaces inherited belief with local evidence, and where the belief was unfounded the number falls.
+A re-census that only ever raises the count is not measuring anything.
+
+### Three ways a row got marked PASSED without being true — all found today
+
+Every one of these was caught by a critic *driving the app*, and none by reading code or by
+`Scripts/dead-models.py`. Check for them before trusting any row whose evidence is not a live drive.
+
+1. **A green test over code the app never calls.** `tiller_project::layout`
+   (`WorkspaceLayout`/`LayoutNode`/`PaneGroup`/`WorkspaceSnapshot`) has **zero references** in
+   `crates/tiller` and `crates/tiller_ui`; only `LayoutCommand::Rename` is wired, from
+   `commit_tab_rename` (`main.rs:8567`). Six rows rested on it. Same story for
+   `classify_file_drop`, whose behaviour really lives in `chat.rs`'s `drop_external_paths`.
+   See `WSP-LAYOUT-DECISION.md` — the dead half is a *second parallel model* the app already
+   replaced, not an unfinished feature. **Before accepting a test as evidence, grep the app crates
+   for the symbol.**
+2. **Equivalence by assertion.** "Same production path as row X" is a claim, not evidence. Two such
+   claims were rejected on inspection because the clauses genuinely differed (a working link that
+   opens a tab is not the missing-file error path).
+3. **A verdict outside the vocabulary.** `PASSED (resume leg environment-limited)` reads as a pass
+   and is not one. Partly proven **is** `half-proven`, with the unproven leg named.
+
+### Merging verdicts from parallel agents needs an explicit precedence
+
+`NOT EXERCISED` and `UNREACHABLE` are **not verdicts** — they are absence of information. Merged
+naively, last-writer-wins lets an agent that never reached a row overwrite one that drove it; this
+nearly erased three live-earned passes. Rule now applied by the orchestrator: only rank-2-and-above
+verdicts (`half-proven`, `PASSED`, `FAILED — *`, `N/A — platform`) are written to the ledger.
+No-information results are withheld, and the ledger keeps whatever it already had.
+
+Related: **count from an agent's per-row data, never its summary headline.** One critic's headline
+said 27 PASSED where its own 33 rows said 22. The headline is written last, from memory, and drifts
+optimistic.
 
 ---
 
