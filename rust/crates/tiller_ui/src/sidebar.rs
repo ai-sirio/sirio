@@ -2478,6 +2478,16 @@ impl Sidebar {
             .right(px(0.0))
             .top(px(0.0))
             .bottom(px(0.0))
+            // F-PRJ-13: without this, GPUI's hit test (`Frame::hit_test`)
+            // walks every hitbox under the pointer back-to-front and only
+            // stops at one with `HitboxBehavior::BlockMouse` -- absent that,
+            // a click here ALSO reaches whatever `sidebar-tree` row this
+            // opaque full-sheet overlay happens to be painted over, firing
+            // that row's own `on_click` (`SidebarEvent::SelectWorktree`) in
+            // the same gesture. `occlude()` installs that blocking hitbox,
+            // so every control in this sheet -- Reset included -- is
+            // finally the only thing a click on it can reach.
+            .occlude()
             .p(px(16.0))
             .bg(theme.sidebar)
             .flex()
@@ -5025,6 +5035,112 @@ mod tests {
         assert!(
             cx.debug_bounds("project-icon-glyph-folder").is_some(),
             "the mounted picker renders its glyph choices"
+        );
+    }
+
+    /// F-PRJ-13: wave F live-drove Reset and found it appeared to fail --
+    /// the sidebar's active worktree silently jumped to a different,
+    /// not-visible-in-sheet project the instant Reset was clicked. Root
+    /// cause: `render_project_settings`'s full-sheet overlay div is a plain
+    /// `.absolute()` sibling of `sidebar-tree`, never `.occlude()`d, so
+    /// GPUI's hit test (`Frame::hit_test`, which walks hitboxes back-to-
+    /// front and only stops at a `HitboxBehavior::BlockMouse` hitbox)
+    /// collects every interactive hitbox under the click, sheet AND row
+    /// both -- both `on_click` handlers fire for one physical click. This
+    /// builds two projects sized so a real worktree row of the *second*
+    /// renders directly under the Reset button of the *first*'s open sheet
+    /// (confirmed, not assumed: the test fails outright if no row's bounds
+    /// intersect Reset's before asserting anything about the click), then
+    /// clicks Reset and asserts no `SelectWorktree` reached the host --
+    /// only the icon-reset update should.
+    #[gpui::test]
+    async fn reset_button_click_does_not_leak_through_to_the_row_underneath(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        // Many single-line worktree rows on the decoy project push its rows
+        // down the sidebar until one lands under the settings sheet's fixed
+        // Reset position -- the sheet is a full-height overlay starting at
+        // the very top, so Reset's own y is constant regardless of which
+        // project opened it.
+        let decoy_worktrees: Vec<SidebarWorktree> = (0..12)
+            .map(|i| SidebarWorktree {
+                branch: format!("decoy-{i}"),
+                path: PathBuf::from(format!("/tmp/prj13-decoy/wt-{i}")),
+                is_primary: i == 0,
+                comment: None,
+            })
+            .collect();
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![
+                    SidebarProject {
+                        id: "settings-project".into(),
+                        name: "settings-project".into(),
+                        is_git: true,
+                        root_path: PathBuf::from("/tmp/prj13-settings"),
+                        worktrees: Vec::new(),
+                    },
+                    SidebarProject {
+                        id: "decoy-project".into(),
+                        name: "decoy-project".into(),
+                        is_git: true,
+                        root_path: PathBuf::from("/tmp/prj13-decoy"),
+                        worktrees: decoy_worktrees,
+                    },
+                ],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach();
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("settings-project", cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let reset = cx
+            .debug_bounds("project-icon-reset")
+            .expect("the reset control is drawn");
+
+        // Confirm the overlap this fix depends on actually exists in this
+        // fixture, rather than assuming geometry: without it, a click at
+        // Reset's centre proves nothing about occlusion either way.
+        let overlapping_row = std::iter::once(0)
+            .chain(1000..1013)
+            .filter_map(|row_id| {
+                let selector: &'static str =
+                    Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+                cx.debug_bounds(selector)
+            })
+            .find(|bounds| bounds.intersects(&reset));
+        assert!(
+            overlapping_row.is_some(),
+            "fixture invariant: a sidebar row must render under the Reset \
+             button for this test to exercise the click-through bug"
+        );
+
+        cx.simulate_click(reset.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, SidebarEvent::SelectWorktree(_))),
+            "clicking Reset must not also select whichever decoy worktree \
+             row is rendered underneath it -- got {:?}",
+            events.borrow()
         );
     }
 
