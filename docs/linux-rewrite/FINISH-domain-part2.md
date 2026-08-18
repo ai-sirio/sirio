@@ -212,3 +212,64 @@ driven and independently confirmed to survive a genuine quit/relaunch, closing t
 predecessor could only get partway through.
 
 ---
+
+## F-CORE-DOM-07 — FAILED — defective (was half-proven)
+
+Ledger row text being carried: *"Fresh cargo test run, two suites:
+domain::tests::auto_naming_requires_first_run_or_both_throttles (domain.rs:176) and the dedicated
+p99_naming_throttle.rs (3 tests, ...), all green, covering first-run exemption plus both threshold
+gates independently and together."* That is real, passing unit-test proof of the throttle *type* in
+isolation. Driving it live finds the throttle is never reached from the app's actual default
+Chat-tab flow — a "tested-but-unwired" defect, not a missing feature.
+
+**Setup**: the setting itself defaults OFF (`tiller_ui/src/settings.rs:390`,
+`auto_naming: false`), which is presumably why a predecessor's earlier attempt (reusing the
+existing `Chat` tab's already-completed turn) saw no rename and moved on. Turned it on for real
+through the UI, not a fixture: `chord ctrl comma` → **Settings → General → "Auto-rename tabs and
+agents"**, clicked the toggle live —
+`reference/linux-progress/wf-dom3/f-core-dom-07-auto-naming-toggle-on.png` shows it flipped orange,
+Summarizer agent already "Claude Code". **Hard discriminator, independent of the UI**: `SELECT *
+FROM setting` against `/tmp/wf-dom3.sqlite` returns `('general.autoNaming', 'true')` — persisted,
+not just painted.
+
+**Live drive, two full real turns, two separate fresh process boots** (every `wayland-drive.sh`
+invocation restarts the app — `auto_naming_throttle` is an in-memory `BTreeMap`, so each boot is
+its own untouched "first request" per the throttle's own documented exemption):
+
+1. Navigated to the `linux/gpui-waku` worktree's existing `Chat` tab (never manually renamed —
+   `title_is_auto_named` stays true at every tab-creation call site checked earlier this pass) and
+   sent a **new** real message: `DOM07 rename test reply with exactly the single word:
+   RENAMEACKWFDOM3`. The real backing agent answered `RENAMEACKWFDOM3`
+   (`reference/linux-progress/wf-dom3/f-core-dom-07-turn-complete-title-unrenamed.png` shows the
+   completed exchange with a timestamp).
+2. Sent the same probe again in a second fresh boot; same result.
+3. Waited **90+ seconds** after send (a `Monitor` poll loop hitting `SELECT title FROM tab WHERE
+   id='default-chat'` against the live on-disk file every 3s — independent of the UI, no `shot`
+   resize disturbing the app) — the title never left `Chat` either time.
+4. `pstree -p` on the live `wf-dom3-tiller` process during the wait shows the Chat pane's own real
+   `claude` subprocess (nested under the ACP wrapper, `npm exec @agentclientprotocol/claude-agent-acp`)
+   but **no `claude -p ...` summarizer process ever spawns** — `request_auto_rename`'s own
+   `run_summarizer_command` call never fires.
+
+**Root cause, at the code, not a guess**: `request_auto_rename` (`main.rs:5671`) is only ever
+called from three places — `grep -n request_auto_rename rust/crates/tiller/src/main.rs` finds
+exactly `main.rs:3298` (`ControlAction::Notify`, Layer A — needs a real `tillerctl notify` call to
+arrive on the control socket), `main.rs:3951` (`subscribe_terminal_activity`, subscribed to a
+`TerminalActivityEvent` from a `TerminalView`), and `main.rs:3996`
+(`start_process_signal_refresh`, walks a terminal pane's `shell_pid`). The latter two are
+structurally terminal-pane-only. `ChatEvent` — the Chat entity's own event enum, `bind_chat`'s
+subscription target — has exactly two variants, `OpenFile` and `OpenLink`
+(`grep -n "ChatEvent::" main.rs`); no completion/status variant exists to ever produce a
+`Transition` for the chat pane the function itself checks for
+(`if let TabContent::Chat(chat) = content` inside `request_auto_rename`). The function is written
+to rename a chat tab from its transcript, and the plumbing that would tell it a chat tab just
+finished a turn does not exist for the ACP-hosted `Chat` tab kind — the app's actual default,
+most-common chat surface.
+
+This falsifies the row's own doc comment (`main.rs:5605-5611`: *"on a running→done/needs-input
+transition, throttled auto-naming re-titles the owning chat tab"*) for the concrete case a user
+hits by default: send a message in the `Chat` tab, get a reply, nothing renames, regardless of the
+setting. The throttle type is correct and well-tested in isolation; the app never asks it a
+question.
+
+---
