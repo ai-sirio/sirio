@@ -13582,6 +13582,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[gpui::test]
     async fn drawn_save_failure_surfaces_file_notice(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
