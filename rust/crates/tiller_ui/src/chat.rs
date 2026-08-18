@@ -8569,6 +8569,93 @@ mod tests {
         );
     }
 
+    /// F-CHAT-23 regression: a finish-line critic reported that dismissing
+    /// an unrenderable permission wipes the *entire* transcript to an empty
+    /// array, not just the dismissed entry — reproduced (per the critic)
+    /// with prior turns already present. This drives exactly that shape:
+    /// one turn dismissed and settled, then a second turn's unrenderable
+    /// permission dismissed by a real simulated click, and asserts the
+    /// first turn's three entries are still there afterwards.
+    #[gpui::test]
+    async fn dismissing_a_later_permission_does_not_wipe_earlier_turns(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = chat_view(cx, &["permission-unrenderable"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        // Turn 1: send, wait for its unrenderable permission, dismiss it.
+        focus_and_type(cx, "first");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+        let dismiss1 = cx
+            .debug_bounds("permission-dismiss-1")
+            .expect("first dismiss control");
+        cx.simulate_click(dismiss1.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn && !chat.streaming);
+
+        let entries_after_turn_one = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
+        assert_eq!(
+            entries_after_turn_one, 3,
+            "turn 1 should have settled to user + dismissed-permission + turn-footer"
+        );
+
+        // Turn 2: send again, wait for its own unrenderable permission,
+        // dismiss THAT one, and check turn 1's entries are still present.
+        refresh_frame(cx);
+        focus_and_type(cx, "second");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    Entry::Permission {
+                        resolved: None,
+                        expired: false,
+                        ..
+                    }
+                )
+            })
+        });
+        refresh_frame(cx);
+        let dismiss2 = cx
+            .debug_bounds("permission-dismiss-2")
+            .expect("second dismiss control");
+        cx.simulate_click(dismiss2.center(), Modifiers::none());
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn && !chat.streaming);
+
+        chat.read_with(&cx.cx, |chat, _| {
+            assert_eq!(
+                chat.entries.len(),
+                6,
+                "dismissing turn 2's permission must not touch turn 1's three \
+                 entries: got {:?}",
+                chat.entries
+            );
+            assert!(
+                matches!(chat.entries.first(), Some(Entry::User(text)) if text == "first"),
+                "turn 1's user message must survive turn 2's dismiss: {:?}",
+                chat.entries.first()
+            );
+        });
+    }
+
     /// F-CHAT-25 (option answers): a permission prompt renders both option
     /// buttons in the drawn frame and each answer is recorded on the card.
     #[gpui::test]
