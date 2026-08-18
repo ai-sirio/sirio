@@ -9,6 +9,53 @@ anything below it.**
 
 ---
 
+# 2026-08-18 — the box changed AGAIN: back on x86, 12 cores, and BOTH lanes are alive
+
+The Pi 5 section below is history. Measured 2026-08-18 on the machine this work now runs on.
+**Translate every absolute path from the Pi section; do not follow it.**
+
+| | measured 2026-08-18 |
+|---|---|
+| host | x86_64 desktop, **12 cores**, 31 GB RAM, 352 GB free on `/` |
+| worktree | `/home/enzopalmisano/Scrivania/Progetti/tiller-linux`, branch `linux/gpui-waku` |
+| GPU | **AMD** (`0d:00.0` VGA, device 7590), `/dev/dri/card1` + `renderD128`, Vulkan 1.4.318, Mesa 25.2.8 — real hardware |
+| desktop session | **COSMIC** (Pop!_OS) on Wayland, socket `wayland-1` in `/run/user/1000` |
+| `cargo build --workspace` | **exit 0 in 14.5 s** (warm target), 2 warnings (`browser.rs:827` `pump_task`; `main.rs:9864` `sidebar_projects`) |
+| workflow fan-out cap | `min(16, cores-2)` = **10 agents at a time** (the Pi's ceiling of 2 is gone) |
+| agent CLIs | `claude`, **`codex` 0.147.0**, **`opencode` 1.18.18**, **`pi`** all present; `oh-my-pi` still upstream-broken |
+
+## Both lanes work here. Neither needs `pi-session.sh`.
+
+**`pi-session.sh` is Pi-only — do not run it.** The parent compositor on this box is the user's own
+COSMIC session. Point the nested lane at it:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1
+export TILLER_WL_LABEL=<your-unique-label>
+cp rust/target/debug/tiller /tmp/$TILLER_WL_LABEL-tiller
+export TILLER_WL_BIN=/tmp/$TILLER_WL_LABEL-tiller
+Scripts/wayland-drive.sh /tmp/$TILLER_WL_LABEL-shots '<actions>' 15
+```
+
+Verified 2026-08-18 10:41: booted, captured `1715x972 · 6792 colours`, full UI — sidebar, tab bar,
+Chat/Terminal tabs, Files panel listing the real repo, status bar with live Claude usage.
+`settle` 15 is enough here; the Pi needed 20–30.
+
+**`DISPLAY=:1` is ALIVE again** — COSMIC runs a rootless XWayland on the real AMD GPU
+(`Xwayland :1 -rootless`, `/tmp/.X11-unix/X1`, `xdpyinfo` answers). The Pi's "X11 is not a lane"
+finding does **not** hold here. This is what the `F-BRW` bucket needs.
+
+> **`:1` is the user's own desktop X server, not a dedicated one.** Synthetic XTEST input there
+> moves a real person's pointer. Before driving it, prefer an isolated nested X display; if you do
+> use `:1`, take `Scripts/linux-drive.sh`'s lock and say in your evidence that you used the shared
+> session.
+
+`oh-my-pi` remains unrunnable: `bin/oh-my-pi.js` carries TypeScript annotations behind a
+`#!/usr/bin/env node` shebang, so it dies at `bin/oh-my-pi.js:176` under **both** node and bun
+(re-measured 2026-08-18). Upstream defect, not an environment gap.
+
+---
+
 # 2026-08-17 — the box is a Raspberry Pi 5 now, and everything below was measured on a different one
 
 Every absolute path in the rest of this file, in `STATE.md`, `QUEUE.md` and the P-reports —
