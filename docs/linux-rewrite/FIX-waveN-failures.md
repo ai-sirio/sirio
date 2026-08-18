@@ -499,3 +499,148 @@ this row's to fix; flagged here so it isn't miscounted against this change by wh
 totals next.
 
 ---
+
+## F-CHG-18 — a diff dropped onto a terminal reached a real handler and then went nowhere a user could see
+
+**Reproduced live first, by reading, not by driving the gesture** — the ledger row itself was
+already built on a decisive three-way grep (quoted verbatim in the row): `TerminalDropEvent` is
+really emitted by `tiller_terminal`'s own production `on_drop::<(PathBuf, String)>` handler
+(`receive_diff_drop`, `tiller_terminal/src/lib.rs:960`), and `grep -rn "TerminalDropEvent"` across
+`rust/crates/tiller/src` and `rust/crates/tiller_ui/src` returned **zero matches** before this pass
+— confirmed again fresh at the start of this row, unchanged from the ledger's finding. This is the
+canonical shape of this port's recurring bug named in the brief: real emitter, tested in its
+defining crate, zero consumers anywhere the running app can reach. The physical drag-and-drop
+gesture itself was **not yet attempted live** at that point (see below — it is, later in this row,
+and decisively).
+
+### Root cause
+
+`TillerWorkspace` (`rust/crates/tiller/src/main.rs`) subscribes a freshly-mounted terminal to three
+of its four event types — `subscribe_terminal` (content/activity), `subscribe_terminal_link`,
+`subscribe_terminal_activity` — but never to `TerminalDropEvent`. `tiller_terminal` stores the
+dropped `(PathBuf, String)` payload on `self` and emits the event correctly; nothing outside that
+crate was ever wired to receive it, so a real drop reached `receive_diff_drop`, updated a field
+nothing read, and stopped there — visibly, on the unfixed binary, as a passive "Dropped diff: …"
+toast and nothing else (see the negative-control screenshot below).
+
+### Fix
+
+`rust/crates/tiller/src/main.rs` adds `subscribe_terminal_drop`, called from
+`mount_terminal_subscriptions` alongside the other three, so it happens for every terminal the
+same way the existing three do. On `TerminalDropEvent::Diff { path, .. }` it calls
+`workspace.add_changes_tab(Some(path.clone()), cx)` — the same call
+`ChangesTabActionEvent::OpenDiff` already uses (the action a changed-file row's own "Open Diff in
+Editor" context-menu item takes), matching the macOS reference's own drop handler
+(`WorkspaceReconciler.performDragOperation` → `.requestOpenDiff(path:target:)`). Dropping a diff
+onto a terminal now opens/focuses a real Diff/Changes tab for the dropped file instead of silently
+updating a field nothing reads.
+
+### Regression test
+
+`rust/crates/tiller/src/main.rs`,
+`tests::drawn_terminal_diff_drop_opens_a_changes_tab_focused_on_that_file` (line 14650): builds the
+palette fixture's workspace, finds its first tab's live `TerminalView` entity, asserts no `Diff` tab
+exists yet (so the test cannot pass vacuously), emits the exact production event
+(`TerminalDropEvent::Diff { path: "dropped/onto-terminal.rs", text: "@@ -1 +1 @@\n-old\n+new\n" }`)
+directly on that terminal entity — the same event `receive_diff_drop` emits, not a substitute — and
+asserts exactly one new tab appeared, its `kind == TabKind::Diff`, and it became `active_tab`.
+
+**Red, on the unfixed code** (verified by disabling only the production wiring — replacing the
+`subscribe_terminal_drop` match arm's `workspace.add_changes_tab(...)` call with a no-op comment,
+keeping the test itself untouched, mirroring how F-TAB-24's red run was captured in this same
+report):
+```
+thread 'tests::drawn_terminal_diff_drop_opens_a_changes_tab_focused_on_that_file' panicked at crates/tiller/src/main.rs:14690:13:
+assertion `left == right` failed: dropping a diff onto a terminal must open exactly one new tab
+  left: 1
+ right: 2
+```
+**Green, after restoring the fix:**
+```
+test tests::drawn_terminal_diff_drop_opens_a_changes_tab_focused_on_that_file ... ok
+```
+Full crate suite: `cargo test --manifest-path rust/Cargo.toml -p tiller --bin tiller` →
+**188 passed, 0 failed**.
+
+### Re-driven live after the fix — the actual drag-and-drop gesture, landed for the first time in 4 attempts across this project's history
+
+The ledger row and three prior passes (see the row's own text: "my own attempt to land the physical
+drag also failed to produce a visible split this pass, consistent with 3 prior passes") had never
+gotten the real gesture to register at all. It landed this time by working out *why* it couldn't:
+`Changes` and `Terminal` are both `TabContent` leaves, but every production path that opens a
+Changes tab (`add_changes_tab`'s two call sites, `rust/crates/tiller/src/main.rs:6092`/`:6654`)
+opens it as a **new standalone tab**, never as a split sibling of a Terminal — `pane.split` (and its
+UI equivalent) only ever adds another **terminal**
+(`split_focused_terminal_with_placement`/`split_focused_agent`). So a Changes row and a terminal's
+drop target are never simultaneously present in the rendered tree via any tab layout the app can
+reach, which is exactly why naive drag attempts across prior passes found no visible target to drop
+onto.
+
+The gesture that does work exploits the same mechanism F-TAB-24 already proved in this report: GPUI
+drag state (`cx.active_drag`) lives in window/app state, independent of the render tree, and
+survives an **action**-dispatched event (F-TAB-24 used Escape; here, `ctrl-tab`/`ctrl-shift-tab`,
+already bound to `CycleTabForward`/`CycleTabBackward` in `rust/crates/tiller/src/panes.rs:122-123`)
+delivered mid-drag. Reading GPUI's own drag-start logic
+(`~/.cargo/git/checkouts/zed-a70e2ad075855582/c05e346/crates/gpui/src/elements/div.rs:2836-2860`)
+confirmed the drag only actually starts on a `MouseMoveEvent` while `pending_mouse_down` is set —
+so the gesture is `down` on the changed-file row, a small `move` **while that row is still
+rendered** (starts the real drag, confirmed necessary: an earlier attempt that switched tabs
+immediately after `down` with no intervening `move` produced no drag and no drop at all), *then*
+`chord ctrl+shift Tab` to switch to the Terminal tab without releasing the mouse button, `move` onto
+the terminal's content area, then `up` there to trigger its `on_drop::<(PathBuf, String)>` hitbox.
+
+Single `wayland-drive.sh` invocation, lane `wf-fix2`, this repo's own real uncommitted diff to
+`rust/crates/tiller/src/main.rs` (this very fix) supplying a genuine non-empty Changes panel:
+```
+ctl tab.select index=4                          → the repo's own Changes tab, showing main.rs's diff
+down 452 139 ; move 460 145 ; move 470 150       → mouse-down + move on the changed-file row (starts the real GPUI drag)
+chord ctrl+shift Tab                             → switches to the Terminal tab; drag persists (cx.active_drag survives)
+move 700 300 ; move 705 305 ; up 705 305         → moves onto the terminal, drops there
+```
+**Hard discriminator**: `panel.list` before the drop listed exactly 4 panes; after, **5**, the new
+one (`pane-4`, `tab: "Changes"`) `active: true`. The frame itself
+(`reference/linux-progress/wf-fix2-chg18/03-post-drop-FIXED-new-diff-tab-opened.png`) shows a
+brand-new, focused Changes tab rendering the real diff of `rust/crates/tiller/src/main.rs` — the
+exact file whose row was dragged, complete with this fix's own `subscribe_terminal_drop` code in
+the visible diff body. This is a live UI gesture producing a live UI result, not a socket call and
+not a test.
+
+**Negative control, same gesture, unfixed binary**: rebuilt `tiller` from `git stash` of just this
+row's diff (`/tmp/wf-fix2-tiller-UNFIXED`), a **separate** lane label (`wf-fix2neg`, its own
+socket/DB) to avoid any state collision with the fixed instance, same repo, same coordinates
+(confirmed by screenshot the Changes/Terminal/Chat tab order and the row's position matched),
+`chord ctrl+shift Tab` from the Changes tab landing correctly on Terminal (`panel.list` shows
+`pane-1`/Terminal `active:true` after the chord, confirming the tab-switch-mid-drag half of the
+gesture is unrelated to this fix and not what's under test). Result:
+`reference/linux-progress/wf-fix2-chg18/05-post-drop-UNFIXED-silent-toast-no-tab.png` — the drop
+visibly reached the terminal (a "Dropped diff: rust/crates/tiller/src/main.rs" toast appears, top
+right — `receive_diff_drop` genuinely ran) and then did **nothing else**: `panel.list` after is
+still exactly the same **3** panes as before, no new tab, Terminal stays the active tab — precisely
+the ledger's "accepted and then went nowhere a user could see." Same gesture, same file, same
+coordinates, only the binary differs, and only the fixed binary opens a tab.
+
+### Verdict: half-proven (builder-driven, not critic-passed)
+
+Proven, to an unusually high bar for this row specifically because it is the family's canonical
+"dead wiring" example: root cause, a regression test red (quoted, unfixed-wiring run) → green, full
+crate suite green (188/188), and — new for this row, not achieved by 3 prior passes — the actual
+physical drag-and-drop gesture landed live through the real UI on the fixed binary (a `panel.list`
+pane-count/active-tab hard discriminator plus a screenshot of the correct file's diff opening) with
+a same-gesture, same-coordinates **negative control** on the unfixed binary showing the drop is
+received but produces no tab — isolating the fix's effect from the gesture/coordinates themselves.
+
+**Gap for a fresh critic**: (1) re-drive independently — the gesture is exact and reproducible
+(quoted step by step above) but was only driven once per binary in this pass, not repeated for
+flake-checking the way F-TAB-14's intermittent claim was. (2) This pass also found, in passing, that
+**no production UI path ever puts a Changes tab and a Terminal in the same visible split** — every
+`add_changes_tab` call site opens a standalone tab, and `pane.split` only ever adds another
+terminal. That means the only route to this drag today is the tab-switch-mid-drag technique used
+above; a critic (or a future feature pass) auditing "can a user discover this gesture without
+already knowing the GPUI internals" should treat that as a real, separate UX gap this row's fix
+does not address — the row's own clause ("wire it") is about the event consumer, which is now
+proven wired, not about discoverability of the source/target layout. (3) `TerminalDropEvent::Files`
+(the sibling variant for external file-manager drops, already covered by `tiller_terminal`'s own
+tests per `WAYLAND-LANE.md`) was not touched or re-checked by this pass — only the `Diff` variant
+the ledger row names.
+
+---
