@@ -3,12 +3,38 @@
 Written by the orchestrator so this work survives losing any single session. Anyone picking it up
 should be able to read this file and continue without re-deriving anything.
 
-Branch `linux/gpui-waku`, worktree **`/home/epalmi/tiller`** on a Raspberry Pi 5.
-Everything is committed — the working tree is no longer the state.
+Branch `linux/gpui-waku`, worktree **`/home/enzopalmisano/Scrivania/Progetti/tiller-linux`** on an
+x86 desktop. Everything is committed — the working tree is no longer the state.
 
-> **Head refreshed 2026-08-17.** Read the next section first: **the machine changed**, and it
-> invalidates every absolute path and the whole `DISPLAY=:1` half of this file. Everything from
-> "## Closed" down is history, and parts of it are superseded twice over.
+> **Head refreshed 2026-08-18. The machine changed a THIRD time** — off the Raspberry Pi, back onto
+> x86. Read `ENVIRONMENT.md`'s 2026-08-18 section before anything else here: every absolute path in
+> the Pi sections below is wrong, the two-agents-at-a-time ceiling is gone (fan-out is now 10), and
+> **`DISPLAY=:1` is alive again**, which reopens the one lane the `F-BRW` bucket had nowhere to run.
+
+---
+
+## 2026-08-18 — where this actually stands
+
+Measured this morning, not inferred:
+
+| | |
+|---|---|
+| `cargo build --workspace` | **exit 0**, 14.5 s warm, 2 dead-code warnings |
+| the app | **renders in full** under the nested Wayland lane — sidebar, tab bar, Chat/Terminal tabs, Files panel on the real repo, status bar with live Claude usage (`1715x972 · 6792 colours`) |
+| the ledger | **363 / 389 PASSED**, per `python3 Scripts/ledger-totals.py`. Open: 5 `FAILED — defective`, 14 `UNREACHABLE`, 1 `half-proven`, 6 `N/A — platform` |
+| agent CLIs | `claude`, `codex`, `opencode`, `pi` all installed — so **every `UNREACHABLE` parked on "not installed" is stale** |
+
+So neither of the goal's two by-definition gaps is open: it compiles and it renders. What is left is
+the tail of the inventory plus one honesty problem, stated below.
+
+### The honesty problem the finish line has to answer
+
+363 rows passed — but they passed across **three different hosts**. The code did not change under
+them; the platform did, twice. `EVIDENCE-STANDARD.md` already says verdicts expire, and this project
+has twice paid for stale ones in both directions. The goal's bar is *a full-app critic that ticks
+every entry by exercising it live*, so the finish line is not "close the last 26 rows" — it is a
+**full re-exercise of all 389 on this host**, sharded across parallel critics. Plan for that, not
+for the tail alone.
 
 ---
 
