@@ -56,3 +56,43 @@ discriminator:
 Both "confirm the project changes to Git-backed behavior" and the specific context-menu entry
 point (not the Project Settings sheet) are now driven.
 
+### F-CHAT-25 — PASSED (upgraded)
+
+Clause: trigger a question, enter text and click Send; repeat with a listed option; repeat with
+Cancel, confirming answered/cancelled states. The unproven leg named in the brief: "AskUserQuestion
+... which a sibling explicitly did not re-drive." Reading the existing suite found two solid named
+tests already covering two of the three arms — `a_text_answer_leaves_the_surface_and_clears_the_pending_bar`
+and `cancel_on_a_question_closes_it_without_an_answer` (`rust/crates/tiller_ui/src/chat.rs`) — but
+no test anywhere exercises a **listed option** click. Tracing the render code
+(`Entry::Permission` in `chat.rs`) and the fixture confirmed why: `chat_fixture.py`'s existing
+`question` mode always sends `"options": []` at the wire top level specifically so the client is
+forced onto the free-text field (its own docstring says so); nothing in the fixture ever sent a
+structured question with populated wire options, so the "render clickable pills instead of a text
+field" branch (`else if let Some(input) = text_input ... } else { for option in options { ...
+permission-option-<id> ... } }`) had no test at all.
+
+Closed it properly rather than routing around it: added a `question-options` mode to
+`rust/crates/tiller_ui/tests/fixtures/chat_fixture.py` (purely additive — a new
+`request_question_with_options()` sending real wire `options: [blue, green]` alongside the
+`rawInput.questions[...]` shape, no existing mode touched) and a new named test
+`a_listed_option_leaves_the_surface_and_clears_the_pending_bar` in `chat.rs`, sibling to the two
+above. It asserts `question-answer-input` (the text field) is **absent**, both
+`permission-option-blue` and `permission-option-green` pills are drawn, clicks the Blue pill with
+`cx.simulate_click`, and confirms: the card records `resolved == "Blue"`, `pending-question-bar`
+disappears, and the agent's echoed reply (`"You picked: blue"`) lands in the transcript — the full
+round trip, not just the click registering.
+
+```
+cargo test --manifest-path rust/Cargo.toml -p tiller_ui a_listed_option_leaves_the_surface_and_clears_the_pending_bar
+test chat::tests::a_listed_option_leaves_the_surface_and_clears_the_pending_bar ... ok
+```
+
+Re-ran the two sibling tests plus the full `chat::` module (`cargo test -p tiller_ui --lib chat::`)
+to confirm nothing regressed: 76 passed, 1 unrelated failure
+(`stopping_via_click_with_a_queued_item_still_sends_it`) that reproduces only under full-suite
+concurrency and passes clean in isolation — a pre-existing flake, not something this change
+touched (confirmed by running it alone: `ok`).
+
+All three arms of F-CHAT-25 now have named, replayable, real-event-dispatching evidence: text
+answer, listed option, and cancel.
+
