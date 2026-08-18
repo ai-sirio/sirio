@@ -39,4 +39,35 @@ Git-backed behavior or shows the initialization error") are now covered: this ro
 success arm through the named entry point; the error arm was already covered elsewhere (not
 re-driven, not this row's missing half).
 
+**F-SID-10** — PASSED (upgraded from half-proven). The prior evidence drove remove-project
+through the Project Settings sheet's Remove Project control; the missing half — the sidebar
+row's own right-click "Remove Project" item, which this clause specifically names — was driven
+live this pass. Fixture: `/home/enzopalmisano/wf-sid2-removeproj`, a disposable git repo.
+Right-clicked the `wf-sid2-removeproj` project row: menu opened with **Project Settings /
+Initialize Git repository (disabled, "Git is already initialized") / Show in File Manager /
+Remove Project** (`reference/linux-progress/wf-sid2/f-sid-10-context-menu-open.png`). Clicked
+**Remove Project**, then clicked **Remove from Tiller** on the resulting "Remove project from
+Tiller? This only removes the project from Tiller's si[debar]..." confirm dialog, all within one
+continuous drive. Hard discriminator: a direct sqlite query against the live on-disk DB
+(`select id, root_path from project`) shows exactly 4 rows afterward — `wf-sid2-removeproj` is
+gone, the other three fixtures remain — and the row is also gone from the rendered sidebar
+(`reference/linux-progress/wf-sid2/f-sid-10-after-remove-row-gone.png`, jumps straight from the
+prior project's "New Worktree..." to `wf-sid2-main`). `ls` confirms the on-disk directory still
+exists, consistent with the dialog's own "only removes... from Tiller's sidebar" text and with
+F-PRJ-11's prior finding for the Settings-sheet entry point.
+
+**Harness note for the next driver**: row Y-coordinates in this sidebar are NOT stable across
+app restarts even with identical DB content — the auto-discovered `tiller` project (this
+worktree's own real repo, unavoidably picked up by `initial_working_directory()`'s
+nearest-git-ancestor walk since `wayland-drive.sh` launches the binary from the repo root) shows
+or hides its primary worktree's default Chat/Terminal tab rows depending on session-restore
+timing, shifting every row below it by up to 2 row-heights. A rightclick aimed at a stale Y
+landed on a neighbouring worktree row instead of a project row once during this pass (opened a
+`Codex` tab on `wf-sid2-removeproj`'s own `master` worktree — harmless, but a reminder). Always
+re-screenshot immediately before a destructive click in the SAME invocation, never reuse a
+coordinate read from an earlier invocation. Also: **never click into the `tiller` project or any
+of its worktree rows** (`rust/gpui-rewrite`, `linux/gpui-waku`, `wf-term-clean`, and several
+`/tmp`-rooted ones) — these are real linked worktrees of the actual repo this task runs in and
+other sibling agents' lanes, not fixtures.
+
 (remaining rows filled in incrementally below, each followed by a commit)
