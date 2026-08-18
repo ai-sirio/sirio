@@ -341,6 +341,18 @@ struct ProjectSettingsCard {
     is_git: bool,
     icon: Rc<RefCell<ProjectIcon>>,
     icon_picker: gpui::Entity<ProjectIconPicker>,
+    /// F-PRJ-17: the pinned base branch draft; empty means "follow the
+    /// primary worktree" (`primary_branch`), matching the Swift
+    /// `WorktreeBaseSection`'s `effectiveBase` fallback chain.
+    default_worktree_base: Rc<RefCell<String>>,
+    worktree_base_focus: FocusHandle,
+    /// The primary worktree's branch, snapshotted when the sheet opens —
+    /// display-only, used for the "Following primary (…)" subtitle.
+    primary_branch: Option<String>,
+    /// F-PRJ-18: the checkout-location override draft; empty means "the
+    /// project's sibling directory" (`card.path`'s parent).
+    worktree_location_override: Rc<RefCell<String>>,
+    worktree_location_focus: FocusHandle,
 }
 
 #[derive(Clone)]
@@ -387,6 +399,12 @@ pub struct ProjectSettingsUpdate {
     pub display_name: Option<String>,
     pub is_git: bool,
     pub icon: ProjectIcon,
+    /// F-PRJ-17: the pinned base branch, or `None` to follow the primary
+    /// worktree.
+    pub default_worktree_base: Option<String>,
+    /// F-PRJ-18: the checkout-location override, or `None` for the
+    /// project's sibling directory.
+    pub worktree_location_override: Option<String>,
 }
 
 /// The kinds of rows rendered by [`Sidebar`].
@@ -456,6 +474,11 @@ pub struct Sidebar {
     project_ids: std::collections::HashMap<usize, String>,
     project_names: std::collections::HashMap<String, String>,
     project_identities: std::collections::HashMap<String, ProjectIcon>,
+    /// F-PRJ-17/F-PRJ-18: persisted per-project worktree defaults
+    /// (`default_worktree_base`, `worktree_location_override`), pushed in by
+    /// the host the same way `project_identities` is — reset on every
+    /// `set_projects` and refilled by `set_project_worktree_defaults`.
+    project_worktree_defaults: std::collections::HashMap<String, (Option<String>, Option<String>)>,
     filter: String,
     filter_focus: FocusHandle,
     /// The open worktree-creation prompt, if any.
@@ -558,6 +581,7 @@ impl Sidebar {
             project_ids: std::collections::HashMap::new(),
             project_names: std::collections::HashMap::new(),
             project_identities: std::collections::HashMap::new(),
+            project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             prompt: None,
@@ -652,6 +676,7 @@ impl Sidebar {
             project_ids,
             project_names,
             project_identities,
+            project_worktree_defaults: std::collections::HashMap::new(),
             filter: String::new(),
             filter_focus: cx.focus_handle().tab_stop(true),
             prompt: None,
@@ -671,6 +696,7 @@ impl Sidebar {
         self.project_ids = replacement.project_ids;
         self.project_names = replacement.project_names;
         self.project_identities = replacement.project_identities;
+        self.project_worktree_defaults = replacement.project_worktree_defaults;
         self.filter = filter;
         self.pending_reorder = None;
         // F-PRJ-12: an already-open Project Settings card snapshots
@@ -1027,6 +1053,25 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// F-PRJ-17/F-PRJ-18: applies the host's persisted worktree-base and
+    /// location-override for one project. Called the same way and at the
+    /// same call sites as [`Self::set_project_identity`] — after initial
+    /// construction and after catalog refreshes — so an already-open
+    /// settings sheet's drafts stay in sync with what was actually saved.
+    pub fn set_project_worktree_defaults(
+        &mut self,
+        project_id: &str,
+        default_worktree_base: Option<String>,
+        worktree_location_override: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_worktree_defaults.insert(
+            project_id.to_string(),
+            (default_worktree_base, worktree_location_override),
+        );
+        cx.notify();
+    }
+
     fn project_settings_update(card: &ProjectSettingsCard) -> ProjectSettingsUpdate {
         ProjectSettingsUpdate {
             id: card.id.clone(),
@@ -1036,6 +1081,14 @@ impl Sidebar {
             },
             is_git: card.is_git,
             icon: card.icon.borrow().clone(),
+            default_worktree_base: {
+                let value = card.default_worktree_base.borrow().trim().to_string();
+                (!value.is_empty()).then_some(value)
+            },
+            worktree_location_override: {
+                let value = card.worktree_location_override.borrow().trim().to_string();
+                (!value.is_empty()).then_some(value)
+            },
         }
     }
 
@@ -1097,6 +1150,128 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// F-PRJ-17: keystrokes typed into the "Default Worktree Base" field.
+    fn on_worktree_base_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = &self.project_settings else {
+            return;
+        };
+        let mut draft = card.default_worktree_base.borrow_mut();
+        match event.keystroke.key.as_str() {
+            "backspace" | "delete" => {
+                draft.pop();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                {
+                    draft.push_str(character);
+                }
+            }
+        }
+        drop(draft);
+        self.emit_project_settings_changed(cx);
+        cx.notify();
+    }
+
+    /// F-PRJ-17: "Use Primary" clears the pin, restoring the "follow the
+    /// primary worktree" fallback — mirrors the Swift `Button("Use Primary")`
+    /// in `WorktreeBaseSection`, which calls
+    /// `setProjectWorktreeBase(project, branch: nil)`.
+    fn use_primary_worktree_base(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = &self.project_settings else {
+            return;
+        };
+        card.default_worktree_base.borrow_mut().clear();
+        self.emit_project_settings_changed(cx);
+        cx.notify();
+    }
+
+    /// F-PRJ-18: keystrokes typed into the "Worktree Location" field.
+    fn on_worktree_location_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(card) = &self.project_settings else {
+            return;
+        };
+        let mut draft = card.worktree_location_override.borrow_mut();
+        match event.keystroke.key.as_str() {
+            "backspace" | "delete" => {
+                draft.pop();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                {
+                    draft.push_str(character);
+                }
+            }
+        }
+        drop(draft);
+        self.emit_project_settings_changed(cx);
+        cx.notify();
+    }
+
+    /// F-PRJ-18: "Restore Default" clears the override, restoring the
+    /// project's sibling directory as the parent for new worktrees.
+    fn restore_default_worktree_location(&mut self, cx: &mut Context<Self>) {
+        let Some(card) = &self.project_settings else {
+            return;
+        };
+        card.worktree_location_override.borrow_mut().clear();
+        self.emit_project_settings_changed(cx);
+        cx.notify();
+    }
+
+    /// F-PRJ-18: "Choose…" opens the same platform folder picker
+    /// `start_open_project` uses (the XDG portal on Linux, the system
+    /// open-panel on macOS) and writes the chosen path into the draft.
+    fn choose_worktree_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(card_id) = self.project_settings.as_ref().map(|card| card.id.clone()) else {
+            return;
+        };
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a folder for new worktrees".into()),
+        });
+        cx.spawn_in(window, async move |sidebar, cx| {
+            let outcome = receiver.await;
+            let Ok(Ok(Some(mut paths))) = outcome else {
+                return;
+            };
+            let Some(path) = paths.pop() else {
+                return;
+            };
+            let _ = sidebar.update(cx, |sidebar, cx| {
+                let Some(card) = sidebar.project_settings.as_ref() else {
+                    return;
+                };
+                if card.id != card_id {
+                    // The sheet was closed/reopened on a different project
+                    // while the portal dialog was up.
+                    return;
+                }
+                *card.worktree_location_override.borrow_mut() = path.display().to_string();
+                sidebar.emit_project_settings_changed(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Host entry point for the gear affordance.
     pub fn open_project_settings(&mut self, project_id: &str, cx: &mut Context<Self>) {
         let Some(row_id) = self
@@ -1137,6 +1312,26 @@ impl Sidebar {
         let display_name = (row.title != base_name)
             .then(|| row.title.clone())
             .unwrap_or_default();
+        // F-PRJ-17: the primary worktree's branch, for the "Following
+        // primary (…)" subtitle — scanned from this project's own child
+        // rows, the same `rows[project_index+1..]` traversal
+        // `insert_worktree_row` already uses.
+        let primary_branch = self
+            .rows
+            .iter()
+            .position(|candidate| candidate.id == row_id)
+            .and_then(|project_index| {
+                self.rows[project_index + 1..]
+                    .iter()
+                    .take_while(|candidate| candidate.depth > 0)
+                    .find(|candidate| candidate.kind == RowKind::Worktree && candidate.is_primary)
+                    .map(|candidate| candidate.title.clone())
+            });
+        let (default_worktree_base, worktree_location_override) = self
+            .project_worktree_defaults
+            .get(project_id)
+            .cloned()
+            .unwrap_or_default();
         self.project_settings = Some(ProjectSettingsCard {
             id: project_id.to_string(),
             name: base_name,
@@ -1146,6 +1341,15 @@ impl Sidebar {
             is_git: row.is_git,
             icon,
             icon_picker,
+            default_worktree_base: Rc::new(RefCell::new(
+                default_worktree_base.unwrap_or_default(),
+            )),
+            worktree_base_focus: cx.focus_handle(),
+            primary_branch,
+            worktree_location_override: Rc::new(RefCell::new(
+                worktree_location_override.unwrap_or_default(),
+            )),
+            worktree_location_focus: cx.focus_handle(),
         });
         cx.notify();
     }
@@ -2591,6 +2795,10 @@ impl Sidebar {
                     .bg(theme.background)
                     .child(card.icon_picker.clone()),
             )
+            .when(card.is_git, |this| {
+                this.child(Self::render_worktree_base_section(&card, &entity, &theme))
+                    .child(Self::render_worktree_location_section(&card, &entity, &theme))
+            })
             .child(
                 div()
                     .id("project-settings-remove")
@@ -2640,6 +2848,243 @@ impl Sidebar {
                     .text_color(theme.meta)
                     .child(card.id),
             )
+    }
+
+    /// F-PRJ-17: "Default Worktree Base" — mirrors the Swift
+    /// `WorktreeBaseSection`'s effective-value/subtitle pair. Typing a
+    /// branch name pins it; "Use Primary" clears the pin.
+    fn render_worktree_base_section(
+        card: &ProjectSettingsCard,
+        entity: &gpui::Entity<Self>,
+        theme: &Theme,
+    ) -> impl IntoElement {
+        let draft = card.default_worktree_base.borrow().clone();
+        let effective_base = if !draft.trim().is_empty() {
+            draft.clone()
+        } else {
+            card.primary_branch.clone().unwrap_or_else(|| "—".to_string())
+        };
+        let subtitle = if !draft.trim().is_empty() {
+            "Pinned".to_string()
+        } else if let Some(branch) = &card.primary_branch {
+            format!("Following primary branch ({branch})")
+        } else {
+            "No primary worktree set".to_string()
+        };
+        let base_focus = card.worktree_base_focus.clone();
+        let focus_entity = entity.clone();
+        let key_entity = entity.clone();
+        let primary_entity = entity.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child("Default Worktree Base"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(theme.typography.footnote)
+                                    .text_color(theme.title)
+                                    .child(effective_base),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.meta)
+                                    .child(subtitle),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("project-worktree-base-use-primary")
+                            .debug_selector(|| "project-worktree-base-use-primary".to_owned())
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.meta)
+                            .hover(|style| style.text_color(theme.title))
+                            .on_click(move |_, _, cx| {
+                                primary_entity.update(cx, |sidebar, cx| {
+                                    sidebar.use_primary_worktree_base(cx);
+                                });
+                            })
+                            .child("Use Primary"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("project-worktree-base-field")
+                    .debug_selector(|| "project-worktree-base-field".to_owned())
+                    .track_focus(&base_focus)
+                    .w_full()
+                    .h(px(28.0))
+                    .px(px(9.0))
+                    .flex()
+                    .items_center()
+                    .rounded(theme.radii.control)
+                    .bg(theme.filter_field_bg)
+                    .border_1()
+                    .border_color(theme.hairline)
+                    .text_size(theme.typography.footnote)
+                    .text_color(if draft.trim().is_empty() {
+                        theme.meta
+                    } else {
+                        theme.title
+                    })
+                    .cursor(gpui::CursorStyle::IBeam)
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        focus_entity.update(cx, |sidebar, cx| {
+                            if let Some(card) = &sidebar.project_settings {
+                                card.worktree_base_focus.focus(window, cx);
+                            }
+                        });
+                    })
+                    .on_key_down(move |event, window, cx| {
+                        key_entity.update(cx, |sidebar, cx| {
+                            sidebar.on_worktree_base_key(event, window, cx);
+                        });
+                    })
+                    .child(if draft.trim().is_empty() {
+                        "Search branches by name…".to_owned()
+                    } else {
+                        draft
+                    }),
+            )
+    }
+
+    /// F-PRJ-18: "Worktree Location" — mirrors the Swift
+    /// `WorktreeLocationSection`. Typing a path or using "Choose…" sets an
+    /// override; "Restore Default" clears it back to the project's sibling
+    /// directory.
+    fn render_worktree_location_section(
+        card: &ProjectSettingsCard,
+        entity: &gpui::Entity<Self>,
+        theme: &Theme,
+    ) -> impl IntoElement {
+        let draft = card.worktree_location_override.borrow().clone();
+        let default_location = card
+            .path
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or_else(|| card.path.display().to_string());
+        let location_focus = card.worktree_location_focus.clone();
+        let focus_entity = entity.clone();
+        let key_entity = entity.clone();
+        let choose_entity = entity.clone();
+        let restore_entity = entity.clone();
+        let has_override = !draft.trim().is_empty();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(theme.typography.footnote)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.title)
+                    .child("Worktree Location"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme.meta)
+                    .child(format!(
+                        "Parent folder for new worktrees. Empty uses the default: {default_location}"
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("project-worktree-location-field")
+                            .debug_selector(|| "project-worktree-location-field".to_owned())
+                            .track_focus(&location_focus)
+                            .flex_1()
+                            .h(px(28.0))
+                            .px(px(9.0))
+                            .flex()
+                            .items_center()
+                            .rounded(theme.radii.control)
+                            .bg(theme.filter_field_bg)
+                            .border_1()
+                            .border_color(theme.hairline)
+                            .text_size(theme.typography.footnote)
+                            .text_color(if has_override { theme.title } else { theme.meta })
+                            .cursor(gpui::CursorStyle::IBeam)
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                focus_entity.update(cx, |sidebar, cx| {
+                                    if let Some(card) = &sidebar.project_settings {
+                                        card.worktree_location_focus.focus(window, cx);
+                                    }
+                                });
+                            })
+                            .on_key_down(move |event, window, cx| {
+                                key_entity.update(cx, |sidebar, cx| {
+                                    sidebar.on_worktree_location_key(event, window, cx);
+                                });
+                            })
+                            .child(if has_override {
+                                draft
+                            } else {
+                                default_location.clone()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("project-worktree-location-choose")
+                            .debug_selector(|| "project-worktree-location-choose".to_owned())
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .px(px(8.0))
+                            .h(px(28.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radii.control)
+                            .bg(theme.primary_pill_bg)
+                            .text_size(theme.typography.footnote)
+                            .text_color(theme.title)
+                            .on_click(move |_, window, cx| {
+                                choose_entity.update(cx, |sidebar, cx| {
+                                    sidebar.choose_worktree_location(window, cx);
+                                });
+                            })
+                            .child("Choose…"),
+                    ),
+            )
+            .when(has_override, |this| {
+                this.child(
+                    div()
+                        .id("project-worktree-location-restore")
+                        .debug_selector(|| "project-worktree-location-restore".to_owned())
+                        .cursor(gpui::CursorStyle::PointingHand)
+                        .text_size(px(10.0))
+                        .text_color(theme.meta)
+                        .hover(|style| style.text_color(theme.title))
+                        .on_click(move |_, _, cx| {
+                            restore_entity.update(cx, |sidebar, cx| {
+                                sidebar.restore_default_worktree_location(cx);
+                            });
+                        })
+                        .child("Restore Default"),
+                )
+            })
     }
 
     fn render_row(
@@ -5224,6 +5669,307 @@ mod tests {
                 .clone()
         });
         assert_eq!(row_title, "Renamed", "the sidebar reflects the edited name");
+    }
+
+    /// F-PRJ-17/F-PRJ-18: wave F found `grep -rn "worktree_base|default_worktree_base|
+    /// WorktreeBase" rust/crates/tiller_ui/src/*.rs` returned zero hits, and a
+    /// live top-to-bottom read of the Project Settings sheet found no
+    /// default-base or worktree-location control anywhere in it. This test
+    /// fails to compile on the unfixed tree (no such ids are ever drawn, no
+    /// such fields exist on `ProjectSettingsUpdate`) and passes once the
+    /// controls exist and are gated on `card.is_git` the same way the New
+    /// Worktree row itself is (a project with no worktrees has no base or
+    /// location to set).
+    #[gpui::test]
+    async fn worktree_base_and_location_fields_are_drawn_only_for_git_projects(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![
+                    SidebarProject {
+                        id: "git-project".into(),
+                        name: "git-project".into(),
+                        is_git: true,
+                        root_path: PathBuf::from("/tmp/prj1718-git"),
+                        worktrees: vec![SidebarWorktree {
+                            branch: "main".into(),
+                            path: PathBuf::from("/tmp/prj1718-git-main"),
+                            is_primary: true,
+                            comment: None,
+                        }],
+                    },
+                    SidebarProject {
+                        id: "folder-project".into(),
+                        name: "folder-project".into(),
+                        is_git: false,
+                        root_path: PathBuf::from("/tmp/prj1718-folder"),
+                        worktrees: Vec::new(),
+                    },
+                ],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("git-project", cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-worktree-base-field").is_some(),
+            "a git project's settings sheet draws the Default Worktree Base field"
+        );
+        assert!(
+            cx.debug_bounds("project-worktree-location-field").is_some(),
+            "a git project's settings sheet draws the Worktree Location field"
+        );
+
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("folder-project", cx)
+            });
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-worktree-base-field").is_none(),
+            "a non-git project has no worktrees, so it offers no base/location controls"
+        );
+    }
+
+    /// F-PRJ-17/F-PRJ-18: typing into either field, and the two clearing
+    /// controls ("Use Primary", "Restore Default"), each emit a durable
+    /// `ProjectSettingsChanged` carrying the new value.
+    #[gpui::test]
+    async fn typing_worktree_base_and_location_emits_a_durable_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "project".into(),
+                    is_git: true,
+                    root_path: PathBuf::from("/tmp/prj1718"),
+                    worktrees: vec![SidebarWorktree {
+                        branch: "main".into(),
+                        path: PathBuf::from("/tmp/prj1718-main"),
+                        is_primary: true,
+                        comment: None,
+                    }],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+            .detach();
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let base_field = cx
+            .debug_bounds("project-worktree-base-field")
+            .expect("worktree-base field is drawn");
+        cx.simulate_click(base_field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("develop");
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ProjectSettingsChanged(update)
+                    if update.default_worktree_base.as_deref() == Some("develop")
+            )),
+            "typing a base branch emits it on the durable update"
+        );
+
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let location_field = cx
+            .debug_bounds("project-worktree-location-field")
+            .expect("worktree-location field is drawn");
+        cx.simulate_click(location_field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("/srv/worktrees");
+        cx.run_until_parked();
+
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ProjectSettingsChanged(update)
+                    if update.worktree_location_override.as_deref() == Some("/srv/worktrees")
+            )),
+            "typing a location override emits it on the durable update"
+        );
+
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let use_primary = cx
+            .debug_bounds("project-worktree-base-use-primary")
+            .expect("Use Primary is drawn");
+        cx.simulate_click(use_primary.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ProjectSettingsChanged(update)
+                    if update.default_worktree_base.is_none()
+            )),
+            "Use Primary clears the pinned base"
+        );
+
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let restore = cx
+            .debug_bounds("project-worktree-location-restore")
+            .expect("Restore Default is drawn once an override is set");
+        cx.simulate_click(restore.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            events.borrow().iter().any(|event| matches!(
+                event,
+                SidebarEvent::ProjectSettingsChanged(update)
+                    if update.worktree_location_override.is_none()
+            )),
+            "Restore Default clears the location override"
+        );
+    }
+
+    /// F-PRJ-17/F-PRJ-18's VERIFY clause, verbatim: "reopen the sheet, and
+    /// confirm the selected option persists." A real host applies
+    /// `set_project_worktree_defaults` after every `ProjectSettingsChanged`
+    /// (the same loop `refresh_sidebar` already drives for icons through
+    /// `set_project_identity`) -- this test drives exactly that host round
+    /// trip without a live `tiller` process, closes the sheet, reopens it,
+    /// and reads the freshly-built card's own drafts.
+    #[gpui::test]
+    async fn worktree_base_and_location_persist_across_reopen(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "project".into(),
+                    name: "project".into(),
+                    is_git: true,
+                    root_path: PathBuf::from("/tmp/prj1718-persist"),
+                    worktrees: vec![SidebarWorktree {
+                        branch: "main".into(),
+                        path: PathBuf::from("/tmp/prj1718-persist-main"),
+                        is_primary: true,
+                        comment: None,
+                    }],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        let saved = Rc::new(RefCell::new(None));
+        let captured = saved.clone();
+        let host_sidebar = sidebar.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, cx| {
+                if let SidebarEvent::ProjectSettingsChanged(update) = event {
+                    *captured.borrow_mut() = Some((
+                        update.default_worktree_base.clone(),
+                        update.worktree_location_override.clone(),
+                    ));
+                    host_sidebar.update(cx, |sidebar, cx| {
+                        sidebar.set_project_worktree_defaults(
+                            &update.id,
+                            update.default_worktree_base.clone(),
+                            update.worktree_location_override.clone(),
+                            cx,
+                        );
+                    });
+                }
+            })
+            .detach();
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let base_field = cx
+            .debug_bounds("project-worktree-base-field")
+            .expect("worktree-base field is drawn");
+        cx.simulate_click(base_field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("release");
+        cx.run_until_parked();
+
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let location_field = cx
+            .debug_bounds("project-worktree-location-field")
+            .expect("worktree-location field is drawn");
+        cx.simulate_click(location_field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("/srv/worktrees");
+        cx.run_until_parked();
+
+        assert_eq!(
+            saved.borrow().clone(),
+            Some((
+                Some("release".to_string()),
+                Some("/srv/worktrees".to_string())
+            )),
+            "both edits reached the host round trip"
+        );
+
+        // Close, then reopen: a fresh card is built from
+        // `project_worktree_defaults`, which now holds what the host saved.
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.project_settings = None;
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.open_project_settings("project", cx)
+            });
+        });
+        cx.run_until_parked();
+
+        let reopened = cx.update(|_, cx| {
+            sidebar.read(cx).project_settings.as_ref().map(|card| {
+                (
+                    card.default_worktree_base.borrow().clone(),
+                    card.worktree_location_override.borrow().clone(),
+                )
+            })
+        });
+        assert_eq!(
+            reopened,
+            Some(("release".to_string(), "/srv/worktrees".to_string())),
+            "reopening the sheet shows the persisted base and location -- \
+             the clause's exact requirement"
+        );
     }
 
     /// F-PRJ-12: open_project_settings snapshots is_git once; set_projects
