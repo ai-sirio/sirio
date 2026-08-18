@@ -158,6 +158,96 @@ membership visibly and structurally changes between two independently-verifiable
 screenshots, with the moved tab's own content (Claude Code's live idle transcript) intact
 across the move.
 
-### F-TAB-14 — Rename a tab by double-clicking its title or using Rename
+### F-TAB-23 — Create left, right, above, or below panes from the Pane menu
+
+**PASSED**, on the same real mechanism as F-TAB-10 above, not a separate control — this
+port folds macOS's "new pane in direction X" into the terminal context menu's Split
+Left/Right/Above/Down items (`tiller_terminal::context_menu::ITEMS`, indices 6-9), the same
+one control both `SplitContentMenu.swift`'s new-pane-direction clause (F-TAB-23) and its
+split-current-pane clause (F-TAB-10) land on in this port — confirmed by reading the actual
+dispatch (`main.rs`'s `TerminalContextAction::SplitLeft/Right/Above/Down` all route to the
+same `split_focused_terminal`/pane-tree-insertion code whichever direction is chosen). All
+four directions were driven live in F-TAB-10's evidence above
+(`t10c`/`t10f`/`t10h`/`t10k-*.png`), each producing a new, independently-live pane group on
+the requested side. Not re-screenshotted separately since the mechanism, the menu, and the
+four outcomes are identical to F-TAB-10's — recorded here as the same evidence under this
+port's real, verified one-control design.
+
+### F-TAB-24 — Cancel a pane-tab drag with Escape
+
+(continued below)
+
+### F-TAB-25 — Attach an eligible pane to the current terminal
+
+**PASSED.** With two independent terminal tabs open in the same pane group ("Terminal ?"
+and "Terminal"), right-clicked the **second** tab's context menu while it was the active
+tab: "Attach to Current Terminal" showed **disabled** with reason "select another terminal
+tab" (`t25b-41-newterm-tabctx.png`) — correct, since a tab cannot attach to itself. Switched
+focus to the **first** tab and reopened its own context menu: the same item now showed
+**enabled** (`t25c-42-firstterm-tabctx.png`). Clicked it: both terminals' live content
+appeared **simultaneously side-by-side** in one combined view — two independent bash
+prompts, two independent `neofetch`-style banners with different live readings, both
+visible in the same frame at once where before only one tab's content showed at a time
+(`t25d-43-attach-result.png`). Hard discriminator: eligibility flips correctly based on
+which tab is "current" (self-attach correctly refused with a stated reason, cross-attach
+allowed), and the post-attach frame shows two live, independently-updating terminal
+surfaces on screen together, which a no-op click could not produce.
+
+### F-TAB-26 — Close a terminal pane from its pane context menu after confirmation
+
+**FAILED — defective.** The confirmation gate itself works correctly and was proven twice:
+launched the real `claude` CLI directly inside a plain terminal pane's shell (not as an ACP
+chat tab — just typed into the raw prompt); the app's own Layer-D foreground-process
+detection picked it up within ~1s (status bar's Activity indicator flipped to "1 running",
+the pane's own tab icon changed from the plain terminal glyph to the Claude sun glyph —
+`t26z2-61-claude-launched.png`). Right-clicking that pane → "Close Terminal…" now raised the
+real confirm banner: *"This pane has running work. Close anyway?"* with **Close Anyway** /
+**Cancel** (`t26z4-63-after-close-click.png`). Clicking **Cancel** correctly left the pane,
+its tab, and the live `claude` process untouched (`t26z5-64-after-cancel.png`).
+
+**Clicking "Close Anyway" is where it breaks**: reopened the same menu → Close Terminal →
+Close Anyway a second time, with the button's on-screen bounds re-confirmed by a fresh
+screenshot immediately before each click (`t26z6`/`t26z9`/`t26g7-85-final-dialog-check.png`,
+all showing the identical button geometry) — and across **three independent Close-Anyway
+clicks** the dialog dismissed but **nothing else changed**: `panel.list` over the control
+socket reported the exact same 5-7 terminal panes before and after every attempt, and the
+real `claude` process (pid confirmed via `ps`, launched at `22:23:40`) was still alive and
+still a child of the same still-alive pane shell after each click. This was not a coordinate
+or input-delivery miss: a **control** run in the same session on the same button/menu, same
+click mechanics, on a *different* pane one click later — an idle terminal pane that was one
+of *several* panes in its tab (no confirmation needed there) — closed correctly and
+immediately, `panel.list`'s pane count dropping 8→7 (`pane-3` disappearing) the instant
+"Close Terminal…" was clicked
+(`t26g4-82-rightpane-ctx3.png`→`t26g5-83-after-close-idle-multi.png`).
+
+**Root cause, read from source**: `close_terminal_at`
+(`rust/crates/tiller/src/main.rs:7513-7525`) opens with
+
+```rust
+if tab.panes.leaf_ids().len() <= 1 || !tab.panes.contains(focused_pane) {
+    return;
+}
+```
+
+— a guard meant to stop an ordinary close from leaving a tab with zero panes. But
+`confirm_pending_pane_close` (`main.rs:4566-4574`) calls this exact function for the
+non-whole-tab case, so when the pane under confirmation is the **sole pane in its tab**
+(exactly the state the running-`claude` pane was in throughout this repro — verified by
+right-clicking the visibly-empty region beside it and getting no context menu at all, i.e.
+no sibling pane there to have a menu), "Close Anyway" silently no-ops: the confirmation
+state is consumed (`.take()`), the dialog disappears, and the function returns before ever
+touching the pane tree, the terminal process, or scheduling a save. The user is told nothing
+— the button visually promises to close the pane "anyway" and does not, and a genuinely
+running agent process is left alive with no further way to close it from that menu (Cancel
+and Close Anyway now behave identically). This is a real, narrowly-scoped, precisely
+reproducible defect: it fires whenever "Close Terminal…" is invoked on a tab's only pane
+while that pane's status is Running/NeedsInput/Error; the identical control on a multi-pane
+tab works correctly.
+
+### F-TAB-27 — Resume a past chat from the pane menu
+
+(continued below)
+
+### F-TAB-28 — Close the active tab with Ctrl-W
 
 (continued below)
