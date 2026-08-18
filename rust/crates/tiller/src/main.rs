@@ -31,7 +31,8 @@ use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme
 use tiller_project::{TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository};
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
-    TerminalIdentity, TerminalLinkEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
+    TerminalIdentity, TerminalLinkEvent, TerminalPromptAction, TerminalPromptEvent, TerminalShell,
+    TerminalStateSnapshot, TerminalView,
 };
 use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
@@ -667,6 +668,14 @@ enum WorkspaceAction {
     /// chord) both funnel here -- re-invoke the same `session.restore`
     /// control-door path `ControlAction::RestoreSession` already drives.
     RestoreLaunchSnapshot,
+    /// F-TERM-02: the empty-pane prompt's "New…" action -- the Linux
+    /// equivalent of the Swift reference's `Menu("New…") { newTabMenu() }`,
+    /// which shares the same chooser the tab strip's own "+" control opens.
+    /// `TerminalPromptEvent` fires from a `cx.subscribe` callback with no
+    /// `Window`, so opening it (which needs one, to move focus into the
+    /// query field) is deferred through this queue like every other
+    /// Window-needing follow-up from a non-Window context.
+    OpenNewTabPalette,
 }
 
 #[derive(Clone)]
@@ -3055,6 +3064,16 @@ struct TillerWorkspace {
     /// directory's list at a time, so the ones that drop out have to be
     /// cleared by name or they keep a ghost of a pane that moved or closed.
     published_pane_directories: BTreeSet<PathBuf>,
+    /// F-TERM-02: one cached [`TerminalView::empty_prompt`] entity per pane
+    /// group that currently has zero tabs, keyed by `TabGroup::id`. Kept
+    /// alive across renders (rather than built fresh every frame) so its
+    /// `TerminalPromptEvent` subscription is created once, matching how
+    /// every other live pane entity in `tabs` is owned. Synced by
+    /// [`Self::sync_empty_pane_prompts`], which `render` calls every frame —
+    /// entries are added the moment a group's last tab leaves it and dropped
+    /// the moment it gets one back, so `render_group_surfaces` can just
+    /// look one up instead of deciding whether to build one mid-render.
+    empty_pane_prompts: BTreeMap<usize, Entity<TerminalView>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3190,6 +3209,9 @@ impl TillerWorkspace {
                                 }
                                 WorkspaceAction::OpenBrowserLink(url) => {
                                     workspace.add_browser_tab(url, window, cx);
+                                }
+                                WorkspaceAction::OpenNewTabPalette => {
+                                    workspace.open_command_palette(window, cx);
                                 }
                                 WorkspaceAction::RestoreLaunchSnapshot => {
                                     if let Err(error) =
@@ -3520,6 +3542,7 @@ impl TillerWorkspace {
             next_toast_id: 0,
             update_state: UpdateState::Idle,
             auto_naming_throttle: BTreeMap::new(),
+            empty_pane_prompts: BTreeMap::new(),
         };
         // ctrl-shift-p is universal, including while the terminal owns focus.
         // An element-level listener is too late for embedded terminal input,
@@ -5575,6 +5598,76 @@ impl TillerWorkspace {
         }
     }
 
+    /// F-TERM-02: keeps `empty_pane_prompts` in step with which pane groups
+    /// currently hold zero tabs. Called every render (like `sync_activity`)
+    /// rather than only from `rebuild_tab_machinery`/`apply_tab_machinery`,
+    /// so it also covers a group created by `add_group` before any tab has
+    /// landed in it. A group that already has an entry is left alone (its
+    /// `TerminalPromptEvent` subscription must survive across renders, or
+    /// clicking "New Terminal" the second time in a session would no-op);
+    /// a group that regained a tab has its entry dropped, which also drops
+    /// its `TerminalView` entity and the subscription tied to it.
+    fn sync_empty_pane_prompts(&mut self, cx: &mut Context<Self>) {
+        let empty_group_ids: Vec<usize> = self
+            .tab_machinery
+            .groups()
+            .iter()
+            .filter(|group| group.tabs.is_empty())
+            .map(|group| group.id)
+            .collect();
+        self.empty_pane_prompts
+            .retain(|group_id, _| empty_group_ids.contains(group_id));
+        for group_id in empty_group_ids {
+            if self.empty_pane_prompts.contains_key(&group_id) {
+                continue;
+            }
+            let prompt = cx.new(|cx| TerminalView::empty_prompt(cx));
+            cx.subscribe(&prompt, move |workspace, _, event: &TerminalPromptEvent, cx| {
+                workspace.handle_empty_pane_prompt(group_id, event.action, cx);
+            })
+            .detach();
+            self.empty_pane_prompts.insert(group_id, prompt);
+        }
+    }
+
+    /// Reassigns `active_group` without requiring the group to already own a
+    /// tab -- `TabMachinery::select_tab` refuses that, since it is meant for
+    /// picking a tab, not just a pane. Rebuilding through `TabMachinery::new`
+    /// with the same groups is the only way to do this from `main.rs`
+    /// without adding a new public method to `tab_machinery.rs`, which this
+    /// wave does not own.
+    fn activate_group(&mut self, group_id: usize) {
+        let groups = self.tab_machinery.groups().to_vec();
+        if let Ok(machinery) = TabMachinery::new(groups, group_id) {
+            self.tab_machinery = machinery;
+        }
+    }
+
+    /// Handles a click on one of the empty-pane prompt's two actions (see
+    /// `sync_empty_pane_prompts`), mirroring the Swift reference's
+    /// `stripModel.onActivateGroup(); stripModel.onNewTab()`
+    /// (`App/PaneEmptyStateView.swift:24-26`): make the clicked pane's group
+    /// active, then create a tab in it. `add_terminal_tab` reads
+    /// `tab_machinery.active_group()` to decide which group a new tab joins,
+    /// so `activate_group` must run first and land before this returns --
+    /// there is no `Window` here to defer through, but neither call needs one.
+    fn handle_empty_pane_prompt(
+        &mut self,
+        group_id: usize,
+        action: TerminalPromptAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_group(group_id);
+        match action {
+            TerminalPromptAction::NewTerminal => self.add_terminal_tab("Terminal", cx),
+            TerminalPromptAction::NewTerminalWithCommand => {
+                if let Ok(mut actions) = self.pending_actions.lock() {
+                    actions.push(WorkspaceAction::OpenNewTabPalette);
+                }
+            }
+        }
+    }
+
     fn subscribe_changes_tab(tab: &Entity<ChangesTab>, cx: &mut Context<Self>) {
         cx.subscribe(
             tab,
@@ -7562,6 +7655,23 @@ impl TillerWorkspace {
                                     })
                                     .child("New Terminal"),
                             )
+                            .into_any_element()
+                    } else if let Some(prompt) = self.empty_pane_prompts.get(&group.id) {
+                        // F-TERM-02: a pane group that lost its last tab
+                        // (every other tab moved elsewhere, or a fresh split
+                        // group awaiting its first tab) without the whole
+                        // pane closing -- mount the real `TerminalView`
+                        // empty-prompt surface instead of tearing the group
+                        // down to a static label. `sync_empty_pane_prompts`
+                        // guarantees an entry exists for every group with
+                        // zero tabs before this renders.
+                        div()
+                            .id(format!("pane-group-empty-{}", group.id))
+                            .debug_selector(|| "pane-group-empty".to_owned())
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(prompt.clone())
                             .into_any_element()
                     } else {
                         div()
@@ -9754,6 +9864,7 @@ impl Render for TillerWorkspace {
         // on an unchanged value, so this doesn't loop.
         self.drain_browser_events(cx);
         self.sync_activity(cx);
+        self.sync_empty_pane_prompts(cx);
 
         if self.show_settings {
             return div()
@@ -16244,6 +16355,90 @@ mod tests {
             workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
             1,
             "New Terminal must replace the empty state with a terminal tab"
+        );
+    }
+
+    /// F-TERM-02: a pane group that lost its last tab to a move -- distinct
+    /// from F-SID-18's group-0-with-a-worktree case above, which the comment
+    /// on `drawn_selected_worktree_without_tabs_offers_a_new_terminal`
+    /// explicitly calls out as a different state -- must fall back to the
+    /// real `TerminalView::empty_prompt` surface, not the bare "No tabs in
+    /// this pane" label the code used to draw with no way back into the
+    /// group at all.
+    #[gpui::test]
+    async fn drawn_detached_pane_group_offers_the_real_empty_prompt(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window =
+            cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        // Move tab 1 into a brand-new second pane group, then move that same
+        // tab straight back to group 0. Nothing ever collapses the second
+        // group -- `TabMachinery::move_tab` only ever empties a group's
+        // `tabs` list, it never removes the group itself -- so this leaves a
+        // genuinely detached, non-zero-id, tabless pane group behind.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.active_tab = 1;
+            workspace.move_selected_tab_to_new_pane(cx);
+        });
+        cx.run_until_parked();
+        let detached_group_id = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .tab_machinery
+                .groups()
+                .iter()
+                .map(|group| group.id)
+                .find(|id| *id != 0)
+                .expect("move_selected_tab_to_new_pane created a second group")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.move_selected_tab(MoveTarget::Group(0), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tab_machinery
+                    .groups()
+                    .iter()
+                    .any(|group| group.id == detached_group_id && group.tabs.is_empty())
+            }),
+            "the second group must survive with zero tabs, not collapse away"
+        );
+
+        assert!(
+            cx.debug_bounds("pane-group-empty").is_some(),
+            "the detached group must draw the empty-pane surface"
+        );
+        assert!(
+            cx.debug_bounds("terminal-new").is_some(),
+            "the empty prompt's New Terminal action must be visible, not a static label"
+        );
+        assert!(
+            cx.debug_bounds("terminal-new-command").is_some(),
+            "the empty prompt's New… action must be visible, not a static label"
+        );
+
+        let new_terminal = cx
+            .debug_bounds("terminal-new")
+            .expect("New Terminal action is drawn");
+        cx.simulate_click(new_terminal.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.group_id == detached_group_id)
+            }),
+            "New Terminal must land the fresh tab back in the pane group the user clicked in, \
+             not silently in whichever group happened to be active before"
         );
     }
 
