@@ -350,3 +350,47 @@ structurally absent (no callback, no button) rather than merely blocked by F-SET
 account.
 
 ---
+
+## F-SET-22 — Customize each agent's accent color
+
+VERIFY: Open an Agent Colors row, choose a color, start/show that agent, and confirm its accent
+color changes. SRC: `App/AppearanceSettingsView.swift:61`.
+
+**The picker half is real and click-driven, not merely unit-tested.** `grep -rn "agent_colors\["
+rust/crates` outside tests turns up exactly one production read site,
+`tiller_ui/src/settings.rs:2147` (`let selected = self.agent_colors[index];`, used only to decide
+which swatch gets the selection ring on render) plus the two write sites reachable from a swatch
+click. The existing unit test `agent_color_click_selects_a_new_accent_and_persists` passes
+(`cargo test --manifest-path rust/Cargo.toml -p tiller_ui -- agent_color_click_selects_a_new_accent_and_persists`
+→ 1 passed in 0.63s), and this pass reproduced the same effect live: a fresh drive opened Settings →
+Appearance and screenshotted the Agent Colors grid
+(`reference/linux-progress/wf-rest3/15-set22-appearance-before.png` — no swatch in the Claude Code
+row carries a selection ring), then clicked the purple swatch on the Claude Code row and
+screenshotted again
+(`reference/linux-progress/wf-rest3/16-set22-claude-purple-selected.png` — the purple swatch on the
+Claude Code row now renders with a white selection ring around it, a state change that only exists
+if the click was received, the row/index resolved, and `agent_colors[0]` was actually written and
+re-rendered). This is a hard discriminator: the ring only appears around the entry matching
+`self.agent_colors[index]`, so its presence at the clicked swatch and nowhere else proves the write
+happened, not just that the click landed.
+
+**The picker is deliberately wired to nothing that renders an agent's brand color.** `main.rs:2740-
+2755`'s own doc comment on `WorktreeActivity::agent_brand` says this in as many words: the sidebar's
+per-worktree agent tint used to be `settings::AgentAccentColor` (this same eight-swatch picker), and
+Claude's picker slot at the time was `theme.tab_needs_input` — so a *running* Claude worktree painted
+the identical color as one that *needed input*. The fix was to point every "show this agent's brand
+color" consumer (`WorktreeStatusGlyph`/`right_panel.rs:1288`'s `activity_status()`, tab dots) at
+`tiller_theme::AgentBrandColor` instead, a separate fixed table the picker never writes to — mirroring
+the Swift reference's own `App/AgentAccentColor.swift`, which says outright it is "unrelated to
+`AgentIcon.color(for:)`". So the VERIFY clause's second half — "start/show that agent, and confirm
+its accent color changes" — has no code path that could pass: there is no rendering surface in this
+tree, ported or otherwise, that reads `agent_colors[]` for anything but redrawing the settings row's
+own selection ring.
+
+**Verdict: half-proven.** The picker's own state machine (click → select → persist → re-render the
+ring) is proven live and by unit test — genuinely working, not stubbed. But it is proven working at
+something the VERIFY clause never asked about: no agent's *displayed* accent color anywhere in the
+app (tab bar, sidebar status dot) changes as a result, by design, matching the ledger's existing
+"zero rendering consumers" characterization exactly.
+
+---
