@@ -299,3 +299,31 @@ user opens, across a genuine process boundary for the override case — not read
 that already covered the same assertion in isolation.
 
 ---
+
+## F-CORE-DOM-08 — FAILED — absent (was half-proven)
+
+VERIFY clause (`02-inventory-packages.md`): *"A MainActor once-gate executes its closure once and
+ignores later fire calls. Trigger the same one-shot restore or setup callback multiple times and
+confirm it has one observable effect."* Ledger evidence being carried was explicit about the gap:
+*"Pure internal type with no UI surface to live-drive at all."* Applied the brief's
+tested-but-unwired check to that claim instead of accepting it — a "no UI surface" claim is itself
+a claim about wiring, and this is exactly what "grep for the app caller before accepting a green
+unit test" is for.
+
+`grep -rn "OnceGate" rust/ --include="*.rs"` (whole tree, target/ excluded — pattern validated by
+its own four hits, not a silent zero) returns exactly **four** lines, all inside
+`tiller_project/src/domain.rs`/`lib.rs` itself: the struct definition (`domain.rs:120`), its `impl`
+block, its own unit test's instantiation (`domain.rs:192`), and the `pub use` re-export from
+`lib.rs:53`. **Zero occurrences in `tiller`, `tiller_ui`, `tiller_terminal`, `tiller_control`,
+`tiller_agents`, `tiller_git`, or `tiller_persistence`** — no restore path, no setup callback,
+nothing in the actual application binary ever constructs or calls `OnceGate::fire`.
+
+This is not "no UI surface to click" (the half-proven framing) — it is **no caller of any kind**.
+The type was ported from `OnceGate.swift:3` and unit-tested in isolation, but the "one-shot
+restore or setup callback" the VERIFY clause names does not exist anywhere in the running Rust
+app for it to gate. A validated whole-tree grep is the standard's own accepted disproof of
+absence (`EVIDENCE-STANDARD.md`, "a validated read is the only possible disproof of absence") —
+downgraded, not carried, since `half-proven` implies partial live wiring that a full-tree grep
+shows is not there.
+
+---
