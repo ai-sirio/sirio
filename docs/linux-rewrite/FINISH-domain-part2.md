@@ -39,7 +39,16 @@ Priority per brief: the five rows a predecessor left NOT EXERCISED (F-WIN-03, F-
 F-PER-05, F-PER-07) — driven first, below — then F-CORE-DOM-03/07 (currently carried on unit
 tests only), then remaining half-proven rows as budget allows.
 
-Status: IN PROGRESS — rows appended below as driven, each committed individually.
+Status: DONE for this pass. Ten rows driven and closed below: the five priority NOT EXERCISED
+rows, F-CORE-DOM-03/07 (the two explicitly named), and three more found and closed while grepping
+for F-CORE-DOM-07's app caller (F-CORE-DOM-02/05/08 all share the same `tiller_project::domain`
+"wave M" evidence lineage and the same tested-but-unwired risk, so each got the same app-caller
+check applied before being carried or moved). Remaining 13 rows (F-CHG-02/15/18, F-SET-14/15/18/22,
+F-TERM-03/10/SCR-02/PTY-04/UI-02, F-CORE-USG-07) were not reached this pass — returned as
+`NOT EXERCISED` in the structured report rather than guessed, per the brief's explicit priority
+order and its instruction to prefer an honest gap over a padded pass. Their prior ledger verdicts
+already carry real evidence (several are grep-validated `FAILED` findings from wave J) and stand
+undisturbed by this pass, which touched only the rows detailed below.
 
 ---
 
