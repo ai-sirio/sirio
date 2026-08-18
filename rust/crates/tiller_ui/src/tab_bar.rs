@@ -625,7 +625,33 @@ impl Render for TabBar {
             }))
             .child(
                 canvas(
-                    move |bounds, _, _| anchor_bounds.set(Some(bounds)),
+                    // `render()` reads `anchor_bounds` synchronously, one full
+                    // render pass BEFORE this prepaint callback can update it
+                    // with the button's bounds for the frame being built now
+                    // -- so the deferred menu below is always positioned from
+                    // last frame's measurement. Invisible while the button's
+                    // position never changes frame to frame, but a window
+                    // resize while the menu is open does move it, and with
+                    // nothing forcing a follow-up render the menu stayed
+                    // pinned to the button's PRE-resize spot forever
+                    // (PLUS-MENU-INVESTIGATION.md). `Window::refresh` is a
+                    // no-op here -- prepaint runs mid-draw
+                    // (`invalidator.not_drawing()` is false), exactly the
+                    // guard that stops a redraw from re-triggering itself
+                    // inside its own frame. Deferring through `on_next_frame`
+                    // (the same "wait for the real next frame" primitive
+                    // `toggle_menu` already uses below, for the same reason:
+                    // deferred/anchored content settles one frame late) calls
+                    // `refresh` from OUTSIDE any draw, where it actually
+                    // marks the window dirty -- so the next frame renders
+                    // with the corrected position instead of never catching
+                    // up.
+                    move |bounds, window, _| {
+                        if anchor_bounds.get() != Some(bounds) {
+                            anchor_bounds.set(Some(bounds));
+                            window.on_next_frame(|window, _cx| window.refresh());
+                        }
+                    },
                     |_, _, _, _| {},
                 )
                 .absolute()
@@ -802,6 +828,117 @@ mod tests {
         assert!(
             cx.debug_bounds("new-tab-item-new-browser").is_some(),
             "the menu offers the mounted browser surface"
+        );
+    }
+
+    /// A bare `TabBar` fills the whole test window, so its "+" button always
+    /// sits flush against the window's true right edge and the 170px menu
+    /// always needs `snap_to_window_with_margin` to pull it back onscreen --
+    /// which saturates to the same clamped position regardless of whether
+    /// the button moved, masking the staleness this test exists to catch.
+    /// The real app never hits that: a Files panel sits to the right of the
+    /// tab strip (`RIGHT_PANEL_WIDTH` in `tiller/src/main.rs`), so the menu
+    /// has real room to its right. This host reproduces that gutter.
+    struct ResizeHost {
+        tab_bar: gpui::Entity<TabBar>,
+    }
+
+    impl Render for ResizeHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .w_full()
+                .h_full()
+                .child(div().flex_1().child(self.tab_bar.clone()))
+                .child(div().id("files-gutter").w(px(400.0)).h_full())
+        }
+    }
+
+    /// PLUS-MENU-INVESTIGATION.md: `toggle_menu`'s anchored menu positions
+    /// itself from `anchor_bounds`, a `Cell` the "+" button's own `canvas`
+    /// only updates during ITS prepaint -- one render pass after the value
+    /// is read to build the menu's `anchored().position(...)`. That lag is
+    /// invisible while the button never moves, but a window resize while the
+    /// menu is open moves it, and nothing forced a follow-up render to pick
+    /// up the corrected bounds: the menu stayed pinned to the button's
+    /// PRE-resize spot forever. Reproduced live under Wayland (down on a
+    /// menu item, a window resize landed in between, up missed every row) --
+    /// see the investigation doc for the screenshots. This is the harness's
+    /// `shot()` doing that resize as a side effect, but the underlying
+    /// staleness is real: any resize while the menu is open reproduces it.
+    #[gpui::test]
+    async fn drawn_new_tab_menu_tracks_the_button_after_a_window_resize(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        let tab_bar_cell: Rc<RefCell<Option<gpui::Entity<TabBar>>>> = Rc::new(RefCell::new(None));
+        let tab_bar_cell_for_window = tab_bar_cell.clone();
+        let window = cx.add_window(move |_window, cx| {
+            let tab_bar = cx.new(TabBar::new);
+            *tab_bar_cell_for_window.borrow_mut() = Some(tab_bar.clone());
+            ResizeHost { tab_bar }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let tab_bar = tab_bar_cell
+            .borrow_mut()
+            .take()
+            .expect("the window's build closure captured the tab bar entity");
+
+        let plus = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is in the drawn frame");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("new-tab-menu").is_some(),
+            "the menu opens before the resize, clear of the window's right edge"
+        );
+
+        // A real window resize while the menu stays open.
+        cx.simulate_resize(gpui::size(px(1400.0), px(700.0)));
+        cx.run_until_parked();
+
+        let plus_mid_resize = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is still drawn after the resize");
+        assert_ne!(
+            plus_mid_resize.origin.x, plus.origin.x,
+            "the resize must actually have moved the button, or this test proves nothing"
+        );
+
+        // Tests have no platform frame loop (see `Window::simulate_next_frame`'s
+        // own doc comment): the fix schedules its correction through
+        // `on_next_frame`, exactly like `toggle_menu`'s focus dance above,
+        // so it needs the one manual pump a real compositor's own next frame
+        // callback would already have delivered by itself. Without the fix,
+        // nothing is scheduled there and this changes nothing.
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        let plus_after = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is still drawn");
+        let menu_after = cx
+            .debug_bounds("new-tab-menu")
+            .expect("the menu is still drawn");
+        let anchor_after = tab_bar.read_with(&cx.cx, |tab_bar, _| tab_bar.anchor_bounds.get());
+        assert_eq!(
+            anchor_after,
+            Some(plus_after),
+            "the canvas-measured anchor itself must have caught up with the button's true \
+             post-resize bounds by now"
+        );
+        assert_eq!(
+            menu_after.origin.x, plus_after.origin.x + px(6.0),
+            "the open menu must self-heal onto the button's post-resize position within one \
+             more delivered frame, not stay pinned to where the button was before the resize \
+             forever: button={plus_after:?} menu={menu_after:?}"
         );
     }
 
