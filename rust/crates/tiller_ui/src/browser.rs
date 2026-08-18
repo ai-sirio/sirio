@@ -1,8 +1,13 @@
-//! P72 throwaway browser-composition spike.
+//! P72 browser-composition surface (WebKitGTK via `wry` in a native X11
+//! child window, composited alongside GPUI's own X11 surface).
 //!
-//! This is intentionally not part of the production module graph yet. The
-//! `browser_spike` example includes it directly so the experiment can answer
-//! whether a WebKitGTK child window can coexist with GPUI's X11 surface.
+//! This module is Linux-only and is part of the production module graph:
+//! `lib.rs` declares `#[cfg(target_os = "linux")] pub mod browser;`, gated
+//! to match `wry`/`raw-window-handle` being declared only under
+//! `[target.'cfg(target_os = "linux")'.dependencies]` in this crate's
+//! `Cargo.toml` (PORT-1, docs/linux-rewrite/PLATFORM-GATING-2026-08-18.md).
+//! The `browser_spike`/`browser_surface` examples and `crates/tiller`'s
+//! panes both use it directly.
 
 use std::{
     cell::{Cell, RefCell},
