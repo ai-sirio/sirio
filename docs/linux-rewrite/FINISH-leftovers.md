@@ -297,3 +297,56 @@ verb ("Install") and the not-found/available binary state genuinely work; the ro
 and only some of its conjuncts hold.
 
 ---
+
+## F-SET-14 — Manage agent accounts: Add Account, waiting/cancel/retry, re-authenticate, remove
+
+**Live drive, real subprocess, two independent repeats — sharpens rather than repeats the prior
+sweep's finding.** `surface.settings.open` → clicked into AI Providers → clicked Codex's **Add
+Account**. Confirmed on the **host**, not just visually: a genuine subprocess tree spawned —
+
+```
+x-terminal-emulator -e codex login      (PID 808560)
+  `- codex login                        (PID 808705)
+```
+
+— and the spawned window's own real content is a genuine, freshly-generated OAuth URL
+(`https://auth.openai.com/oauth/authorize?...&state=<random>...`) with "Starting local login server
+on http://localhost:1455." This is `Settings::launch_account_login`
+(`tiller_ui/src/settings.rs:1513`) reached for real, not a stub: its own `Command::new(
+"x-terminal-emulator").arg("-e").arg(program)...` is exactly what `ps` shows running.
+
+**The Signing-in/Cancel half does not visibly occur — reproduced twice, immediately and at +2s.**
+`launch_account_login`'s own first three lines set `self.account_login_pending = Some(provider)`
+and call `cx.notify()` **synchronously**, before the async spawn even begins (`settings.rs:1523-
+1526`), and the card's render branches on exactly that field
+(`self.account_login_pending == Some(provider)`, `settings.rs:2386`) to swap "Add Account" for a
+"Signing in…" indicator + Cancel button (`settings.rs:2401`). Two independent live drives (fresh
+app boot each time, same click sequence) both show the Codex card **still reading plain "Add
+Account"** — not "Signing in…" — in a forced-repaint frame taken immediately after the click
+(`reference/linux-progress/wf-rest3/13-set14-immediately-after-click-still-add-account.png`) and
+again two seconds later
+(`reference/linux-progress/wf-rest3/14-set14-two-sec-after-still-add-account.png`), while the real
+subprocess is confirmed alive on the host throughout. This **sharpens** the prior sweep's finding
+(fin-set2-cancel3: "Codex row still showed plain Add Account post-click ... process stayed alive") —
+that pass attributed the miss to the spawned window reflowing Tiller's layout and moving the Cancel
+button's coordinates out from under a stale click target. This pass shows the transition does not
+occur even in the **very first** post-click frame, before any plausible reflow-driven coordinate
+drift: there is no "Signing in…"/Cancel button rendered anywhere in the frame for any coordinate to
+hit, not merely one whose position moved. `cancel_account_login` (the handler this state would need
+to reach) remains unexercised by any live click in either pass, now for a more precise reason.
+
+**Re-authenticate and remove are structurally absent, not merely untargetable.** Confirmed the same
+way F-SET-15 was: `controls::account_row` (`controls.rs:367`) — the only component that renders any
+account row, "System default" or otherwise — takes exactly `(label, subtitle, active, theme)` and no
+click callback of any kind; it renders text and two static badges ("This device"/"Active") and
+nothing else. There is no code path by which a click on the one existing row could reach a
+re-authenticate or remove action, independent of F-SET-15's "only one row exists" finding.
+
+**Verdict: half-proven.** Add Account's real-subprocess half is proven live (a genuine OAuth URL and
+a genuine running login server, confirmed on the host both times). The waiting/cancel half is now
+more precisely characterized as unreachable — the UI transition that would expose Cancel does not
+render, reproduced twice, not just "the click missed." Re-authenticate and remove are confirmed
+structurally absent (no callback, no button) rather than merely blocked by F-SET-15's missing second
+account.
+
+---
