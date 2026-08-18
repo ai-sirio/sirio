@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Bounds, Context, DefiniteLength, DragMoveEvent, Entity, FocusHandle,
-    Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton,
+    AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
+    FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, MouseButton,
     PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement, TitlebarOptions, Window,
     WindowBounds, WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
@@ -8078,7 +8078,29 @@ impl TillerWorkspace {
                 cx.stop_propagation();
                 menu_entity.update(cx, |this, cx| this.open_tab_menu(id, cx));
             })
-            .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.select_tab(id, cx)))
+            // F-TAB-14: double-click-to-rename was entirely unwired -- no
+            // click-count handling existed anywhere in this render function.
+            // `ClickEvent::Mouse`'s `up.click_count` is the same signal
+            // `right_panel.rs`'s file rows and `titlebar.rs`'s drag area
+            // already use to distinguish a double-click from a plain one;
+            // routing it through the existing `on_click` (rather than adding
+            // a sibling `on_mouse_down`) keeps this a single click-listener
+            // on the tab, so it cannot race the close button's own
+            // `on_click`/`cx.stop_propagation()` the way a second, separate
+            // mouse-down listener on the same hitbox could.
+            .on_click(move |event, window, cx| {
+                let click_count = match event {
+                    ClickEvent::Mouse(mouse) => mouse.up.click_count,
+                    _ => 1,
+                };
+                entity.update(cx, |this, cx| {
+                    if click_count >= 2 {
+                        this.begin_tab_rename(id, window, cx);
+                    } else {
+                        this.select_tab(id, cx);
+                    }
+                });
+            })
             .child(
                 div()
                     .w(px(14.0))
@@ -13489,6 +13511,68 @@ mod tests {
         assert!(
             cx.update(|window, _| focus.is_focused(window)),
             "committing a tab rename must hand keyboard focus back to the tab's own content"
+        );
+    }
+
+    /// F-TAB-14: double-click-to-rename was entirely unwired -- no
+    /// click-count handling existed anywhere in the tab render code, so a
+    /// double click only ever reselected the tab. A single click must keep
+    /// only selecting (no rename field, no `select_tab` side effect lost),
+    /// and a real double-click (`click_count == 2`, GPUI's own
+    /// platform-timing disambiguation already applied, same pattern
+    /// `titlebar.rs`'s drag-area tests use) must open the same
+    /// `tab-rename-field` the context menu's Rename item opens.
+    #[gpui::test]
+    async fn double_click_on_a_tab_opens_its_rename_field(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.active_tab),
+            0,
+            "the fixture starts on tab 0"
+        );
+
+        // A single click on the OTHER tab only selects it -- no rename field.
+        let tab1 = cx.debug_bounds("workspace-tab-1").expect("tab 1 is drawn");
+        cx.simulate_click(tab1.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.active_tab),
+            1,
+            "a plain single click must still select the tab"
+        );
+        assert!(
+            cx.debug_bounds("tab-rename-field").is_none(),
+            "a single click must not open the rename field"
+        );
+
+        let tab0 = cx.debug_bounds("workspace-tab-0").expect("tab 0 is drawn");
+        cx.simulate_event(MouseDownEvent {
+            position: tab0.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: tab0.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 2,
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("tab-rename-field").is_some(),
+            "a real double-click (click_count == 2) must open the tab's rename field"
         );
     }
 

@@ -114,3 +114,118 @@ regression test's sibling assertions cover this in-process, but it was not re-dr
 pass, and a critic independent of the builder should be the one to promote it.
 
 ---
+
+## F-TAB-14 — double-click-to-rename (built) + context-menu "silent fail" (harness artifact, not an app bug)
+
+The row bundles two distinct claims. They were investigated, and treated, separately.
+
+### Part 1: double-click-to-rename was genuinely unwired — reproduced, then built
+
+**Reproduced live first**: double-clicking a tab (two real, separate `click` gestures at the same
+coordinates) only ever re-selected it; no rename field ever appeared. Reading `tab_bar.rs` and the
+tab-render code in `main.rs` confirmed the ledger's finding directly — `grep -n click_count` across
+both files returns matches only in `titlebar.rs`, `file_view.rs`, and `right_panel.rs`; the tab
+row's own click handler was a single-branch `.on_click(move |_, _, cx| ... select_tab(id, cx))`
+with no click-count branch anywhere.
+
+**Root cause**: no code path checked `click_count` on the tab row at all — not a race, not a
+guard bug, an absent feature exactly as the row says.
+
+**Fix**: `rust/crates/tiller/src/main.rs`'s tab render function now branches inside the same
+`on_click` handler on `ClickEvent::Mouse(mouse) => mouse.up.click_count` (imported `ClickEvent`
+from `gpui`) — `click_count >= 2` calls the existing `begin_tab_rename`, otherwise `select_tab`,
+matching the click-count convention `right_panel.rs`'s file rows and `titlebar.rs`'s drag area
+already use elsewhere in this codebase. Deliberately kept as a single `on_click` listener (not an
+added sibling `on_mouse_down`) because GPUI hitboxes nest — the close button's own hitbox sits
+inside the tab row's hitbox, so a second `on_mouse_down` on the parent would also fire (on the
+Down phase, before the close button's own `on_click`+`stop_propagation` ever runs at Up) every
+time the close "×" is clicked. Routing through the one existing `on_click` avoids that risk
+entirely: a click resolved on the close button's own hitbox never reaches the tab's click
+listener, exactly as it doesn't today.
+
+**Regression test**: `rust/crates/tiller/src/main.rs`,
+`tests::double_click_on_a_tab_opens_its_rename_field` — builds a 2-tab fixture, single-clicks tab 1
+and asserts only `select_tab` happened (`active_tab == 1`, no `tab-rename-field`), then dispatches
+a real `MouseDownEvent`/`MouseUpEvent` pair with `click_count: 2` at tab 0 (the same pattern
+`titlebar.rs`'s double-click tests use) and asserts `tab-rename-field` is drawn.
+
+**Red, on the unfixed code** (verified by reverting just the `on_click` change and re-running):
+```
+thread 'tests::double_click_on_a_tab_opens_its_rename_field' panicked at
+crates/tiller/src/main.rs:13551:9:
+a real double-click (click_count == 2) must open the tab's rename field
+```
+**Green, after the fix:**
+```
+test tests::double_click_on_a_tab_opens_its_rename_field ... ok
+```
+Full crate suite after restoring the fix: `cargo test --manifest-path rust/Cargo.toml -p tiller` →
+**184 passed, 0 failed** (183 + this one new test; no existing test drives the close button
+directly, so the nesting risk above was reasoned through, not test-caught, and is exactly what the
+`ClickEvent`-based design was chosen to make unnecessary to test).
+
+**Re-driven live**, one `wayland-drive.sh` invocation: `project.add`, then two real `click`s at
+the same coordinates on the Terminal tab (`click 505 51` twice — GPUI's own
+`DOUBLE_CLICK_INTERVAL` is 400ms and `DOUBLE_CLICK_DISTANCE` 5px,
+`rust/vendor/gpui_linux/src/linux/platform.rs`, so two same-position synthetic clicks issued
+back-to-back genuinely register as `click_count == 2`, not a simulated event). The rename field
+opened (`reference/linux-progress/wf-fix2-tab14/01-doubleclick-opens-rename-field.png`), typed
+`RENAMEDTAB`, `Return` committed it — both the tab strip and the sidebar now read
+`TerminalRENAMEDTAB` (`02-doubleclick-rename-committed.png`).
+
+**Hard discriminator, two of them**: (1) `panel.list` over the control socket after commit returns
+`{"tab":"TerminalRENAMEDTAB","title":"TerminalRENAMEDTAB", ...}` for `pane-1` — a live read of the
+real `OpenTab.title`, not a screenshot impression; (2) `panel.scrollback id=pane-1 max_bytes=8000`
+decoded to 7100 real bytes of PTY buffer, and `"RENAMEDTAB" in raw` is **`False`** — the typed
+characters never reached the shell, which is the exact inverse of the original bug's leaked-text
+symptom (full raw scrollback saved at
+`reference/linux-progress/wf-fix2-tab14/06-scrollback-no-leak.json`).
+
+### Part 2: context-menu "Rename click silently fails while the menu stays open" — NOT reproduced as an app bug; traced to a documented harness race
+
+Per instructions, this was attempted repeatedly (not "fixed" on a single miss) before drawing a
+conclusion, because the row calls it intermittent.
+
+**Three careful attempts, each with a real 1.2s sleep between opening the tab's own context menu
+(right-click) and clicking its "Rename" row** (`Scripts/wayland-drive.sh`'s own header comment
+warns exactly about this gap: deferred-menu content links into the real dispatch tree "only after
+~2 real frames past the click that opened it," and a synthetic click arriving before that linking
+finishes silently does nothing while the menu stays open — the identical symptom this row
+describes): **3 for 3, the rename field opened cleanly every time**, screenshot at
+`reference/linux-progress/wf-fix2-tab14/04-contextmenu-rename-WITH-settle-success.png`. No leaked
+text in any trial (each was cancelled with Escape and reset, and the terminal's own prompt line
+stayed empty throughout).
+
+**Then the exact same gesture, deliberately with no sleep between the right-click and the "Rename"
+click** (`rightclick 505 51` immediately followed by `click 483 133`, same coordinates as every
+successful trial): the click landed and did **nothing** — the tab context menu is still fully open
+in the resulting frame, cursor sitting on "Rename", no rename field, exactly the ledger's
+description of "Close-menu-click can silently fail while the menu stays open." Screenshot:
+`reference/linux-progress/wf-fix2-tab14/05-contextmenu-rename-NO-settle-silent-fail.png`.
+
+**Conclusion**: this reproduces the *symptom* the ledger describes, but the controlled A/B (same
+coordinates, same tab, only the settle time differs) traces it conclusively to the harness race
+`wayland-drive.sh` already documents in its own header — synthetic input delivered faster than a
+human can physically move a pointer, arriving inside the ~2-frame window before the deferred
+tab-context-menu's dispatch tree finishes linking. This is very likely what the original wave M
+drive hit (no sleep recorded between its right-click and its Rename click). **No source change was
+made for this half of the row** — per instructions, a fix for a failure not actually reproduced as
+an app defect is worse than no fix, and this one traces cleanly to the instrument, not the app. The
+existing `committing_a_tab_rename_returns_focus_to_the_terminal` unit test already exercises this
+exact right-click → Rename-click path in-process and passes, consistent with there being no app-side
+race to fix.
+
+### Verdict: half-proven (builder-driven, not critic-passed)
+
+Proven: double-click-to-rename built, tested red→green, full suite green, live re-drive with a
+`panel.list` + raw-scrollback hard discriminator. Also established: the context-menu "silent fail"
+claim reproduces only as a documented harness timing artifact, not as an app defect, across 3
+positive controls (with settle) and 1 confirmatory negative control (without settle).
+
+**Gap for a fresh critic**: (1) re-drive the double-click fix independently to confirm it holds;
+(2) if a critic can still reproduce the context-menu silent-fail *with* a real, generous sleep
+between opening the menu and clicking Rename — not back-to-back synthetic clicks — that would
+overturn this pass's harness-artifact conclusion and point back at a real app race, and should be
+investigated fresh rather than assumed settled by this report.
+
+---
