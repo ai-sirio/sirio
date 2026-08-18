@@ -96,3 +96,35 @@ hard discriminator (EVIDENCE-STANDARD.md's bar — a value that could only diffe
 truly worked).
 
 ---
+
+## F-WIN-10 — PASSED (was half-proven)
+
+Real UI gesture, not a socket call (`control_add_project`, the control-socket handler, is a
+**separate** function from `add_project` — `rust/crates/tiller/src/main.rs:3306` calls
+`workspace.control_add_project`, not `add_project` — and never calls `show_toast`. Driving this
+row over `ctl project.add` produces no toast at all regardless of outcome; confirmed live first as
+a negative control, then abandoned in favor of the real `+` → **Open Project…** UI path that
+actually calls `add_project`, `rust/crates/tiller/src/main.rs:4031`).
+
+Full live sequence, one continuous `wayland-drive.sh` invocation, real portal dialog both times:
+
+1. `+` → **Open Project…** → real GTK "Open Folder" dialog → Home → `wf-dom3-fixtures` (a plain,
+   non-git folder) → **Add Project** → "This folder is not a git repository" confirmation card →
+   **Add without Git**. First time: added cleanly, no toast (`Ok(true)` branch, screenshot
+   `reference/linux-progress/wf-dom3/f-win-03-...` sibling — sidebar now lists `wf-dom3-fixtures`
+   as a project).
+2. Repeated the **identical** gesture a second time against the same already-tracked folder.
+3. **`reference/linux-progress/wf-dom3/f-win-10-toast-visible.png`**: a bottom-right floating card
+   reading `already tracked or nested: /home/enzopalmisano/wf-dom3-fixtures` appears — matches
+   `render_toast`'s real styling (`rust/crates/tiller/src/main.rs:9941`: `.absolute().bottom_20()
+   .right_20()...`), distinct from the sidebar's own persistent inline banner (bottom-left,
+   already visible in the same frame).
+4. **`reference/linux-progress/wf-dom3/f-win-10-toast-gone.png`**, captured 4.5s later (>
+   `TOAST_DURATION = Duration::from_secs(4)`, `main.rs:5310`): the bottom-right toast is gone while
+   the sidebar's persistent inline banner (`Sidebar::set_notice`) is still showing the same text —
+   exactly the distinguishing behavior the row's own doc comment names ("unlike
+   `Sidebar::set_notice`'s persistent inline banner, which stays silent unless the sidebar happens
+   to be the visible surface"). Both halves of the VERIFY clause (appears / auto-dismisses) driven
+   live and distinguished from the lookalike persistent banner.
+
+---
