@@ -30,9 +30,9 @@ use tiller_git::{
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository};
 use tiller_terminal::{
-    TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalExitStatus,
-    TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
-    TerminalPromptEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
+    TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
+    TerminalExitStatus, TerminalIdentity, TerminalLinkEvent, TerminalPaneCache,
+    TerminalPromptAction, TerminalPromptEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
 };
 use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
@@ -3861,6 +3861,7 @@ impl TillerWorkspace {
         Self::subscribe_terminal(terminal, tab_id, pane_id, cx);
         Self::subscribe_terminal_link(terminal, pane_id, cx);
         Self::subscribe_terminal_activity(terminal, pane_id, cx);
+        Self::subscribe_terminal_drop(terminal, cx);
         Self::start_process_signal_refresh(terminal, tab_id, pane_id, cx);
     }
 
@@ -3938,6 +3939,28 @@ impl TillerWorkspace {
                 }
             },
         )
+        .detach();
+    }
+
+    /// F-CHG-18: a changed-file row dragged from the Changes panel onto a
+    /// terminal lands as a real `on_drop::<(PathBuf, String)>` in
+    /// `tiller_terminal` (`receive_diff_drop`), which stores the payload and
+    /// emits `TerminalDropEvent::Diff` -- but nothing outside that crate ever
+    /// subscribed to it, so the drop was accepted and then went nowhere a
+    /// user could see. The macOS reference's own drop handler
+    /// (`WorkspaceReconciler.performDragOperation` ->
+    /// `.requestOpenDiff(path:target:)`) opens a Diff view for the file the
+    /// row named; `add_changes_tab(Some(path), cx)` is this app's existing
+    /// equivalent (already used by `ChangesTabActionEvent::OpenDiff`, the
+    /// same action a changed-file row's own "Open Diff in Editor" menu item
+    /// takes), so dropping a diff onto a terminal now opens/focuses that
+    /// same Diff tab instead of silently updating a field nothing reads.
+    fn subscribe_terminal_drop(terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        cx.subscribe(terminal, |workspace, _, event: &TerminalDropEvent, cx| {
+            if let TerminalDropEvent::Diff { path, .. } = event {
+                workspace.add_changes_tab(Some(path.clone()), cx);
+            }
+        })
         .detach();
     }
 
@@ -14609,6 +14632,84 @@ mod tests {
             "the app crate's TerminalContextEvent dispatch must reach TerminalView::restart, \
              not just define the command"
         );
+    }
+
+    /// F-CHG-18: a changed-file row dropped onto a terminal reaches a real
+    /// production `on_drop::<(PathBuf, String)>` inside `tiller_terminal`
+    /// (`TerminalView::receive_diff_drop`, driven end to end by that crate's
+    /// own tests), which stores the payload and emits `TerminalDropEvent`.
+    /// This proves the app crate is a real subscriber of that event, not
+    /// just a definition nothing outside `tiller_terminal` ever reached --
+    /// the ledger's own decisive finding (`grep -rn "TerminalDropEvent"`
+    /// across `tiller/src` and `tiller_ui/src` returned zero matches before
+    /// this pass). Emits the exact event `receive_diff_drop` emits, on the
+    /// fixture's own live terminal entity, and asserts a real Diff tab opens
+    /// for the dropped file -- mirroring the macOS reference's
+    /// `.requestOpenDiff(path:target:)` drop behaviour, not a stand-in.
+    #[gpui::test]
+    async fn drawn_terminal_diff_drop_opens_a_changes_tab_focused_on_that_file(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let terminal = workspace.read_with(&cx.cx, |workspace, _| {
+            let mut found = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    found = Some(view.clone());
+                }
+            });
+            found.expect("the fixture's first tab is a terminal pane")
+        });
+        let tabs_before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
+        assert!(
+            !workspace.read_with(&cx.cx, |workspace, _| workspace
+                .tabs
+                .iter()
+                .any(|tab| tab.kind == TabKind::Diff)),
+            "sanity: no Diff tab exists before the drop"
+        );
+
+        let dropped_path = PathBuf::from("dropped/onto-terminal.rs");
+        terminal.update(&mut cx.cx, |_, cx| {
+            cx.emit(TerminalDropEvent::Diff {
+                path: dropped_path.clone(),
+                text: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            });
+        });
+        cx.run_until_parked();
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace.tabs.len(),
+                tabs_before + 1,
+                "dropping a diff onto a terminal must open exactly one new tab"
+            );
+            let new_tab = workspace
+                .tabs
+                .last()
+                .expect("a tab was just pushed");
+            assert_eq!(
+                new_tab.kind,
+                TabKind::Diff,
+                "the tab opened by a diff drop must be a Diff/Changes tab, \
+                 not left as whatever the drop landed on"
+            );
+            assert_eq!(
+                workspace.active_tab,
+                workspace.tabs.len() - 1,
+                "the newly opened Diff tab must become the active tab, the \
+                 same way ChangesTabActionEvent::OpenDiff already behaves"
+            );
+        });
     }
 
     #[gpui::test]
