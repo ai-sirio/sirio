@@ -93,7 +93,8 @@ not against the commit messages. What the builders were briefed to fix, so it ca
 
 ### What moved today
 
-`PASSED 353 → 357 · FAILED — defective 1 → 5 · UNREACHABLE 28 → 20`, plus four rows wired.
+Across 2026-08-17/18: `PASSED 353 → 363 · FAILED — defective 1 → 5 · UNREACHABLE 28 → 14`, six
+rows wired and judged live. Run `Scripts/ledger-totals.py` rather than trusting this line.
 
 - **Stale `UNREACHABLE`s cost exactly what stale `FAILED`s cost.** Eight rows were parked on
   2026-08-14/15 with reasons of the form "the harness has no primitive for this". The primitives
