@@ -152,3 +152,31 @@ Both clauses of the VERIFY text — "the tab returns" and "an unrelated current 
 live in the same session with a real dirty-tab confirmation in between, not glossed over.
 
 ---
+
+## F-PER-07 — PASSED (was NOT EXERCISED)
+
+Live sequence: right-clicked the `wf-dom3-fixtures` project row → **Project Settings** → the real
+settings sheet (`rust/crates/tiller_ui/src/sidebar.rs:2654`, `render_project_settings`) rendered
+inline. Edited three fields in one continuous `wayland-drive.sh` invocation: **display name**
+(`ctrl+a` then typed `WFDOM3 RENAMED PROJECT`), **icon kind** (clicked the git-branch glyph),
+**colour** (clicked the green swatch) — `reference/linux-progress/wf-dom3/f-per-07-settings-edited.png`
+shows the sheet with all three applied and the sidebar row already reading the new name live.
+Clicked **Close**.
+
+**Hard discriminator, independent of the UI**: after closing the sheet, `wayland-drive.sh` was
+invoked again — a genuine process kill + cold restart of the app binary against the same on-disk
+SQLite file, zero interaction before the capture. Two independent checks both confirm persistence:
+
+1. Screenshot `reference/linux-progress/wf-dom3/f-per-07-after-relaunch.png`: sidebar still reads
+   `WFDOM3 RENAMED PROJECT` with the git-branch icon, with no clicks since the fresh boot.
+2. **Direct SQLite read**, bypassing the app entirely:
+   `SELECT display_name, icon_kind, icon_value, color_hex FROM project WHERE root_path LIKE
+   '%wf-dom3-fixtures%'` against `/tmp/wf-dom3.sqlite` returns
+   `('WFDOM3 RENAMED PROJECT', 'icon', 'git-branch', 'green')` — the on-disk row itself, not a
+   rendered pixel.
+
+All three identity fields the VERIFY clause names (name, icon, and — via colour, part of the same
+`update_project_settings` write, `rust/crates/tiller/src/main.rs:4052`-`4065` — the project's tint)
+survive a real quit/relaunch.
+
+---
