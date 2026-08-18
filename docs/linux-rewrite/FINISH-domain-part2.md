@@ -42,3 +42,57 @@ tests only), then remaining half-proven rows as budget allows.
 Status: IN PROGRESS — rows appended below as driven, each committed individually.
 
 ---
+
+## F-WIN-03 — PASSED (was half-proven / UNREACHABLE-assumed)
+
+**The old "no session D-Bus" assumption is wrong on this host.** Checked first, per the brief:
+built a private session bus (`dbus-daemon --session --fork`), pointed its activation environment
+at the nested compositor's real display (`dbus-update-activation-environment
+WAYLAND_DISPLAY=$WD ...`), started `/usr/libexec/xdg-desktop-portal -v`, and confirmed live:
+`org.freedesktop.portal.Desktop` registers `org.freedesktop.portal.FileChooser` backed by
+`gtk.portal` (`XDP: providing portal org.freedesktop.portal.FileChooser` in the portal's own log),
+and `dbus-send ... GetConnectionUnixProcessID org.freedesktop.portal.Desktop` returns a live PID.
+A FileChooser backend **is** registered on this session bus.
+
+One real trap found and fixed along the way: starting a **second** `xdg-desktop-portal` frontend
+process against an already-running one (leftover from an earlier manual check) raced the bus-name
+request and produced `Couldn't open file picker due to missing xdg-desktop-portal implementation`
+— `ashpd::Error::PortalNotFound`, `rust/vendor/gpui_linux/src/linux/platform.rs:430` — even though
+a portal genuinely was there. Killing the stale duplicate and starting exactly one frontend per
+drive fixed it; recorded here since the error text is easy to misread as "no portal environment"
+when the real cause is "two portals fighting over one bus name."
+
+**Full live round trip, one continuous `wayland-drive.sh` invocation** (`TILLER_WL_LABEL=wf-dom3`,
+binary pinned to `/tmp/wf-dom3-tiller`):
+
+1. Fixture `/home/enzopalmisano/wf-dom3-fixtures/open-me.txt` seeded with `WFDOM3_ORIGINAL_LINE`.
+2. `chord ctrl o` → GPUI's `handle_open_file` (`rust/crates/tiller/src/main.rs:9099`) called
+   `cx.prompt_for_paths`, which dispatched a real `ashpd::desktop::file_chooser::OpenFileRequest`
+   over the private bus; the **real GTK "Open File" dialog** mapped as an independent sway tile,
+   floated/positioned via `swaymsg`.
+3. Navigated by real clicks (not the location bar — see below): clicked **Home**, clicked the
+   `wf-dom3-fixtures` row, `key Return` to descend, clicked `open-me.txt`, `key Return` to open.
+4. The picker closed and a new `open-me.txt` editor tab appeared in the real workspace, showing
+   line 1 `WFDOM3_ORIGINAL_LINE` — screenshot
+   `reference/linux-progress/wf-dom3/f-win-03-file-opened.png`.
+5. Clicked into the editor, `chord ctrl a`, `type WFDOM3_EDITED_CONTENT_9182`, `chord ctrl s`.
+6. **Hard discriminator**: `cat /home/enzopalmisano/wf-dom3-fixtures/open-me.txt` on the real host
+   filesystem, read directly (not through the app) after the drive, now reads
+   `WFDOM3_EDITED_CONTENT_9182` — the file genuinely changed on disk. Tab shows no dirty-dot after
+   save (`reference/linux-progress/wf-dom3/f-win-03-after-save.png`).
+
+**A GTK location-bar (`chord ctrl l` + `type <path>`) trap found and abandoned**: the first
+character(s) typed immediately after `chord ctrl l` were dropped twice in a row (`/home/...`
+arrived as `/ome/...`; a second attempt lost both a doubled leading marker and `home`), and the
+second attempt actually landed in GTK's **interactive search** ("Ricerca in Recenti") rather than
+a location-entry, not the location bar at all — this GTK version's `ctrl+l` behavior is not
+reliable through synthetic `wtype` input immediately after the dialog maps. Switched to real
+navigation clicks (Home → folder row → Return → file row → Return), which worked cleanly and is
+the more representative gesture anyway (a person browses more often than they type an exact path).
+Filed here as a lane trap for the next builder who reaches for `ctrl+l`.
+
+Evidence standard: named gesture sequence above is replayable; the disk-content assertion is the
+hard discriminator (EVIDENCE-STANDARD.md's bar — a value that could only differ if the feature
+truly worked).
+
+---
