@@ -394,3 +394,135 @@ app (tab bar, sidebar status dot) changes as a result, by design, matching the l
 "zero rendering consumers" characterization exactly.
 
 ---
+
+## F-CORE-DOM-02 — Worktree defaults: base-branch/location precedence
+
+VERIFY: Configure each combination of project base/primary branch and location override, create a
+worktree, and inspect its branch and path. SRC: `WorktreeDefaults.swift:5`.
+
+Fresh run this pass: `cargo test --manifest-path rust/Cargo.toml -p tiller_project -- domain::tests
+--test-threads=1` → `domain::tests::defaults_prefer_explicit_values_then_primary_and_sibling ... ok`.
+The test itself (`tiller_project/src/domain.rs:138`) exercises both halves of the clause against
+`resolve_worktree_defaults`: no explicit base branch falls through to the primary branch and the
+project root's sibling directory; an explicit base branch and an explicit location both override
+their respective fallback in the same call. This is the exact precedence logic the VERIFY clause
+names, proven by direct assertion on inputs/outputs, not adjacency.
+
+**Verdict: half-proven**, matching the ledger's existing characterization unchanged: the pure
+precedence logic is proven by a passing, on-point unit test (reconfirmed fresh this pass), but I did
+not additionally live-drive the New Worktree dialog through every combination to confirm the UI
+threads these three inputs to `resolve_worktree_defaults` without its own bug — the logic is right,
+whether every caller wires it correctly end-to-end is not independently re-checked this pass.
+
+---
+
+## F-CORE-DOM-03 — Deterministic Linux project-location default
+
+VERIFY: Start with no project defaults and observe the proposed project location; repeat with a
+Linux replacement root and confirm it is deterministic. SRC: `ProjectDefaults.swift:3` (PLATFORM:
+`NSHomeDirectory` needs an explicit Linux home/config/data-root policy).
+
+Fresh run this pass: `cargo test --manifest-path rust/Cargo.toml -p tiller_ui --
+project_form_parent_proposes_the_deterministic_default_base --test-threads=1` → `ok`. The test
+(`tiller_ui/src/sidebar.rs:3961`, itself doc-commented "F-CORE-DOM-03") is the row's own live
+discriminator: with `TILLER_PROJECTS_DIR`/`XDG_DATA_HOME` cleared, it asserts
+`Sidebar::project_form_parent() == tiller_project::default_project_base()` — i.e. the New/Clone
+Project form's proposed parent is not an independently-computed guess, it is literally the same
+deterministic function call — then sets `TILLER_PROJECTS_DIR` to a temp-dir replacement root and
+re-asserts the proposal tracks it. `default_project_base()` itself
+(`tiller_project/src/domain.rs:6`) is the Linux policy the PLATFORM note asks for:
+`TILLER_PROJECTS_DIR` > `XDG_DATA_HOME`/Tiller/projects > `$HOME`/Tiller/projects, in that order,
+still unchanged as of this pass's read.
+
+**Verdict: half-proven.** The deterministic-default policy and the form's use of it are both
+directly proven (this is closer to PASSED than most half-proven rows here), but the test is a unit
+test against `Sidebar::project_form_parent()`, not a full live drive of the New Project dialog UI
+showing the proposed path text on screen — keeping this at half-proven rather than upgrading it
+unilaterally, consistent with not softening/hardening verdicts without a live UI confirmation this
+pass.
+
+---
+
+## F-CORE-DOM-05 — Manual ordering: known/unknown/no-op moves
+
+VERIFY: Reorder known and unknown project/worktree IDs, including moving an item onto itself, and
+inspect the resulting sequence. SRC: `ManualOrder.swift:6`.
+
+Fresh run this pass: `domain::tests::ordering_ignores_unknown_and_noop_moves ... ok`. The test
+(`tiller_project/src/domain.rs:156`) drives `move_item` through exactly the three cases the clause
+names: an unknown id (`move_item(&mut ids, 9, Some(1))` → `false`, sequence unchanged), a no-op move
+(moving `2` before itself → `false`, unchanged), and a real move (moving `1` before `3`, then `1` to
+the end via `None`) — both producing the expected reordered sequence and a `true` return.
+
+**Verdict: half-proven**, unchanged from the ledger: the ordering algorithm itself is fully proven
+by direct assertion; no live drag-reorder of a project/worktree sidebar list was driven this pass to
+confirm the UI's drop-target resolution calls `move_item` with the right `(item, before)` pair.
+
+---
+
+## F-CORE-DOM-07 — Auto-naming throttle: 30s and 200-char gates, first-run exempt
+
+VERIFY: Feed transcript growth below each threshold and above both thresholds while observing
+generated-name requests. SRC: `AutoNamingThrottle.swift:7`.
+
+Fresh run this pass, two independent test sites:
+- `domain::tests::auto_naming_requires_first_run_or_both_throttles ... ok`
+  (`tiller_project/src/domain.rs:176`).
+- `cargo test --manifest-path rust/Cargo.toml -p tiller_project --test p99_naming_throttle --
+  --test-threads=1` → all 3 pass: `the_first_run_is_never_throttled`,
+  `growth_below_each_threshold_is_throttled_and_above_both_requests`,
+  `recording_a_request_resets_both_baselines` — the file's own header names this row directly
+  ("P99 exercise of `F-CORE-DOM-07`").
+
+Together these assert every branch the clause asks for: first run always fires regardless of
+growth; below-30s-elapsed suppresses even with growth past 200 chars; below-200-chars-growth
+suppresses even past 30s elapsed; both thresholds cleared fires again.
+
+**Verdict: half-proven**, unchanged: the throttle gate itself is exhaustively proven by two
+independent passing test suites; no live agent turn was driven this pass to confirm a real running
+agent's transcript growth reaches this gate through the production call site unmodified.
+
+---
+
+## F-CORE-DOM-08 — MainActor once-gate fires exactly once
+
+VERIFY: Trigger the same one-shot restore or setup callback multiple times and confirm it has one
+observable effect. SRC: `OnceGate.swift:3`.
+
+Fresh run this pass: `domain::tests::once_gate_runs_only_the_first_callback ... ok`
+(`tiller_project/src/domain.rs:191`): fires the gate twice, asserts the first call returns `true`
+and runs the closure, the second returns `false` and does not, and the shared counter ends at
+exactly `1` — a hard discriminator (a broken gate reading `2` would fail the `assert_eq!` outright,
+not merely "look right").
+
+**Verdict: half-proven**, unchanged from the ledger's own note: this is a pure internal type with no
+UI surface to live-drive at all (there is nothing to click that would exercise it any more directly
+than the unit test already does), so half-proven here reflects "logic proven, no live-surface
+counterpart exists" rather than "an untested UI half remains".
+
+---
+
+## F-CORE-USG-07 — Codex usage fetching: credentials, refresh, headers, parsed windows
+
+VERIFY: Run with valid, refresh-needed, missing, and rejected credentials and inspect the resulting
+usage state and window data. SRC: `CodexUsageFetcher.swift:3`.
+
+Not re-driven fresh this pass (adopting the existing wave D evidence, same day, same host, after
+confirming it is not stale): `git log --oneline -- rust/crates/tiller_usage/src/codex.rs` shows no
+commits since wave D's pass touched this file, and a fresh grep this pass reconfirms its central
+claim still holds — `USAGE_URL` (`tiller_usage/src/codex.rs:25`) remains a hardcoded
+`https://chatgpt.com/backend-api/wham/usage` constant with no environment-variable override, unlike
+`token_url()` (`codex.rs:267`) which does read `TILLER_CODEX_TOKEN_URL`. Wave D's own evidence
+(ledger row, wave D, x86 box, 2026-08-18) proved three of four branches live through the real,
+unmodified `fetch_usage`: missing-creds (real `~/.codex/auth.json` is apikey-mode, genuinely fails
+OAuth load), rejected-creds/reactive-refresh (real 401 from the real backend, through
+`fetch_usage → refresh_token`), and bearer/account header construction (the 401 actually reaching
+OpenAI's auth layer proves the headers were sent). The valid-credentials/200-success branch remains
+UNREACHABLE in this environment: no override seam for `USAGE_URL`, and this environment's Codex has
+no working account to hit it with regardless.
+
+**Verdict: half-proven** — adopting wave D's verdict and evidence directly, having confirmed this
+pass that the file has not changed since and the specific claim (no `USAGE_URL` override seam) still
+holds by direct grep, not by trusting a stale note.
+
+---
