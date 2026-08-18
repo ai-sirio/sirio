@@ -4922,12 +4922,24 @@ impl Chat {
                     .gap(px(10.0))
                     .text_size(typography.callout)
                     .text_color(banner_text)
-                    .child(div().flex_1().child(message))
+                    // F-CHAT-02: a flex child defaults to a min-width of its
+                    // own content (same rule as CSS flexbox), so a long
+                    // guidance message never shrank below its own text
+                    // width — it overflowed the row and pushed the Retry
+                    // sibling out past the visible edge instead of wrapping.
+                    // `min_w_0()` is the standard fix (zed's own
+                    // `ui::components::banner` uses the identical
+                    // `.min_w_0().flex_1()` pairing for the same reason).
+                    .child(div().flex_1().min_w_0().child(message))
                     .when(retryable, |this| {
                         this.child(
                             div()
                                 .id(("retry", entry_index))
                                 .debug_selector(|| "chat-retry".into())
+                                // Never shrink: the message above now wraps
+                                // and gives up width instead of pushing this
+                                // sibling out of the row (F-CHAT-02).
+                                .flex_shrink_0()
                                 .px(px(8.0))
                                 .py(px(4.0))
                                 .rounded(theme.radii.control)
@@ -10014,6 +10026,76 @@ mod tests {
             assert!(
                 message.to_ascii_lowercase().contains("cli") || message.contains("login"),
                 "banner must carry CLI login guidance, not just the raw protocol message: {message}"
+            );
+        });
+    }
+
+    /// F-CHAT-02 regression: `retryable: true` alone does not make Retry
+    /// reachable — a finish-line critic found the auth banner's message div
+    /// had no `min_w_0()`, so at the app's real running width the long
+    /// two-paragraph login guidance never shrank/wrapped, overflowed the
+    /// row, and clipped Retry out of the visible window at both 1715px and
+    /// 2400px. This drives the same real (fixture) auth-failure banner as
+    /// `auth_required_launch_gets_a_dedicated_banner_with_login_guidance`,
+    /// resizes to the app's own 1715px running width, and asserts the Retry
+    /// control's drawn bounds actually sit inside the window — not merely
+    /// that it renders somewhere.
+    #[gpui::test]
+    async fn auth_required_retry_survives_long_guidance_text_at_running_width(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        let command = AgentCommand::new("/bin/sh").args([
+            "-c",
+            r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),.*/\1/'); case "$line" in *initialize*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Login","description":"agent auth login"}]}}' ;; *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":'"$id"',"error":{"code":-32000,"message":"Authentication required"}}' ;; esac; done"#,
+        ]);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(command, std::env::temp_dir(), cx);
+            configure_test_chat(&mut chat);
+            chat
+        });
+
+        cx.executor().allow_parking();
+        // The app's real captured running size (see wayland-drive.sh's
+        // W1xH1) — the exact width the critic reproduced the clip at.
+        cx.simulate_resize(gpui::size(px(1715.0), px(972.0)));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+
+        let banner = cx
+            .debug_bounds("chat-auth-required-banner")
+            .expect("an auth_required launch failure must render the dedicated banner");
+        let window_width = cx.update(|window, _| window.viewport_size().width);
+
+        let retry = cx
+            .debug_bounds("chat-retry")
+            .expect("retryable:true must draw a Retry control, not just set the flag");
+        assert!(
+            retry.origin.x + retry.size.width <= window_width,
+            "Retry must be reachable inside the window, not clipped past its \
+             right edge: retry={retry:?} window_width={window_width:?} \
+             banner={banner:?}"
+        );
+        assert!(
+            retry.size.width > px(0.0) && retry.size.height > px(0.0),
+            "Retry must have a real, non-zero drawn size: {retry:?}"
+        );
+
+        // And the control must actually be clickable where it is drawn, not
+        // just present in the layout tree at that position: clicking it
+        // must launch a fresh connection attempt. The fixture rejects auth
+        // immediately every time, so the observable effect is a second
+        // AuthRequired error entry landing in the transcript.
+        let entries_before_retry = chat.read_with(&cx.cx, |chat, _| chat.entries.len());
+        cx.simulate_click(retry.center(), Modifiers::none());
+        cx.run_until_parked();
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                chat.entries.len() > entries_before_retry,
+                "clicking the reachable Retry must start a new connection \
+                 attempt, which lands its own error entry: before={} after={:?}",
+                entries_before_retry,
+                chat.entries
             );
         });
     }
