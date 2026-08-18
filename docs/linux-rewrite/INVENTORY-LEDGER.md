@@ -374,13 +374,13 @@ touched the entry — those rows do **not** count toward done.
 | `F-CORE-DOM-06` | PASSED | **wave H live drive (this host)**: ctrl-tab/ctrl-shift-tab cycle and wrap correctly both directions from Terminal focus; ctrl-9 clamp and ctrl-4 ignore also confirmed live | sweep ?, 2026-08-14 |
 | `F-CORE-DOM-07` | half-proven | **wave H live drive (this host)**: unit tests green; no fresh live agent-turn re-drive this pass, no commit hash to check staleness | sweep ?, 2026-08-14 |
 | `F-CORE-DOM-08` | half-proven | **wave H live drive (this host)**: pure internal once-gate, unit test green, no UI surface to live-drive | sweep ?, 2026-08-14 |
-| `F-CORE-WSP-01` | half-proven | **wave H live drive (this host)**: tests pass; zero app callers for LegacyWorkspaceTab/content-id helpers | sweep ?, 2026-08-14 |
-| `F-CORE-WSP-02` | half-proven | **wave H live drive (this host)**: tests pass; WorkspaceContentRef unused by shipped app | sweep ?, 2026-08-14 |
-| `F-CORE-WSP-03` | half-proven | **wave H live drive (this host)**: tests pass; real splits use a different type (panes.rs PaneNode) | sweep ?, 2026-08-14 |
+| `F-CORE-WSP-01` | half-proven | **wave J wf-wsp decision (live, this host)**: real route is `TabKind` + `AgentActivityModel` (shape proven, exact per-kind identity contract not driven). The tiller_project::layout model this row was previously scored against has zero app callers; see docs/linux-rewrite/WSP-LAYOUT-DECISION.md | sweep ?, 2026-08-14 |
+| `F-CORE-WSP-02` | half-proven | **wave J wf-wsp decision (live, this host)**: real route is `TabKind` (kinds, live); document symlink/worktree-scoped identity absent app-wide. The tiller_project::layout model this row was previously scored against has zero app callers; see docs/linux-rewrite/WSP-LAYOUT-DECISION.md | sweep ?, 2026-08-14 |
+| `F-CORE-WSP-03` | PASSED | **wave J wf-wsp decision (live, this host)**: real route is `panes.rs::PaneNode<T>` — live-driven real split this pass. The tiller_project::layout model this row was previously scored against has zero app callers; see docs/linux-rewrite/WSP-LAYOUT-DECISION.md | sweep ?, 2026-08-14 |
 | `F-CORE-WSP-04` | PASSED | **wave H live drive (this host)**: live rename via context menu, title persisted, focus-return proven | sweep ?, 2026-08-14 |
-| `F-CORE-WSP-05` | half-proven | **wave H live drive (this host)**: Rename/Activate path live via WSP-04; other commands have zero callers | sweep ?, 2026-08-14 |
-| `F-CORE-WSP-06` | half-proven | **wave H live drive (this host)**: validate() tests pass on an unwired type | sweep ?, 2026-08-14 |
-| `F-CORE-WSP-07` | half-proven | **wave H live drive (this host)**: snapshot tests pass on an unwired type | sweep ?, 2026-08-14 |
+| `F-CORE-WSP-05` | half-proven | **wave J wf-wsp decision (live, this host)**: real route is `LayoutCommand::Rename` path (already proven via WSP-04) only; structural commands (Insert/Split/Move/Close) don't use this mechanism at all. The tiller_project::layout model this row was previously scored against has zero app callers; see docs/linux-rewrite/WSP-LAYOUT-DECISION.md | sweep ?, 2026-08-14 |
+| `F-CORE-WSP-06` | half-proven | **wave J wf-wsp decision (live, this host)**: real route is outcome (no crash, safe fallback) proven via `SessionTabState::decode`/quarantine; specific duplicate-ID/reference checks have no real analog. The tiller_project::layout model this row was previously scored against has zero app callers; see docs/linux-rewrite/WSP-LAYOUT-DECISION.md | sweep ?, 2026-08-14 |
+| `F-CORE-WSP-07` | half-proven | **wave J wf-wsp decision (live, this host)**: real route is malformed→empty fallback proven (same evidence as WSP-06); schema-version/canonical-JSON half absent. The tiller_project::layout model this row was previously scored against has zero app callers; see docs/linux-rewrite/WSP-LAYOUT-DECISION.md | sweep ?, 2026-08-14 |
 | `F-CORE-WSP-08` | PASSED | **wave H live drive (this host)**: draft byte-exact in SQLite, survived a real process kill+relaunch | sweep ?, 2026-08-14 |
 | `F-CORE-FILE-01` | PASSED | **wave H live drive (this host)**: live nested-subdirectory fixture confirms dirs-before-files sort and nested loading | sweep ?, 2026-08-14 |
 | `F-CORE-FILE-02` | PASSED | **wave H live drive (this host)**: real XDND onto Chat composer: image accept, oversized reject (exact message), in-tree and outside-tree file chips all confirmed live | sweep ?, 2026-08-14 |
@@ -567,8 +567,8 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 
 | verdict | count |
 |---|---|
-| PASSED | **308** |
-| half-proven | **56** |
+| PASSED | **309** |
+| half-proven | **55** |
 | FAILED — absent | **0** |
 | FAILED — defective | **1** |
 | UNREACHABLE | **5** |
