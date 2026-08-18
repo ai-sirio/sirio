@@ -300,7 +300,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-SET-12` | PASSED | Earlier-today fin-set-tall5/02-06: live cookie type/Save -> Signed in, workspace-ID override typed, Clear on both -> reverts to Not signed in and usage-bar auto-off. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
 | `F-SET-13` | PASSED | Earlier-today captures show live Ollama cookie field type/save cycle and a Refresh click; live network refresh-error state not independently re-hit against ollama.com this exact verification pass. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
 | `F-SET-14` | half-proven | Live: Add Account (Codex) genuinely spawned x-terminal-emulator -e codex login with a real oauth URL + localhost:1455 callback server (confirmed via host ps), twice. Named test add_account_in_flight_renders_signing_in_and_cancel passes. But my own live Cancel clicks did not land -- the spawned terminal window tiles and reflows Tiller's own layout, and two recomputed-coordinate attempts both missed (fin-set2-cancel3: Codex row still showed plain Add Account post-click while the process stayed alive). cancel_account_login was not exercised by a landed click this pass. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
-| `F-SET-15` | UNREACHABLE | Re-read settings.rs:2445 today: exactly one account_row('System default',...,true,theme) call per provider, comment confirms 'stays true by construction'. No second row, no selection state anywhere. Same as standing verdict. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
+| `F-SET-15` | FAILED — absent | **reclassified from UNREACHABLE, verified in source 2026-08-18**: the row asks to select a second account and watch the active badge move (SRC App/AIProvidersSettingsView.swift:412). settings.rs has exactly ONE `account_row` call site (line 2445), hardcoded to "System default" with active=true, and `grep -c 'selected_account\|active_account\|account_selection'` returns 0 in both settings.rs and main.rs. Nothing blocks a critic from driving this — there is no second row to select. Absent, not unreachable. | sweep ?, 2026-08-14 |
 | `F-SET-16` | PASSED | Earlier-today fin-set-tall2/03,04: typed 'zzzznonexistent' into Search agents, list genuinely emptied (real filter) vs the 5-row positive control in the same session. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
 | `F-SET-17` | PASSED | Earlier-today negative control fin-set-nopath2/02 (separate instance, PATH unset): live banner 'Could not load the agent registry: PATH is not set in the environment'. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
 | `F-SET-18` | half-proven | Live negative control (fin-set-noagt1/02, all 5 binaries off PATH): every row shows real 'Not found on PATH' + Install button. But grep -n '"Retry"' settings.rs and a search for Unsupported/update_to_latest across tiller_ui/tiller_project both return nothing for agent rows -- in-progress-install/Update-to-latest/failed-Retry/unsupported states named in the clause have no implementation. \| wave B, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
@@ -512,7 +512,7 @@ touched the entry — those rows do **not** count toward done.
 | `F-PERSIST-DB-09` | PASSED | **wave H live drive (this host)**: same corruption test: valid siblings and active-tab selection survived | sweep ?, 2026-08-14 |
 | `F-PERSIST-DB-10` | PASSED | **wave H live drive (this host)**: session_ref row matches the live ACP chat session UUID | sweep ?, 2026-08-14 |
 | `F-PERSIST-DB-11` | PASSED | **wave H live drive (this host)**: v6→current migration test reran green live | sweep ?, 2026-08-14 |
-| `F-PERSIST-DB-12` | UNREACHABLE | Read rust/crates/tiller_persistence/src/migrations.rs start to finish today: migrate_v1 (lines 24-59) creates the tab table from scratch with current column names; from-scratch Rust migrator, not a GRDB port, so no terminalTab table or v17 rename ever existed in this lineage. grep -rn 'terminalTab\\|legacyTerminalTab' rust/crates --include=*.rs returns nothing workspace-wide. \| recon+recensus workflow, x86 box, 2026-08-18 | sweep ?, 2026-08-14 |
+| `F-PERSIST-DB-12` | N/A — platform | **reclassified from UNREACHABLE, 2026-08-18**: the row asks to verify a compatibility RISK created by GRDB migration v17 renaming `terminalTab` to `legacyTerminalTab_v15` while legacy save/load paths still name `terminalTab`. The Rust migrator is written from scratch (migrations.rs migrate_v1 creates the tab table with current column names) and never had a `terminalTab` table; `grep -rn 'terminalTab\|legacyTerminalTab' rust/crates` is empty workspace-wide. The risk is structurally absent here, so the row does not apply — UNREACHABLE wrongly implied a critic might reach it later. | sweep ?, 2026-08-14 |
 | `F-PERSIST-PLAT-01` | PASSED | **wave H live drive (this host)**: DB path resolution is cleanly cfg(target_os)-gated, no leakage; live-exercised throughout | sweep ?, 2026-08-14 |
 
 ### F-TERM — terminal package (17)
@@ -569,10 +569,10 @@ must count these as "plus 14 newly-found ACP rows not yet in the denominator".
 |---|---|
 | PASSED | **309** |
 | half-proven | **55** |
-| FAILED — absent | **0** |
+| FAILED — absent | **1** |
 | FAILED — defective | **1** |
-| UNREACHABLE | **5** |
-| N/A — platform | **6** |
+| UNREACHABLE | **3** |
+| N/A — platform | **7** |
 | NOT EXERCISED | **13** |
 | NOT EXERCISED — blocked on display | **0** |
 | builder-claimed, unverified | **0** |
