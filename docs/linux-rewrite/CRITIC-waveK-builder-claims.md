@@ -165,5 +165,31 @@ recording for the next critic: this daemon's GTK3 build segfaults under `GDK_BAC
 headless/pixman compositor — use `DISPLAY=:N` + `GDK_BACKEND=x11` against a private sway with
 `xwayland enable` instead.
 
+---
+
+## 3. F-SID-19 — ctrl-t from the empty state; does the fix generalize?
+
+Ledger line 88, commit `407f7c9b` (ancestor of HEAD). The wave-I builder's own re-drive confirmed
+Ctrl+T from the zero-tab "No Terminals" state; its named gap: "the fix's own rationale generalizes
+to 'every global keybinding' reachable from root — a fresh critic should drive at least one other
+root-level keybinding... from the same zero-tab empty state to confirm the generalization holds."
+
+Read `handle_root_key_down` (`main.rs`) first to pick a second real root-dispatched binding rather
+than guessing: it also gates `Ctrl+Shift+P` (always) and `Ctrl+K` (unless a terminal is focused) to
+`open_command_palette` — the same capture-phase root handler family Ctrl+T's fix targets, so it is
+a genuine second instance of "a root keybinding with nothing focused," not a coincidence.
+
+**Drive**: fresh scratch git repo (`/tmp/wfj-sid19-repo`), added as a project, selected — zero tabs,
+landing on "No Terminals" (screenshot `sid19-01-empty-state.png`). **Without ever pressing Ctrl+T**,
+sent `chord ctrl+shift p` directly from that empty state. Result
+(`sid19-02-palette-from-empty-state.png`): the full Command Palette opened — a real, populated
+command list (New Terminal Tab, Open File, Save File, Toggle Sidebar, Focus Pane Left/Right/…,
+Jump to Tab 1–9, …), not a blank or inert overlay.
+
+**Verdict: PASSED.** The fix generalizes: a second root-level keybinding, reachable only through
+the same root-focus path Ctrl+T's fix repairs, fires correctly from the identical zero-tab empty
+state with nothing else focused. This is my own fresh drive on this pass's own pinned binary,
+against a brand-new scratch project (not reusing any prior state).
+
 
 
