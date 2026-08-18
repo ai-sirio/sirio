@@ -198,3 +198,32 @@ So the dead-module list and the `FAILED — absent` list are **two views of the 
 indexed by code, one by clause. Read together they are a work queue of unusually cheap items: the
 expensive half already exists and what is missing is a subscription, a call site, or a handler.
 Read apart, one looks like garbage to delete and the other like features to build from scratch.
+
+---
+
+## Re-run 2026-08-18 against HEAD — the census missed both of the day's real findings
+
+Re-ran `Scripts/dead-models.py --modules` and the fn tier against HEAD (five days after the
+pinned 2026-08-13 run). Two genuinely dead pieces of domain code were found on this day, **both
+by critics driving the live app, neither by this instrument**:
+
+| finding | what is dead | how it was found | census verdict |
+|---|---|---|---|
+| `tiller_project::layout` | `WorkspaceLayout`, `LayoutNode`, `PaneGroup`, `WorkspaceSnapshot`, `LegacyWorkspaceTab` — **0 references** in `tiller`/`tiller_ui`. Only `LayoutCommand::Rename` is wired, from `commit_tab_rename` (`main.rs:8567`). The real pane tree is a parallel type, `panes.rs`'s `PaneNode<T>` | wf-win critic, live drive | **not flagged** |
+| `tiller_project::classify_file_drop` | 0 app callers; the behaviour `F-CORE-FILE-02` describes is really implemented by `tiller_ui/src/chat.rs`'s `drop_external_paths` | wf-edit critic, live drive | **not flagged** |
+
+**The module tier's blind spot, newly identified.** It measures reachability per *file*. One live
+symbol marks the whole file reached, so a file that is 95% dead around a single wired enum variant
+scores exactly like a fully live one. `layout.rs` is that file. This is a different blindness from
+the fn tier's documented one (mutually-calling groups all have `in > 0`); the two do not cover for
+each other, which is why a mostly-dead module slips through both.
+
+**And it produced a false DEAD the same run.** The fn tier reported
+`save_layout_now  out=0 in=0  session.rs:1331`. It is called twice — `main.rs:4879` and
+`main.rs:12233` — alongside `restore_tabs_for` at `main.rs:4881`. Hand-checked before it reached a
+row, per this file's own standing rule.
+
+**So the instrument is weak in both directions**: it missed two real dead subsystems and invented
+one. Treat a census run as a source of *questions to check by hand*, never as evidence for or
+against a ledger row. The check that actually worked today was the plainest one — grep the app
+crates for the type's name and see whether anything outside the defining crate mentions it.
