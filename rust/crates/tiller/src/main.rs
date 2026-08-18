@@ -3644,6 +3644,16 @@ impl TillerWorkspace {
         .detach();
         workspace.seed_browser_origins(cx);
         workspace.schedule_save(cx);
+        // F-CHG-02: `right_panel` is always constructed bound to
+        // `working_directory` -- on a genuinely empty catalog that is
+        // `initial_working_directory()`'s git-repo-walking fallback (real,
+        // just not a selected worktree), so the Files panel would otherwise
+        // render that unrelated real tree instead of its own no-worktree
+        // placeholder, even though the centre surface already gets this
+        // right via `has_current_worktree()`. `sync_activity` (below)
+        // reconciles the panel's selection state against
+        // `has_current_worktree()` every time it runs, including this first
+        // call, so construction needs no separate one-off check.
         workspace.sync_activity(cx);
         workspace
     }
@@ -5477,8 +5487,33 @@ impl TillerWorkspace {
         self.sync_entity_evidence(cx);
         self.sync_control_panes(cx);
         let activity = self.activity_surfaces(cx);
-        self.right_panel
-            .update(cx, |panel, cx| panel.set_activity(activity, cx));
+        // F-CHG-02: keep the Files panel's own selection state honest against
+        // `has_current_worktree()` on every reconciliation pass, not only on
+        // an explicit `select_worktree`/`close_workspace` transition. A
+        // worktree can also become (or stop being) current passively --
+        // e.g. `sync_control_state` re-matching `working_directory` against
+        // a project just added over the control socket -- with no dedicated
+        // switch call of its own; relying only on the two explicit mutation
+        // points left exactly that path free to strand the panel on its old
+        // reading (real repro: boot with an empty catalog, then add the
+        // project the app's own fallback `working_directory` already lives
+        // in -- the centre pane picks the new selection up immediately since
+        // it re-checks every render, the old Files panel did not).
+        // `bind_worktree`/`clear_worktree` are both no-ops when the state
+        // already matches, so this costs nothing on the other ~44 call sites
+        // that have nothing to do with worktree selection, and `render`
+        // already calls `sync_activity` unconditionally on every frame, so
+        // no individual mutation handler needs its own extra call for this.
+        let has_worktree = self.has_current_worktree();
+        let working_directory = self.working_directory.clone();
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_activity(activity, cx);
+            if has_worktree {
+                panel.bind_worktree(working_directory, cx);
+            } else {
+                panel.clear_worktree(cx);
+            }
+        });
 
         // The sidebar's tab rows under this worktree are the same `tabs`
         // the tab bar and the Activity panel just rendered from above —
@@ -12088,6 +12123,76 @@ mod tests {
         )
     }
 
+    /// F-CHG-02: a workspace booted with a genuinely empty catalog --
+    /// mirrors real boot (`main()`'s `initial_working_directory()` +
+    /// `session::restore`'s `default_restored`) exactly: no project was ever
+    /// added, `ControlState::from_catalog` sees zero workspaces, yet
+    /// `working_directory` still points at a real, existing directory (the
+    /// git-repo-walking fallback finds *some* real tree; it is just not a
+    /// selected worktree). This is deliberately unlike `palette_test_workspace`,
+    /// whose catalog already contains and selects one worktree.
+    fn empty_catalog_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
+        let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let scratch_root = std::env::temp_dir().join(format!(
+            "tiller-empty-catalog-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch_root).expect("create empty-catalog test scratch dir");
+        let working_directory = scratch_root.clone();
+        let project_catalog = ProjectCatalog::default();
+        let pending_actions = Arc::new(Mutex::new(Vec::new()));
+        let control_actions = Arc::new(Mutex::new(Vec::new()));
+        let panes = Arc::new(PaneRegistry::new());
+        let state = Arc::new(Mutex::new(ControlState::from_catalog(
+            &project_catalog,
+            &working_directory,
+        )));
+        let session_path = scratch_root.join("tiller.sqlite");
+        let session = SessionStore::open(&session_path);
+        let titlebar = cx.new(Titlebar::new);
+        let sidebar = cx.new(|cx| Sidebar::from_projects(sidebar_projects(&project_catalog), cx));
+        let tab_bar = cx.new(|cx| TabBar::new(cx));
+        let status_bar = cx.new(|_| {
+            StatusBar::new(UsageBarData {
+                branch: String::new(),
+                path: working_directory.to_string_lossy().into_owned(),
+            })
+        });
+        let settings = cx.new(|cx| Settings::new(cx));
+        let right_panel = cx.new(|_| RightPanel::new(working_directory.clone()));
+        TillerWorkspace::new(
+            titlebar,
+            sidebar,
+            tab_bar,
+            status_bar,
+            settings,
+            right_panel,
+            panes,
+            state,
+            Vec::new(),
+            0,
+            working_directory.clone(),
+            pending_actions.clone(),
+            pending_actions,
+            control_actions,
+            session,
+            project_catalog,
+            String::new(),
+            String::new(),
+            RestoredSession {
+                working_directory,
+                tabs: Vec::new(),
+                tab_states: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            AgentActivityModel::new(),
+            None,
+            None,
+            None,
+            cx,
+        )
+    }
+
     fn palette_test_terminal_focus(
         workspace: &Entity<TillerWorkspace>,
         cx: &VisualTestContext,
@@ -17762,6 +17867,86 @@ mod tests {
         assert!(
             cx.debug_bounds("right-panel-files").is_none(),
             "the old worktree's file list must be unmounted"
+        );
+    }
+
+    /// F-CHG-02: booting straight into a genuinely empty catalog (no project
+    /// ever added -- the ledger's live-drive reproduction, not a worktree
+    /// closed after the fact) must not let the Files panel default to
+    /// rendering `working_directory`'s real, unrelated tree just because
+    /// that path happens to exist on disk.
+    #[gpui::test]
+    async fn drawn_empty_catalog_boot_shows_the_right_panels_no_worktree_placeholder(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| empty_catalog_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("right-panel-no-worktree").is_some(),
+            "an empty-catalog boot must draw the right panel's own \
+             no-worktree placeholder"
+        );
+        assert!(
+            cx.debug_bounds("right-panel-files").is_none(),
+            "an empty-catalog boot must not render working_directory's real \
+             file tree just because that fallback path happens to exist"
+        );
+    }
+
+    /// F-CHG-02, second half: adding a project whose (auto-synthesized, for
+    /// a plain folder) worktree path exactly equals the fallback
+    /// `working_directory` an empty-catalog boot rooted itself in makes that
+    /// worktree the current one via `sync_control_state` alone -- no
+    /// `select_worktree` call ever runs. The centre pane already re-checks
+    /// `has_current_worktree()` fresh on every render and would pick this up
+    /// for free; this asserts the right panel, which caches its own
+    /// selection state, is told too and does not stay stuck on the
+    /// no-worktree placeholder.
+    #[gpui::test]
+    async fn drawn_adding_a_project_matching_the_fallback_directory_binds_the_right_panel(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| empty_catalog_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("right-panel-no-worktree").is_some(),
+            "sanity: boot must start on the placeholder before the project is added"
+        );
+
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let working_directory =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .control_add_project(&working_directory, cx)
+                .expect("add the project rooted at the fallback working_directory")
+        });
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.has_current_worktree()),
+            "sanity: the added project's synthesized worktree must match \
+             working_directory exactly"
+        );
+        assert!(
+            cx.debug_bounds("right-panel-files").is_some(),
+            "the right panel must bind to the worktree that just became \
+             current, not stay stuck on the no-worktree placeholder"
+        );
+        assert!(
+            cx.debug_bounds("right-panel-no-worktree").is_none(),
+            "the no-worktree placeholder must not still be drawn once a \
+             worktree is current"
         );
     }
 
