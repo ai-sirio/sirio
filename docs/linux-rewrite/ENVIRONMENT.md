@@ -21,8 +21,41 @@ The Pi 5 section below is history. Measured 2026-08-18 on the machine this work 
 | GPU | **AMD** (`0d:00.0` VGA, device 7590), `/dev/dri/card1` + `renderD128`, Vulkan 1.4.318, Mesa 25.2.8 — real hardware |
 | desktop session | **COSMIC** (Pop!_OS) on Wayland, socket `wayland-1` in `/run/user/1000` |
 | `cargo build --workspace` | **exit 0 in 14.5 s** (warm target), 2 warnings (`browser.rs:827` `pump_task`; `main.rs:9864` `sidebar_projects`) |
-| workflow fan-out cap | `min(16, cores-2)` = **10 agents at a time** (the Pi's ceiling of 2 is gone) |
+| workflow fan-out cap | `min(16, cores-2)` = 10 by the formula — **but 10 is not survivable here, see below** |
 | agent CLIs | `claude`, **`codex` 0.147.0**, **`opencode` 1.18.18**, **`pi`** all present; `oh-my-pi` still upstream-broken |
+
+## The real concurrency ceiling is about 5, not 10 — measured 2026-08-18 14:34
+
+The `min(16, cores-2)` formula counts agents. It does not count what each agent *starts*: a nested
+sway, a 284 MB Tiller binary, and often a `cargo` build. Running ~10 shard critics at once took this
+box to:
+
+```
+load average: 41.17          # on 12 cores
+Mem:  26 GB of 31 used
+Swap: 32535 MB of 32767 used   # 232 MB left
+```
+
+Nothing was OOM-killed, but the second-order damage was real and it is the expensive kind — **it
+looks like application bugs**:
+
+- Agents error and get retried. A retried slot leaves its **first attempt still running**, and both
+  attempts drive the same `TILLER_WL_LABEL` — the same socket, the same capture directory. Seen
+  twice today: the `activity` shard burned four attempts this way and produced nothing.
+- Screenshots race the relayout. `WAYLAND-LANE.md` already lists "a screenshot taken before the
+  window relaid out" as a fault whose every symptom reads as *the app ignored my input*. A loaded
+  box makes that fault the common case rather than the rare one.
+- A finish-line critic lost most of its budget to what it called "an environment rendering/coordinate
+  friction", and the centre-pane desync it reported was measured under exactly these conditions.
+  **Any render-timing finding made on a loaded box has to be re-measured on a quiet one before a
+  builder is sent after it.**
+
+Two rules follow, both cheap:
+
+1. **Keep concurrent lane-driving agents at about 5.** Doc-only or test-only agents are far lighter
+   and can run alongside. Check `uptime` and `free -m` before adding a wave.
+2. **Every agent's lane label must be assigned by its brief and be unique.** Never let two agents
+   pick their own and collide, and never assume a retry killed its predecessor.
 
 ## Both lanes work here. Neither needs `pi-session.sh`.
 
