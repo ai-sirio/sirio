@@ -957,16 +957,89 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
                     ));
                 }
             }
-            Err(error) => diagnostics.push(format!(
-                "project {} could not be discovered: {error}",
-                record.name
-            )),
+            Err(error) => {
+                // F-CHG-02/03/09: a transient git fault (e.g. `.git`
+                // briefly unreadable) must not make a durable project the
+                // user added silently disappear. Dropping it here used to
+                // do three things at once: erase the sidebar row, desync
+                // it from the working directory/right panel that restore()
+                // (a separate, catalog-independent read of the same
+                // persisted path) still pointed at, and -- since
+                // `write_catalog` deletes any DB row missing from the next
+                // `schedule_catalog` call -- risk turning one bad `git`
+                // invocation into a permanent loss on the next unrelated
+                // catalog write. Keep the project with its last persisted
+                // worktrees instead: the Files/Changes surfaces' own 1s
+                // refresh loops already retry the real git calls and show
+                // their own "unavailable" + Retry state, and self-heal
+                // once the fault clears -- they just need the project to
+                // still be there to render into.
+                let worktrees = db.worktrees_of_project(&record.id).unwrap_or_default();
+                let project = degraded_catalog_project(&record, worktrees);
+                if seen_project_ids.insert(project.id.clone()) {
+                    settings.insert(
+                        project.id.clone(),
+                        CatalogProjectSettings {
+                            color_hex: record.color_hex.clone(),
+                            display_name: record.display_name.clone(),
+                            icon_kind: record.icon_kind.clone(),
+                            icon_value: record.icon_value.clone(),
+                            default_worktree_base: record.default_worktree_base.clone(),
+                            worktree_location_override: record.worktree_location_override.clone(),
+                        },
+                    );
+                    projects.push(project);
+                }
+                diagnostics.push(format!(
+                    "project {} could not be refreshed, keeping its last-known state: {error}",
+                    record.name
+                ));
+            }
         }
     }
     RestoredCatalog {
         projects,
         settings,
         diagnostics,
+    }
+}
+
+/// Builds a [`CatalogProject`] straight from what was last persisted, for
+/// when a fresh `discover_project` failed (see the call site in
+/// [`restore_catalog`]). Unlike [`catalog_project`], this never shells out
+/// to git -- it is exactly the durable state the user last saw, not a
+/// rediscovery.
+fn degraded_catalog_project(record: &ProjectRecord, worktrees: Vec<WorktreeRecord>) -> CatalogProject {
+    let root_path = PathBuf::from(&record.root_path);
+    let mut worktrees: Vec<CatalogWorktree> = worktrees
+        .into_iter()
+        .map(|worktree| CatalogWorktree {
+            branch: worktree.branch,
+            path: PathBuf::from(worktree.path),
+            is_primary: worktree.is_primary,
+        })
+        .collect();
+    if worktrees.is_empty() {
+        // No worktree row was ever persisted for this project (unusual,
+        // but not impossible for an older database) -- fall back to a
+        // synthesized primary at the root, the same baseline row a
+        // freshly discovered git project always gets at least one of.
+        worktrees.push(CatalogWorktree {
+            branch: "main".to_string(),
+            path: root_path.clone(),
+            is_primary: true,
+        });
+    }
+    CatalogProject {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        root_path,
+        // A worktree row only ever gets persisted for a git project
+        // (`write_catalog` only writes worktrees `if project.is_git`), so
+        // reaching this function at all means the last-known state was a
+        // git repository.
+        is_git: true,
+        worktrees,
     }
 }
 
@@ -2374,6 +2447,96 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.contains("vanished"))
         );
+    }
+
+    /// F-CHG-02/03/09: the shared root cause of three findings from a
+    /// finish-line critic pass -- a transient permission fault on `.git`
+    /// (unreadable, then restored) used to make `restore_catalog` drop the
+    /// project entirely rather than keep its last-known state, which in
+    /// turn destroyed the sidebar row and desynced it from the
+    /// independently-restored working directory before the Changes/Files
+    /// surfaces' own "Git unavailable" + Retry panels ever got a chance to
+    /// render. This is Linux/Unix-only (permission bits), matching the
+    /// "platform gate" the OS-touching fix requires.
+    #[test]
+    #[cfg(unix)]
+    fn restore_keeps_a_project_whose_git_is_transiently_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new();
+        let root = checkout(&dir.0, "flaky");
+        std::fs::write(root.join("a.txt"), "hi").expect("write file");
+        run_git(&root, &["add", "a.txt"]);
+        run_git(&root, &["-c", "user.email=a@b.c", "-c", "user.name=a", "commit", "-q", "-m", "init"]);
+        let db_path = dir.db_path("flaky-git");
+        let store = SessionStore::open(&db_path);
+        let mut catalog = ProjectCatalog::default();
+        catalog.add(&root).expect("discover the healthy repo");
+        assert!(
+            catalog.projects()[0].is_git,
+            "precondition: a real git checkout discovers as git"
+        );
+        store.schedule_catalog(&catalog);
+        store.flush_now();
+        drop(store);
+
+        let git_dir = root.join(".git");
+        let original_mode = std::fs::metadata(&git_dir)
+            .expect("stat .git")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod .git unreadable");
+
+        let restored = restore_catalog(&db_path);
+
+        // Restore permissions immediately, win or lose, so the temp dir
+        // can still be cleaned up and no assertion below can leave the
+        // fixture broken for anything that runs after it.
+        std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(original_mode))
+            .expect("restore .git permissions");
+
+        assert_eq!(
+            restored.projects.len(),
+            1,
+            "a transient git fault must not drop a durable project from the catalog"
+        );
+        let project = &restored.projects[0];
+        assert_eq!(project.root_path, root.canonicalize().unwrap());
+        assert!(
+            project.is_git,
+            "the project's last-known git status must be preserved, not reset"
+        );
+        assert_eq!(
+            project.worktrees.len(),
+            1,
+            "the last persisted worktree row must survive, so the sidebar row and the \
+             independently-restored working directory stay in sync"
+        );
+        assert_eq!(project.worktrees[0].path, root.canonicalize().unwrap());
+        assert!(
+            restored
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("could not be refreshed")),
+            "the fault is still logged, just not treated as the project vanishing: {:?}",
+            restored.diagnostics
+        );
+        assert!(
+            !restored
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("vanished")),
+            "a permission fault is not the same as the directory disappearing: {:?}",
+            restored.diagnostics
+        );
+
+        // And once the fault clears, a later restore is the normal,
+        // fully-rediscovered path again -- this project was never actually
+        // lost from the database.
+        let recovered = restore_catalog(&db_path);
+        assert_eq!(recovered.projects.len(), 1);
+        assert!(recovered.projects[0].is_git);
     }
 
     // ---- database path scoping -----------------------------------------
