@@ -636,6 +636,15 @@ struct TabRename {
     focus: FocusHandle,
 }
 
+/// F-TAB-24: pre-drag state for `TillerWorkspace::cancel_tab_drag`. Stores
+/// tab identity, not `OpenTab` itself (which holds live PTY/agent entities
+/// and is not meant to be cloned) — a cancel only ever needs to put the same
+/// tabs back in their original order and restore which one was active.
+struct TabDragSnapshot {
+    order: Vec<usize>,
+    active_id: Option<usize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RetainedChat {
     id: usize,
@@ -3010,6 +3019,14 @@ struct TillerWorkspace {
     restore_focus_pending: bool,
     tabs: Vec<OpenTab>,
     active_tab: usize,
+    /// F-TAB-24: the tab order (by id) and active tab id at the moment a
+    /// tab drag started, captured in `render_open_tab`'s `on_drag`.
+    /// `preview_tab_reorder` mutates `tabs` live on every hover crossing
+    /// (there is no separate "commit on drop" step), so this is the only
+    /// record of what to put back if the drag is cancelled instead of
+    /// dropped. Cleared on a real drop (`render_open_tabs`'s
+    /// `on_drop::<RowDrag>`) and on Escape (`cancel_tab_drag`).
+    tab_drag_snapshot: Option<TabDragSnapshot>,
     next_tab_id: usize,
     next_retained_chat_id: usize,
     retained_chats: Vec<RetainedChat>,
@@ -3572,6 +3589,7 @@ impl TillerWorkspace {
             pending_actions,
             tabs,
             active_tab,
+            tab_drag_snapshot: None,
             next_tab_id: tabs_len,
             next_retained_chat_id: 0,
             retained_chats: Vec::new(),
@@ -4197,6 +4215,47 @@ impl TillerWorkspace {
             self.sync_activity(cx);
             cx.notify();
         }
+    }
+
+    /// F-TAB-24: Escape mid-tab-drag put the tab order back the way it was.
+    /// `preview_tab_reorder` above has no separate "commit" step -- it
+    /// mutates `self.tabs` on every hover crossing -- so cancelling means
+    /// restoring `tab_drag_snapshot`'s recorded order and active tab,
+    /// exactly the way a cancelled drag would if it had never been applied
+    /// live. `cx.stop_active_drag` additionally clears GPUI's own drag
+    /// payload (`cx.active_drag`); `on_drag_move`/`on_drop` are both gated
+    /// on that being `Some` (see `gpui::Div::{on_drag_move,on_drop}`), so
+    /// once it is cleared, no further hover the still-held mouse button
+    /// produces before its eventual release can re-mutate `self.tabs`, and
+    /// the later mouse-up cannot fire the tab strip's `on_drop` and
+    /// re-clear this snapshot out from under an already-cancelled drag.
+    /// Returns whether a drag was actually in progress to cancel, so the
+    /// global Escape handler can fall through to its other duties otherwise.
+    fn cancel_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(snapshot) = self.tab_drag_snapshot.take() else {
+            return false;
+        };
+        cx.stop_active_drag(window);
+        let mut restored = Vec::with_capacity(self.tabs.len());
+        for id in &snapshot.order {
+            if let Some(position) = self.tabs.iter().position(|tab| tab.id == *id) {
+                restored.push(self.tabs.remove(position));
+            }
+        }
+        // Defensive: any tab not named in the snapshot (none should exist --
+        // no tab opens or closes mid-drag) keeps its relative order, appended
+        // after the restored ones rather than silently dropped.
+        restored.extend(self.tabs.drain(..));
+        self.tabs = restored;
+        self.active_tab = snapshot
+            .active_id
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or_else(|| self.active_tab.min(self.tabs.len().saturating_sub(1)));
+        self.rebuild_tab_machinery();
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+        cx.notify();
+        true
     }
 
     fn control_add_project(
@@ -8041,6 +8100,7 @@ impl TillerWorkspace {
         let menu_entity = entity.clone();
         let rename_entity = entity.clone();
         let drag_entity = entity.clone();
+        let drag_start_entity = entity.clone();
         let tab_drag = RowDrag {
             scope: ReorderScope::Tabs,
             id,
@@ -8066,7 +8126,20 @@ impl TillerWorkspace {
                 theme.subtitle
             })
             .hover(|style| style.bg(theme.row_hover))
-            .on_drag(tab_drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            // F-TAB-24: `on_drag` fires once, at the start of the gesture --
+            // the same point sidebar.rs's own drag resets `pending_reorder`
+            // at. Snapshot the pre-drag tab order here so Escape has
+            // something to put back; `preview_tab_reorder` below mutates
+            // `tabs` live on every hover crossing with no other checkpoint.
+            .on_drag(tab_drag, move |_, _, _, cx| {
+                drag_start_entity.update(cx, |workspace, _| {
+                    workspace.tab_drag_snapshot = Some(TabDragSnapshot {
+                        order: workspace.tabs.iter().map(|tab| tab.id).collect(),
+                        active_id: workspace.tabs.get(workspace.active_tab).map(|tab| tab.id),
+                    });
+                });
+                cx.new(|_| gpui::Empty)
+            })
             .on_drag_move::<RowDrag>(move |event, _, cx| {
                 let drag = *event.drag(cx);
                 let before = event.event.position.x < event.bounds.center().x;
@@ -8902,7 +8975,23 @@ impl TillerWorkspace {
             .flex()
             .items_start()
             .gap(px(1.0))
-            .bg(theme.background);
+            .bg(theme.background)
+            // F-TAB-24: a real drop commits the reorder that
+            // `preview_tab_reorder` already applied live during hover --
+            // this just clears the pre-drag snapshot so a later, unrelated
+            // Escape press can no longer revert it. Attached to this stable
+            // strip container, not a per-tab row, for the same reason
+            // sidebar.rs's own `#sidebar-tree` drop is: rows reorder during
+            // the drag, so the row originally under the pointer may not be
+            // the one under it at drop.
+            .on_drop::<RowDrag>({
+                let drop_entity = entity.clone();
+                move |_, _, cx| {
+                    drop_entity.update(cx, |workspace, _| {
+                        workspace.tab_drag_snapshot = None;
+                    });
+                }
+            });
         if has_overflow {
             tabs = tabs.pr(theme.spacing.titlebar_control_frame.width);
         }
@@ -9527,13 +9616,45 @@ impl TillerWorkspace {
     /// focus; Back routes through the CloseSettings action. Focus returns
     /// to the sidebar immediately (it is rendered again on the next frame),
     /// so the shell's ctrl-k handling keeps working without a click.
+    ///
+    /// F-TAB-24: also cancels an in-progress tab drag, checked first. This
+    /// has to be an `on_action` listener, not a raw `capture_key_down` one
+    /// (`handle_root_key_down`) -- measured live and in a headless test:
+    /// GPUI's own capture/bubble key-listener dispatch (`Window::
+    /// dispatch_key_down_up_event`) is not reached at all while
+    /// `cx.active_drag` is `Some`, even though the exact same keystroke's
+    /// keybinding-matched *action* dispatch (`Window::
+    /// dispatch_action_on_node`) still runs fine -- upstream `gpui` itself
+    /// relies on exactly that split for this exact purpose (`workspace::
+    /// Pane`'s own `on_action(|_, _: &menu::Cancel, window, cx| if
+    /// cx.stop_active_drag(window) {} else { cx.propagate() })`).
+    ///
+    /// Wiring this `on_action` into the main (non-`show_settings`) render
+    /// branch, below, needs the same `cx.propagate()` escape hatch Zed uses
+    /// there: GPUI's bubble-phase action dispatch stops propagation
+    /// unconditionally once *any* listener for the action exists on the
+    /// dispatch path, regardless of what the listener body does, so without
+    /// `cx.propagate()` on the "nothing to do" path this would silently
+    /// swallow every other Escape press in that branch before it ever
+    /// reaches `handle_root_key_down`'s raw-key fallback -- breaking things
+    /// like the command palette's own Escape handling. (Measured the hard
+    /// way: an earlier version of this fix omitted `cx.propagate()` and
+    /// broke `escape_closes_the_palette_and_returns_focus_to_the_terminal`.)
     fn handle_close_settings_surface(
         &mut self,
         _: &CloseSettingsSurface,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.cancel_tab_drag(window, cx) {
+            return;
+        }
         if !self.show_settings {
+            // Nothing for this handler to do -- let the keystroke continue
+            // on to whatever else might want it (the palette's own Escape
+            // handling, chiefly). Without this, GPUI's default
+            // stop-propagation-on-action-dispatch would eat it here.
+            cx.propagate();
             return;
         }
         self.show_settings = false;
@@ -10248,6 +10369,15 @@ impl Render for TillerWorkspace {
             .on_action(cx.listener(Self::handle_restore_launch_snapshot))
             .on_action(cx.listener(Self::handle_save_file))
             .on_action(cx.listener(Self::handle_open_settings_shortcut))
+            // F-TAB-24: this action/binding pair previously existed only in
+            // the `show_settings` render branch above (there was nothing
+            // else for it to do outside settings). A tab drag can only be
+            // in progress while *this*, the main, branch renders, so Escape
+            // needs this listener here too -- see the long comment on
+            // `handle_close_settings_surface` for why it is safe to add
+            // (short version: it always `cx.propagate()`s when it finds
+            // nothing to do, so this cannot swallow an unrelated Escape).
+            .on_action(cx.listener(Self::handle_close_settings_surface))
             .on_action(cx.listener(|workspace, _: &ToggleSidebar, _, cx| {
                 workspace.toggle_sidebar(cx);
             }))
@@ -13892,6 +14022,111 @@ mod tests {
             }),
             vec![1, 2, 0],
             "the drawn tab drag must update the live strip order"
+        );
+    }
+
+    /// F-TAB-24: `preview_tab_reorder` mutates the live tab vector on every
+    /// hover crossing, with no on-drop commit step and (until this fix) no
+    /// Escape handling and no pre-drag snapshot anywhere in the drag path --
+    /// exactly the ledger row's finding. Same event sequence as
+    /// `drawn_tab_drag_reorders_the_live_tab_strip` above up through the
+    /// mid-drag reorder, but Escape is dispatched *before* the mouse button
+    /// is released (mirroring a real held-button drag, not a drop) and must
+    /// put the tab order back exactly where it started.
+    #[gpui::test]
+    async fn escape_mid_tab_drag_restores_the_pre_drag_order(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("tab workspace root")
+        });
+        let original_order = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+        });
+        let original_active = workspace.read_with(&cx.cx, |workspace, _| workspace.active_tab);
+
+        let source = cx
+            .debug_bounds("workspace-tab-0")
+            .expect("source tab is drawn");
+        let target = cx
+            .debug_bounds("workspace-tab-2")
+            .expect("target tab is drawn");
+
+        cx.simulate_event(MouseDownEvent {
+            position: source.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(source.center().x + px(30.0), source.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: target.center(),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        // Sanity check: the drag genuinely reordered the live strip already,
+        // same as the sibling test above -- otherwise Escape restoring the
+        // order would prove nothing (there'd be nothing to restore from).
+        assert_ne!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            original_order,
+            "the mid-drag hover must have already reordered the live tabs \
+             before Escape is tested, or this test proves nothing"
+        );
+
+        // The button is still held (no MouseUpEvent yet) -- Escape here is
+        // exactly the "cancel mid-drag" gesture the ledger row describes,
+        // not a drop.
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            original_order,
+            "Escape mid-drag must restore the pre-drag tab order"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.active_tab),
+            original_active,
+            "Escape mid-drag must also restore which tab was active"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_drag_snapshot.is_none()),
+            "the cancelled drag's snapshot must be consumed, not left behind"
+        );
+
+        // Releasing the button after the cancel must not re-apply anything:
+        // `cx.stop_active_drag` clears `cx.active_drag`, so this MouseUp can
+        // no longer be interpreted as a drop of the (already-cancelled) drag.
+        cx.simulate_event(MouseUpEvent {
+            position: target.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>()
+            }),
+            original_order,
+            "releasing the mouse after an Escape-cancelled drag must not \
+             reorder the tabs again"
         );
     }
 

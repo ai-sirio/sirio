@@ -229,3 +229,139 @@ overturn this pass's harness-artifact conclusion and point back at a real app ra
 investigated fresh rather than assumed settled by this report.
 
 ---
+
+## F-TAB-24 — Escape does not cancel a tab drag
+
+**Reproduced live first.** Lane `wf-fix2`, `project.add` on this repo, two real tabs (`Chat`,
+`TerminalRENAMEDTAB`, the latter left over from the F-TAB-14 pass in this same lane). Composing a
+raw held-button drag from `wayland-drive.sh`'s primitives (`down`, `move`, `key`, `up` — the
+`drag` helper alone cannot interleave a keystroke mid-gesture), before any code change: `down` on
+`TerminalRENAMEDTAB`'s tab, `move` twice to cross into `Chat`'s hitbox (confirmed a real live
+reorder by finishing the same gesture with a plain `up`, no Escape — order flipped from `[Chat,
+TerminalRENAMEDTAB]` to `[TerminalRENAMEDTAB, Chat]`, screenshot
+`reference/linux-progress/wf-fix2-tab24/03-positive-control-no-escape-reorders.png`), then
+repeating from a reset baseline with `key Escape` sent *before* the `up` — the order still flipped
+identically; Escape had no effect at all. This matches the ledger's finding exactly.
+
+### Root cause
+
+Two independent gaps, both confirmed by reading `rust/crates/tiller/src/main.rs` before touching
+it: (1) `preview_tab_reorder` mutates `self.tabs` directly on every `on_drag_move` hover crossing
+— there is no separate "commit on drop" step, so by the time any cancel signal could arrive the
+live model is already changed with nothing recorded to put back; (2) there was no pre-drag
+snapshot anywhere in the drag path and no Escape handling reachable from it at all — `grep -n
+"click_count\|Escape"` around the tab-row render code and the drag closures returned nothing.
+
+### Fix
+
+`TillerWorkspace` gains `tab_drag_snapshot: Option<TabDragSnapshot>` (tab ids in their pre-drag
+order, plus which id was active — not a clone of `OpenTab` itself, which owns live PTY/agent
+entities). The tab row's `on_drag` closure (previously just `|_, _, _, cx| cx.new(|_|
+gpui::Empty)`, i.e. it did nothing but build the invisible drag ghost) now also records that
+snapshot at the moment the drag starts. A new `cancel_tab_drag` restores `self.tabs` to the
+recorded order, recomputes `active_tab` from the recorded active id, and calls
+`cx.stop_active_drag(window)` (the same GPUI primitive `workspace::Pane`'s own drag-cancel uses
+upstream — see below). The tab strip's container `div` in `render_open_tabs` gets a new
+`on_drop::<RowDrag>` that simply clears the snapshot on a real, completed drop (the reorder is
+already committed live by that point; this only stops a *later*, unrelated Escape from reverting
+an already-finished drag).
+
+**Wiring Escape to `cancel_tab_drag` took two attempts, and the failure of the first is worth
+recording because it is a real GPUI trap, not a Tiller-specific one.** The first attempt added the
+check to `handle_root_key_down`, a `capture_key_down` raw-key listener already on the workspace
+root (the same one the command palette's own Escape handling uses). This passed a from-scratch
+regression test... until the test also simulated an actual held-button drag first — at which point
+the raw-key listener stopped firing *at all* while `cx.active_drag` was `Some`, reproducible both
+in a headless `#[gpui::test]` and, independently, live (the exact same `wayland-drive.sh`
+down/move/Escape/up sequence: order flipped as if Escape had never been sent — screenshots from
+that broken attempt were not kept, but the mechanism is the same one the final, working attempt's
+positive control above demonstrates). Cross-checking the pinned `gpui` git revision's own
+`crates/workspace/src/pane.rs` (`~/.cargo/git/checkouts/zed-a70e2ad075855582/c05e346/`, the exact
+source this project's `gpui` dependency resolves to) shows Zed's own drag-cancel-on-Escape uses
+`.on_action(cx.listener(|_, _: &menu::Cancel, window, cx| if cx.stop_active_drag(window) {} else {
+cx.propagate() }))` — an **action** listener, not a raw key listener. `handle_close_settings_surface`
+(already bound to the global `escape` → `CloseSettingsSurface` keybinding, previously wired only
+into the `show_settings` render branch) now checks `cancel_tab_drag` first, and now is also wired
+into the *main* branch — matching Zed's own pattern, including the `cx.propagate()` on the
+"nothing to cancel" path, without which GPUI's default "actions stop propagation unconditionally
+during the bubble phase" (`Window::dispatch_action_on_node_inner`) would have silently swallowed
+every other Escape press in that branch, breaking the command palette's own Escape handling — this
+exact regression was caught by the full suite (`escape_closes_the_palette_and_returns_focus_to_the_terminal`
+failed) before being fixed by adding the `cx.propagate()` call. Both the broken-raw-key and the
+fixed-action-based versions are documented inline at `handle_close_settings_surface`.
+
+### Regression test
+
+`rust/crates/tiller/src/main.rs`, `tests::escape_mid_tab_drag_restores_the_pre_drag_order`: builds
+a 3-tab fixture, drags tab 0 over tab 2 with real `MouseDownEvent`/`MouseMoveEvent`s (no
+`MouseUpEvent` yet — the button stays "held", mirroring a real mid-drag cancel rather than a
+drop), asserts the live order already changed (so the test cannot pass vacuously), then dispatches
+a real `escape` keystroke via `cx.simulate_keystrokes` and asserts the order and `active_tab` are
+back to their pre-drag values, `tab_drag_snapshot` is consumed, and a subsequent `MouseUpEvent`
+does not re-apply anything.
+
+**Red, on the unfixed code** (verified by temporarily forcing `cancel_tab_drag` to `return false`
+immediately, keeping the test unchanged):
+```
+thread 'tests::escape_mid_tab_drag_restores_the_pre_drag_order' panicked at crates/tiller/src/main.rs:14099:9:
+assertion `left == right` failed: Escape mid-drag must restore the pre-drag tab order
+  left: [1, 2, 0]
+ right: [0, 1, 2]
+```
+**Green, after the fix:**
+```
+test tests::escape_mid_tab_drag_restores_the_pre_drag_order ... ok
+```
+Full crate suite: `cargo test --manifest-path rust/Cargo.toml -p tiller --bin tiller` →
+**185 passed, 0 failed** — including
+`tests::escape_closes_the_palette_and_returns_focus_to_the_terminal` and
+`tests::escape_closes_the_settings_surface`, both of which the first (raw-key) attempt at this fix
+had put at risk and the second (action-based) attempt does not.
+
+### Re-driven live after the fix
+
+Single `wayland-drive.sh` invocation, reusing the two-tab state from the reproduction above (`Chat`
+first, `TerminalRENAMEDTAB` second — confirmed by screenshot, not assumed, since a prior corrupted
+mid-drag `shot` in this same lane had briefly left the order swapped from an earlier attempt;
+`WAYLAND-LANE.md`'s own warning that `shot` forces a real resize and must never land between a
+`down` and its `up` is honoured throughout — every screenshot below is taken only after the
+matching `up`):
+
+```
+down 537 51 ; move 500 51 ; move 355 51 ; key Escape ; up 355 51 ; sleep 0.3 ; shot after-escape
+down 537 51 ; move 500 51 ; move 355 51 ;              up 355 51 ; sleep 0.3 ; shot no-escape-control
+```
+
+**Hard discriminator**: the drawn tab-strip order itself (this project's own `panel.list` reads
+pane *existence*, not tab strip *position* — confirmed by reading its handler, `"panel.list"` in
+`main.rs`, which lists `self.panes.list_for(...)`, a registry independent of `self.tabs`' order —
+so a screenshot of the strip is the correct, not merely convenient, instrument for a
+position/order claim here). With Escape mid-drag: order stays `[Chat, TerminalRENAMEDTAB]`,
+identical to the pre-drag baseline
+(`reference/linux-progress/wf-fix2-tab24/02-after-escape-cancel-order-unchanged.png` next to
+`01-baseline-chat-first.png`). The immediately following positive control — the *exact* same
+gesture with no Escape — flips the order to `[TerminalRENAMEDTAB, Chat]`
+(`03-positive-control-no-escape-reorders.png`), proving the coordinates and gesture genuinely
+drive a real reorder and that Escape, not some coordinate mistake, is what suppressed it.
+Re-confirmed once more against the final, `cargo fmt`-formatted binary (`04-refmt-build-baseline.png`,
+`05-refmt-build-escape-still-cancels.png` — order unchanged after Escape, same as above).
+
+### Verdict: half-proven (builder-driven, not critic-passed)
+
+Proven: reproduction of the original absence, root cause, a regression test red→green (with the
+red run captured against the *fixed* test file and *disabled* fix, per instructions), full crate
+suite green (185/185, including both pre-existing Escape tests this fix could have broken and
+initially did break in its first form), and a live re-drive with a screenshot-based hard
+discriminator plus an in-sequence positive control ruling out a coordinate/gesture mistake.
+
+**Gap for a fresh critic**: (1) this drive only exercised the two-tab case; re-confirm with 3+
+tabs and dragging from/to interior positions, matching the unit test's own 3-tab fixture. (2) The
+row's clause is specifically about a *tab* drag; sidebar drags (`ReorderScope::Projects` /
+`Worktrees`) use a structurally different preview/commit split (`Sidebar::preview_reorder`/
+`confirm_reorder`, which *also* mutates its `rows` vector live on hover with no Escape handling of
+its own) — untouched by this pass and not covered by the ledger row, but a critic auditing "drag
+cancel" more broadly should know it is not fixed there. (3) Nobody yet re-confirmed that a
+completed **drop** (not a cancel) still correctly clears `tab_drag_snapshot` live end-to-end
+(covered by the unit test and reasoned through inline, but not independently re-driven this pass).
+
+---
