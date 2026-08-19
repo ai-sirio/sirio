@@ -347,3 +347,82 @@ separate UX-discoverability finding the report itself scoped out of this row's o
 consumer," which is proven wired) — not re-litigated here. Gap (3) (`TerminalDropEvent::Files`, the
 sibling variant, untouched) is accepted as out of scope: the ledger row and this pass both concern the
 `Diff` variant only.
+
+---
+
+## F-SET-15 — no second account, no selection state (absent — built this pass)
+
+**Verdict: PASSED**
+
+### Code check
+
+`git show c1f27dc5` matches the report: `tiller_persistence` migration v14 creates `agent_account`
+(id, provider, label, config dir path, created-at); `AppDatabase` gains `agent_accounts(provider)`/
+`save_agent_account`/`active_agent_account_id`/`set_active_agent_account_id`, the last two reusing the
+generic `setting` table under `"agentAccounts.<provider>.activeId"`. `tiller_ui::controls::account_row`
+gains `row_id`, owned `label`/`subtitle`, and an `on_select` click callback (previously no
+interactivity at all). `tiller/src/main.rs` adds control-socket methods `settings.account.add` and
+`settings.account.select`. Direct read of `settings.rs`'s `launch_account_login` (its
+`Ok(status) if status.success()` success arm) independently confirms the report's own named gap: it
+calls only `ProviderAccountStates::discovered()` and `sync_account_identity_cache()`, never
+`add_agent_account` — matching the report's "Add Account still not wired" claim exactly, verified by
+reading the code myself rather than trusting the quote.
+
+### Reproduced original defect (pre-fix binary, lane `wfj2preset15`)
+
+Fresh boot, navigated to Settings → AI Providers via `ctl surface.settings.open` +
+`ctl surface.settings.select section=aiProviders`. Screenshot
+`/tmp/wf-judge2/shots/preset15/02-01-baseline-settings-prefix.png` shows exactly **one** row per
+provider card — "System default", hardcoded `Active`, no other row, no other control — for both
+Claude Code and Codex. **Hard discriminator, protocol-level**: `ctl settings.account.add
+provider=claude label=Work` on this binary returns `{"ok":false,"error":"unknown control method:
+settings.account.add"}` — the method genuinely does not exist on the pre-fix binary's control socket,
+not merely "the UI doesn't expose it."
+
+### Confirmed fix (current-HEAD binary, lane `wfj2set15`)
+
+`ctl settings.account.add provider=claude label=Work` → `{"id":"acct-1787102205258-0"}`;
+`ctl settings.account.add provider=codex label=Personal` → `{"id":"acct-1787102207029-1"}`.
+**Hard discriminator, durable storage**: reading `/tmp/wfj2set15.sqlite` directly with `sqlite3` in a
+fresh Python process (no live Tiller instance holding it open) shows both rows in `agent_account`,
+and both `/tmp/agent-accounts/claude/acct-1787102205258-0` and
+`/tmp/agent-accounts/codex/acct-1787102207029-1` genuinely exist on disk as real, empty directories
+(`ls -la`, not a string-only claim). Settings screenshot
+(`/tmp/wf-judge2/shots/set15/04-03-after-add-codex.png`) shows the Claude card with "System default"
+and "Work" (`Active`, its own config-dir subtitle) and the Codex card with "System default" and
+"Personal" (`Active`, its own config-dir subtitle) — provider scoping correct, each card shows only
+its own accounts.
+
+**Live click-back on both cards (closes the report's own named gap 2 — Claude's click-back was
+already builder-driven; Codex's own row had only ever been exercised via the `add` socket call, never
+clicked):** `click 655 376` (Claude's "System default" row) — screenshot
+`03-11-after-claude-click-back.png` shows the `Active` badge moved off "Work" and onto "System
+default", cursor visibly on the clicked row. `click 655 780` (Codex's "System default" row, the gap's
+specific ask) — screenshot `04-12-after-codex-click-back.png` shows the same: `Active` moved off
+"Personal" onto "System default" on the Codex card, cursor on the row. **Hard discriminator**:
+re-reading `/tmp/wfj2set15.sqlite` afterward — `SELECT key,value FROM setting WHERE key LIKE
+'agentAccounts%'` returns **zero rows** (both providers' active-id keys fully cleared, not left
+stale), while `agent_account` still lists both `Work` and `Personal` untouched — exactly
+`select_agent_account`'s documented `None`-clears behaviour, now independently confirmed at the
+database level after a real click, on both providers, not just read from the report's own text.
+
+**Live-checked the "Add Account" gap itself, not just re-quoted:** clicked the Claude card's own "Add
+Account" button (`1257, 325`). Screenshot `02-20-after-add-account-button-click.png` shows the
+Accounts header switches to "Signing in…" with a "Cancel" button — `launch_account_login` genuinely
+spawned a real login attempt. Re-reading `agent_account` immediately after: still exactly the same
+**two** rows (`Work`, `Personal`) — no third row appeared. This independently confirms, live, that
+the production "Add Account" button does not call `add_agent_account` on this pass's own code, the
+same conclusion the code read reached, now backed by a hard discriminator instead of only a grep.
+
+### Gap disposition
+
+The report's four named items: (1) its own core claim (`settings.account.add` + a live click) is
+independently reproduced above, on a fresh lane with a fresh database, not re-run in the same
+database the builder used. (2) closed here: a live click on **Codex's own row**, not just the `add`
+via socket, is now driven and confirmed with the same database-level discriminator used for Claude's
+side. (3) accepted as correctly out of scope — no `remove` method exists in either the socket surface
+or the UI, matches the row's own clause, not silently missing. (4) "Add Account" wiring to
+`add_agent_account` remains unresolved exactly as the report frames it — live-confirmed above (the
+button still only launches a real login subprocess, no new row appears on success) rather than only
+re-read from `settings.rs`; still correctly out of scope for this row's own clause, which asked for
+selection state to exist and be selectable, not for the login-completion pipeline to be rebuilt.
