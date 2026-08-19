@@ -172,6 +172,17 @@ mod tests {
         assert_eq!(numeric_tab_selection(4, 3), None);
     }
 
+    /// F-CORE-DOM-06: pins the two edges a clamping reimplementation gets
+    /// wrong. Position 9 always means "the last tab", even with more than
+    /// nine tabs open -- not "the ninth tab" -- and a position beyond the
+    /// group is a rejected selection (`None`, i.e. no change), not a silent
+    /// clamp to the last tab.
+    #[test]
+    fn position_nine_always_means_the_last_tab_and_overflow_is_rejected_not_clamped() {
+        assert_eq!(numeric_tab_selection(9, 12), Some(11));
+        assert_eq!(numeric_tab_selection(5, 3), None);
+    }
+
     #[test]
     fn auto_naming_requires_first_run_or_both_throttles() {
         let start = Instant::now();

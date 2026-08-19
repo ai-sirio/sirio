@@ -30,6 +30,7 @@ use tiller_git::{
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
     OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository,
+    numeric_tab_selection,
 };
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -97,6 +98,8 @@ actions!(
         ToggleSidebar,
         ToggleRightPanel,
         RestoreLaunchSnapshot,
+        NewBrowser,
+        FocusAddressBar,
     ]
 );
 
@@ -116,11 +119,14 @@ enum WindowCommand {
     ToggleSidebar,
     ToggleRightPanel,
     RestoreLaunchSnapshot,
+    NewBrowser,
+    FocusAddressBar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowCommandDisabledReason {
     NoActiveFile,
+    NoActiveBrowser,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,7 +135,7 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 6] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 8] {
     [
         (WindowCommand::NewTerminalTab, "ctrl-t"),
         (WindowCommand::OpenFile, "ctrl-o"),
@@ -139,6 +145,12 @@ fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 6] {
         // F-WIN-07: Linux stand-in for macOS's `⇧⌘O` "History > Restore
         // Previous Launch" chord.
         (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
+        // F-WIN-06: Linux stand-in for macOS's `⇧⌘L` "New Browser" and `⌘L`
+        // "Focus Address Bar" chords (App/TillerApp.swift:73-81). The port
+        // draws no menu bar (see F-WIN-07 above), so both live only as
+        // window-level bindings and command-palette rows.
+        (WindowCommand::NewBrowser, "ctrl-shift-l"),
+        (WindowCommand::FocusAddressBar, "ctrl-l"),
     ]
 }
 
@@ -150,12 +162,22 @@ fn window_command_availability(
         WindowCommand::SaveFile if active_tab_kind != Some(TabKind::Editor) => {
             WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveFile)
         }
+        // F-WIN-06: focusing the address bar needs a browser tab to focus
+        // it *in* -- unlike SaveFile there is no silent fallback target, so
+        // this mirrors SaveFile's own no-active-file gate rather than
+        // inventing new behavior for the case the reference app's gate
+        // (`WorkspaceEngineGate`) never reaches, because this port has none.
+        WindowCommand::FocusAddressBar if active_tab_kind != Some(TabKind::Browser) => {
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
+        }
         WindowCommand::NewTerminalTab
         | WindowCommand::OpenFile
         | WindowCommand::SaveFile
         | WindowCommand::ToggleSidebar
         | WindowCommand::ToggleRightPanel
-        | WindowCommand::RestoreLaunchSnapshot => WindowCommandAvailability::Enabled,
+        | WindowCommand::RestoreLaunchSnapshot
+        | WindowCommand::NewBrowser
+        | WindowCommand::FocusAddressBar => WindowCommandAvailability::Enabled,
     }
 }
 
@@ -174,6 +196,8 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::RestoreLaunchSnapshot => {
                     KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
                 }
+                WindowCommand::NewBrowser => KeyBinding::new(shortcut, NewBrowser, None),
+                WindowCommand::FocusAddressBar => KeyBinding::new(shortcut, FocusAddressBar, None),
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
             // context) on purpose — it must fire even when the surface
@@ -734,6 +758,14 @@ struct ControlWorkspace {
 #[derive(Clone)]
 struct ControlState {
     projects: Vec<session::CatalogProject>,
+    /// F-CORE-DOM-01: the identity settings (display name, colour, icon)
+    /// and worktree defaults (pinned base branch, location override) that
+    /// `project.list` exposes alongside each project's git-derived fields --
+    /// its own VERIFY clause requires every persisted project field to be
+    /// "visible through the corresponding domain/control listing", which
+    /// `ctl project.list` did not satisfy before this: it exposed only
+    /// `id/isGit/name/path/worktreeCount/worktrees`.
+    project_settings: BTreeMap<String, session::CatalogProjectSettings>,
     workspaces: Vec<ControlWorkspace>,
     current: Option<usize>,
 }
@@ -792,8 +824,14 @@ impl ControlState {
             workspace.mounted = priority_paths.contains(&workspace.path);
         }
         let current = workspaces.iter().position(|worktree| worktree.selected);
+        let project_settings = catalog
+            .projects()
+            .iter()
+            .map(|project| (project.id.clone(), catalog.project_settings(&project.id)))
+            .collect();
         Self {
             projects: catalog.projects().to_vec(),
+            project_settings,
             workspaces,
             current,
         }
@@ -819,6 +857,16 @@ impl ControlState {
                         ])
                     })
                     .collect();
+                // F-CORE-DOM-01: the identity settings and worktree
+                // defaults persisted alongside this project -- unset
+                // optional fields report as empty strings, the same
+                // convention `comment` already uses on workspace rows,
+                // rather than omitting the key.
+                let settings = self
+                    .project_settings
+                    .get(&project.id)
+                    .cloned()
+                    .unwrap_or_default();
                 BTreeMap::from([
                     ("id".to_string(), project.id.clone()),
                     ("name".to_string(), project.name.clone()),
@@ -834,6 +882,24 @@ impl ControlState {
                     (
                         "empty".to_string(),
                         project.worktrees.is_empty().to_string(),
+                    ),
+                    (
+                        "displayName".to_string(),
+                        settings.display_name.unwrap_or_default(),
+                    ),
+                    ("color".to_string(), settings.color_hex.unwrap_or_default()),
+                    ("iconKind".to_string(), settings.icon_kind),
+                    (
+                        "iconValue".to_string(),
+                        settings.icon_value.unwrap_or_default(),
+                    ),
+                    (
+                        "defaultWorktreeBase".to_string(),
+                        settings.default_worktree_base.unwrap_or_default(),
+                    ),
+                    (
+                        "worktreeLocationOverride".to_string(),
+                        settings.worktree_location_override.unwrap_or_default(),
                     ),
                     (
                         "worktrees".to_string(),
@@ -3891,22 +3957,17 @@ impl TillerWorkspace {
 
     fn refresh_sidebar(&mut self, cx: &mut Context<Self>) {
         let projects = self.sidebar_projects();
-        let identities = sidebar_project_identities(&self.project_catalog);
-        // F-PRJ-17/F-PRJ-18: pushed the same way identities are, right after
+        let catalog = &self.project_catalog;
+        // F-PRJ-17/F-PRJ-18/F-CORE-DOM-01: pushed the same way after
         // `set_projects` rebuilds the row tree and resets both maps to
         // empty -- an already-open Project Settings sheet was seeded from
         // `project_worktree_defaults` in `open_project_settings`, so a
         // reopen after this refresh shows whatever `update_project_settings`
-        // just persisted.
-        let worktree_defaults = sidebar_project_worktree_defaults(&self.project_catalog);
+        // just persisted. Shares `seed_sidebar_identity_and_worktree_defaults`
+        // with boot's construction so the two can't drift apart again.
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_projects(projects, cx);
-            for (id, display_name, icon) in identities {
-                sidebar.set_project_identity(&id, display_name, icon, cx);
-            }
-            for (id, default_base, location_override) in worktree_defaults {
-                sidebar.set_project_worktree_defaults(&id, default_base, location_override, cx);
-            }
+            seed_sidebar_identity_and_worktree_defaults(sidebar, catalog, cx);
         });
         // `set_projects` rebuilds every row from the catalog, which drops the
         // per-row agent facts and the urgency order with them. Re-apply both
@@ -7423,6 +7484,23 @@ impl TillerWorkspace {
         view.map(|view| (tab, view))
     }
 
+    /// F-WIN-06: the browser surface hosted by the *active* tab specifically
+    /// -- unlike [`Self::browser_surface`], which returns the first browser
+    /// found across every tab and exists for the control socket's
+    /// worktree-scoped `browser.*` methods. Focus Address Bar must move
+    /// focus into whichever browser is actually on screen, not an
+    /// off-screen one from another tab.
+    fn active_browser_surface(&self) -> Option<Entity<BrowserSurface>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let mut surface = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Browser(browser) = content {
+                surface = Some(browser.clone());
+            }
+        });
+        surface
+    }
+
     fn control_open_changes(
         &mut self,
         worktree: Option<&str>,
@@ -7744,20 +7822,23 @@ impl TillerWorkspace {
         self.select_tab(id, cx);
     }
 
+    /// F-CORE-DOM-06: routes the numeric tab chords (and `tab.select` off
+    /// the control socket, whose `position` is arbitrary external input)
+    /// through the one domain function so this and `numeric_tab_selection`
+    /// cannot drift apart. `position` beyond `u8::MAX` cannot name any real
+    /// chord or a sane control-socket index either, so it is treated the
+    /// same as any other out-of-range position: rejected, not clamped.
     fn select_tab_position(&mut self, position: usize, cx: &mut Context<Self>) {
         let ids = self
             .tab_machinery
             .group_tabs(self.tab_machinery.active_group())
             .unwrap_or(&[]);
-        let active = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|tab| ids.iter().position(|id| *id == tab.id))
-            .unwrap_or(0);
-        let Some(selection) = TabSelection::new(ids.len(), active) else {
+        let Ok(number) = u8::try_from(position) else {
             return;
         };
-        let index = selection.jump(position).active();
+        let Some(index) = numeric_tab_selection(number, ids.len()) else {
+            return;
+        };
         let id = ids[index];
         self.select_tab(id, cx);
     }
@@ -8912,12 +8993,17 @@ impl TillerWorkspace {
             .map(|candidate| candidate.id)
             .collect::<Vec<_>>();
         items.push(TabContextItem::separator());
-        items.push(TabContextItem::disabled(
-            "Move to This Pane",
-            "move-to-current-pane",
-            TabContextAction::MoveToCurrentPane,
-            "no other tab is available",
-        ));
+        // F-TAB-12: there used to be an unconditionally-`disabled(...)`
+        // "Move to This Pane" entry here. It could never become enabled --
+        // this menu only ever opens on a tab already belonging to
+        // `machinery.active_group()` (the tab strip renders exclusively
+        // that group's tabs; see `render_open_tabs`), so `group.id` here is
+        // always the active group already. Its only plausible Swift
+        // equivalent (`SplitContentMenu.swift`'s "This Pane" bucket) picks
+        // a sibling tab and gives it a brand-new adjacent split -- exactly
+        // what "Move to New Pane" below already does for any tab,
+        // regardless of its current group. So there is no capability left
+        // to restore: the real one already lives under "Move to New Pane".
         if other_groups.is_empty() {
             items.push(TabContextItem::enabled(
                 "Move to New Pane",
@@ -9043,9 +9129,6 @@ impl TillerWorkspace {
             }
             TabContextAction::MoveLater => {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
-            }
-            TabContextAction::MoveToCurrentPane => {
-                self.move_selected_tab(MoveTarget::CurrentPane, cx)
             }
             TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
                 self.move_selected_tab(MoveTarget::Group(group_id), cx)
@@ -9657,6 +9740,39 @@ impl TillerWorkspace {
         self.open_action(NewTabAction::NewTerminal, window, cx);
     }
 
+    /// F-WIN-06: `ctrl-shift-l`, the Linux stand-in for `⇧⌘L` "New Browser"
+    /// (App/TillerApp.swift:73-81). Routes through the same `open_action`
+    /// the '+' menu's `NewTabAction::NewBrowser` item already drives, so the
+    /// chord and the mouse path cannot land two different tabs.
+    fn handle_new_browser(&mut self, _: &NewBrowser, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_action(NewTabAction::NewBrowser, window, cx);
+    }
+
+    /// F-WIN-06: `ctrl-l`, the Linux stand-in for `⌘L` "Focus Address Bar"
+    /// (App/TillerApp.swift:73-81). Disabled when the active tab is not a
+    /// browser -- there is no address bar to focus, and no fallback target
+    /// the reference app's own gate would pick either, so this is a no-op
+    /// (the `WindowCommandAvailability::Disabled` guard SaveFile already
+    /// uses for "no active editor" is reused for "no active browser" here).
+    fn handle_focus_address_bar(
+        &mut self,
+        _: &FocusAddressBar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_tab_kind = self.tabs.get(self.active_tab).map(|tab| tab.kind);
+        if !matches!(
+            window_command_availability(WindowCommand::FocusAddressBar, active_tab_kind),
+            WindowCommandAvailability::Enabled
+        ) {
+            return;
+        }
+        if let Some(browser) = self.active_browser_surface() {
+            let focus = browser.focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+    }
+
     /// F-WIN-07: `ctrl-shift-o`, the Linux stand-in for `⇧⌘O`'s "History >
     /// Restore Previous Launch" -- the same path the titlebar's History
     /// button and the `session.restore` control door both drive.
@@ -10233,6 +10349,10 @@ impl TillerWorkspace {
                 }
                 WindowCommand::RestoreLaunchSnapshot => {
                     window.dispatch_action(Box::new(RestoreLaunchSnapshot), cx)
+                }
+                WindowCommand::NewBrowser => window.dispatch_action(Box::new(NewBrowser), cx),
+                WindowCommand::FocusAddressBar => {
+                    window.dispatch_action(Box::new(FocusAddressBar), cx)
                 }
             },
             PaletteCommand::Tab(command) => match command {
@@ -10831,6 +10951,8 @@ impl Render for TillerWorkspace {
             .on_action(cx.listener(Self::handle_open_file))
             .on_action(cx.listener(Self::handle_restore_launch_snapshot))
             .on_action(cx.listener(Self::handle_save_file))
+            .on_action(cx.listener(Self::handle_new_browser))
+            .on_action(cx.listener(Self::handle_focus_address_bar))
             .on_action(cx.listener(Self::handle_open_settings_shortcut))
             // F-TAB-24: this action/binding pair previously existed only in
             // the `show_settings` render branch above (there was nothing
@@ -10988,6 +11110,34 @@ fn sidebar_project_worktree_defaults(
             )
         })
         .collect()
+}
+
+/// Applies a catalog's persisted per-project identity (display name, icon,
+/// colour) and worktree defaults (pinned base branch, location override) to
+/// an already-constructed sidebar — the one seeding step every caller that
+/// hands a catalog to a `Sidebar` must repeat, on top of whatever rows it
+/// built.
+///
+/// F-CORE-DOM-01: boot's one-time sidebar construction used to inline only
+/// the identity loop and never called `set_project_worktree_defaults` at
+/// all, unlike `refresh_sidebar`'s later updates, which always did both.
+/// `project_worktree_defaults` stayed an empty map — surviving on disk the
+/// whole time — until the next unrelated refresh (a project added, a
+/// worktree created, any other settings edit) happened to populate it.
+/// Reopening Project Settings right after a genuine restart, before any such
+/// refresh, read that still-empty map and showed the pin as unset. Both call
+/// sites now share this function so they cannot drift apart again.
+fn seed_sidebar_identity_and_worktree_defaults(
+    sidebar: &mut Sidebar,
+    catalog: &ProjectCatalog,
+    cx: &mut Context<Sidebar>,
+) {
+    for (id, display_name, icon) in sidebar_project_identities(catalog) {
+        sidebar.set_project_identity(&id, display_name, icon, cx);
+    }
+    for (id, default_base, location_override) in sidebar_project_worktree_defaults(catalog) {
+        sidebar.set_project_worktree_defaults(&id, default_base, location_override, cx);
+    }
 }
 
 /// Starts in the nearest repository when launched from one of its subdirectories.
@@ -12010,7 +12160,6 @@ fn main() {
                     .collect();
                 let catalog_for_sidebar =
                     sidebar_projects_with_comments(&project_catalog, &comments_for_sidebar);
-                let identities_for_sidebar = sidebar_project_identities(&project_catalog);
                 let pending_for_chat_agent = pending_for_tab_bar.clone();
                 let pending_for_agent_settings = pending_for_tab_bar.clone();
                 let tab_bar = cx.new(|cx| {
@@ -12093,9 +12242,17 @@ fn main() {
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);
-                        for (id, display_name, icon) in identities_for_sidebar {
-                            sidebar.set_project_identity(&id, display_name, icon, cx);
-                        }
+                        // F-CORE-DOM-01: this one-time boot construction used
+                        // to stop at `set_project_identity`, leaving the
+                        // pinned worktree base/location unset until the next
+                        // unrelated refresh -- see
+                        // `seed_sidebar_identity_and_worktree_defaults`'s doc
+                        // comment.
+                        seed_sidebar_identity_and_worktree_defaults(
+                            &mut sidebar,
+                            &project_catalog,
+                            cx,
+                        );
                         sidebar
                     });
                     TillerWorkspace::new(
@@ -12251,6 +12408,8 @@ mod tests {
             let toggle_sidebar = self.fired.clone();
             let toggle_right_panel = self.fired.clone();
             let restore_launch_snapshot = self.fired.clone();
+            let new_browser = self.fired.clone();
+            let focus_address_bar = self.fired.clone();
             div()
                 .key_context("WindowCommandFixture")
                 .track_focus(&self.focus_handle)
@@ -12279,6 +12438,14 @@ mod tests {
                     restore_launch_snapshot
                         .borrow_mut()
                         .push(WindowCommand::RestoreLaunchSnapshot);
+                }))
+                .on_action(cx.listener(move |_, _: &NewBrowser, _, _| {
+                    new_browser.borrow_mut().push(WindowCommand::NewBrowser);
+                }))
+                .on_action(cx.listener(move |_, _: &FocusAddressBar, _, _| {
+                    focus_address_bar
+                        .borrow_mut()
+                        .push(WindowCommand::FocusAddressBar);
                 }))
                 .child("window command fixture")
         }
@@ -12366,6 +12533,57 @@ mod tests {
         );
     }
 
+    /// F-TAB-12: `tab_context_items()` used to build a "Move to This Pane"
+    /// entry as `TabContextItem::disabled(..., "no other tab is available")`
+    /// *unconditionally* -- no branch anywhere could ever enable it. That
+    /// was not a missing condition to add: the tab context menu only ever
+    /// opens on a tab that already belongs to `active_group` (`render_open_tabs`
+    /// filters the visible tab strip to `tab.group_id == active_group`, and
+    /// every other path that sets `tab_menu_tab` -- the right-click handler,
+    /// the keyboard `OpenTabMenu` handler -- draws from the same active
+    /// group), so "move it to this (its own) pane" never had a distinct
+    /// destination to move to. The Swift original's actual "This Pane"
+    /// capability (`SplitContentMenu.swift`'s "This Pane" bucket, wired
+    /// through `WorkspaceCoordinator.requestSplit` with `.moveExistingTab`)
+    /// always creates a brand-new adjacent split for the chosen tab -- which
+    /// is exactly what "Move to New Pane" already does here for any
+    /// right-clicked tab, regardless of which group it started in. So the
+    /// real capability was never missing, just mislabeled as a second,
+    /// permanently-dead item. This pins the fix at the level the item was
+    /// built: with a second, pre-existing pane group in play, nothing sits
+    /// between the preceding separator and the live "Move to Pane 1" entry.
+    #[gpui::test]
+    fn tab_context_menu_never_offers_a_this_pane_move(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            // Tab 1 already lives in a second, pre-existing pane group; tab
+            // 0 (the one being right-clicked below) stays in the active
+            // group 0, matching how the menu is always actually opened.
+            workspace.tabs[1].group_id = 1;
+            workspace.rebuild_tab_machinery();
+            workspace.tab_menu_tab = Some(0);
+            workspace
+        });
+
+        let items = workspace.read_with(cx, |workspace, _| workspace.tab_context_items());
+
+        let move_to_pane_1 = TabContextItem::enabled(
+            "Move to Pane 1",
+            "move-to-pane-1",
+            TabContextAction::MoveToPane(1),
+        );
+        let index = items
+            .iter()
+            .position(|item| *item == move_to_pane_1)
+            .expect("the only other pane group must be offered as a live destination");
+        assert!(
+            index > 0 && items[index - 1] == TabContextItem::separator(),
+            "\"Move to Pane 1\" must sit directly after its separator -- \
+             nothing (in particular no disabled \"Move to This Pane\" \
+             placeholder) may sit between them"
+        );
+    }
+
     fn palette_test_workspace(cx: &mut Context<TillerWorkspace>) -> TillerWorkspace {
         palette_test_workspace_with_tab_count(cx, 1)
     }
@@ -12422,6 +12640,37 @@ mod tests {
         repo
     }
 
+    /// A repo with two branches: `main` (checked out) and `release`, which
+    /// carries one extra commit `main` never gets. F-CORE-DOM-01/F-CORE-DOM-02
+    /// tests create a worktree with no explicit base and check for
+    /// `release-marker.txt` in it, to tell "cut from the pinned base" apart
+    /// from "cut from HEAD" by content, not just by branch name.
+    fn dom01_boot_seed_repo(tag: &str) -> PathBuf {
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("README.md"), "root\n").expect("seed root fixture");
+        git_test(&repo, &["add", "README.md"]);
+        git_test(
+            &repo,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "root"],
+        );
+        git_test(&repo, &["checkout", "-q", "-b", "release"]);
+        std::fs::write(repo.join("release-marker.txt"), "release\n").expect("seed release marker");
+        git_test(&repo, &["add", "release-marker.txt"]);
+        git_test(
+            &repo,
+            &[
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-q",
+                "-m",
+                "release marker",
+            ],
+        );
+        git_test(&repo, &["checkout", "-q", "main"]);
+        repo
+    }
+
     fn conflicted_test_repo(tag: &str) -> PathBuf {
         let repo = test_repo(tag);
         std::fs::write(repo.join("conflicted.txt"), "base\n").expect("seed conflict fixture");
@@ -12463,6 +12712,86 @@ mod tests {
                 .advance_clock(Duration::from_millis(5));
         }
         panic!("{selector} was not drawn");
+    }
+
+    /// F-CORE-DOM-01: `seed_sidebar_identity_and_worktree_defaults` is the
+    /// exact function boot's one-time sidebar construction calls. This test
+    /// drives it the same way — build the rows, seed identity and worktree
+    /// defaults in one pass, no `refresh_sidebar` in between — on a catalog
+    /// restored (`ProjectCatalog::from_restored`) with a pinned base and
+    /// location, exactly what a real restart hands `main()`.
+    ///
+    /// `Sidebar`'s seeded state is private to `tiller_ui`, so this drives it
+    /// through New Worktree instead of reading it directly: New Worktree's
+    /// own fallback (F-CORE-DOM-02) reads the very same
+    /// `project_worktree_defaults` map `open_project_settings` does, so a
+    /// worktree created with blank dialog fields right after this one-pass
+    /// seed proves the map was populated — the pinned base and location
+    /// reached the sidebar without a second, separate refresh.
+    #[gpui::test]
+    async fn boot_seeding_reaches_project_worktree_defaults_in_one_pass(cx: &mut TestAppContext) {
+        let repo = dom01_boot_seed_repo("core-dom-01-boot-seed");
+        let location_dir = repo
+            .parent()
+            .expect("scratch repo has a parent directory")
+            .join("dom-01-pinned-location");
+        std::fs::create_dir_all(&location_dir).expect("create pinned location dir");
+
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "boot-seed-project".to_string(),
+            session::CatalogProjectSettings {
+                default_worktree_base: Some("release".to_string()),
+                worktree_location_override: Some(location_dir.to_string_lossy().into_owned()),
+                ..session::CatalogProjectSettings::default()
+            },
+        );
+        let catalog = ProjectCatalog::from_restored(
+            vec![session::CatalogProject {
+                id: "boot-seed-project".into(),
+                name: "boot-seed-project".into(),
+                root_path: repo.clone(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            }],
+            settings,
+        );
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = Sidebar::from_projects(sidebar_projects(&catalog), cx);
+            seed_sidebar_identity_and_worktree_defaults(&mut sidebar, &catalog, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = wait_for_drawn(&mut cx, "new-worktree-row");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        // Leave the dialog's own Base/Location fields blank.
+        cx.simulate_input("cleanbase1");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let expected_path = location_dir.join("boot-seed-project-cleanbase1");
+        assert!(
+            expected_path.is_dir(),
+            "the pinned Worktree Location, seeded at boot in one pass, placed \
+             the new worktree at {} instead of the project's sibling directory",
+            expected_path.display()
+        );
+        assert!(
+            expected_path.join("release-marker.txt").is_file(),
+            "the new worktree was cut from the pinned Default Worktree Base \
+             ('release'), seeded at boot in one pass -- not from HEAD -- the \
+             release-only marker file must be present at {}",
+            expected_path.display()
+        );
     }
 
     fn palette_test_workspace_with_tab_count(
@@ -16270,7 +16599,9 @@ mod tests {
         cx.update(|window, app| focus_handle.focus(window, app));
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o");
+        cx.simulate_keystrokes(
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o ctrl-shift-l ctrl-l",
+        );
         cx.run_until_parked();
 
         assert_eq!(
@@ -16282,6 +16613,8 @@ mod tests {
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleRightPanel,
                 WindowCommand::RestoreLaunchSnapshot,
+                WindowCommand::NewBrowser,
+                WindowCommand::FocusAddressBar,
             ],
             "Linux primary and secondary chords must reach typed shell actions"
         );
@@ -16298,6 +16631,8 @@ mod tests {
                 (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
                 (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
                 (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
+                (WindowCommand::NewBrowser, "ctrl-shift-l"),
+                (WindowCommand::FocusAddressBar, "ctrl-l"),
             ]
         );
     }
@@ -16370,6 +16705,78 @@ mod tests {
             window_command_availability(WindowCommand::SaveFile, Some(TabKind::Editor)),
             WindowCommandAvailability::Enabled
         );
+    }
+
+    /// F-WIN-06: New Browser Tab always creates a tab, so it is available
+    /// regardless of what is currently active -- the same as New Terminal
+    /// Tab.
+    #[test]
+    fn new_browser_command_is_always_enabled() {
+        assert_eq!(
+            window_command_availability(WindowCommand::NewBrowser, None),
+            WindowCommandAvailability::Enabled
+        );
+        assert_eq!(
+            window_command_availability(WindowCommand::NewBrowser, Some(TabKind::Terminal)),
+            WindowCommandAvailability::Enabled
+        );
+    }
+
+    /// F-WIN-06: Focus Address Bar has nothing to focus into unless the
+    /// active tab is a browser -- there is no fallback target the way
+    /// SaveFile has none for "no active editor" either.
+    #[test]
+    fn focus_address_bar_is_disabled_without_an_active_browser_and_explains_why() {
+        assert_eq!(
+            window_command_availability(WindowCommand::FocusAddressBar, None),
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
+        );
+        assert_eq!(
+            window_command_availability(WindowCommand::FocusAddressBar, Some(TabKind::Terminal)),
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
+        );
+        assert_eq!(
+            window_command_availability(WindowCommand::FocusAddressBar, Some(TabKind::Browser)),
+            WindowCommandAvailability::Enabled
+        );
+    }
+
+    /// F-WIN-06 end to end: with a real browser tab active, the typed
+    /// `FocusAddressBar` handler must move keyboard focus into that
+    /// surface's own address field -- not just report `Enabled` in
+    /// isolation. The disabled/no-op path when the active tab is not a
+    /// browser is exhaustively covered above by
+    /// `window_command_availability` itself, the same guard the handler
+    /// calls before doing anything.
+    #[gpui::test]
+    async fn focus_address_bar_moves_focus_into_the_active_browsers_address_field(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let (_id, browser) = workspace.add_browser_tab("https://example.com", window, cx);
+            assert_eq!(
+                workspace.active_tab,
+                workspace.tabs.len() - 1,
+                "adding a browser tab makes it the active one"
+            );
+
+            workspace.handle_focus_address_bar(&FocusAddressBar, window, cx);
+            assert!(
+                browser.focus_handle(cx).is_focused(window),
+                "Focus Address Bar must move keyboard focus into the active \
+                 browser's own address field"
+            );
+        });
     }
 
     #[test]
@@ -17317,6 +17724,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17348,6 +17756,7 @@ mod tests {
     fn raw_notify_accepts_user_title_and_body() {
         let state = Arc::new(Mutex::new(ControlState {
             projects: Vec::new(),
+            project_settings: BTreeMap::new(),
             workspaces: Vec::new(),
             current: None,
         }));
@@ -17406,6 +17815,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17512,6 +17922,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17556,6 +17967,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17591,6 +18003,7 @@ mod tests {
     fn browser_methods_are_explicit_and_capabilities_are_truthful() {
         let state = Arc::new(Mutex::new(ControlState {
             projects: Vec::new(),
+            project_settings: BTreeMap::new(),
             workspaces: Vec::new(),
             current: None,
         }));
@@ -17767,6 +18180,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17820,6 +18234,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17912,6 +18327,7 @@ mod tests {
         let handler = Arc::new(AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -18231,6 +18647,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -18256,11 +18673,85 @@ mod tests {
         );
     }
 
+    /// F-CORE-DOM-01's own VERIFY clause: "...confirm every field survives
+    /// and is visible through the corresponding domain/control listing."
+    /// `ctl project.list` used to expose only
+    /// `id/isGit/name/path/worktreeCount/worktrees` -- display name,
+    /// colour, icon, and the pinned worktree base/location were invisible
+    /// through the control surface even though they persisted correctly.
+    #[test]
+    fn project_list_exposes_identity_and_worktree_defaults() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "listed-project".to_string(),
+            session::CatalogProjectSettings {
+                color_hex: Some("green".to_string()),
+                display_name: Some("Renamed Project".to_string()),
+                icon_kind: "icon".to_string(),
+                icon_value: Some("folder".to_string()),
+                default_worktree_base: Some("feature".to_string()),
+                worktree_location_override: Some("/dev/shm/dom01".to_string()),
+            },
+        );
+        let catalog = ProjectCatalog::from_restored(
+            vec![session::CatalogProject {
+                id: "listed-project".into(),
+                name: "listed-project".into(),
+                root_path: PathBuf::from("/tmp/dom01-listed-project"),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "master".into(),
+                    path: PathBuf::from("/tmp/dom01-listed-project"),
+                    is_primary: true,
+                }],
+            }],
+            settings,
+        );
+        let state = ControlState::from_catalog(&catalog, Path::new("/tmp/dom01-listed-project"));
+
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(state)),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-project-list-defaults-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::project_list());
+        assert!(response.ok, "project.list failed: {:?}", response.error);
+        let rows = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("projects"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("project rows");
+        let row = rows.first().expect("the listed project has a row");
+        assert_eq!(
+            row.get("displayName").map(String::as_str),
+            Some("Renamed Project")
+        );
+        assert_eq!(row.get("color").map(String::as_str), Some("green"));
+        assert_eq!(row.get("iconValue").map(String::as_str), Some("folder"));
+        assert_eq!(
+            row.get("defaultWorktreeBase").map(String::as_str),
+            Some("feature"),
+            "the pinned worktree base is visible through project.list"
+        );
+        assert_eq!(
+            row.get("worktreeLocationOverride").map(String::as_str),
+            Some("/dev/shm/dom01"),
+            "the worktree location override is visible through project.list"
+        );
+    }
+
     #[test]
     fn changes_mutations_validate_path_and_worktree_before_git() {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -18308,6 +18799,7 @@ mod tests {
         let handler = Arc::new(AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -19796,6 +20288,52 @@ mod tests {
             assert_eq!(
                 workspace.active_tab, 1,
                 "select_tab must have made the needs-input tab the active one"
+            );
+        });
+    }
+
+    /// F-CORE-DOM-06: pins the behaviour the numeric tab chords (ctrl-1
+    /// through ctrl-9) and the `tab.select` control-socket door rely on,
+    /// end to end through the real `select_tab_position` -- not just the
+    /// domain function it now calls in isolation. Ten tabs open so position
+    /// 9 has to actually pick the ninth tab's *and* the tenth tab's worth
+    /// of coverage: 9 must still land on the last tab (index 9), the same
+    /// "always last" contract `numeric_tab_selection` documents, which the
+    /// deleted `TabSelection::jump` got wrong once the group grew past nine
+    /// tabs (it would have clamped to the literal ninth instead).
+    #[gpui::test]
+    async fn numeric_tab_chords_select_the_absolute_position_and_reject_overflow(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 10));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_tab_position(5, cx);
+            assert_eq!(
+                workspace.active_tab, 4,
+                "position 5 selects the fifth tab (0-based index 4)"
+            );
+
+            workspace.select_tab_position(9, cx);
+            assert_eq!(
+                workspace.active_tab, 9,
+                "with ten tabs open, position 9 must still land on the last \
+                 tab, not the literal ninth"
+            );
+
+            workspace.select_tab_position(15, cx);
+            assert_eq!(
+                workspace.active_tab, 9,
+                "a position beyond the group is rejected, not clamped -- the \
+                 active tab must be unchanged"
             );
         });
     }

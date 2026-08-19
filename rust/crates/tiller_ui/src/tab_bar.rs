@@ -43,7 +43,13 @@ pub enum TabContextAction {
     CloseTabsToRight,
     MoveEarlier,
     MoveLater,
-    MoveToCurrentPane,
+    // F-TAB-12: there used to be a `MoveToCurrentPane` variant here, backing
+    // a tab-context-menu "Move to This Pane" item that was built
+    // unconditionally `disabled(...)` in `tiller`'s `tab_context_items()`.
+    // It could never be enabled: that menu only ever opens on a tab that
+    // already belongs to the workspace's active pane group, so "move it to
+    // this (its own) pane" had no reachable non-trivial destination. See
+    // the removal comment at that call site for the fuller rationale.
     MoveToPane(usize),
     AttachToCurrentTerminal,
 }
