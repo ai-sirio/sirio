@@ -29,6 +29,80 @@ why, and what was reproduced structurally instead.
 
 ---
 
+## F-CORE-DOM-07 — auto-rename never fires for an ACP-hosted Chat tab
+
+**Row** (`02-inventory-packages.md:35`): "Automatic naming is throttled to at least 30 seconds and
+at least 200 characters of new transcript growth, except for the first run." VERIFY: "Feed
+transcript growth below each threshold and above both thresholds while observing generated-name
+requests." The specific defect this fix addresses is narrower than the full row: no rename request
+was ever generated for a Chat tab at all (any growth, any threshold), because `ChatEvent` had no
+completion signal. Both sides below drive **real Claude Code turns through the actual ACP path**,
+not the `chat_fixture.py` stand-in — this row needed no upstream-blocked agent, so there was no
+reason to use it.
+
+### Side 1 — reproduced the original defect live, on the pre-fix binary
+
+`TILLER_WL_BIN=/tmp/wf-judge3-pre-dom07-tiller` (built from `2c5c712c^`, the same tree that serves
+F-SID-14). Fixture `/home/enzopalmisano/wf-judge3-dom07`, `general.autoNaming=true` written
+directly into the fresh DB's `setting` table before the driving launch (confirmed with a read-back
+before proceeding). Created a real Chat tab, then — **within one continuous `wayland-drive.sh`
+invocation**, since a second invocation under the same label kills and relaunches the app and would
+have destroyed the in-flight turn — sent two real turns through `surface.chat.send` against the
+real `claude` CLI and polled `surface.chat.read` until each reported `status: "completed"` (first
+turn's assistant reply: "Acknowledged"; second: "Confirmed", full transcript captured in the
+control-socket JSON).
+
+**Result**: after both turns completed, direct sqlite read of the tab's own `title` column:
+```
+('...-tab-18cd1675914450f6-0', 'p-48a780faad3764e1-wt-0', 'Chat', 'chat')
+```
+Title is still the literal default `"Chat"` — no rename request was ever generated, reproducing
+exactly the row's named defect on an independently-built pre-fix binary with two genuine completed
+turns, not a mocked or truncated one.
+
+*(Note on setup friction, unrelated to the row itself: this box's fresh/default `TILLER_DB` auto-
+discovers a second "tiller" project pointing at the real, shared `tiller`/`tiller-linux` checkouts
+on this machine with their many live sibling-agent worktrees — this is a real environmental quirk
+worth a follow-up note in `ENVIRONMENT.md`, but is not this row's concern. It cost significant
+setup time via misdirected sidebar clicks before I switched to driving worktree selection through
+`ctl workspace.select` and the tab-bar `+` menu instead of sidebar coordinates, which sidesteps it
+entirely.)*
+
+### Side 2 — confirmed the fix, live, on my own HEAD-pinned binary
+
+Identical method on `/tmp/wf-judge3-tiller`, fresh fixture `/home/enzopalmisano/wf-judge3-dom07fix`,
+`general.autoNaming=true` seeded the same way. Created a Chat tab via the tab-bar `+` → New Chat →
+Claude Code (avoiding the sidebar entirely, driven by `ctl workspace.select` first), sent the same
+two real turns in one continuous invocation, polled to `completed` for both.
+
+**Result**: sqlite read of the same tab's `title` column after both turns:
+```
+('...-tab-18cd16ff64da9253-0', 'p-380028dc7a8da494-wt-0', 'Empty conversation start', 'chat')
+```
+The title changed away from the default. Screenshot `/tmp/wj3dom07fix-shots/03-06-turn2-final.png`
+shows this rendered live in both the tab strip and the sidebar, with the full two-turn transcript
+("Acknowledged" / "Confirmed", real timestamps) visible in the chat surface — not a screenshot that
+merely contains the word "renamed" somewhere.
+
+(The generated name itself, "Empty conversation start", reads oddly given the actual transcript
+content — that is a summarizer-quality question, a different concern from this row's clause, which
+is about a rename request firing at all. Worth a note for whoever owns summarizer prompt quality,
+not a defect in this row.)
+
+### Verdict: PASSED
+
+Both sides driven live by me this pass, each with a real two-turn conversation against the actual
+`claude` CLI (not a stand-in) and a sqlite `title`-column hard discriminator, on binaries I built
+and pinned myself. `reproduced_original: true` — the original defect (title never leaves the
+default after real completed turns) was independently reproduced on the pre-fix binary, not just
+read from the commit message. Not driven by me this pass, matching the builder's own report's named
+gap: the `codex`/`opencode`/`pi` summarizer-agent alternatives, and the throttle
+(`AutoNamingThrottle::MIN_INTERVAL`/`MIN_GROWTH`) actually suppressing a third rename within the
+30s/200-char window — both out of scope for what this pass's two-sided test needed to prove (that
+the completion signal reaches `request_auto_rename` at all, which it now demonstrably does).
+
+---
+
 ## F-CORE-WSP-02 — symlink resolution when deduping open document tabs
 
 **Row** (`02-inventory-packages.md:38`, F-CORE-WSP-02, one clause of a larger row): "...document IDs
