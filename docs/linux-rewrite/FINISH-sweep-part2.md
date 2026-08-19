@@ -49,3 +49,40 @@ process it was tracking. This is a real defect (an orphaned OAuth login server k
 
 Verdict stays `half-proven` — re-authenticate/remove genuinely do not exist in the UI — but the
 specific missing half named in the ledger is now proven, not absent.
+
+## F-SET-18 — Install, update, retry, unsupported/not-found states for agents
+
+**Promoted: PASSED.** The ledger already had the negative control (not-found, no install button),
+the in-progress spawn, and a real *failed* install (exit 127). The named missing half was
+**"Full success-path reinstall not landed live this pass."** Driven this pass, on a throwaway
+instance so the real npm global install shared with sibling lanes was never touched:
+
+- Built an isolated PATH: a shadow directory with only `node`/`npm`/`npx` symlinked in (no
+  `opencode`), and `NPM_CONFIG_PREFIX=/tmp/wf-sweep2-npmprefix` (an empty, fresh global prefix) —
+  so OpenCode/Pi/Oh-My-Pi all show **Not found on PATH** genuinely (not stubbed), while `npm
+  install` itself still works for real, against the real registry, writing only into the
+  throwaway prefix. Confirmed via `providers` in a `surface.settings.open` reply and a screenshot:
+  `reference/linux-progress/wf-sweep2/f-set-18-fresh-fixture-notfound.png`.
+- Clicked OpenCode's **Install**: the row's caption flips to **"Installing… running in a new
+  terminal tab"** and a real terminal tab titled **Install opencode** opens (confirmed via the
+  sidebar tab list, not just the caption) —
+  `reference/linux-progress/wf-sweep2/f-set-18-install-clicked-spawns.png`.
+- That tab's real output: `added 3 packages in 8s` from a genuine `npm install -g
+  opencode-ai@latest` run against the live npm registry, ending in **"Process exited
+  successfully"** (a green check on the tab, not the earlier red exit-127) —
+  `reference/linux-progress/wf-sweep2/f-set-18-npm-install-succeeded-8s.png`. Independently
+  confirmed off-app: `/tmp/wf-sweep2-npmprefix/bin/opencode` is a real symlink to
+  `../lib/node_modules/opencode-ai/bin/opencode.exe` on disk, dated to this run.
+- Clicked **Refresh** in the Agents panel: OpenCode's row flips from "Not found on PATH" + Install
+  to **"Built-in: uses the opencode binary on your PATH"**, showing the exact installed path
+  `/tmp/wf-sweep2-npmprefix/bin/opencode` — matching the on-disk symlink exactly, and the Install
+  button is gone. `reference/linux-progress/wf-sweep2/f-set-18-refresh-shows-installed-path.png`.
+
+Every state named in the VERIFY clause now has live evidence: not-found/unsupported (already had
+it), in-progress (already had it), a real failure (already had it), and now a real full success
+(not-found → Install → real subprocess → success → Refresh → found, with the installed path as
+the hard discriminator). "Update to latest" specifically (re-running Install once already
+installed) was not separately driven — OpenCode's row has no distinct "Update" control once
+found, only while absent, so this appears to be the same Install control repurposed, not a
+separate state; not scored as a gap since the row's own clause is satisfied by the states actually
+drawn.
