@@ -131,3 +131,52 @@ not protect against it.
 tests pass). F-TERM-08 and F-TAB-26 do not, until the close-confirm variant claims focus and maps
 Escape to cancel. Leave Enter unbound to the destructive action, or bind it only after checking the
 Swift alert's own default-button convention.
+
+## Resolved 2026-08-19 — merged as `c0834159`, and the 29-hunk problem never had to be solved
+
+Two things closed here, one of them by discovering the plan above was built on a false premise.
+
+**The focus gap is fixed, in two layers.** A real GPUI focus claim on `PendingPaneClose`
+(`focus: FocusHandle` + `needs_focus`, following the Set Title prompt's already-correct pattern,
+with `ModalFocus` added to the shared `modal.rs` so both variants use one mechanism), plus a
+root-level swallow in `handle_root_key_down` mirroring the existing `palette_open` case. The second
+layer is what actually guarantees no leak: it fires before the terminal's own key handler
+regardless of what GPUI considers focused at that instant.
+
+**Enter cancels, and the answer came from primary source rather than from caution.** This document
+said to leave Enter unbound or bind it only after checking the Swift alert's convention. Checked:
+`NSAlert` gives the Return key-equivalent to the **first-added** button, and every close-confirm
+alert in the original adds Cancel before Close (`TerminalContextMenuProvider.swift:58`,
+`SidebarView.swift:580`, `:627`). So on macOS Enter *and* Escape both cancel, and Close has no
+keyboard shortcut at all. `showSetTitleAlert` (`:76`) adds OK first, which is why the two prompts
+in this port intentionally end up with opposite Enter behaviour — each follows its own alert's
+button order, not one blanket rule.
+
+**The 29-hunk reconciliation this document spends a section on was never performed, because it was
+not possible.** The modal branch's `rust/` tree predates the current one *structurally*: its
+`main.rs` declares `mod panes;`/`mod session;`/`mod tab_machinery;`/`mod tray;`/
+`mod command_palette;`/`mod display_backend;` as external files that exist nowhere in that branch,
+and its `tiller_ui/src/` holds only `lib.rs` + `modal.rs` against our ~18 files. `git merge-base`
+between the two resolves to a commit with **no `rust/` directory at all**, and an attempted merge
+produced *add/add* conflicts rather than a 3-way diff. The per-intent resolution rule above assumes
+a mergeable diff exists; there was none.
+
+What was done instead: a fresh worktree off current `linux/gpui-waku`, with the three modal-branch
+commits' unique content ported onto it by hand — the `modal.rs` primitive, F-TERM-05's Set Title
+prompt, and F-TERM-08's close-confirm fix with focus on top. F-TAB-26 turned out to need nothing
+ported; its fix was already on `linux/gpui-waku` independently, which was **verified against the
+merged source** rather than accepted as a claim (`main.rs:4961`, the `whole_tab` guard). The
+resulting merge conflicted on exactly one line — two module declarations at the same alphabetical
+position in `tiller_ui/src/lib.rs` — which is the rare case where a union really is the correct
+resolution.
+
+**The surgical table above still describes the landed code**, and that was checked rather than
+assumed: `request_close_terminal_at` (`main.rs:4950`) is unconditional, `request_close_activity`
+(`:4987`) still calls `pane_close_needs_confirmation`. The two paths did not get collapsed.
+
+**Ledger:** F-TERM-08 → PASSED. F-TERM-05 → half-proven, not because the behaviour is doubted but
+because the critic that drove it live deleted its own screenshots and said so; the live half cannot
+be replayed. F-TAB-26 → half-proven, because its own reproduction was the right-click context menu
+and the drive that cleared F-TERM-08 used the `ctrl-alt-w` chord — and "same code path, therefore
+same result" is exactly the reasoning that let F-TERM-08's first critic pass a control from an
+entry point the bug could not occur in. That mistake is not being repeated one row over.
