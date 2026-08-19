@@ -67,8 +67,12 @@ picked because it does that, rather than because it is a real spec.
 
 So I used a different, independently verifiable anchor instead: **macOS's backing-store scale
 factor for a real display is always an integer** (1x or 2x for virtually every real Mac screen;
-Apple achieves "fractional" HiDPI modes by rendering at an integer multiple and downsampling the
-*composited* framebuffer, never by handing an app view a fractional `backingScaleFactor`). Given
+Apple achieves "fractional" HiDPI modes by rendering the whole desktop at 2x and GPU-downsampling
+the *composited* framebuffer to the target resolution, never by handing an individual app view a
+fractional `backingScaleFactor` — confirmed via web search against independent sources describing
+this exact mechanism, e.g. <https://bytecellar.com/2022/11/08/4k-scaling-is-not-a-problem-on-modern-macs/>
+and Apple's own developer-forum threads on the topic; not from waku's or any reference app's
+code). Given
 the measured 46px pitch / 28px diameter, the only physically plausible integer nearby is **2**
 (giving a 23pt pitch / 14pt diameter — a plausible dot size); 1x implies an implausibly huge 46pt
 pitch, 3x an implausibly tiny 15pt one, smaller than any convention either agent or I could find
@@ -203,9 +207,9 @@ constant while rewriting its justification.
 ### 8. Tests: read for tautology, not yet run to completion (see below)
 
 `radii_form_a_monotonic_scale` asserts a strict ordering across eight independently-declared
-constants — not tautological, and would catch a swapped pair `radii_come_from_the_measured_token_set`
-(itself renamed only in comment, not in name — still `radii_come_from_the_measured_token_set`,
-though its doc comment is honestly hedged) would miss.
+constants — not tautological, and would catch a swapped pair that its sibling test,
+`radii_come_from_the_measured_token_set` (itself renamed only in its doc comment, not in its
+identifier — see §6), would miss.
 `the_content_column_tokens_never_drift_apart` asserts equality across three constants declared in
 three different files (`chat.rs`, `settings.rs`, `file_view.rs`) — genuinely redundant with, but not
 subsumed by, the literal-720 test next to it, since a *coordinated* drift of two of the three would
