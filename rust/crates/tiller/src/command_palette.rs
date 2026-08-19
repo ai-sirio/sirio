@@ -397,6 +397,23 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
         // bring into the pane you right-clicked. Collapsing that per-tab
         // picker into one command that moves the active tab is what made it
         // degenerate. Re-porting it means the submenu, not re-adding this.
+        //
+        // How much of that submenu already exists, checked rather than guessed
+        // (2026-08-20), because "unported" would overstate the work:
+        //   - `TabMachinery::move_tab` SHIPS -- the action that moves a tab
+        //     between groups is real code in the binary.
+        //   - `MoveCandidates` (tab_machinery.rs:32) and `move_candidates()`
+        //     (:235) are each marked `#[cfg(test)]`, so the eligibility model
+        //     is written and pinned by a test, and then deliberately compiled
+        //     out. Its two empty states, `NoOtherTab` and `NoEligibleTab`, are
+        //     exactly Swift's two texts ("No other tabs in this pane." / "No
+        //     other panes in this layout.").
+        //   - Nothing renders a submenu. That is the whole of what is absent.
+        // So this is machinery that exists and that the app cannot call --
+        // the same shape as F-CORE-FILE-01's first failed fix, except here
+        // `#[cfg(test)]` makes it unreachable by construction rather than by
+        // oversight. Whether to finish it is a scope decision for the user;
+        // do not quietly un-gate it as a side effect of other work.
         if context.has_other_pane {
             PaletteEntry::enabled(
                 PaletteCommand::Tab(TabCommand::MoveTabToOtherPane),
