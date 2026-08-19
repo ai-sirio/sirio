@@ -32,6 +32,7 @@ mod discovery;
 mod domain;
 mod error;
 mod file;
+mod file_icon;
 mod file_link;
 mod git;
 mod id;
@@ -59,6 +60,7 @@ pub use file::{
     shell_quote_path, terminal_file_drop,
 };
 pub use file::{FileTreeEntry, FileTreeError, load_file_tree, validate_relative_path};
+pub use file_icon::FileIconKey;
 pub use file_link::{FileLinkTarget, is_markdown_path, resolve_file_link};
 pub use id::{ProjectId, TabId, WorktreeId};
 pub use layout::{
