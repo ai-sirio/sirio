@@ -3421,11 +3421,11 @@ impl Sidebar {
                                 .flex_none()
                                 .items_center()
                                 // Each mark in its own brand. Every mark used
-                                // to be tinted `theme.tab_focus_accent`, which
-                                // is `#E2795B` — Claude's own brand coral — so
-                                // a Codex or Pi mark was drawn in Claude's
-                                // colour. Shape carried identity; colour
-                                // actively contradicted it.
+                                // to be tinted `theme.tab_focus_accent`, a
+                                // coral near enough to Claude's brand to read
+                                // as it, so a Codex or Pi mark was drawn in
+                                // Claude's colour. Shape carried identity;
+                                // colour actively contradicted it.
                                 .child(
                                     IconElement::new(mark.icon, px(12.0))
                                         .text_color(mark.brand.color()),
@@ -4863,9 +4863,9 @@ mod tests {
     ///    only difference. The reference has no such collision: needs-input
     ///    is `.dot(.amber)` and Claude-running is `RunningDots` in Claude's
     ///    own colour.
-    /// 2. Every badge mark was tinted `theme.tab_focus_accent` — `#E2795B`,
-    ///    which is Claude's brand coral — so a Codex or Pi mark was drawn in
-    ///    Claude's colour.
+    /// 2. Every badge mark was tinted `theme.tab_focus_accent`, a coral near
+    ///    enough to Claude's brand to read as it, so a Codex or Pi mark was
+    ///    drawn in Claude's colour.
     #[test]
     fn running_tint_never_equals_a_status_colour_and_names_the_agent() {
         for theme in [Theme::dark(), Theme::light()] {

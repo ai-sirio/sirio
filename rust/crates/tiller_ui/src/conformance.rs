@@ -98,20 +98,26 @@ fn expect_hex(actual: Rgba, hex: u32, label: &str) {
     assert_eq!(actual.a, 1.0, "{label}.a must be opaque");
 }
 
-/// The accent is waku's measured coral in both appearances
-/// (`§A.2`: `#E2795B` dark / `#C85F44` light), under both the modern and
-/// legacy token names the surfaces consume.
+/// The accent resolves to Tiller's coral in both appearances — `#E08B52` dark
+/// / `#AD581F` light — under both the modern and legacy token names the
+/// surfaces consume.
+///
+/// The pair a surface reads through `accent` and the pair it reads through
+/// `tab_focus_accent` must not drift apart, which is the only thing this test
+/// is for; where the values themselves come from is
+/// `docs/linux-rewrite/THEME-PROVENANCE.md`, and the rules they satisfy are
+/// tested next to them in `tiller_theme`.
 #[test]
-fn accent_resolves_to_the_measured_coral_in_each_appearance() {
+fn accent_resolves_to_the_same_coral_under_either_token_name() {
     let dark = Theme::dark();
     assert_eq!(dark.appearance, Appearance::Dark);
-    expect_hex(dark.accent, 0xE2_79_5B, "dark accent");
-    expect_hex(dark.tab_focus_accent, 0xE2_79_5B, "dark tab_focus_accent");
+    expect_hex(dark.accent, 0xE0_8B_52, "dark accent");
+    expect_hex(dark.tab_focus_accent, 0xE0_8B_52, "dark tab_focus_accent");
 
     let light = Theme::light();
     assert_eq!(light.appearance, Appearance::Light);
-    expect_hex(light.accent, 0xC8_5F_44, "light accent");
-    expect_hex(light.tab_focus_accent, 0xC8_5F_44, "light tab_focus_accent");
+    expect_hex(light.accent, 0xAD_58_1F, "light accent");
+    expect_hex(light.tab_focus_accent, 0xAD_58_1F, "light tab_focus_accent");
 }
 
 /// The type scale is the measured one: body 13.5/21 (the document ratio),

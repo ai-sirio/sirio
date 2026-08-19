@@ -1,11 +1,19 @@
 //! Tiller's shared color, spacing, and typography tokens.
 //!
-//! The values in this crate are measured from waku's visual system — see
-//! `docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` §A.2. The design
-//! contract, in waku's own words: neutral graphite surfaces in the spirit of
-//! Cursor — color is reserved for meaning. Selected, hovered, and pressed
-//! rows are a ~6% neutral layer; the coral accent is used only for brand
-//! moments (logo, caret, focus, live activity), never as structure.
+//! Tiller keeps its chrome quiet. Surfaces are neutral greys that step by
+//! lightness alone, so depth reads as depth and never as hue; a row that is
+//! selected, hovered or pressed lifts by a few percent of neutral rather than
+//! taking on a tint. Colour is spent only where it carries meaning — the coral
+//! accent marks brand and focus, and the semantic hues mark state. Nothing
+//! structural is coloured.
+//!
+//! Where each value comes from is recorded in
+//! `docs/linux-rewrite/THEME-PROVENANCE.md`, and the measurement that produced
+//! the ones taken off reference frames is re-runnable:
+//! `./reference/waku/measure-theme.py`. Tokens the frames cannot settle say so
+//! at their own definition and name our source instead. That distinction is
+//! load-bearing: matching a reference's look is the goal, lifting its source is
+//! not, and only a recorded measurement tells the two apart afterwards.
 //!
 //! A resolved [`Theme`] is installed as a GPUI global so views can retrieve
 //! the same tokens from their render context.
@@ -96,151 +104,157 @@ impl ThemeMode {
 
 /// All adaptive colors used by Tiller.
 ///
-/// Token names keep the roles the UI has always consumed; the values are
-/// waku's measured palette. The waku role names themselves (accent, gauge,
-/// selection, raised, composer, inset, overlay, border_strong, code_wash,
-/// inverse, …) exist alongside so components can move to them without
-/// re-measuring anything.
+/// Two naming layers live here on purpose. The first names what a component
+/// *is* (`tab_focus_accent`, `filter_field_bg`) and is what the UI has always
+/// consumed; the second names what a value *does* in the design system
+/// (`accent`, `raised`, `inset`, `overlay`, …) and is where the first ones
+/// resolve to. Components can migrate from the former to the latter without
+/// anything being re-derived.
+///
+/// Where each value comes from — measured off a reference frame, or chosen by
+/// us because no frame could settle it — is in
+/// `docs/linux-rewrite/THEME-PROVENANCE.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColors {
     /// Panel surface for the tab bar, workspace column, right panel and
-    /// settings — waku `surface` (`#1A1A1A` dark / `#F6F5F6` light). The
-    /// chrome merges with the reading surface; only the sidebar steps a
-    /// hair darker (see [`ThemeColors::sidebar`]).
+    /// settings. The chrome merges with the reading surface; only the sidebar
+    /// steps a hair darker (see [`ThemeColors::sidebar`]).
     pub background: Rgba,
-    /// Window canvas behind the working column (`#1A1A1A` dark,
-    /// `#F6F5F6` light — waku `canvas`/`surface`).
+    /// Window canvas behind the working column. Same value as `background` —
+    /// the distinction is which component asks, not what it gets.
     pub canvas: Rgba,
-    /// Terminal surface — paper-white in light, near-black in dark (waku
-    /// `terminal`: `#151515` / `#FFFFFF`).
+    /// Terminal surface — paper-white in light, near-black in dark, one step
+    /// deeper than `background` so a terminal reads as a well.
     pub terminal_surface: Rgba,
-    /// Brand accent — waku `accent`, a coral used only for meaning (focus
-    /// rings, caret, live activity, selected states): `#E2795B` / `#C85F44`.
+    /// Brand accent, a coral spent only on meaning: focus rings, caret, live
+    /// activity, selected states. Never structure.
     pub tab_focus_accent: Rgba,
-    /// Waiting-for-input status — waku `warning` `#E0B36A` / `#A66B20`.
+    /// Waiting-for-input status.
     pub tab_needs_input: Rgba,
-    /// Completed status — waku `success` `#62C987` / `#2F8F52`.
+    /// Completed status.
     pub tab_done: Rgba,
-    /// Errored status — waku `danger` `#E2726A` / `#C64A42`.
+    /// Errored status.
     pub tab_error: Rgba,
-    /// Chat transcript surface (waku `surface`).
+    /// Chat transcript surface. Deliberately the same as `background`: the
+    /// transcript is the reading surface, not a panel floating on one.
     pub chat_surface: Rgba,
     /// Tint used by the sidebar material (same as `background`).
     pub chrome_tint: Rgba,
-    /// Tab-chip underline — waku `border_strong`.
+    /// Tab-chip underline.
     pub tab_chip_underline: Rgba,
-    /// Shared one-pixel border/divider stroke — waku `border`
-    /// (`hsla(220,10%,90%,0.07)` dark / `hsla(220,10%,12%,0.08)` light).
+    /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
+    /// so it reads as a seam rather than a line.
     pub hairline: Rgba,
-    /// Hover fill for sidebar rows — waku `sidebar_item_background`, a 6%
-    /// neutral layer, not a color.
+    /// Hover fill for sidebar rows — a 6% neutral layer, not a colour.
     pub row_hover: Rgba,
-    /// Hover fill for transcript rows — waku `overlay` (5% neutral).
+    /// Hover fill for transcript rows — 5% neutral, a step lighter than
+    /// `row_hover` because transcript rows are wider and a 6% wash over that
+    /// area reads as a block.
     pub chat_row_hover: Rgba,
-    /// Selected row fill — waku's selected rows are the same 6% neutral
-    /// wash as hover (`sidebar_item_background`), never a color. Text
-    /// selection is a different concept: see [`ThemeColors::selection`].
+    /// Selected row fill — the same 6% neutral wash as hover, never a colour.
+    /// Text selection is a different concept: see [`ThemeColors::selection`].
     pub selection_fill: Rgba,
-    /// Focused-field border — waku's focus ring is the accent, not a second
-    /// blue.
+    /// Focused-field border. The focus ring is the accent, not a second blue.
     pub selection_ring: Rgba,
-    /// Row title text — waku `text` `#E2E2E2` / `#242424`.
+    /// Row title text.
     pub title: Rgba,
     /// Selected row title text — a step brighter than `title`.
     pub title_selected: Rgba,
-    /// Secondary row text — waku `text_secondary` `#A3A3A3` / `#666666`.
+    /// Secondary row text.
     pub subtitle: Rgba,
-    /// Caption/meta text — waku `text_tertiary` `#7D7D7D` / `#858585`.
+    /// Caption/meta text — the faintest step that still passes as body copy.
     pub meta: Rgba,
-    /// Primary pill fill — waku `raised` `#232323` / `#ECECEC`.
+    /// Primary pill fill.
     pub primary_pill_bg: Rgba,
-    /// Filter field fill — waku `inset` `#151515` / `#E6E6E6`.
+    /// Filter field fill.
     pub filter_field_bg: Rgba,
     /// Tree guide stroke, including its source alpha.
     pub tree_guide: Rgba,
-    /// Staged-file status color (waku `success`).
+    /// Staged-file status color — the success hue.
     pub git_staged: Rgba,
-    /// Modified-file status color (waku `warning`).
+    /// Modified-file status color — the warning hue.
     pub git_modified: Rgba,
-    /// Untracked-file status color (waku `gauge` blue).
+    /// Untracked-file status color — the gauge blue.
     pub git_untracked: Rgba,
-    /// Conflict-file status color (waku `danger`).
+    /// Conflict-file status color — the danger hue.
     pub git_conflict: Rgba,
-    /// Addition diff accent (waku `success`).
+    /// Addition diff accent — the success hue.
     pub diff_addition: Rgba,
     /// Addition diff background — translucent success wash.
     pub diff_addition_background: Rgba,
-    /// Deletion diff accent (waku `danger`).
+    /// Deletion diff accent — the danger hue.
     pub diff_deletion: Rgba,
     /// Deletion diff background — translucent danger wash.
     pub diff_deletion_background: Rgba,
-    /// Hunk diff background — waku `code_wash`.
+    /// Hunk diff background — the same wash inline code sits on.
     pub diff_hunk_background: Rgba,
-    /// Chat card fill — waku `raised`.
+    /// Chat card fill — cards are raised above the transcript.
     pub card_fill: Rgba,
-    /// Recessed code/diff fill — waku `inset`.
+    /// Recessed code/diff fill — the inverse move: code sits *in* the card.
     pub code_inset_fill: Rgba,
-    /// Composer primary text (waku `text`).
+    /// Composer primary text.
     pub primary_text_color: Rgba,
-    /// Clickable file-link color (waku `gauge` blue).
+    /// Clickable file-link color — the gauge blue, the one place blue means
+    /// "you can click this" rather than "this is a quantity".
     pub file_link: Rgba,
     /// Task-card accent rail.
     pub rail_task: Rgba,
-    /// Question-card accent rail (waku `warning`).
+    /// Question-card accent rail — the warning hue.
     pub rail_question: Rgba,
-    /// Edit-card accent rail (waku `success`).
+    /// Edit-card accent rail — the success hue.
     pub rail_edit: Rgba,
     /// Tool-card accent rail.
     pub rail_tool: Rgba,
 
-    // ── waku role tokens (measured values, verbatim) ──────────────────────
-    /// The opaque sidebar fill chosen for Linux. waku's sidebar is
-    /// transparent over macOS vibrancy; Linux has no vibrancy, so this
-    /// promotes waku's own drag-state fill (`sidebar_drag_background`
-    /// `#181818` dark / `#F3F3F3` light) to the resting fill — a hair
-    /// darker than the surface it separates from, plus the 1px
-    /// `sidebar_border` hairline.
+    // ── Role tokens: what a value does, rather than who consumes it ───────
+    /// The sidebar fill. Opaque, and one of the tokens no reference frame
+    /// could settle — see `THEME-PROVENANCE.md`; it is derived from
+    /// `background` a step down, plus the 1px [`ThemeColors::sidebar_border`]
+    /// seam.
     pub sidebar: Rgba,
-    /// Floating cards, popovers, tooltips — waku `raised`.
+    /// Floating cards, popovers, tooltips: a step *above* the surface.
     pub raised: Rgba,
-    /// Composer card fill — waku `composer` `#212121` / `#FFFFFF`.
+    /// Composer card fill.
     pub composer: Rgba,
-    /// Recessed wells — waku `inset`.
+    /// Recessed wells: a step *below* the surface.
     pub inset: Rgba,
-    /// Generic hover wash (5% neutral) — waku `overlay`.
+    /// Generic hover wash — 5% neutral.
     pub overlay: Rgba,
-    /// Pressed wash (9% neutral) — waku `overlay_strong`.
+    /// Pressed wash — 9% neutral, so press reads as more than hover.
     pub overlay_strong: Rgba,
-    /// Stronger divider — waku `border_strong`.
+    /// Stronger divider, for seams that separate rather than merely delimit.
     pub border_strong: Rgba,
-    /// The 1px seam between sidebar and content — waku `sidebar_border`.
+    /// The 1px seam between sidebar and content.
     pub sidebar_border: Rgba,
-    /// Faintest text step — waku `text_ghost` `#575757` / `#A4A4A4`.
+    /// Faintest text step — placeholder copy and disabled labels, below
+    /// [`ThemeColors::meta`].
     pub text_ghost: Rgba,
-    /// Brand coral — waku `accent` (same value as `tab_focus_accent`).
+    /// Brand coral (same value as `tab_focus_accent`).
     pub accent: Rgba,
-    /// Quota-meter blue — waku `gauge` `#3B82F6` / `#2563EB`.
+    /// Quota-meter blue. Blue is reserved for quantity, so a gauge never
+    /// competes with the accent for attention.
     pub gauge: Rgba,
-    /// Selected *row* fill: the 6% neutral wash waku applies to selected,
-    /// hovered and pressed rows alike. Components that paint a selected row
-    /// or tab chip should use this; [`ThemeColors::selection`] is reserved
-    /// for painted text-selection under glyphs.
+    /// Selected *row* fill: the 6% neutral wash that selected, hovered and
+    /// pressed rows all share. Components that paint a selected row or tab
+    /// chip should use this; [`ThemeColors::selection`] is reserved for
+    /// painted text-selection under glyphs.
     pub selected_fill: Rgba,
     /// Text-selection wash — the familiar browser blue, painted under
     /// glyphs: `hsla(211,100%,50%,0.55)` / `0.35`. Never used for row
     /// chrome.
     pub selection: Rgba,
-    /// Inline `code` foreground — waku `code_text` `#E0A882` / `#9A5528`.
+    /// Inline `code` foreground — a warm tone that separates code from prose
+    /// without spending the accent on it.
     pub code_text: Rgba,
-    /// Inline `code` rounded wash — waku `code_wash`.
+    /// Inline `code` rounded wash.
     pub code_wash: Rgba,
-    /// Light fill for primary buttons, dark glyph on top — waku `inverse`.
+    /// Light fill for primary buttons, dark glyph on top.
     pub inverse: Rgba,
-    /// Glyph on primary buttons — waku `on_inverse`.
+    /// Glyph on primary buttons.
     pub on_inverse: Rgba,
-    /// Star/favorite amber — waku `favorite` `#EAB308` / `#CA8A04`.
+    /// Star/favorite amber.
     pub favorite: Rgba,
-    /// Soft danger fill (stop button hover) — waku `danger_soft`.
+    /// Soft danger fill (stop button hover).
     pub danger_soft: Rgba,
 }
 
@@ -256,22 +270,59 @@ impl ThemeColors {
     }
 
     fn for_appearance(appearance: Appearance) -> Self {
-        let accent = Self::adaptive(rgb_hex(0xE2795B), rgb_hex(0xC85F44), appearance);
+        // Tiller's accent. Part measured, part chosen, and the seam between
+        // the two is the whole point — see `THEME-PROVENANCE.md`.
+        //
+        // Measured: the hue, 24.3°, taken from the warm family the reference
+        // frames actually render (their inline-code tone, `#E0A882`, agreeing
+        // across three independent spans). Neither frame contains an accent to
+        // sample directly — both show one idle chat with no logo, caret, focus
+        // ring or activity dot, and a search of the whole frame finds zero
+        // pixels within 37 units of any coral — so hue is as much as looking
+        // can settle.
+        //
+        // Chosen: saturation 0.70 and lightness 0.60/0.40, against two
+        // constraints rather than taste. Each variant clears WCAG AA on the
+        // surface it is painted on (6.62:1 dark, 4.61:1 light — the light one
+        // is the first lightness step that does), held by
+        // `accent_clears_contrast_on_its_own_surface`. And both stay clear of
+        // every `AgentBrandColor`, held by
+        // `worktree_activity_colours_name_the_agent_and_never_a_status`: a tab
+        // shows its accent and its agent's mark side by side, so an accent
+        // that lands on a brand makes the mark stop meaning anything. Claude's
+        // `#D97757` is the near one at 22 units, which is also why the obvious
+        // shortcut — reusing our own Swift's Claude fill for the accent — is
+        // the one coral this app cannot have.
+        let accent = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0xAD581F), appearance);
+        // The four state hues, and `favorite` below, are ours by choice: both
+        // reference frames show one idle chat session, with no error, no
+        // progress gauge, no starred row and no terminal, so there is nothing
+        // in them to measure. Each is the conventional hue for its meaning,
+        // desaturated to sit in neutral chrome without shouting.
         let warning = Self::adaptive(rgb_hex(0xE0B36A), rgb_hex(0xA66B20), appearance);
         let success = Self::adaptive(rgb_hex(0x62C987), rgb_hex(0x2F8F52), appearance);
         let danger = Self::adaptive(rgb_hex(0xE2726A), rgb_hex(0xC64A42), appearance);
         let gauge = Self::adaptive(rgb_hex(0x3B82F6), rgb_hex(0x2563EB), appearance);
         let text = Self::adaptive(rgb_hex(0xE2E2E2), rgb_hex(0x242424), appearance);
         let text_secondary = Self::adaptive(rgb_hex(0xA3A3A3), rgb_hex(0x666666), appearance);
-        let text_tertiary = Self::adaptive(rgb_hex(0x7D7D7D), rgb_hex(0x858585), appearance);
+        let text_tertiary = Self::adaptive(rgb_hex(0x7C7D7D), rgb_hex(0x868686), appearance);
         let text_ghost = Self::adaptive(rgb_hex(0x575757), rgb_hex(0xA4A4A4), appearance);
         let surface = Self::adaptive(rgb_hex(0x1A1A1A), rgb_hex(0xF6F5F6), appearance);
-        let raised = Self::adaptive(rgb_hex(0x232323), rgb_hex(0xECECEC), appearance);
+        let raised = Self::adaptive(rgb_hex(0x232323), rgb_hex(0xEBEBEB), appearance);
         let inset = Self::adaptive(rgb_hex(0x151515), rgb_hex(0xE6E6E6), appearance);
         let composer = Self::adaptive(rgb_hex(0x212121), color(1.0, 1.0, 1.0, 1.0), appearance);
         let terminal_surface =
             Self::adaptive(rgb_hex(0x151515), color(1.0, 1.0, 1.0, 1.0), appearance);
-        let sidebar = Self::adaptive(rgb_hex(0x181818), rgb_hex(0xF3F3F3), appearance);
+        // Opaque, and ours by necessity. The reference sidebar is a macOS
+        // vibrancy layer: measured across the frame it drifts #21282A ->
+        // #26292A as the desktop behind the window goes cyan -> near-white,
+        // while the content column beside it never moves. A translucent layer
+        // has no constant to sample, and macOS vibrancy does not exist on the
+        // two platforms this app also targets. What the frames *do* establish
+        // is that the sidebar reads as recessed from the content, so it is
+        // derived from the measured `surface` by one step down rather than
+        // named as a number nobody can check.
+        let sidebar = Self::adaptive(scaled(surface, 0.92), scaled(surface, 0.98), appearance);
         let border = Self::adaptive(
             hsla(220.0, 0.10, 0.90, 0.07),
             hsla(220.0, 0.10, 0.12, 0.08),
@@ -282,11 +333,10 @@ impl ThemeColors {
             hsla(220.0, 0.10, 0.12, 0.15),
             appearance,
         );
-        let sidebar_border = Self::adaptive(
-            hsla(126.93, 0.000_000_1, 0.16077, 1.0),
-            hsla(0.0, 0.0, 0.078, 0.12),
-            appearance,
-        );
+        // Measured off the seam itself, which is two frame pixels wide — one
+        // logical pixel at 2x — and flat at 200/200 in both variants, so these
+        // are solid values and not a blend of the surfaces either side.
+        let sidebar_border = Self::adaptive(rgb_hex(0x282828), rgb_hex(0xDCDBDB), appearance);
         let row_hover = Self::adaptive(
             hsla(0.0, 0.0, 0.941, 0.06),
             hsla(0.0, 0.0, 0.078, 0.06),
@@ -1057,9 +1107,25 @@ fn rgb_hex(hex: u32) -> Rgba {
     }
 }
 
-/// Converts a CSS-style `hsla(h, s, l, a)` value (h in **degrees**, s/l/a
-/// in 0..1) to sRGB. Used so waku's measured hsl tokens are written the way
-/// the reference writes them.
+/// Scales an opaque colour's channels toward black, keeping alpha.
+///
+/// Used where one variant of a token is *our derivation* of another rather
+/// than a second independent measurement. Writing the relationship down is the
+/// point: a derived value can be checked against its source, and a pasted hex
+/// cannot be checked against anything.
+fn scaled(color: Rgba, factor: f32) -> Rgba {
+    Rgba {
+        r: color.r * factor,
+        g: color.g * factor,
+        b: color.b * factor,
+        a: color.a,
+    }
+}
+
+/// Converts a CSS-style `hsla(h, s, l, a)` value (h in **degrees**, s/l/a in
+/// 0..1) to sRGB. Washes and overlays are written this way because they are
+/// specified as "N% neutral at M% opacity", which hsl states directly and hex
+/// cannot state at all.
 fn hsla(h: f32, s: f32, l: f32, a: f32) -> Rgba {
     let h = (h.rem_euclid(360.0)) / 360.0;
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
@@ -1103,6 +1169,72 @@ mod tests {
         );
     }
 
+    /// WCAG 2.1 relative luminance of an opaque colour.
+    fn relative_luminance(color: Rgba) -> f32 {
+        let channel = |c: f32| {
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    }
+
+    fn contrast_ratio(one: Rgba, other: Rgba) -> f32 {
+        let (a, b) = (relative_luminance(one), relative_luminance(other));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The accent must stay legible on the surface it is painted on, in both
+    /// appearances.
+    ///
+    /// This is the rule the light accent is *derived* from rather than a
+    /// property observed after the fact, which is the point: the value it
+    /// replaced was carried over from another project's source and managed
+    /// only 3.73:1 here, so nothing but a test keeps a future edit from
+    /// drifting back under the line.
+    #[test]
+    fn accent_clears_contrast_on_its_own_surface() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            let ratio = contrast_ratio(theme.accent, theme.background);
+            assert!(
+                ratio >= 4.5,
+                "{label}: accent contrast against its surface is {ratio:.2}:1, under WCAG AA 4.5:1"
+            );
+        }
+    }
+
+    /// The accent must never be one of the agent brands.
+    ///
+    /// A tab row paints its accent and its agent's mark at the same time, so
+    /// an accent that lands on a brand makes that mark stop distinguishing
+    /// anything — the row looks identically tinted whichever agent is running.
+    /// This is not hypothetical: Claude's `#D97757` is the nearest brand to
+    /// where the accent sits, so the tempting move of reusing our own Swift's
+    /// Claude fill is exactly the one that breaks it.
+    #[test]
+    fn accent_is_not_any_agent_brand() {
+        let brands = [
+            AgentBrandColor::Claude,
+            AgentBrandColor::Codex,
+            AgentBrandColor::OpenCode,
+            AgentBrandColor::Pi,
+            AgentBrandColor::Omp,
+            AgentBrandColor::Unknown,
+        ];
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            for brand in brands {
+                assert_ne!(
+                    theme.accent,
+                    brand.color(),
+                    "{label}: the accent is {brand:?}'s brand, so that agent's mark \
+                     no longer marks anything"
+                );
+            }
+        }
+    }
+
     fn expect_color(actual: Rgba, expected: (f32, f32, f32, f32)) {
         for (actual, expected, name) in [
             (actual.r, expected.0, "r"),
@@ -1117,9 +1249,14 @@ mod tests {
         }
     }
 
-    /// waku's measured dark palette (docs/linux-rewrite/03 §A.2).
+    /// The dark palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
+    ///
+    /// Each value there is either a recorded measurement off a reference frame
+    /// or a stated choice of ours; this test is what stops the two drifting
+    /// apart silently. Re-derive the measured ones with
+    /// `./reference/waku/measure-theme.py`.
     #[test]
-    fn dark_palette_matches_waku() {
+    fn dark_palette_matches_recorded_provenance() {
         let theme = Theme::dark();
         let f = |r, g, b| (r, g, b, 1.0);
 
@@ -1182,17 +1319,17 @@ mod tests {
         expect_color(
             theme.accent,
             f(
-                0xE2 as f32 / 255.0,
-                0x79 as f32 / 255.0,
-                0x5B as f32 / 255.0,
+                0xE0 as f32 / 255.0,
+                0x8B as f32 / 255.0,
+                0x52 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.tab_focus_accent,
             f(
-                0xE2 as f32 / 255.0,
-                0x79 as f32 / 255.0,
-                0x5B as f32 / 255.0,
+                0xE0 as f32 / 255.0,
+                0x8B as f32 / 255.0,
+                0x52 as f32 / 255.0,
             ),
         );
         expect_color(
@@ -1300,9 +1437,9 @@ mod tests {
         expect_color(theme.selection, (0.0, 0.483, 1.0, 0.55));
     }
 
-    /// waku's measured light palette.
+    /// The light palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
     #[test]
-    fn light_palette_matches_waku() {
+    fn light_palette_matches_recorded_provenance() {
         let theme = Theme::light();
         let f = |r, g, b| (r, g, b, 1.0);
 
@@ -1326,17 +1463,17 @@ mod tests {
         expect_color(
             theme.raised,
             f(
-                0xEC as f32 / 255.0,
-                0xEC as f32 / 255.0,
-                0xEC as f32 / 255.0,
+                0xEB as f32 / 255.0,
+                0xEB as f32 / 255.0,
+                0xEB as f32 / 255.0,
             ),
         );
         expect_color(
             theme.accent,
             f(
-                0xC8 as f32 / 255.0,
-                0x5F as f32 / 255.0,
-                0x44 as f32 / 255.0,
+                0xAD as f32 / 255.0,
+                0x58 as f32 / 255.0,
+                0x1F as f32 / 255.0,
             ),
         );
         expect_color(
