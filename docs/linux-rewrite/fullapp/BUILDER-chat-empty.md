@@ -65,7 +65,31 @@ establishing that the blank surface was reliable rather than occasional, before 
 It was captured on the `verifyfix` run — i.e. *with* the fix applied — so it demonstrates that the
 `+` path works afterwards. It is **not** evidence that the `+` path was unaffected beforehand.
 
-## One tension left on the record rather than smoothed away
+## Resolved by measurement — read this before the section below it
+
+**The discriminating run was performed, and it came back blank.** See
+`BUILDER-chat-empty-followup.md` and `builder-chat-empty-followup-shots/`. With the fix
+reverse-applied and a worktree carrying a persisted tab, on a quiet box (load 4-25, against the
+44-48 of the original report): the restored tab is blank, and a **second** chat created immediately
+afterwards through the literal `+` → New Chat → Claude Code path — in that same, already-restored
+session — is blank as well (`02-unfixed-plus-created-second-tab-ALSO-blank.png`: two Claude Code
+tabs in the strip, two rows in the sidebar, centre area entirely empty).
+
+So the corruption is **not scoped to the tabs `restore_tabs` itself builds**. `centre-surface` is
+one shared wrapper for the whole centre column; once anything sets the bad height, every pane
+rendered into it afterwards inherits it. That is broader than this document originally said, and it
+means the visual-bar critic's fresh-creation blank needs no separate explanation — it is this same
+bug. **There is no second, unfixed problem blanking that surface under load.**
+
+The fix covers the wider scope, and that was checked rather than assumed: it recomputes the height
+from `window.viewport_size()` on every render, so nothing sticky survives to be inherited. Against
+the same poisoned database with the fix restored, both previously-blank restored tabs render and a
+third `+`-created tab renders too.
+
+The section below is kept as the reasoning that predicted this, and as the record of an inference
+that did not hold.
+
+## The tension this replaced, and the inference that failed
 
 The commit message says fresh creation via the `+` menu "was never affected". The visual-bar critic
 that first reported this defect says the opposite: it opened the chat via `+` → `New Chat` →
