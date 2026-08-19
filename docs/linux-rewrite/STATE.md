@@ -17,6 +17,72 @@ x86 desktop. Everything is committed — the working tree is no longer the state
 
 ---
 
+## 2026-08-19 (early hours) — 368 / 389, and no defective rows left
+
+Waves N, O and P landed overnight. The ledger reads **368 PASSED**, and both hard-failure buckets
+are now empty of `FAILED — defective`. What is left:
+
+| | |
+|---|---|
+| open, actionable | **11** — 10 `half-proven` + 1 `FAILED — absent` (`F-GIT-RUN-01`, git cancellation) |
+| blocked upstream | **3** — the `F-AGENT-OMP` rows, see below |
+| `N/A — platform` | 7 |
+| `NOT EXERCISED` | **0** — every row in the inventory has now been reached by at least one pass |
+
+`F-TAB-09`'s native GTK file picker was the last row nobody had ever driven. It fell to the
+private-portal recipe, and the same recipe closed `F-PRJ-14` and `F-PRJ-18`.
+
+### The evidence standard rose: reproduce the defect, then confirm the fix
+
+Wave O's critic judged all six of wave N's fixes on **both sides** — it rebuilt a pre-fix binary
+from source (`git archive <commit>^ | tar -x`, never `checkout`/`stash`/`reset`), reproduced each
+original defect on it, and only then confirmed the fix on a HEAD binary. This is now the standard
+for judging any fix. The reason is simple: *a fix you only ever saw working cannot be told apart
+from a feature that was never broken.* One reconstructed tree can serve several rows, provided you
+check the commits are independent with `git diff --stat` first.
+
+### A new failure mode: the builder that forgot it was the builder
+
+`wf-wsp2` built two fixes early in a 110-minute run, then hours later judged them **believing a
+predecessor had written them**, and passed them on that basis. Its report describes its own work as
+someone else's. The commit timestamps (02:36, 02:58) fall inside its own run window and no other
+lane held WSP rows, which is how it was caught.
+
+The lesson is not "agents lie" — this one was scrupulous, and re-ran the tests rather than trusting
+the report it thought it had inherited. It is that **the builder-cannot-pass-own-work rule needs an
+external check**, because an agent's belief about who wrote a commit is not evidence. Verify
+authorship against the run window before accepting any "a predecessor already fixed this".
+
+### `F-AGENT-OMP-01/02/03` are blocked upstream, definitively
+
+Re-probed across **every published version**, not just the installed one. `npm view oh-my-pi
+versions` returns exactly `[0.1.0, 0.1.1, 0.2.0]`. The first two declare **no `bin` field at all**,
+so no `oh-my-pi` executable exists. `0.2.0` declares one, but that file carries TypeScript
+annotations under a `#!/usr/bin/env node` shebang (rejected by node v24.19.0 *and* by bun 1.3.14)
+**and** imports `../src/*.ts` files the published tarball omits entirely — so even a TS-capable
+runtime fails module resolution. `dist/` holds the package `main`, a library entry, not a CLI.
+Tiller's adapter launches `oh-my-pi --hook <path>` (`omp.rs:77`) and the distribution ships no `omp`
+alias. No local workaround can produce a runnable agent; do not spend another pass on this.
+
+### One root cause, two very distant symptoms
+
+The nested lane's file dialogs hung, and separately the host's own desktop flooded `/var/log/syslog`
+at up to 72 MB/s. Both were the same bug: **a missing `XDG_CURRENT_DESKTOP` in the portal router's
+exec environment.** `xdg-desktop-portal` picks its backend from that variable, so with it unset the
+service runs "active" while registering *no* backend at all — `org.freedesktop.portal.Settings`
+simply does not exist on the object, and every client polling it retries forever. Two agents found
+this independently with different instruments (`dbus-monitor` in the lane, `gdbus`/`systemctl` on
+the live session), which is what real corroboration looks like.
+
+Fix in either context: read the true display from a live client's `/proc/<pid>/environ` (the
+compositor itself has no `WAYLAND_DISPLAY` — it *creates* the socket), then
+`dbus-update-activation-environment --systemd WAYLAND_DISPLAY=… DISPLAY=… XDG_CURRENT_DESKTOP=…`
+**before** the first portal-triggering call. Repairing the backend does not silence clients that
+were already running: their zbus connections have errored out permanently and only a session
+restart clears them.
+
+---
+
 ## 2026-08-18 — where this actually stands
 
 Measured, not inferred:
