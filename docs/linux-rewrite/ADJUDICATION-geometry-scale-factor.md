@@ -81,6 +81,41 @@ logical value and a measured rendered value is not circular; it would only be ci
 conclude that the known logical value is correct. And in fact the card check now corroborates
 rather than assumes: at 2.00x, `CARD_TWO_LINE_HEIGHT = 51` is consistent with the frames.
 
+## The strongest evidence came from the losing side's own numbers
+
+Twin A finished with seven commits and reported three "low-confidence tensions" — measurements that
+disagreed with values already pinned in the code — plus one material finding. Every one of them
+resolves at 2.00x:
+
+| quantity | A's value at 2.30x | implied frame px | at 2.00x | pinned in code |
+|---|---|---|---|---|
+| body line-height | 18.0 | 41.4 | **20.7** | 21.0 |
+| user pill radius | 10.6 | 24.4 | **12.19** | 12.0 (`user_pill`) |
+| content column | 560-690 | 1288-1587 | **644-793** | 720 |
+| sidebar card height | (rejected) | 102 | **2.000 ratio** | 51 (`CARD_TWO_LINE_HEIGHT`) |
+
+The line-pitch row is worth dwelling on: A's 18 logical implies 41.4 frame px, and twin B measured
+42 frame px directly. They measured the same thing and got the same answer, to within a pixel.
+
+A's material finding — "the content column is not confirmed by the frames, measured ~560-690,
+closer to the ~550 alternative than to 720" — **reverses** at the corrected scale. Its own span
+becomes 644-793, which contains 720 and contains twin B's 676-727 entirely.
+
+**The tell, and it is generalisable.** A had four independent measurements each disagreeing with
+the code, and read each as a question about the code. But they disagreed *by the same ratio*:
+21/18 = 1.167, 12/10.6 = 1.132, and 2.30/2.00 = 1.15. When several unrelated quantities are each
+off by one common factor, the ruler is wrong, not the things being measured. A single value in
+tension is a finding; three in tension by the same proportion is a calibration error, and the
+right response is to go back to the anchor rather than to write three careful low-confidence
+caveats.
+
+None of which is a reason to discount A's work. It measured well, wrote its methodology down, and
+declared what it could not measure — including several things B did not attempt (bar heights,
+sidebar width, type-scale point sizes, most spacing steps, each with a stated reason). It also
+produced the one artefact neither the adjudication nor B has: an `include_str!`-based provenance
+regression test that fails if "waku's measured" reappears in a comment, hand-verified with a
+positive control. That test should survive the merge whichever branch forms its base.
+
 ## Standing conclusions
 
 1. **Scale factor: 2.00x**, on three independent corroborations that agree:
