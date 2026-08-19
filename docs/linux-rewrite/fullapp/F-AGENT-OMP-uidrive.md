@@ -242,7 +242,42 @@ half specifically was attempted live and did not work for me, and I'm not paperi
 (`settings.rs::render_summarizer_menu` / `render_summarizer_trigger`) does not open under
 synthetic X11 click in this build, unlike the structurally similar "+" tab-strip menu. Start from
 the missing `cx.stop_propagation()` in `render_summarizer_trigger`'s `on_click`, by direct analogy
-with the `PLUS-MENU-INVESTIGATION.md` fix. This blocks a genuine end-to-end UI drive of
+with the `PLUS-MENU-INVESTIGATION.md` fix.
+
+> **Correction, 2026-08-19 (integrator): do not start from `cx.stop_propagation()`. The analogy
+> that recommends it misreads the document it cites.**
+>
+> `PLUS-MENU-INVESTIGATION.md`'s fix has nothing to do with `stop_propagation`. Read its
+> "4. The fix": the `+` menu's bug was that its **anchor was measured one render pass late** by a
+> `canvas` prepaint callback with nothing forcing the follow-up render, so the popup stayed glued
+> to the button's pre-resize position. The fix schedules `window.refresh()` via `on_next_frame`
+> when the measured bounds change. No propagation is involved anywhere in it.
+>
+> That bug class **cannot apply to the summarizer menu at all**, because that menu has no measured
+> anchor: `render_summarizer_menu` positions it `.absolute().right(px(24.0)).bottom(px(24.0))` —
+> a fixed corner of the surface, deliberately, with its own comment saying a real anchor under the
+> trigger needs layout information GPUI does not expose at render time.
+>
+> **What does transfer from that document is its other half, and it was never tried here.** Its
+> verdict is that an *atomic* click works every time, and that both critics' failures came from
+> **splitting the gesture across a frame boundary** — `down`/`up` pairs, or a `shot` between two
+> clicks — because `wayland-drive.sh`'s `shot` is not a passive snapshot: it forces a repaint by
+> really resizing the window. This pass never ran a fresh drive (it re-analysed screenshots already
+> captured), so nobody has yet clicked this trigger atomically and observed the result **without**
+> a resize-based `shot` in between. Use `grim` against the live instance instead.
+>
+> Two of this addendum's own findings survive intact and are worth keeping: hypothesis **B is
+> genuinely refuted** — the `#444444` hover tint is reachable only through the `.when(enabled, ...)`
+> branch, so `enabled == true` at render time — and frames 17-20 are **byte-identical**
+> (`md5 d58fe77b1eba3f0c63d357ecc6815d88`, verified), which rules out the menu having opened
+> anywhere on screen, including its real bottom-right position, and rules out a toggle that opened
+> and closed. A third hypothesis — that the menu opened where nobody was looking — is dead on that
+> evidence.
+>
+> Note also that `F-SET-05` is `PASSED` on a **live** drive from 2026-08-18 in which this picker
+> did open and show all its options, and `settings.rs`'s own drawn test
+> `summarizer_picker_is_gated_on_auto_naming_and_selects` opens it under a simulated click and
+> asserts all five options render. So whatever this is, it is not "the control is inert". This blocks a genuine end-to-end UI drive of
 auto-naming choosing Oh-My-Pi specifically; the adapter-level `summarizer_command()` itself is
 proven correct both by this pass's live shell run and by the earlier `omp_live.rs` test.
 
