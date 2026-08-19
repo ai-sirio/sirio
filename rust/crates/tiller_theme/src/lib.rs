@@ -294,25 +294,73 @@ impl ThemeColors {
         // shortcut — reusing our own Swift's Claude fill for the accent — is
         // the one coral this app cannot have.
         let accent = Self::adaptive(rgb_hex(0xE08B52), rgb_hex(0xAD581F), appearance);
-        // The four state hues, and `favorite` below, are ours by choice: both
-        // reference frames show one idle chat session, with no error, no
-        // progress gauge, no starred row and no terminal, so there is nothing
-        // in them to measure. Each is the conventional hue for its meaning,
-        // desaturated to sit in neutral chrome without shouting.
-        let warning = Self::adaptive(rgb_hex(0xE0B36A), rgb_hex(0xA66B20), appearance);
-        let success = Self::adaptive(rgb_hex(0x62C987), rgb_hex(0x2F8F52), appearance);
-        let danger = Self::adaptive(rgb_hex(0xE2726A), rgb_hex(0xC64A42), appearance);
-        let gauge = Self::adaptive(rgb_hex(0x3B82F6), rgb_hex(0x2563EB), appearance);
-        let text = Self::adaptive(rgb_hex(0xE2E2E2), rgb_hex(0x242424), appearance);
+        // The state hues are not a fresh design problem: Tiller already
+        // shipped them. These four are the sRGB components of
+        // `App/AppTheme.swift`'s `tabNeedsInput`, `tabDone`, `tabError` and
+        // `tabFocusAccent`, transcribed digit for digit from our own macOS
+        // app, where they mark the same four things on the same tab strip.
+        // They are written as the float triples the Swift declares rather than
+        // as hex so the two files can be diffed by eye.
+        //
+        // Nothing here could have come off the reference frames anyway: both
+        // show one idle chat session — no error, no progress gauge, no starred
+        // row, no terminal — so there is no pixel of any of these states to
+        // sample. Reusing our own is the strictly better answer than inventing
+        // a second vocabulary for a meaning we had already fixed.
+        //
+        // `gauge` is the exception worth naming: in Swift this blue is the
+        // focus accent. The Rust accent is coral, which freed the blue, and a
+        // progress bar is the one place left that wants a cool hue.
+        let warning = Self::adaptive(
+            color(0.95, 0.72, 0.28, 1.0),
+            color(0.67, 0.42, 0.02, 1.0),
+            appearance,
+        );
+        let success = Self::adaptive(
+            color(0.48, 0.78, 0.57, 1.0),
+            color(0.10, 0.45, 0.22, 1.0),
+            appearance,
+        );
+        let danger = Self::adaptive(
+            color(0.94, 0.43, 0.47, 1.0),
+            color(0.68, 0.12, 0.17, 1.0),
+            appearance,
+        );
+        let gauge = Self::adaptive(
+            color(0.55, 0.64, 1.00, 1.0),
+            color(0.24, 0.38, 0.78, 1.0),
+            appearance,
+        );
+        // A starred row is a louder `warning`, not a fifth colour: same hue,
+        // same lightness, all the chroma the pair allows. Held by
+        // `favorite_is_the_warning_hue_at_full_chroma`.
+        let favorite = {
+            let (hue, lightness) = hue_and_lightness(warning);
+            hsla(hue, 1.0, lightness, 1.0)
+        };
+        let text = Self::adaptive(rgb_hex(TEXT_DARK), rgb_hex(TEXT_LIGHT), appearance);
         let text_secondary = Self::adaptive(rgb_hex(0xA3A3A3), rgb_hex(0x666666), appearance);
         let text_tertiary = Self::adaptive(rgb_hex(0x7C7D7D), rgb_hex(0x868686), appearance);
         let text_ghost = Self::adaptive(rgb_hex(0x575757), rgb_hex(0xA4A4A4), appearance);
-        let surface = Self::adaptive(rgb_hex(0x1A1A1A), rgb_hex(0xF6F5F6), appearance);
+        let surface = Self::adaptive(rgb_hex(SURFACE_DARK), rgb_hex(SURFACE_LIGHT), appearance);
         let raised = Self::adaptive(rgb_hex(0x232323), rgb_hex(0xEBEBEB), appearance);
-        let inset = Self::adaptive(rgb_hex(0x151515), rgb_hex(0xE6E6E6), appearance);
+        // One step *into* the page, and derived from the measured surface for
+        // the same reason `sidebar` is: a well is a relationship to the page
+        // it is cut into, so it should move when the page does. The two
+        // factors differ because the move is not symmetric — dark has 26 units
+        // of headroom below the surface and can take a big step, light has 246
+        // and would go grey long before it read as a well. Both were picked to
+        // make the well legible at a glance and neither is a measurement;
+        // `the_depth_ladder_reads_as_depth` holds the ordering.
+        let inset = Self::adaptive(scaled(surface, 0.72), scaled(surface, 0.93), appearance);
         let composer = Self::adaptive(rgb_hex(0x212121), color(1.0, 1.0, 1.0, 1.0), appearance);
-        let terminal_surface =
-            Self::adaptive(rgb_hex(0x151515), color(1.0, 1.0, 1.0, 1.0), appearance);
+        // A terminal is the deepest thing on the page in dark, and paper in
+        // light — the same two extremes `inset` already names.
+        let terminal_surface = Self::adaptive(
+            scaled(rgb_hex(SURFACE_DARK), 0.72),
+            color(1.0, 1.0, 1.0, 1.0),
+            appearance,
+        );
         // Opaque, and ours by necessity. The reference sidebar is a macOS
         // vibrancy layer: measured across the frame it drifts #21282A ->
         // #26292A as the desktop behind the window goes cyan -> near-white,
@@ -323,54 +371,41 @@ impl ThemeColors {
         // derived from the measured `surface` by one step down rather than
         // named as a number nobody can check.
         let sidebar = Self::adaptive(scaled(surface, 0.92), scaled(surface, 0.98), appearance);
-        let border = Self::adaptive(
-            hsla(220.0, 0.10, 0.90, 0.07),
-            hsla(220.0, 0.10, 0.12, 0.08),
-            appearance,
-        );
-        let border_strong = Self::adaptive(
-            hsla(220.0, 0.10, 0.90, 0.14),
-            hsla(220.0, 0.10, 0.12, 0.15),
-            appearance,
-        );
+        // Everything from here to `danger_soft` is a veil off the ladder — see
+        // [`veil`] for why washes cannot be measured and must come from one
+        // rule instead.
+        let border = veil(VEIL_LOW, appearance);
+        let border_strong = veil(VEIL_HIGH, appearance);
         // Measured off the seam itself, which is two frame pixels wide — one
         // logical pixel at 2x — and flat at 200/200 in both variants, so these
         // are solid values and not a blend of the surfaces either side.
         let sidebar_border = Self::adaptive(rgb_hex(0x282828), rgb_hex(0xDCDBDB), appearance);
-        let row_hover = Self::adaptive(
-            hsla(0.0, 0.0, 0.941, 0.06),
-            hsla(0.0, 0.0, 0.078, 0.06),
-            appearance,
-        );
-        let overlay = Self::adaptive(
-            hsla(220.0, 0.10, 0.90, 0.05),
-            hsla(220.0, 0.10, 0.12, 0.05),
-            appearance,
-        );
-        let overlay_strong = Self::adaptive(
-            hsla(220.0, 0.10, 0.90, 0.09),
-            hsla(220.0, 0.10, 0.12, 0.09),
-            appearance,
-        );
-        let selection = Self::adaptive(
-            hsla(211.0, 1.0, 0.50, 0.55),
-            hsla(211.0, 1.0, 0.50, 0.35),
-            appearance,
+        let row_hover = veil(VEIL_LOW, appearance);
+        // A chat row is most of the width of the pane. The same veil a sidebar
+        // row uses would read as a change of surface at that size, so the
+        // large-area hover sits one rung lower.
+        let overlay = veil(VEIL_FAINT, appearance);
+        let overlay_strong = veil(VEIL_MID, appearance);
+        // Text selection is focus, and focus is what the accent is for. The
+        // light variant is turned down further because its accent is the dark
+        // one of the pair and would otherwise swallow the glyphs it sits
+        // under; `selection_stays_under_its_text` holds that.
+        let selection = softened(
+            accent,
+            match appearance {
+                Appearance::Dark => 0.45,
+                Appearance::Light => 0.30,
+            },
         );
         let code_text = Self::adaptive(rgb_hex(0xE0A882), rgb_hex(0x9A5528), appearance);
-        let code_wash = Self::adaptive(
-            hsla(220.0, 0.10, 0.90, 0.08),
-            hsla(220.0, 0.10, 0.12, 0.07),
-            appearance,
-        );
-        let inverse = Self::adaptive(rgb_hex(0xE7E9EC), rgb_hex(0x202227), appearance);
-        let on_inverse = Self::adaptive(rgb_hex(0x17181C), rgb_hex(0xF8F8F9), appearance);
-        let favorite = Self::adaptive(rgb_hex(0xEAB308), rgb_hex(0xCA8A04), appearance);
-        let danger_soft = Self::adaptive(
-            hsla(4.0, 0.55, 0.63, 0.10),
-            hsla(4.0, 0.55, 0.52, 0.10),
-            appearance,
-        );
+        let code_wash = veil(VEIL_LOW, appearance);
+        // An inverted chip — a tooltip, a keycap — is literally the other
+        // appearance's page, so it is the same measured pair, swapped. No new
+        // number, and it stays right by construction if either is ever
+        // re-measured.
+        let inverse = Self::adaptive(rgb_hex(SURFACE_LIGHT), rgb_hex(SURFACE_DARK), appearance);
+        let on_inverse = Self::adaptive(rgb_hex(TEXT_LIGHT), rgb_hex(TEXT_DARK), appearance);
+        let danger_soft = softened(danger, VEIL_MID);
 
         Self {
             background: surface,
@@ -394,27 +429,17 @@ impl ThemeColors {
             meta: text_tertiary,
             primary_pill_bg: raised,
             filter_field_bg: inset,
-            tree_guide: Self::adaptive(
-                color(1.0, 1.0, 1.0, 0.14),
-                color(0.0, 0.0, 0.0, 0.12),
-                appearance,
-            ),
+            tree_guide: veil(VEIL_MID, appearance),
             git_staged: success,
             git_modified: warning,
             git_untracked: gauge,
             git_conflict: danger,
             diff_addition: success,
-            diff_addition_background: Self::adaptive(
-                hsla(144.0, 0.47, 0.58, 0.15),
-                hsla(144.0, 0.47, 0.38, 0.15),
-                appearance,
-            ),
+            // The band under a diff line is the line's own colour turned down,
+            // never a second green or a second red — see [`softened`].
+            diff_addition_background: softened(success, VEIL_MID),
             diff_deletion: danger,
-            diff_deletion_background: Self::adaptive(
-                hsla(4.0, 0.55, 0.63, 0.14),
-                hsla(4.0, 0.55, 0.52, 0.14),
-                appearance,
-            ),
+            diff_deletion_background: softened(danger, VEIL_MID),
             diff_hunk_background: code_wash,
             card_fill: raised,
             code_inset_fill: inset,
@@ -1122,6 +1147,80 @@ fn scaled(color: Rgba, factor: f32) -> Rgba {
     }
 }
 
+/// A neutral veil at `alpha`: white over the dark palette, black over the
+/// light one.
+///
+/// Every hairline, hover, overlay and wash in this theme is one of these. That
+/// is a rule, not a convenience — the module header says surfaces step by
+/// lightness alone and colour is spent only where it means something, and a
+/// tinted hairline breaks it: it spends colour on structure, where there is
+/// nothing to mean. The rule also settles a question measurement cannot. A
+/// veil is translucent, and a screenshot is flat: whatever a wash looked like
+/// in the reference, compositing had already happened by the time the shutter
+/// closed, so there is no pixel anywhere that carries its rgba back. Washes
+/// are therefore ours by necessity, and the only honest way to write them is
+/// to derive them all from one stated rule instead of naming twenty numbers.
+fn veil(alpha: f32, appearance: Appearance) -> Rgba {
+    match appearance {
+        Appearance::Dark => color(1.0, 1.0, 1.0, alpha),
+        Appearance::Light => color(0.0, 0.0, 0.0, alpha),
+    }
+}
+
+/// The alpha ladder every [`veil`] and soft fill is drawn from. Four rungs,
+/// each half again the one below it (0.05 · 0.08 · 0.12 · 0.18), which is the
+/// smallest step that stays visible when two of them meet along an edge. Held
+/// by `the_veil_ladder_is_geometric`.
+const VEIL_FAINT: f32 = 0.05;
+const VEIL_LOW: f32 = 0.08;
+const VEIL_MID: f32 = 0.12;
+const VEIL_HIGH: f32 = 0.18;
+
+/// The page itself, in each appearance — the two values the measurement is
+/// most confident about (`measure-theme.py` reports them at 100% patch
+/// coverage, i.e. every sampled pixel agreed). Named because several other
+/// tokens are stated as transformations of them and one, [`ThemeColors::inverse`],
+/// is stated as the pair swapped.
+const SURFACE_DARK: u32 = 0x1A_1A_1A;
+const SURFACE_LIGHT: u32 = 0xF6_F5_F6;
+
+/// Body text on each of the surfaces above, likewise measured, and likewise
+/// swapped to make [`ThemeColors::on_inverse`].
+const TEXT_DARK: u32 = 0xE2_E2_E2;
+const TEXT_LIGHT: u32 = 0x24_24_24;
+
+/// The same colour at a lower opacity.
+///
+/// Used for the soft fills that sit *under* text of the same meaning — a
+/// deleted diff line under red text, a danger banner under a danger label. The
+/// fill is not a second red to choose; it is the one red already chosen,
+/// turned down.
+fn softened(color: Rgba, alpha: f32) -> Rgba {
+    Rgba { a: alpha, ..color }
+}
+
+/// HSL hue in degrees, and HSL lightness in 0..1, of an sRGB colour.
+///
+/// The inverse of [`hsla`], and only used to state one token as a
+/// transformation of another rather than as a fresh number.
+fn hue_and_lightness(c: Rgba) -> (f32, f32) {
+    let max = c.r.max(c.g).max(c.b);
+    let min = c.r.min(c.g).min(c.b);
+    let delta = max - min;
+    let lightness = (max + min) / 2.0;
+    if delta <= f32::EPSILON {
+        return (0.0, lightness);
+    }
+    let hue = if max == c.r {
+        60.0 * (((c.g - c.b) / delta).rem_euclid(6.0))
+    } else if max == c.g {
+        60.0 * ((c.b - c.r) / delta + 2.0)
+    } else {
+        60.0 * ((c.r - c.g) / delta + 4.0)
+    };
+    (hue.rem_euclid(360.0), lightness)
+}
+
 /// Converts a CSS-style `hsla(h, s, l, a)` value (h in **degrees**, s/l/a in
 /// 0..1) to sRGB. Washes and overlays are written this way because they are
 /// specified as "N% neutral at M% opacity", which hsl states directly and hex
@@ -1184,6 +1283,239 @@ mod tests {
     fn contrast_ratio(one: Rgba, other: Rgba) -> f32 {
         let (a, b) = (relative_luminance(one), relative_luminance(other));
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Composites `over` (which may be translucent) onto `under`, so a wash
+    /// can be judged the way a reader actually sees it.
+    fn composite(over: Rgba, under: Rgba) -> Rgba {
+        let a = over.a;
+        Rgba {
+            r: over.r * a + under.r * (1.0 - a),
+            g: over.g * a + under.g * (1.0 - a),
+            b: over.b * a + under.b * (1.0 - a),
+            a: 1.0,
+        }
+    }
+
+    /// Every rung of the veil ladder is half again the rung below it.
+    ///
+    /// The ladder is the *only* free parameter left in the wash tokens — each
+    /// of the ten is `veil(rung)` and nothing else — so this is where the
+    /// arbitrariness is concentrated, deliberately, in four numbers with a
+    /// stated relationship instead of twenty without one.
+    #[test]
+    fn the_veil_ladder_is_geometric() {
+        let ladder = [VEIL_FAINT, VEIL_LOW, VEIL_MID, VEIL_HIGH];
+        for pair in ladder.windows(2) {
+            let ratio = pair[1] / pair[0];
+            assert!(
+                (1.4..=1.65).contains(&ratio),
+                "{} -> {} is a {ratio:.2}x step, not the declared ~1.5x",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// No structural token carries a hue.
+    ///
+    /// The module header says surfaces step by lightness alone and colour is
+    /// spent only where it means something. A hairline, a hover, an overlay
+    /// and a tree guide mean nothing — they are shape — so they must be
+    /// neutral. This is the test that caught the theme's largest provenance
+    /// defect: the ten washes that failed it were tinted `hsla(220, 10%, …)`,
+    /// which is not a colour anyone here chose for a reason, and could not
+    /// have been measured either, because compositing has already happened by
+    /// the time a screenshot exists.
+    #[test]
+    fn no_structural_token_carries_a_hue() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            for (name, c) in [
+                ("hairline", theme.hairline),
+                ("tab_chip_underline", theme.tab_chip_underline),
+                ("row_hover", theme.row_hover),
+                ("chat_row_hover", theme.chat_row_hover),
+                ("overlay", theme.overlay),
+                ("overlay_strong", theme.overlay_strong),
+                ("tree_guide", theme.tree_guide),
+                ("diff_hunk_background", theme.diff_hunk_background),
+                ("inverse", theme.inverse),
+                ("on_inverse", theme.on_inverse),
+                ("background", theme.background),
+                ("sidebar", theme.sidebar),
+                ("inset", theme.inset),
+                ("raised", theme.raised),
+            ] {
+                assert!(
+                    (c.r - c.g).abs() < 0.01 && (c.g - c.b).abs() < 0.01,
+                    "{label} {name} is tinted: ({}, {}, {})",
+                    c.r,
+                    c.g,
+                    c.b
+                );
+            }
+        }
+    }
+
+    /// A soft fill is its own meaning's colour turned down, never a second
+    /// colour picked to sit near it.
+    #[test]
+    fn soft_fills_are_their_own_meanings_colour() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            for (name, fill, parent) in [
+                ("danger_soft", theme.danger_soft, theme.diff_deletion),
+                (
+                    "diff_deletion_background",
+                    theme.diff_deletion_background,
+                    theme.diff_deletion,
+                ),
+                (
+                    "diff_addition_background",
+                    theme.diff_addition_background,
+                    theme.diff_addition,
+                ),
+            ] {
+                assert!(
+                    (fill.r - parent.r).abs() < 0.004
+                        && (fill.g - parent.g).abs() < 0.004
+                        && (fill.b - parent.b).abs() < 0.004,
+                    "{label} {name} is a different hue from the text it sits under"
+                );
+                assert!(fill.a < 1.0, "{label} {name} should be a wash");
+            }
+        }
+    }
+
+    /// A well is always deeper than a card, and deeper than the page, in both
+    /// appearances — the ordering `inset` is derived to produce.
+    #[test]
+    fn the_depth_ladder_reads_as_depth() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            assert!(
+                relative_luminance(theme.inset) < relative_luminance(theme.background),
+                "{label}: inset is not below the page"
+            );
+            assert!(
+                relative_luminance(theme.inset) < relative_luminance(theme.raised),
+                "{label}: inset is not below a raised card"
+            );
+        }
+    }
+
+    /// The star is a louder `warning`, not a fifth colour.
+    #[test]
+    fn favorite_is_the_warning_hue_at_full_chroma() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            let (star_hue, star_light) = hue_and_lightness(theme.favorite);
+            let (warn_hue, warn_light) = hue_and_lightness(theme.tab_needs_input);
+            assert!(
+                (star_hue - warn_hue).abs() < 1.0,
+                "{label}: star hue {star_hue} left warning's {warn_hue}"
+            );
+            assert!(
+                (star_light - warn_light).abs() < 0.01,
+                "{label}: star lightness {star_light} left warning's {warn_light}"
+            );
+            let chroma = |c: Rgba| c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
+            assert!(
+                chroma(theme.favorite) >= chroma(theme.tab_needs_input),
+                "{label}: the star is not the louder of the two"
+            );
+        }
+    }
+
+    /// An inverted chip is the other appearance's page, and its text.
+    #[test]
+    fn inverse_is_the_other_appearances_page() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        expect_color(
+            dark.inverse,
+            (
+                light.background.r,
+                light.background.g,
+                light.background.b,
+                1.0,
+            ),
+        );
+        expect_color(
+            light.inverse,
+            (
+                dark.background.r,
+                dark.background.g,
+                dark.background.b,
+                1.0,
+            ),
+        );
+        expect_color(
+            dark.on_inverse,
+            (light.title.r, light.title.g, light.title.b, 1.0),
+        );
+        expect_color(
+            light.on_inverse,
+            (dark.title.r, dark.title.g, dark.title.b, 1.0),
+        );
+    }
+
+    /// Selected text stays readable through its own selection wash.
+    ///
+    /// Selection is the accent turned down, and the accent is a mid-lightness
+    /// coral, so this is the constraint that fixes *how far* down: the two
+    /// alphas are the loudest each appearance can take while the glyphs under
+    /// them still clear WCAG AA.
+    #[test]
+    fn selection_stays_under_its_text() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            let seen = composite(theme.selection, theme.background);
+            let ratio = contrast_ratio(theme.title, seen);
+            assert!(
+                ratio >= 4.5,
+                "{label}: selected text reads at {ratio:.2}:1 through its own wash"
+            );
+        }
+    }
+
+    /// The four state hues are still the ones our own macOS app ships.
+    ///
+    /// They are not measurable — neither reference frame contains an error, a
+    /// gauge, a starred row or a terminal — so their provenance is that Tiller
+    /// already had them, for the same four meanings on the same tab strip.
+    /// A citation in a comment decays; this reads the Swift and fails if the
+    /// two ever part company, which is the only version of "these came from
+    /// our app" that stays true.
+    #[test]
+    fn the_state_hues_are_the_ones_the_swift_app_ships() {
+        let swift = include_str!("../../../../App/AppTheme.swift");
+        let declared = |token: &str, dark: bool| -> (f32, f32, f32) {
+            let after = swift
+                .split_once(&format!("static let {token} = dynamic("))
+                .unwrap_or_else(|| panic!("{token} is gone from App/AppTheme.swift"))
+                .1;
+            // `dynamic(light:…, dark:…)` — take whichever arm was asked for.
+            let arm = after
+                .split_once(if dark { "dark:" } else { "light:" })
+                .expect("arm")
+                .1;
+            let numbers: Vec<f32> = arm
+                .split(&[',', ':', ')'][..])
+                .filter_map(|piece| piece.trim().parse::<f32>().ok())
+                .take(3)
+                .collect();
+            assert_eq!(numbers.len(), 3, "{token} did not yield an rgb triple");
+            (numbers[0], numbers[1], numbers[2])
+        };
+
+        for (dark_mode, theme) in [(true, Theme::dark()), (false, Theme::light())] {
+            for (token, ours) in [
+                ("tabNeedsInput", theme.tab_needs_input),
+                ("tabDone", theme.tab_done),
+                ("tabError", theme.tab_error),
+                ("tabFocusAccent", theme.gauge),
+            ] {
+                let (r, g, b) = declared(token, dark_mode);
+                expect_color(ours, (r, g, b, 1.0));
+            }
+        }
     }
 
     /// The accent must stay legible on the surface it is painted on, in both
@@ -1284,14 +1616,11 @@ mod tests {
                 0x18 as f32 / 255.0,
             ),
         );
-        expect_color(
-            theme.terminal_surface,
-            f(
-                0x15 as f32 / 255.0,
-                0x15 as f32 / 255.0,
-                0x15 as f32 / 255.0,
-            ),
-        );
+        // The well: the measured 0x1A surface stepped down by the declared
+        // 0.72, spelled out here rather than restated as a hex so the test
+        // fails if either half of the derivation moves.
+        let well = 0x1A as f32 * 0.72 / 255.0;
+        expect_color(theme.terminal_surface, f(well, well, well));
         expect_color(
             theme.raised,
             f(
@@ -1308,14 +1637,7 @@ mod tests {
                 0x21 as f32 / 255.0,
             ),
         );
-        expect_color(
-            theme.inset,
-            f(
-                0x15 as f32 / 255.0,
-                0x15 as f32 / 255.0,
-                0x15 as f32 / 255.0,
-            ),
-        );
+        expect_color(theme.inset, f(well, well, well));
         expect_color(
             theme.accent,
             f(
@@ -1332,14 +1654,8 @@ mod tests {
                 0x52 as f32 / 255.0,
             ),
         );
-        expect_color(
-            theme.gauge,
-            f(
-                0x3B as f32 / 255.0,
-                0x82 as f32 / 255.0,
-                0xF6 as f32 / 255.0,
-            ),
-        );
+        // Swift `AppTheme.tabFocusAccent`, dark.
+        expect_color(theme.gauge, f(0.55, 0.64, 1.00));
         expect_color(
             theme.title,
             f(
@@ -1372,38 +1688,13 @@ mod tests {
                 0x57 as f32 / 255.0,
             ),
         );
-        expect_color(
-            theme.tab_needs_input,
-            f(
-                0xE0 as f32 / 255.0,
-                0xB3 as f32 / 255.0,
-                0x6A as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.tab_done,
-            f(
-                0x62 as f32 / 255.0,
-                0xC9 as f32 / 255.0,
-                0x87 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.tab_error,
-            f(
-                0xE2 as f32 / 255.0,
-                0x72 as f32 / 255.0,
-                0x6A as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.favorite,
-            f(
-                0xEA as f32 / 255.0,
-                0xB3 as f32 / 255.0,
-                0x08 as f32 / 255.0,
-            ),
-        );
+        // The three state hues, digit for digit from `App/AppTheme.swift`'s
+        // `tabNeedsInput` / `tabDone` / `tabError`, dark variants.
+        expect_color(theme.tab_needs_input, f(0.95, 0.72, 0.28));
+        expect_color(theme.tab_done, f(0.48, 0.78, 0.57));
+        expect_color(theme.tab_error, f(0.94, 0.43, 0.47));
+        // `tab_needs_input`'s hue (39.4°) and lightness (0.615) at s = 1.
+        expect_color(theme.favorite, f(1.0, 0.7357, 0.23));
         expect_color(
             theme.code_text,
             f(
@@ -1412,29 +1703,41 @@ mod tests {
                 0x82 as f32 / 255.0,
             ),
         );
+        // An inverted chip in dark is the *light* page and the light page's
+        // text — the measured pair, swapped.
         expect_color(
             theme.inverse,
             f(
-                0xE7 as f32 / 255.0,
-                0xE9 as f32 / 255.0,
-                0xEC as f32 / 255.0,
+                0xF6 as f32 / 255.0,
+                0xF5 as f32 / 255.0,
+                0xF6 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.on_inverse,
             f(
-                0x17 as f32 / 255.0,
-                0x18 as f32 / 255.0,
-                0x1C as f32 / 255.0,
+                0x24 as f32 / 255.0,
+                0x24 as f32 / 255.0,
+                0x24 as f32 / 255.0,
             ),
         );
 
-        // The 6% neutral hover wash and the translucent border/selection.
-        expect_color(theme.row_hover, (0.941, 0.941, 0.941, 0.06));
-        // hsla(220,10%,90%) ≈ rgb(0.890, 0.897, 0.910).
-        expect_color(theme.overlay, (0.890, 0.897, 0.910, 0.05));
-        // hsla(211,100%,50%) is the browser blue #007BFF.
-        expect_color(theme.selection, (0.0, 0.483, 1.0, 0.55));
+        // Veils are pure white over dark — no hue at all, per the module
+        // header — at their rung of the ladder.
+        expect_color(theme.row_hover, (1.0, 1.0, 1.0, VEIL_LOW));
+        expect_color(theme.overlay, (1.0, 1.0, 1.0, VEIL_FAINT));
+        expect_color(theme.hairline, (1.0, 1.0, 1.0, VEIL_LOW));
+        expect_color(theme.tab_chip_underline, (1.0, 1.0, 1.0, VEIL_HIGH));
+        // Selection is the accent turned down, not a borrowed browser blue.
+        expect_color(
+            theme.selection,
+            (
+                0xE0 as f32 / 255.0,
+                0x8B as f32 / 255.0,
+                0x52 as f32 / 255.0,
+                0.45,
+            ),
+        );
     }
 
     /// The light palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
@@ -1476,14 +1779,8 @@ mod tests {
                 0x1F as f32 / 255.0,
             ),
         );
-        expect_color(
-            theme.gauge,
-            f(
-                0x25 as f32 / 255.0,
-                0x63 as f32 / 255.0,
-                0xEB as f32 / 255.0,
-            ),
-        );
+        // Swift `AppTheme.tabFocusAccent`, light.
+        expect_color(theme.gauge, f(0.24, 0.38, 0.78));
         expect_color(
             theme.title,
             f(
@@ -1508,28 +1805,34 @@ mod tests {
                 0x85 as f32 / 255.0,
             ),
         );
+        // `App/AppTheme.swift`'s three state hues, light variants.
+        expect_color(theme.tab_needs_input, f(0.67, 0.42, 0.02));
+        expect_color(theme.tab_done, f(0.10, 0.45, 0.22));
+        expect_color(theme.tab_error, f(0.68, 0.12, 0.17));
+        // `tab_needs_input`'s hue (36.9°) and lightness (0.345) at s = 1.
+        expect_color(theme.favorite, f(0.69, 0.4246, 0.0));
+        // Light veils are pure black, same ladder.
+        expect_color(theme.row_hover, (0.0, 0.0, 0.0, VEIL_LOW));
+        expect_color(theme.overlay, (0.0, 0.0, 0.0, VEIL_FAINT));
+        expect_color(theme.hairline, (0.0, 0.0, 0.0, VEIL_LOW));
+        expect_color(theme.tab_chip_underline, (0.0, 0.0, 0.0, VEIL_HIGH));
         expect_color(
-            theme.tab_needs_input,
-            f(
-                0xA6 as f32 / 255.0,
-                0x6B as f32 / 255.0,
-                0x20 as f32 / 255.0,
+            theme.selection,
+            (
+                0xAD as f32 / 255.0,
+                0x58 as f32 / 255.0,
+                0x1F as f32 / 255.0,
+                0.30,
             ),
         );
+        // The well, mirrored: the light page has far less room below it, so
+        // the step is 0.93 rather than dark's 0.72.
         expect_color(
-            theme.tab_done,
+            theme.inset,
             f(
-                0x2F as f32 / 255.0,
-                0x8F as f32 / 255.0,
-                0x52 as f32 / 255.0,
-            ),
-        );
-        expect_color(
-            theme.tab_error,
-            f(
-                0xC6 as f32 / 255.0,
-                0x4A as f32 / 255.0,
-                0x42 as f32 / 255.0,
+                0xF6 as f32 * 0.93 / 255.0,
+                0xF5 as f32 * 0.93 / 255.0,
+                0xF6 as f32 * 0.93 / 255.0,
             ),
         );
         expect_color(
@@ -1540,20 +1843,21 @@ mod tests {
                 0x28 as f32 / 255.0,
             ),
         );
+        // And in light, an inverted chip is the *dark* page and its text.
         expect_color(
             theme.inverse,
             f(
-                0x20 as f32 / 255.0,
-                0x22 as f32 / 255.0,
-                0x27 as f32 / 255.0,
+                0x1A as f32 / 255.0,
+                0x1A as f32 / 255.0,
+                0x1A as f32 / 255.0,
             ),
         );
         expect_color(
             theme.on_inverse,
             f(
-                0xF8 as f32 / 255.0,
-                0xF8 as f32 / 255.0,
-                0xF9 as f32 / 255.0,
+                0xE2 as f32 / 255.0,
+                0xE2 as f32 / 255.0,
+                0xE2 as f32 / 255.0,
             ),
         );
     }
