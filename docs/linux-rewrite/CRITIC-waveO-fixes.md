@@ -232,3 +232,61 @@ All three of the report's own named gaps for this row (3+-tab case, drop-clears-
 the caveat about sidebar drags being unaudited) are closed: the first two with a live PASS, the third
 by actually driving it — where the live result contradicts the report's characterization rather than
 confirming it.
+
+---
+
+## F-CHG-02 — Files panel shows an unrelated real file tree on a genuinely empty catalog
+
+**Verdict: PASSED**
+
+### Code check
+
+`git show 25900f64` matches the report: `RightPanel::bind_worktree`
+(`rust/crates/tiller_ui/src/right_panel.rs`) mirrors the existing `clear_worktree`, and
+`TillerWorkspace::sync_activity` (`rust/crates/tiller/src/main.rs`) now calls `bind_worktree`/
+`clear_worktree` based on `has_current_worktree()` on every render, not just at the two call sites
+(`select_worktree`, `close_workspace`) that existed before.
+
+### Reproduced original defect (pre-fix binary, lane `wfj2prechg02`)
+
+Fresh empty DB, no `project.add`. **Hard discriminator**: `ctl project.list` → `projects:[]`,
+`ctl workspace.list` → `workspaces:[]` — genuinely empty catalog, confirmed at the control-socket
+level, not just visually. Screenshot `/tmp/wf-judge2/shots/prechg02/03-02-settled.png` shows the
+center pane correctly reading "No worktree selected. Add a project, then select a worktree." while
+the Files panel on the right **simultaneously renders this repo's own real tree** (`.agents`,
+`.claude`, `App`, `rust`, `Scripts`, `reference`, …, rooted at
+`/home/enzopalmisano/Scrivania/Progetti/tiller-linux`) — the exact divergence the ledger row and
+report describe, reproduced independently on the pre-fix binary.
+
+### Confirmed fix (current-HEAD binary)
+
+**Matching-fallback case (lane `wfj2chg02`):** fresh empty DB, `ctl project.add` on this same repo's
+own path. `ctl workspace.current` afterward returns a real workspace
+(`branch:"linux/gpui-waku"`, `path:.../tiller-linux`) — hard discriminator at the control-socket
+level, not a screenshot guess — and the Files panel and center pane both track it consistently across
+frames.
+
+**Non-matching case (the builder's own named gap, closed here, lane `wfj2chg02b`):** fresh empty DB,
+`ctl project.add` on a throwaway scratch git repo
+(`$SCRATCH/wfjudge/unrelated-proj`, `git init`+one commit, nothing to do with this repo or its
+fallback directory) — `added:"true"`, `worktreeCount:"1"`. **Hard discriminator**:
+`ctl workspace.current` immediately afterward returns `{"ok":false,"error":"no current workspace"}`
+— `has_current_worktree()` is genuinely false, no worktree was auto-selected by adding an unrelated
+project — and `ctl workspace.list` confirms the new project's sole worktree has `"selected":"false"`.
+Screenshot `/tmp/wf-judge2/shots/chg02b/04-03-after-settle.png` shows the sidebar now lists
+`unrelated-proj` alongside its `master` worktree, **and both the center pane and the Files panel still
+correctly read their own "No worktree selected" placeholders** — no divergence, no stray tree from
+either panel. This is exactly the "more common real-world shape" the report flagged as undriven: a
+project that does *not* match the fallback directory, confirmed live not to spuriously bind the Files
+panel.
+
+### Gap disposition
+
+Gap (1) (the non-matching-project case) is closed above with a control-socket hard discriminator
+(`workspace.current` erroring) plus a screenshot showing both panels agree. Gap (2) (not individually
+re-driving all ~44 `sync_activity` call sites) is accepted as the report frames it — a full audit of
+44 unrelated call sites is out of proportion to this row, and the two live cases actually exercised
+(matching-fallback boot-then-add, and a genuinely unrelated add) are the two shapes that matter for
+this specific bug class (worktree becomes current / worktree does not become current). Gap (3) (the
+pre-existing `titlebar.rs` double-click test failure) is not this row's concern and is not re-verified
+here.
