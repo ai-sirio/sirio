@@ -919,31 +919,51 @@ fn run_connection(
             // — the read loop can never notice the EOF. Watch the child
             // process instead: on exit, withdraw every pending permission so
             // the handler unblocks and the connection observes the death.
+            //
+            // Withdrawing *once* is not enough, and that was a real bug. A
+            // request the agent wrote just before dying is still sitting in the
+            // pipe when the child is reaped: the kernel keeps buffered bytes
+            // readable after the writer is gone, so the handler can register
+            // its waiter well after the exit has been observed. A watchdog that
+            // cancelled and broke drained an empty map and left that waiter
+            // stranded for the full five-minute PERMISSION_TIMEOUT, with the
+            // card still answerable and the transport error never surfaced.
+            // It reproduced about one run in six, and — being a race — hid
+            // whenever the window was instrumented. So once the child is gone,
+            // keep sweeping until the connection itself is finished.
+            let mut child_gone = false;
             loop {
                 if watchdog_finished.load(Ordering::Acquire) {
                     break;
                 }
-                let exited =
-                    watchdog_child
-                        .lock()
-                        .ok()
-                        .is_none_or(|mut child| match child.as_mut() {
-                            Some(child) => {
-                                let wait = child.status();
-                                let probe = async_io::Timer::after(Duration::from_millis(50));
-                                futures::pin_mut!(wait, probe);
-                                matches!(
-                                    block_on(futures::future::select(wait, probe)),
-                                    futures::future::Either::Left(_)
-                                )
-                            }
-                            None => true,
-                        });
-                if exited {
-                    cancel_permissions(&watchdog_waiters);
-                    break;
+                if !child_gone {
+                    child_gone =
+                        watchdog_child
+                            .lock()
+                            .ok()
+                            .is_none_or(|mut child| match child.as_mut() {
+                                Some(child) => {
+                                    let wait = child.status();
+                                    let probe = async_io::Timer::after(Duration::from_millis(50));
+                                    futures::pin_mut!(wait, probe);
+                                    matches!(
+                                        block_on(futures::future::select(wait, probe)),
+                                        futures::future::Either::Left(_)
+                                    )
+                                }
+                                None => true,
+                            });
                 }
-                thread::sleep(Duration::from_millis(100));
+                if child_gone {
+                    // Cheap: `cancel_permissions` drains, so every sweep after
+                    // the first is a lock and an empty iteration until a late
+                    // waiter shows up. Sweep faster than the pre-exit poll —
+                    // the connection is now blocked on exactly this.
+                    cancel_permissions(&watchdog_waiters);
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
         });
     if worker_tx
