@@ -59,6 +59,12 @@ use tiller_ui::{
 };
 
 mod command_palette;
+/// The X11-vs-Wayland decision, and the only place that touches the display
+/// environment. Linux-only by construction: the variables it reads and writes
+/// (`DISPLAY`, `WAYLAND_DISPLAY`, `GDK_BACKEND`) mean nothing on macOS or
+/// Windows, where the platform picks itself.
+#[cfg(target_os = "linux")]
+mod display_backend;
 mod panes;
 mod session;
 mod tab_machinery;
@@ -11764,6 +11770,14 @@ fn app_settings_with_environment_override(mut settings: AppSettings) -> AppSetti
 }
 
 fn main() {
+    // First statement in the process, and it has to stay first. `gpui`
+    // decides X11 vs Wayland by reading the environment
+    // (`guess_compositor`), so the environment has to be right before
+    // `application()` constructs anything — and `set_var` is only sound while
+    // this is still a single-threaded process. See `display_backend`.
+    #[cfg(target_os = "linux")]
+    display_backend::prepare_environment();
+
     application().run(|cx: &mut App| {
         Theme::init(cx);
 
