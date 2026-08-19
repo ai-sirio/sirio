@@ -165,3 +165,60 @@ immediately, only the tab-host content lagged. Switching back through a real sid
 resolved it cleanly every time. Flagged here for whoever owns cross-project tab-host mounting;
 not reproduced as a loss of PANE STATE (nothing died, nothing reset), so it does not contradict
 this row's own PASSED clause.
+
+## F-TERM-SCR-02 — Terminal output forwarded to activity model after debounce (200ms settle, 120ms resize)
+
+**Promoted: PASSED.** The ledger's evidence was "constants match" — a code-reading claim that a
+120ms resize debounce and 200ms output-settle debounce exist in source. The named missing half was
+explicit: **a test that actually counts status/resize callbacks under a burst**, not a restated
+constant. `docs/linux-rewrite/wave-h/H6-instruments-report.md` had already worked out the right
+shape for this (a SIGWINCH-trap script in a real split pane, driven by a real button-held divider
+drag) but never landed the instrument or the transcript in the repo, so it was unreplayable. This
+pass reproduces it and lands both.
+
+Opened a fresh Terminal tab in the `wf-sweep2-fixture` worktree, typed the trap one-liner directly
+into its shell (also saved as
+`reference/linux-progress/wf-sweep2/f-term-scr-02-winch-trap.sh`):
+
+```
+trap 'printf "WINCH %s cols=%s\n" "$(date +%s.%3N)" "$(tput cols)"' WINCH
+echo TRAP_READY
+while true; do sleep 0.02; done
+```
+
+The tight `sleep 0.02` loop keeps the shell's foreground process alive so a pending `SIGWINCH` is
+picked up within ~20ms, without needing the shell back at its prompt. Right-clicked the pane →
+**Split Right** to create a real divider, then found its exact pixel column by sampling pixel
+colours across the boundary (the divider hairline is a distinct near-black run only 4-6px wide —
+an earlier drag attempt at a coordinate 6px off missed the hit-region entirely and produced no
+resize at all, which is itself informative: this is a narrow, precise hit-target, not a generous
+one).
+
+Drove one real button-held drag on the divider: `down (1039,400)`, four `move` waypoints stepping
+left to `(850,400)`, `up (850,400)` — 6 distinct virtual-pointer operations spanning 346ms
+(host-timestamped: `1787103068.011` → `1787103068.357`). Rather than reading the result back with
+a window-resizing screenshot (which would itself inject more real resize events and contaminate
+the count), the pane's scrollback was polled with `ctl panel.read id=pane-4` — a control-socket
+read of the pane's live buffer that touches no window geometry at all — at t+0.3s, 0.8s, 1.5s,
+2.5s, and 4.0s after the drag, with **no** `shot()`/`quickshot()` calls anywhere in between:
+
+- **6 raw pointer-driven resize opportunities collapsed to exactly 1 delivered `WINCH`**, arriving
+  at `1787103068.561` — 204ms **after** the drag's own `up` event, not synchronously with any of
+  the 6 pointer moves.
+- Columns jumped straight from 90 to 65 in that single delivery — no intermediate `WINCH` for any
+  column count the pointer physically passed through mid-drag.
+- The log stayed completely flat across all 5 polls out to t+4.0s — one settle, one delivery, done;
+  this wasn't the first of a delayed second wave.
+
+Full raw transcript (pointer-op timestamps + all 5 poll results) saved at
+`reference/linux-progress/wf-sweep2/f-term-scr-02-drag-and-winch-log.txt`; a corroborating
+screenshot of the pane's own printed log (matching the transcript exactly) at
+`reference/linux-progress/wf-sweep2/f-term-scr-02-winch-count-burst.png`. That same screenshot
+carries a bonus data point: two earlier `WINCH` lines in the same log
+(`cols=89` then `cols=90`, 221ms apart) came from a single `quickshot()`'s own two-step window
+resize (1715×972 → 1714×972 → 1715×972, unrelated to the deliberate drag) — and that too produced
+exactly one `WINCH` per direction change rather than a flood, the same debounce/settle shape from
+an independent trigger.
+
+This is a genuine instrumented count — 6 inputs, 1 output, arriving after gesture-end rather than
+tracking it — not a restatement of a source-code constant. Promoted to PASSED.
