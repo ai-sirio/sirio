@@ -1,0 +1,97 @@
+# Builder fix — the restored Chat tab rendered nothing
+
+Merged 2026-08-19. Commit `e6b3816c` `fix(F-CHAT): give centre-surface a definite height instead
+of flex_1`, branch `fix/chat-empty-971757`, worktree `/var/tmp/tt-chat-971757`.
+
+## What it was
+
+The ACP-backed Chat tab rendered **completely empty** — no composer, no placeholder, no error
+message — but only when the tab was built by `restore_tabs` rather than `add_chat_tab`. That is,
+after a full app restart or a `select_worktree` worktree switch, both of which reconstruct tabs from
+persisted session state. Creating a chat fresh from the `+` menu was never affected.
+
+That asymmetry is why this looked intermittent for so long, and why the first read of it was
+"probably host contention": whether you saw the bug depended on how you got to the chat, not on
+anything visible in the UI.
+
+## Root cause
+
+`centre-surface`'s `.flex_1()` height, grown by Taffy against its `centre-column` ancestor, resolved
+to roughly **1656px against a real window height near 970px** — but only on frames following a
+`restore_tabs`-triggered replacement of the tab array, and it stayed wrong indefinitely rather than
+self-correcting on a later frame.
+
+A chat pane's transcript is itself a `flex_1` child of `chat-root`, so it grew to fill that wrong
+height and pushed the composer below the bottom edge of the actually-visible, `overflow`-hidden
+area. The composer was in the element tree the whole time — never painted, never hit-testable.
+The screenshots below show exactly that: the composer lives at the bottom of the surface, which is
+precisely the part an oversized parent pushes out of view.
+
+## The fix
+
+Compute `centre-surface`'s height directly from `window.viewport_size()` minus the three fixed bars
+around it, instead of trusting flex-grow for that one node. `viewport_size` is a plain field the
+platform backend writes synchronously on resize — not a value Taffy computes or caches, which is
+what makes it trustworthy on exactly the frames where the flex chain was not.
+
+Everything below `centre-surface` is untouched: the pane tree, splits, and other pane kinds already
+resolve their percentage/`flex-1` chain correctly against a definite ancestor height. Only how
+`centre-surface` itself obtains that height changes.
+
+## Evidence
+
+Screenshots preserved in `builder-chat-empty-shots/` — copied out of `/tmp` when this was merged,
+because that is where the drive wrote them and the next pass would have deleted them.
+
+**The A/B/A control, which is what rules out contention** (run on a quiet box, load average in the
+single digits, ~8-9):
+
+| frame | state |
+|---|---|
+| `01-aba-baseline.png` | baseline, fix present |
+| `02-aba-restart-unfixed.png`, `03-aba-restart-unfixed-settled.png` | **fix reverted** — Chat tab open and active, sidebar correct, centre area entirely blank |
+| `04-aba-restart-fixed.png`, `05-aba-restart-fixed-settled.png` | **fix restored** — same window, same tab, same worktree; composer renders ("Message…", `idle`, Opus Plan Mode, 0%) with the worktree-path footer beneath it |
+
+The two states differ in nothing but the fix. That is the whole argument, and it is why "the box was
+busy" is not an available explanation.
+
+Supporting frames: `06-first-repro-restart1-settled.png` and
+`07-first-repro-restart11-settled.png` are from the original reproduction run — eleven restarts,
+establishing that the blank surface was reliable rather than occasional, before any fix existed.
+`08-worktree-switch-path.png` covers the second entry point (`select_worktree`).
+`09-fresh-newchat-renders-with-the-fix.png` shows `+` → New Chat rendering correctly.
+
+**That last frame is named carefully, because an earlier name for it claimed more than it shows.**
+It was captured on the `verifyfix` run — i.e. *with* the fix applied — so it demonstrates that the
+`+` path works afterwards. It is **not** evidence that the `+` path was unaffected beforehand.
+
+## One tension left on the record rather than smoothed away
+
+The commit message says fresh creation via the `+` menu "was never affected". The visual-bar critic
+that first reported this defect says the opposite: it opened the chat via `+` → `New Chat` →
+`Claude Code` and got a blank surface (`VISUAL-BAR.md`, row `01-chat-empty`).
+
+Both can be true, and the root cause is what reconciles them: what gets poisoned is
+**`centre-surface`'s own height**, on frames after a `restore_tabs`. Once it is oversized, *any*
+pane living inside it is pushed out of view — including a chat created a moment later from the `+`
+menu. So the distinguishing factor is not how the tab was made; it is whether the app had performed
+a `restore_tabs` in that session, which it does at startup for any worktree with persisted tabs.
+
+Under that reading the `+` menu is not a safe path, it is merely a path that looks safe when you
+reach it from a clean session. Nobody has re-driven the visual-bar critic's exact sequence
+post-fix to confirm this reconciliation, so it is stated as the explanation that fits both
+observations, not as a measured finding.
+
+## Regression test
+
+Added alongside the existing P117 test, and the difference between the two is the point: the new one
+constructs the tab through the **real `restore_tabs` constructor** instead of a direct `OpenTab`
+literal. The P117 test built its tab the way `add_chat_tab` does, which is the path that always
+worked — so it passed throughout, while the bug was live.
+
+## What is still owed
+
+Nobody has measured whether any *other* surface reached through `restore_tabs` inherits the same
+oversized `centre-surface` height. The fix corrects the height for every pane kind at once, so
+there is no reason to expect a survivor — but that is an argument, not a measurement, and the
+Browser and Changes tabs have not been driven through a restart since.
