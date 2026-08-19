@@ -279,3 +279,53 @@ Promoted to PASSED. (The red in-page banner both Browser tabs show —
 `Direct XCB build failed: the window handle kind is not supported` — is this nested compositor's
 own inability to embed a webview surface, unrelated to URL routing, which is what this row's clause
 actually covers.)
+
+## F-CHG-15 — Binary-file and diff-load-unavailable states, with retry
+
+**Promoted: PASSED.** The binary-file half was already live-proven and fix-confirmed. The named
+gap was the **diff-load-fail** half: two prior cheap attempts (a self-referential symlink, a FIFO
+meant to trip a per-file timeout) both failed to isolate a per-file `diff_entry()` failure without
+also tripping the whole-snapshot `status()`/`stats()` error — which would prove the wrong thing
+(F-CHG-09's repo-wide error banner, not this row's per-file message).
+
+Reading `expand_diff`/`load_snapshot`/`stats()` in `rust/crates/tiller_ui/src/changes.rs` and
+`diff_entry`/`stats` in `rust/crates/tiller_git/src/diff.rs` (to find where to aim the drive, not
+as evidence) showed the exact seam: for an **untracked** file, `stats()` tries a cheap direct
+`std::fs::read` first and only calls `diff_entry` as its own fallback, while `git status` itself
+never reads file *content* at all (just stats the directory entry) — so a file `git status` can
+list fine, but that nothing can actually *open*, hits only `diff_entry`'s error path. Verified the
+exact git behaviour directly first: a fresh repo with one committed file and one untracked file
+`chmod 000`'d —
+
+```
+$ git status --porcelain
+?? noperm.txt
+$ git diff --no-color --no-ext-diff --no-index --unified=3 -- /dev/null "$PWD/noperm.txt"
+error: open("/tmp/chg15-repro/noperm.txt"): Permesso negato
+fatal: cannot hash /tmp/chg15-repro/noperm.txt
+exit=128
+```
+
+`git status` succeeds (128 is outside `git diff --no-index`'s accepted `{0,1}`, so `diff_entry`
+alone fails). Recipe saved at
+`reference/linux-progress/wf-sweep2/f-chg-15-repro-recipe.sh`. Added the repo as a real Tiller
+project (`ctl project.add`), opened its **Changes** tab live, and expanded the untracked
+`noperm.txt` row:
+
+- **Local changes (1)** / **Untracked (1)** lists `noperm.txt` alone — no whole-repo error banner,
+  confirming `status()`/`stats()` succeeded for the snapshot as a whole (the committed
+  `tracked.txt`, unmodified, correctly doesn't appear at all).
+- Expanding the row renders, live, exactly the `ChangeRow::Unavailable` message text from
+  `changes.rs`: **"diff unavailable: git exited with status 128: error:
+  open("/tmp/chg15-repro/noperm.txt"): Permesso negato\nfatal: cannot hash
+  /tmp/chg15-repro/noperm.txt"`** —
+  `reference/linux-progress/wf-sweep2/f-chg-15-diff-load-fail-live.png`.
+
+This is the discriminating repro the ledger's two prior attempts couldn't isolate: one file whose
+diff genuinely fails to load, with the rest of the snapshot (and the sibling tracked file)
+completely unaffected — not the broader repo-error path. Per this row's own clause text ("the
+binary message **or** Retry action"), the per-file diff-fail row's affordance is the message alone
+— `ChangeRow::Unavailable`'s render carries no retry control (only the whole-repo error banner does,
+scoped to F-CHG-09, confirmed by reading `changes.rs`'s only two `"Retry"` button call sites) — so
+the clause's disjunction is satisfied by the message, matching what the code actually offers.
+Promoted to PASSED.
