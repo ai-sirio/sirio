@@ -116,6 +116,43 @@ produced the one artefact neither the adjudication nor B has: an `include_str!`-
 regression test that fails if "waku's measured" reappears in a comment, hand-verified with a
 positive control. That test should survive the merge whichever branch forms its base.
 
+## The critic did not clear it, and its objection lands on this document too
+
+A fresh critic returned **`cleared: false` — TRANSPLANTS REMAIN** against the remedy. Two of its
+findings change what is written above.
+
+**It calls the cross-checks circular, and the objection is partly right.** Both the line-pitch check
+(42 frame px against `body_line_height` 21.0) and the card-height check (102 frame px against
+`CARD_TWO_LINE_HEIGHT` 51.0) divide a measured span by a value that was itself read out of waku's
+source. Twin A refused the card-height check on exactly that ground and wrote a function to name the
+refusal; twin B used the line-pitch check without engaging the objection. This document called them
+"three independent corroborations". That was too strong: the traffic-light anchor is external, but
+the other two are the same *kind* of evidence as each other, not two more kinds.
+
+What survives the objection, stated precisely. Deriving *the scale factor* from a known logical
+value and a measured rendered span is sound; it becomes circular only if one then concludes the
+known value is correct, which nobody does here. And the two checks are not redundant with each
+other: 51 and 21 are unrelated quantities in unrelated components, and both land on exactly 2.000.
+So they are weaker than three independent anchors and stronger than one.
+
+**The load-bearing argument is one neither twin led with, and the critic supplied it: macOS backing
+scale factors are integers.** A native screenshot at native resolution is 1x or 2x, never 2.30. That
+constraint alone excludes twin A's answer without appealing to any waku-sourced value, and it is
+what promotes the Big-Sur-onward traffic-light spec from "the era I chose" to "the era the
+measurement requires". The reasoning should run in that order — integer constraint first, era spec
+second, waku-sourced cross-checks third as consistency rather than as proof. It does not run that
+way in `THEME-PROVENANCE.md`, and that is the critic's largest gap: a document that sounds more
+certain than its method earns, which is a smaller instance of the disease this whole gap was opened
+to cure.
+
+**The sweep is incomplete, and the twins are complementary.** Four unhedged "waku's measured" claims
+survive on twin B's branch — `tiller_theme/src/lib.rs:917`, the `radii_match_waku` test and its doc
+at `:2115-2117`, and `conformance.rs:1-3` and `:63` — in files whose commit message asserts a full
+sweep. Twin A renamed every one of those. So the merge is not "B, plus A's regression test": it is
+**B as the base for the values and the scale factor, plus A's renames and its `include_str!`
+provenance regression test**, which is precisely the artefact that would have caught the four
+survivors automatically.
+
 ## Standing conclusions
 
 1. **Scale factor: 2.00x**, on three independent corroborations that agree:
