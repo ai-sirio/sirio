@@ -29,7 +29,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | F-CHAT-25 | PASSED | AskUserQuestion's text/option/cancel arms all covered by named drawn tests, none of which existed at wave H's ledger writing |
 | F-CHAT-33 | half-proven | re-confirmed live, fresh, this session: the OK-dismiss GPUI test and the ignored real-npx-agent "Trust gate blocks the channel" test both re-run green; the pre-fix contrast (that the banner drew zero controls before the fix) is not independently driveable at HEAD without reverting the fix |
 | F-CORE-ACT-17 | PASSED | new named test proves `agent_id_for_panes` breaks a genuine Running/Running tie by pane-id order, then flips the winner when the earlier-sorting id is swapped to the other agent |
-| F-CORE-ACT-24 | | |
+| F-CORE-ACT-24 | PASSED | a real restart cycle (separate process, isolated `CODEX_HOME`) relaunched the pane with the exact production `codex … resume <ref>` command — the real content-ID-present classification, confirmed via `/proc/<pid>/cmdline`, no OAuth needed |
 | F-AGENT-CODEX-01 | | |
 
 ---
@@ -500,5 +500,85 @@ two-status live drive, pixel-exact colour match) and this pass's tie-break proof
 production `agent_id_for_panes` call site the live sidebar renders through every frame, both halves of
 the F-CORE-ACT-17 clause are now covered: the priority pick (live, pixel) and the tie-break-by-order
 (unit, string-exact, order-reversal-verified).
+
+---
+
+## F-CORE-ACT-24 — PASSED
+
+**Full clause** (`docs/linux-rewrite/02-inventory-packages.md:26`): "Agent session references
+distinguish a stable content ID from a live pane ID, and restore planning classifies captured
+references as resumable or prunable based on the live content IDs present." **Missing half named in
+the brief**: wave M drove the rejection path live (a real session_ref DB row, missing session file,
+correctly pruned through a real restart). The positive **resumable** leg was left "environment-blocked
+(no live Claude nested-session transcript saving; no Codex/OpenCode OAuth creds)."
+
+**Re-derived the pipeline from source before deciding whether that blocker still holds.**
+`resumable_session_refs` (`rust/crates/tiller/src/main.rs:10921`) does two things in sequence: (1)
+`AgentSessionRestorePlan::plan` (`tiller_activity/src/session.rs:56`) keeps a reference only if its
+`content_id` (a stable `"pane-N"` string) is present among the *restored* tabs' live content ids —
+pure tab-survival bookkeeping, no agent process involved; (2) each survivor is then re-checked by
+`AgentSessionValidator::is_likely_valid` (`tiller_agents/src/session_validator.rs:11`), which for
+Codex is a recursive filename search under `<codex_home>/sessions` for one containing the session
+ref (`find_reference`, line 56) — a **plain filesystem existence check**, nothing more. Neither step
+touches the network, a CLI's own auth state, or actually invokes `codex resume`. The prior wave's
+"no OAuth creds" framing describes what blocks *completing a resumed conversation*, not what blocks
+*the classification this clause is actually about* — those are different things, and the clause only
+asks about the classification.
+
+**Built the positive case with real production entry points, no faked credentials.**
+`codex_home()` (`main.rs:10904`) honours `$CODEX_HOME`, unlike `claude_config_dir()`
+(`main.rs:10898`, explicitly "never overridden per-worktree") — so Codex, not Claude, is the safe
+choice: a scratch `CODEX_HOME=/tmp/wf-act24-codex-home` isolates the test completely from the user's
+real `~/.codex`. Set up:
+
+- A fresh scratch git repo (`/tmp/wf-act24-repo`), never the user's real project tree.
+- `/tmp/wf-act24-codex-home/sessions/2026/08/19/rollout-2026-08-19T03-14-00-<ref>.jsonl`, named after
+  Codex's own real rollout convention (confirmed against real files under `~/.codex/sessions` for the
+  shape, read-only) — a placeholder file, not a real transcript. `is_likely_valid`'s Codex path is a
+  pure filename-contains-the-ref check, so this is a faithful test of the classifier, not a shortcut
+  around it — nothing here impersonates an authenticated account (the F-AGENT-CODEX-01 hard
+  constraint against faking an account is a different concern and was not touched).
+- A brand-new `wf-act24`-labelled instance (own compositor, own `TILLER_SOCKET`, own
+  `TILLER_DB=/tmp/wf-act24.sqlite`) — never the kept-alive `wf-rest4` instance, and never
+  `DISPLAY=:1`. Added the scratch project, opened a real `Codex` tab (`pane-0`, confirmed via
+  `panel.list`'s `"agent":"codex"`), then called the **real control-socket method a native hook would
+  use**, `ctl session.ref session=pane-0 ref=<uuid>` (`ControlServer`'s `"session.ref"` handler,
+  `main.rs:1936`, which calls `store.save_session_ref` — the same write path `notify`'s `agentSession`
+  payload goes through) to persist the reference exactly as Codex's own hook would report it.
+
+**Drove an actual restart cycle**, not a simulated one: confirmed the app process (`PID 615391`, its
+own `TILLER_SOCKET=/tmp/wf-act24.sock` verified via `/proc/<pid>/environ`) had genuinely exited
+(`kill -TERM`, then `kill -0` failed), then launched a **separate, fresh process** under the same
+label — a deliberate, isolated restart-cycle test, not a second drive against a kept-alive instance
+(the `wf-rest4` instance this lane's other rows depend on was never touched). The relaunched
+instance's own `panel.list` showed the `Codex` tab restored as `pane-0` again — the tab slot itself
+survived across the restart, satisfying `plan()`'s content-id-present half.
+
+**The hard discriminator**: walked the fresh process's real child tree via `/proc` (`ps --ppid
+<fresh-pid>`), not a screenshot — a screenshot of the resumed pane looks *identical* to a fresh one
+here, since Codex isn't authenticated either way and falls back to the same "Sign in with ChatGPT"
+menu regardless (screenshot at
+`reference/linux-progress/wf-rest4/f-core-act-24-resumed-after-restart.png`, included for
+completeness, but explicitly **not** the proof — this is exactly the kind of case where "the
+screenshot looks right" would be worthless evidence in either direction). The real child process's
+full command line was:
+
+```
+codex -c notify=["/home/enzopalmisano/.local/share/TillerRust/bin/tillerctl","notify","--session","pane-0","--status","needs-input"] resume 8c73677e-512d-4040-bac5-5900a76054c9
+```
+
+This is `CodexAdapter::resume_command`'s exact shape (`tiller_agents/src/codex.rs:41-53`:
+`format!("codex -c {} resume {}", notify_override, shell_quote(session_ref))`) with **my own chosen
+ref string appended verbatim** as the `resume` argument — a value that could only appear there if
+`resumable_session_refs` classified this exact reference as resumable, `AgentSessionValidator::
+is_likely_valid` found my placeholder file on disk, and `restored_agent_shell` built and launched
+this precise command. No other code path produces this string.
+
+**Verdict: PASSED.** Combined with wave M's already-proven rejection path (missing file → pruned,
+live, real restart), both branches of the clause are now driven live through a real process restart:
+prunable (file absent) and resumable (file present, real `resume` command launched) — using the
+control socket's real `session.ref` API and the app's real classify-and-relaunch pipeline throughout,
+with no OAuth credentials needed because the clause under test never required completing an
+authenticated conversation, only classifying and launching correctly.
 
 ---
