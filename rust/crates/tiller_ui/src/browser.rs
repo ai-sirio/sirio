@@ -803,6 +803,18 @@ fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, 
 /// Two rounds because the first iteration is what lets GTK act on
 /// `gtk_widget_destroy`/`gtk_window_close` and emit their own X requests; the
 /// flush after it is what puts those on the wire.
+///
+/// **Which half actually flushes, measured.** The `brw-close` critic tried to
+/// break `Scripts/Tests/test-x11-unmap-needs-a-flush.sh` and found that
+/// deleting the explicit `display.flush()` alone still passes: `events_pending`
+/// reaches `XPending`, which is `XEventsQueued(QueuedAfterFlush)` and flushes on
+/// its own. Deleting the whole recipe correctly fails. So the iteration is the
+/// load-bearing half here, and `display.flush()` is a guarantee rather than the
+/// mechanism — kept because "the loop happened to flush" is a property of GDK's
+/// event source, not a contract, and because an early `break` in a future
+/// version of that loop would silently take the flush with it. Not cargo cult:
+/// the test isolates "no flush at all", and that limit is stated in the report
+/// rather than papered over.
 fn flush_native_window_ops() {
     for _ in 0..2 {
         while gtk::events_pending() {
