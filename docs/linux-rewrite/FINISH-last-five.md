@@ -504,7 +504,7 @@ code path — three live against the real backend in a prior wave, the fourth ag
 this pass, using the same override-seam pattern the file's own F-CORE-USG-05 fix already
 established, with no credentials faked against a real account and no user-global config touched.
 
-Commit: `<to be filled after commit>` (adds `usage_url()`/`TILLER_CODEX_USAGE_URL` and the new test
-to `rust/crates/tiller_usage/src/codex.rs`).
+Commit: `b0f6cc7b` (adds `usage_url()`/`TILLER_CODEX_USAGE_URL` and the new test to
+`rust/crates/tiller_usage/src/codex.rs`).
 
 ---
