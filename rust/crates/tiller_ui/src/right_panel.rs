@@ -2891,7 +2891,7 @@ mod tests {
             })
             .expect("right panel entity");
         cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
-        let cx = VisualTestContext::from_window(window.into(), cx);
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
         pump_until(&cx.cx, || {
             panel.read_with(&cx.cx, |panel, _| {
                 panel
