@@ -16,6 +16,10 @@ pub mod composer;
 pub mod controls;
 pub mod editor;
 pub mod file_view;
+// F-CHG-06: the single git-status -> colour resolver. Deliberately its own
+// module rather than a helper inside right_panel or changes, because those two
+// each having their own copy is the defect it exists to make impossible.
+pub mod git_status_style;
 pub mod project_forms;
 pub mod project_identity;
 pub mod right_panel;
