@@ -150,6 +150,13 @@ genuine restart so `restore_tabs` rebuilds them, render identically before and a
 tab keeps its full diff list, section controls and Unified/Split toggle; the Browser pane's chrome
 is correctly sized and positioned.
 
+**That pass has since been re-run against the current tree** — see `BUILDER-triple-observation.md`,
+observation 3 (`9409cfb0`, merged as `bb703f41`). The re-run matters because the original predated
+that night's other fixes, so it attested to a tree nobody was running any more; this project has
+already been bitten once by evidence outrunning the code it describes. The result is unchanged:
+Terminal, Changes and Browser all survive a full restart, with the Changes content and its pixel
+colours byte-identical before and after.
+
 The red "Direct XCB build failed / unsupported handle: `Wayland(...)`" banner in the Browser frames
 is **identical before and after** the restart and is the known nested-Wayland harness limitation —
 no native window-handle path for embedding a browser surface in this sandboxed compositor. It is
