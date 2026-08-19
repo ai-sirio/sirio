@@ -78,9 +78,32 @@ menu. So the distinguishing factor is not how the tab was made; it is whether th
 a `restore_tabs` in that session, which it does at startup for any worktree with persisted tabs.
 
 Under that reading the `+` menu is not a safe path, it is merely a path that looks safe when you
-reach it from a clean session. Nobody has re-driven the visual-bar critic's exact sequence
-post-fix to confirm this reconciliation, so it is stated as the explanation that fits both
-observations, not as a measured finding.
+reach it from a clean session.
+
+**The builder did re-drive the visual-bar critic's exact sequence**, coordinates included
+(`+` at 1289,48 → New Chat at 1360,349 → Claude Code submenu at 1360,383), on a brand-new worktree
+on a quiet box (load 6-9, against the 44-48 regime of the original report). The composer rendered
+correctly and immediately, with its focus ring. Its conclusion: the fresh-creation blank the
+visual-bar critic saw "actually was contention-related".
+
+**That run cannot support that conclusion, and the reason is worth writing down.** It changes more
+than one variable against the visual-bar session at once:
+
+- The binary it used had the fix. The stash-revert that produced the A/B/A came afterwards, by the
+  builder's own ordering.
+- A brand-new worktree has no persisted tabs, so `restore_tabs` never ran — the precondition for
+  the poisoning is absent regardless of the fix.
+
+Either of those alone explains a correctly-rendered composer, so the run does not isolate
+contention as the cause of anything. Two explanations for the visual-bar blank are still standing:
+contention, or the ambient `centre-surface` height already being wrong in a session that had
+restored tabs before the chat was created.
+
+**The discriminating run, if anyone wants to close this:** open a worktree that *has* persisted
+tabs, so `restore_tabs` runs, then create a chat from the `+` menu, on a quiet box, **with the fix
+reverted**. Blank means the `+` path was affected by this same bug and nothing else needs
+explaining. Rendered means something else blanked that surface under load, and that something is
+still in the tree.
 
 ## Regression test
 
