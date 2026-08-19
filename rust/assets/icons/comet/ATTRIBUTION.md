@@ -1,30 +1,32 @@
 # Icon set — provenance and licence
 
-> **The "user's explicit request" below is UNVERIFIED, and the whole exception rests on it.**
-> Checked 2026-08-19. comet is one of the four apps the standing rule names as
-> inspiration-only, so importing 63 files from it is a gap *unless* the user asked for it —
-> which is exactly what the sentence below claims, and what nobody has ever checked.
+> **VERIFIED 2026-08-19 — the user did ask for these, in writing, by URL.**
+> Found in the user's own typed-prompt history, `~/.claude/history.jsonl`, session
+> `6c13680a-d3bb-4d5b-8c40-6c3bc45a5e73`, project `Scrivania/Progetti/tiller`,
+> **2026-08-13 23:23:48** — four minutes before `b753ed69` landed the import at 23:27:53:
 >
-> What I searched: every `*.jsonl` transcript under both
-> `~/.claude/projects/-home-enzopalmisano-Scrivania-Progetti-tiller{,-linux}/`, for
-> genuine user-role messages (excluding stop-hook goal restatements and system reminders)
-> containing `icon`, `icone`, `svg`, `comet`, or `zeronsh`. **Zero matches.** I also listed
-> every distinct genuine user message on 13–14 Aug, the day `b753ed69` landed the import:
-> none mentions icons.
+> > *"Ti chiedo inoltre di prendere le icone da https://github.com/zeronsh/comet.git .
+> > Inoltre guarda come è fatta [Image #7] . Vorrei la stessa top bar (la barra dove ci
+> > sono i 3 semafori)"*
 >
-> What that does *not* prove: the user orchestrated much of this work through herdr panes,
-> so a request typed to a pane agent would never appear in these transcripts at all. Absence
-> here is not proof the request never happened. It only means **this file's claim cannot
-> currently be substantiated, and should stop being treated as settled.**
+> So the inspiration-only rule does not apply here: the user named this repository and asked
+> for its icons directly. The exception is real and this directory stays.
 >
-> Two independent critics have now flagged this directory and both stood down on the
-> strength of the unverified sentence below — the first calling it out of scope, the second
-> recording it as already-declared. That is how an unchecked claim becomes load-bearing.
-> Nothing has been deleted: reversing this is the user's call, not a builder's or a critic's.
+> **Why three passes failed to find it, which is the part worth keeping.** The message was
+> *queued*, not typed at an idle prompt. A queued message never appears in the session
+> transcript as a `type: "user"` turn — it is recorded as `type: "queue-operation"` and again
+> inside an `attachment` of type `queued_command`. A search filtered to "genuine user-role
+> messages" therefore returns **zero matches** on a message the user unambiguously sent, which
+> is exactly what the previous version of this banner reported.
+>
+> `~/.claude/history.jsonl` is the authoritative record of what the user actually typed,
+> across every project and session, and it is one flat file. Search it first, and search it
+> with the user's own words — the request is in Italian and contains neither `icon` nor
+> `svg`; `semafori` is what finds it.
 
 The 63 SVGs in this directory come from **comet** (<https://github.com/zeronsh/comet>),
-`crates/ui/assets/icons/`, imported at what the importing session recorded as the user's
-explicit request. See the banner above before relying on that.
+`crates/ui/assets/icons/`, imported at the user's explicit request — quoted, dated and
+located in the banner above.
 
 **Licence: MIT — Copyright (c) 2026 Wing.** The MIT licence permits use, modification and
 redistribution provided the copyright notice and permission notice accompany the work. That is what
