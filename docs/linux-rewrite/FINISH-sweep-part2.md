@@ -329,3 +329,25 @@ binary message **or** Retry action"), the per-file diff-fail row's affordance is
 scoped to F-CHG-09, confirmed by reading `changes.rs`'s only two `"Retry"` button call sites) — so
 the clause's disjunction is satisfied by the message, matching what the code actually offers.
 Promoted to PASSED.
+
+## F-CORE-USG-07 — Codex usage fetch across valid/refresh/missing/rejected credentials
+
+**Verdict unchanged: `half-proven` — the row's one open leg re-verified fresh as `UNREACHABLE`, not
+re-driven.** Three
+of four branches (missing-creds, rejected-creds/refresh, header construction) already have real
+live evidence through unmodified `fetch_usage`, adopted from wave D/M. Re-checked this pass rather
+than trusting the prior claim: `git log --oneline -1 -- rust/crates/tiller_usage/src/codex.rs`
+shows only a `cargo fmt` commit since — no logic change — and a fresh read confirms
+`USAGE_URL` (`codex.rs:25`, `https://chatgpt.com/backend-api/wham/usage`) is a bare `const` with
+**no** env-var override, unlike its sibling `TOKEN_URL` which does have one
+(`TILLER_CODEX_TOKEN_URL`, `codex.rs:268`, already what the refresh branch's live test aims at).
+The transport (`tiller_usage/src/http.rs`) shells out to real `curl` with no proxy/CA override
+passed by the app — so a redirect would have to happen entirely at the environment level (an
+`HTTPS_PROXY` + `CURL_CA_BUNDLE` MITM standing in for `chatgpt.com`), which is a real, technically
+available path curl itself would honor, but stands up a self-signed CA, a TLS-terminating stub
+server, and a throwaway app instance to point at it — out of proportion to spend against one row
+in this pass given the higher-value, more directly drivable rows still ahead of it (`F-CORE-DOM-02`,
+`F-PRJ-14`, `F-PRJ-18`). Codex is logged out on this host (status bar reads "Codex logged out" in
+every screenshot this pass), so there is also no real working account to exercise the branch
+against directly. Row verdict stays `half-proven`; the valid-creds/200 leg specifically is
+`UNREACHABLE` on this host — not claimed closed, not guessed at.
