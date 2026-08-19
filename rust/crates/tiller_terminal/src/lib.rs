@@ -98,17 +98,23 @@ pub struct TerminalLinkEvent {
 /// path, then leaves an interactive shell in the repository so the user can
 /// resolve it with ordinary Git commands. The path is shell-quoted here,
 /// before it crosses the PTY boundary.
+/// The shell left behind is the user's own. `exec`ing a hardcoded `/bin/sh`
+/// dropped a POSIX-minimal shell on someone whose `$SHELL` is fish or zsh,
+/// with none of their history, prompt or aliases, in the middle of resolving
+/// a conflict.
+///
+/// Outstanding Windows port item: the command *grammar* below is POSIX —
+/// `;` sequencing, `printf`, `exec`, and [`shell_quote`]'s single-quoting.
+/// The shell it runs in is resolved per platform, but cmd.exe would not
+/// understand this line. Porting it needs a cmd/PowerShell counterpart, not
+/// a different program name.
 pub fn conflict_resolution_shell(path: &Path) -> TerminalShell {
     let quoted_path = shell_quote(path);
-    TerminalShell::WithArguments {
-        program: "/bin/sh".to_string(),
-        args: vec![
-            "-lc".to_string(),
-            format!(
-                "git diff --cc -- {quoted_path}; printf '\\nResolve conflict at %s\\n' {quoted_path}; exec /bin/sh -il"
-            ),
-        ],
-    }
+    let interactive = shell_quote(Path::new(&user_shell_program()));
+    let (program, args) = command_shell_invocation(&format!(
+        "git diff --cc -- {quoted_path}; printf '\\nResolve conflict at %s\\n' {quoted_path}; exec {interactive} -il"
+    ));
+    TerminalShell::WithArguments { program, args }
 }
 
 fn shell_quote(path: &Path) -> String {
@@ -340,12 +346,28 @@ fn default_system_shell() -> (String, Vec<String>) {
 /// three-way split — the split already happened one call down.
 #[cfg(not(windows))]
 pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
-    // A user who set `$SHELL` meant it; the platform default is only a floor.
-    let program = match std::env::var("SHELL") {
+    (
+        user_shell_program(),
+        vec!["-lc".to_string(), command.to_string()],
+    )
+}
+
+/// The shell this user runs: `$SHELL` when they set it — they meant it — and
+/// the platform's own default only as a floor. Every site that needs to name
+/// a shell asks here, so no call site spells a path of its own.
+#[cfg(not(windows))]
+fn user_shell_program() -> String {
+    match std::env::var("SHELL") {
         Ok(value) if !value.is_empty() => value,
         _ => default_system_shell().0,
-    };
-    (program, vec!["-lc".to_string(), command.to_string()])
+    }
+}
+
+/// `$SHELL` is not a Windows notion, so the interpreter is whatever
+/// [`default_system_shell`] resolved from `COMSPEC`.
+#[cfg(windows)]
+fn user_shell_program() -> String {
+    default_system_shell().0
 }
 
 /// See the POSIX arm. `$SHELL` is not a Windows notion, so the interpreter
@@ -2987,10 +3009,27 @@ mod view_tests {
         let TerminalShell::WithArguments { program, args } = shell else {
             panic!("conflict launch must be a shell command");
         };
-        assert_eq!(program, "/bin/sh");
+        // The user's own shell, not a hardcoded one. This used to assert
+        // "/bin/sh", which pinned the defect: whoever resolved a conflict was
+        // dropped into a POSIX-minimal shell with none of their own setup.
+        if let Ok(configured) = std::env::var("SHELL")
+            && !configured.is_empty()
+        {
+            assert_eq!(program, configured);
+        } else {
+            assert!(
+                std::path::Path::new(&program).exists(),
+                "the fallback must name a shell present on this platform, got: {program}"
+            );
+        }
         assert_eq!(args[0], "-lc");
         assert!(args[1].contains("git diff --cc -- 'src/conflicted file.txt'"));
         assert!(args[1].contains("Resolve conflict at"));
+        assert!(
+            args[1].contains(&format!("exec '{program}' -il")),
+            "the interactive shell left behind must be the same one, got {}",
+            args[1]
+        );
     }
 
     /// The drawn terminal created for a conflict keeps the repository root
