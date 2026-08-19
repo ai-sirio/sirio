@@ -326,6 +326,36 @@ fn default_system_shell() -> (String, Vec<String>) {
     (program, Vec::new())
 }
 
+/// Program and arguments that run one command string through the user's shell.
+///
+/// Callers that want to run a command — an agent's launch line, an install
+/// command, a summarizer — must go through this rather than spelling a shell
+/// and a flag themselves. Both halves are platform-specific: the fallback
+/// program, and the flag that means "read the next argument as a command"
+/// (`-lc` is POSIX, cmd.exe wants `/C`).
+///
+/// The macOS and Linux arms are deliberately shared here, unlike
+/// [`default_system_shell`]: what differs between them is only the fallback
+/// program, and that decision is delegated. Do not "fix" this into a
+/// three-way split — the split already happened one call down.
+#[cfg(not(windows))]
+pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
+    // A user who set `$SHELL` meant it; the platform default is only a floor.
+    let program = match std::env::var("SHELL") {
+        Ok(value) if !value.is_empty() => value,
+        _ => default_system_shell().0,
+    };
+    (program, vec!["-lc".to_string(), command.to_string()])
+}
+
+/// See the POSIX arm. `$SHELL` is not a Windows notion, so the interpreter
+/// comes from `COMSPEC` and the command flag is `/C`.
+#[cfg(windows)]
+pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
+    let (program, _) = default_system_shell();
+    (program, vec!["/C".to_string(), command.to_string()])
+}
+
 impl TerminalHandle {
     fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
@@ -3138,6 +3168,61 @@ mod view_tests {
                  fallback ({program}), but it failed: {error:#}"
             ),
         }
+    }
+
+    /// Every "run this command" call site funnels through
+    /// `command_shell_invocation`, so the guarantee it owes is that the
+    /// program it names can actually be executed here and that the command
+    /// survives into the arguments.
+    ///
+    /// This deliberately does not unset `$SHELL`: the sibling test above
+    /// already proves the fallback program exists on this platform, and
+    /// `command_shell_invocation` delegates to that same function rather than
+    /// naming a shell of its own. Mutating the environment a second time would
+    /// race that test for no extra coverage.
+    #[test]
+    fn command_shell_invocation_names_a_runnable_shell_and_keeps_the_command() {
+        let (program, args) = command_shell_invocation("printf hello");
+
+        assert!(
+            std::path::Path::new(&program).exists() || which_on_path(&program).is_some(),
+            "the command shell must be executable here, got: {program}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("printf hello"),
+            "the command must reach the shell verbatim, got {args:?}"
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(args.first().map(String::as_str), Some("-lc"));
+        #[cfg(windows)]
+        assert_eq!(args.first().map(String::as_str), Some("/C"));
+
+        // The whole point is that it runs. A shell that cannot execute the
+        // command is the defect this replaced: an ungated `/bin/zsh` opened
+        // nothing at all on a Linux box with `$SHELL` unset.
+        let status = std::process::Command::new(&program)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap_or_else(|error| panic!("{program} must be spawnable: {error}"));
+        assert!(status.success(), "{program} {args:?} exited {status}");
+    }
+
+    /// Minimal `which`, so the assertion above also accepts a `$SHELL` that is
+    /// a bare name rather than an absolute path.
+    fn which_on_path(program: &str) -> Option<std::path::PathBuf> {
+        if program.contains(std::path::MAIN_SEPARATOR) {
+            return None;
+        }
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|directory| directory.join(program))
+                .find(|candidate| candidate.exists())
+        })
     }
 
     /// A real PTY must expose the shell's OSC title and its settled scrollback
