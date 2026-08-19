@@ -1311,11 +1311,14 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
             })
         })
         .collect::<Vec<_>>();
+    // F-CORE-FILE-01. This is the comparator the Files panel a user
+    // actually sees goes through — `tiller_project::file::read_directory`
+    // has its own copy of this call, but nothing in the UI reaches it, so
+    // porting natural sort there alone left the panel sorting
+    // `file10.txt` before `file2.txt`. A fresh critic caught exactly that:
+    // "the fix exists, was never wired to the UI".
     nodes.sort_by(|left, right| {
-        right
-            .is_dir
-            .cmp(&left.is_dir)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        tiller_project::compare_file_tree_names(left.is_dir, &left.name, right.is_dir, &right.name)
     });
     Ok(nodes)
 }
@@ -2187,6 +2190,34 @@ mod tests {
     /// F-CHG-05: the Files focus path supports arrow selection and Space
     /// toggles the selected directory without needing a mouse click.
     #[gpui::test]
+    /// F-CORE-FILE-01: the Files panel's own comparator, not
+    /// `tiller_project::file::read_directory`'s. A critic pass found the
+    /// natural-sort port landed in the latter while the panel a user sees
+    /// goes through `read_tree` — so this test drives `read_tree` directly
+    /// rather than the already-covered domain function, because that is
+    /// where the defect was.
+    #[test]
+    fn the_files_tree_sorts_names_in_natural_numeric_order() {
+        let dir = std::env::temp_dir().join(format!("tiller-files-natsort-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        for name in ["file10.txt", "file9.txt", "file1.txt", "file2.txt"] {
+            std::fs::write(dir.join(name), b"x").expect("write fixture file");
+        }
+        std::fs::create_dir_all(dir.join("zdir")).expect("create fixture dir");
+
+        let nodes = read_tree(&dir, &dir, &GitMarkers::default()).expect("read the fixture tree");
+        let order: Vec<&str> = nodes.iter().map(|node| node.name.as_str()).collect();
+
+        assert_eq!(
+            order,
+            vec!["zdir", "file1.txt", "file2.txt", "file9.txt", "file10.txt"],
+            "directories lead, then digit runs compare numerically — a plain \
+             lowercase sort puts file10 before file2"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     async fn arrow_keys_select_and_space_expands_the_files_tree(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let folder = dir.0.join("src");
