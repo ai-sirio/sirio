@@ -17,6 +17,36 @@
 //! the token assertions below; a fresh inline literal is a review finding,
 //! not a test failure.
 //!
+//! # Do not measure glyphs from a test — the headless text system is a stub
+//!
+//! The line above says there is no headless renderer to measure glyphs
+//! with. That is easy to disbelieve, because `#[gpui::test]` hands you a
+//! `TestAppContext`, `window.text_system()` resolves, and
+//! `.advance(font_id, size, ch)` returns `Ok`. It looks like a ruler. It is
+//! not one. Measured 2026-08-19 under `#[gpui::test]`:
+//!
+//! ```text
+//! family ".SystemUIFont"   n=7.80  m=7.80  i=7.80
+//! family "Cantarell"       n=7.80  m=7.80  i=7.80
+//! family "DejaVu Sans"     n=7.80  m=7.80  i=7.80
+//! family "Liberation Sans" n=7.80  m=7.80  i=7.80   <- not installed at all
+//! ```
+//!
+//! Every glyph, every family, including one that does not exist on the
+//! machine, returns the same constant. A proportional font cannot have
+//! `i` and `m` the same width; the headless text system is returning a
+//! fixed advance rather than reading a face. So a test that "measures" a
+//! column's characters-per-line through this API is asserting against a
+//! constant, and will happily agree with any number you pick.
+//!
+//! The only honest ruler for type is a real frame: drive the app under
+//! `Scripts/wayland-drive.sh` and measure ink extents in the screenshot.
+//! Even then, note that ink extent and advance width are different
+//! quantities — spaces carry advance and no ink, and glyphs carry side
+//! bearings — so the two disagree by roughly a tenth on a short string, and
+//! a derivation that needs advance cannot be fed an ink measurement without
+//! reconciling that first.
+//!
 //! # Departures ledger — where Tiller deliberately leaves the bar
 //!
 //! A frozen reference is a starting point, not an authority over a
