@@ -17,6 +17,33 @@ x86 desktop. Everything is committed — the working tree is no longer the state
 
 ---
 
+## 2026-08-19 06:20 — 376 / 389, and the three things still owed
+
+Wave Q closed the last of the uncertainty. **`half-proven` is down from 32 to 1**, so every row is
+now either proven or has a named defect with an exact reproduction. Nothing is left in the
+"we haven't checked" state.
+
+Exactly three rows are actionable. Each has a repro, so none of them needs re-investigation:
+
+| Row | State | What is actually missing |
+|---|---|---|
+| `F-GIT-RUN-01` | `FAILED — absent` | Output limits and truncated-output reporting are unbuilt — no byte cap, no size constant, no `Truncated`-shaped error variant. Confirmed live by pushing a 10.4 MB blob through `run_streaming` and getting it back whole. Cancellation *was* built this pass (`GitCancellationToken`, `run_streaming_cancellable`, `GitError::Cancelled`) with a red-then-green test that kills a real slow clone. The remaining work needs a policy decision for every existing caller — diff, status, actions, worktree — on what a truncated command returns. |
+| `F-CORE-WSP-05` | `FAILED — defective` | A divider mousedown empties `window.focus`: `focus_new` and `focus_old` both read false, `tab.focused_pane` unchanged (ruling out `select_pane`), focus landing on `root_focus`. Only F-SID-19's "nothing has focus" fallback prevents total keyboard-input loss. Named repro: `drawn_divider_drag_blurs_focus_to_workspace_root` (commit `c4ec95ce`). |
+| `F-TERM-PTY-04` | `half-proven` | Fixed, but by the orchestrator, so it is held out of PASSED. A fresh critic owes a live drive of a System pane with `$SHELL` unset, and a judgment on whether preferring `/bin/bash` over the passwd-file shell is the right Linux answer. |
+
+The other three non-PASSED rows are `F-AGENT-OMP-01/02/03`, blocked upstream — see the section
+below; do not spend a pass on them.
+
+### Do not launch a build-heavy wave until the log flood is stopped
+
+`rust/target` is ~41 GB. It was cleared at 06:17 to buy disk runway, which means **rebuilding it
+consumes back exactly what was freed**. While `/var/log/syslog` is growing at ~9–15 MB/s, a wave
+that rebuilds the workspace returns the machine to ENOSPC within about fifteen minutes. The fix is
+`~/FIX-SYSLOG-FLOOD.sh` (an rsyslog filter plus a truncate; needs sudo, no logout required) — run it
+before starting anything that compiles.
+
+---
+
 ## 2026-08-19 (early hours) — 368 / 389, and no defective rows left
 
 Waves N, O and P landed overnight. The ledger reads **368 PASSED**, and both hard-failure buckets
