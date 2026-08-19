@@ -153,12 +153,102 @@ Distances from the accent as it now stands: Claude 22, Codex 189, OpenCode 88,
 Pi 205, Omp 148. `accent_is_not_any_agent_brand` holds it in `tiller_theme`
 too, next to the values, rather than only in the app crate that noticed.
 
-### Everything else — `inset`, `warning`, `success`, `danger`, `gauge`, `favorite`
+### Correction, 2026-08-19: this section used to be a blanket, and the blanket was false
 
-None appear in the two frames: the screenshots show one idle chat session, with
-no error state, no progress gauge, no starred row, and no terminal. They cannot
-be measured, and our own Swift defines only `tabError` among them. They are ours
-by choice, and the code says so at each one instead of citing waku.
+What stood here said the remaining tokens were "ours by choice" and that the
+code "says so at each one." A fresh critic checked that claim against
+`waku/src/theme.rs` and refuted it
+(`docs/linux-rewrite/fullapp/CRITIC-theme-transplant.md`). Sixteen values were
+still exact transcriptions — six as hex (`inset`, `warning`, `success`,
+`danger`, `gauge`, `favorite`) and ten as identical hsl parameters plus
+identical alphas (`row_hover`, `border`, `border_strong`, `overlay`,
+`overlay_strong`, `selection`, `code_wash`, `inverse`, `on_inverse`,
+`danger_soft`). "Ours by choice" was not a provenance claim at all; it was a
+sentence standing where one should have been. The critic was right, and the
+strongest form of its argument is the one this document should have made
+itself: **a translucent wash cannot be measured from a screenshot in
+principle** — compositing has already happened by the time the shutter closes,
+so no pixel anywhere carries a wash's rgba back. There was never a "we measured
+and it happened to match" story available for those ten. Five of them sharing
+one hue, one saturation and one lightness with the reference, each at its
+matching alpha, in both appearances, is not a coincidence anyone should be
+asked to believe.
+
+All sixteen are now derived. What follows is the whole set, and none of it is a
+free number except the four-rung alpha ladder, which is named as such.
+
+### The state hues — from our own macOS app, not from anywhere else
+
+`warning`, `success`, `danger` and `gauge` are the sRGB triples of
+`App/AppTheme.swift`'s `tabNeedsInput`, `tabDone`, `tabError` and
+`tabFocusAccent`. Tiller already shipped these four, for the same four meanings
+on the same tab strip; inventing a second vocabulary for a meaning we had
+already fixed would have been the worse answer even if provenance were not at
+stake. They are written in Rust as the float triples the Swift declares, not as
+hex, so the two files diff by eye.
+
+`gauge` is worth one line: in Swift that blue is the *focus* accent. The Rust
+accent is coral, which freed the blue, and a progress bar is the one place left
+that wants a cool hue.
+
+This is not a citation in a comment — comments decay.
+`the_state_hues_are_the_ones_the_swift_app_ships` reads `App/AppTheme.swift` at
+test time, parses the four `dynamic(light:…, dark:…)` declarations, and fails if
+the Rust and the Swift ever part company. Perturbing one channel by 0.04 fails
+it; that control was run.
+
+| token | dark | light | source |
+| --- | --- | --- | --- |
+| `warning` | `0.95, 0.72, 0.28` | `0.67, 0.42, 0.02` | Swift `tabNeedsInput` |
+| `success` | `0.48, 0.78, 0.57` | `0.10, 0.45, 0.22` | Swift `tabDone` |
+| `danger` | `0.94, 0.43, 0.47` | `0.68, 0.12, 0.17` | Swift `tabError` |
+| `gauge` | `0.55, 0.64, 1.00` | `0.24, 0.38, 0.78` | Swift `tabFocusAccent` |
+
+`favorite` is not a fifth colour: a starred row is a louder `warning`, so it is
+`warning`'s own hue and lightness at full chroma, computed by
+`hue_and_lightness` rather than written down. Held by
+`favorite_is_the_warning_hue_at_full_chroma`.
+
+### The ten washes — one rule, because measurement is unavailable
+
+Every hairline, hover, overlay and wash is now `veil(rung)`: **white over dark,
+black over light, no hue at all.** That is not a workaround for missing
+provenance, it is what this theme's own module header already said — *surfaces
+step by lightness alone, and colour is spent only where it means something*. A
+hairline means nothing; it is shape. The tinted `hsla(220, 10%, …)` values did
+not merely lack provenance, they contradicted the rule printed at the top of
+the file they lived in.
+
+`no_structural_token_carries_a_hue` holds it, and re-tinting a single veil the
+old way fails that test — control run.
+
+The one free parameter is the alpha ladder, deliberately concentrated in four
+numbers with a stated relationship instead of scattered across twenty without
+one. Each rung is half again the one below (`the_veil_ladder_is_geometric`):
+
+| rung | alpha | used by |
+| --- | --- | --- |
+| `VEIL_FAINT` | 0.05 | `overlay`, `chat_row_hover` (large areas, must barely register) |
+| `VEIL_LOW` | 0.08 | `border`/`hairline`, `row_hover`, `code_wash` |
+| `VEIL_MID` | 0.12 | `overlay_strong`, `tree_guide`, the soft fills |
+| `VEIL_HIGH` | 0.18 | `border_strong`, `tab_chip_underline` |
+
+### The rest, each stated as a transformation of something measured
+
+| token | rule | held by |
+| --- | --- | --- |
+| `inset` | the measured `surface` scaled — 0.72 dark, 0.93 light. The factors differ because the move is not symmetric: dark has 26 units of room below the page and can take a big step, light has 246 and would go grey long before it read as a well. | `the_depth_ladder_reads_as_depth` |
+| `terminal_surface` | dark: the same well as `inset`. light: paper. | the palette snapshots |
+| `inverse` | the other appearance's page — the measured pair, swapped. No new number, and it stays correct by construction if either is ever re-measured. | `inverse_is_the_other_appearances_page` |
+| `on_inverse` | likewise, the other appearance's body text. | same |
+| `selection` | the accent at 0.45 dark / 0.30 light. Selection *is* focus, and focus is what the accent is for; the alphas are the loudest each appearance takes while the glyphs underneath still clear WCAG AA. | `selection_stays_under_its_text` |
+| `danger_soft`, `diff_deletion_background` | `danger` turned down to `VEIL_MID` — the red already chosen, not a second red picked to sit near it. | `soft_fills_are_their_own_meanings_colour` |
+| `diff_addition_background` | `success` turned down the same way. | same |
+
+The previous `selection` was `hsla(211, 100%, 50%)`, the browser blue. Dropping
+it is a real design change and not only a provenance one: a coral app that
+selects text in Chrome's blue is borrowing a convention it does not otherwise
+follow.
 
 ## Geometry, which has the same problem and less of a cure
 
@@ -200,3 +290,15 @@ inspiration, and is allowed, even though the number ends up identical. Copying
 
 Which is why roughly half this palette kept its numbers and all of it changed
 its status.
+
+And it is why the first pass at this document was not enough. Getting the five
+loudest tokens right while sixteen quieter ones kept their transcribed values
+is not a partial success at the contract; the contract is per-value. The second
+pass answers it the only way that scales: **no token in `tiller_theme` is a
+free number any more.** Each one is a measurement recorded here, a value our own
+Swift app already shipped, or a stated transformation of one of those — with a
+test holding the rule rather than the digits. Seven of the eight rules above
+have a test named next to them, and the two doing the most work
+(`no_structural_token_carries_a_hue`,
+`the_state_hues_are_the_ones_the_swift_app_ships`) were checked with positive
+controls: perturb the value, watch the test fail, restore.

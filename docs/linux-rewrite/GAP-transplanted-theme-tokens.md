@@ -1,6 +1,27 @@
 # GAP — waku's theme source was read, not its screenshots
 
-> **Remedy applied 2026-08-19, NOT yet cleared.** Step 5 below says a builder
+> **Second remedy applied 2026-08-19, NOT cleared.** Step 5 ran and the first
+> remedy *failed* it: a fresh critic returned **TRANSPLANTS REMAIN**
+> (`fullapp/CRITIC-theme-transplant.md`). It upheld the measurement work and
+> the two findings below, and refuted the claim that the rest of the palette
+> was ours — sixteen values were still exact transcriptions, ten of them
+> undiscussed anywhere. Its sharpest point is one this document should have
+> made itself: **a translucent wash cannot be measured from a flattened
+> screenshot at all**, so for those ten there was never a measurement story to
+> appeal to.
+>
+> The second remedy derives all sixteen — the state hues from our own
+> `App/AppTheme.swift`, the washes from a single stated neutral-veil rule, and
+> the rest as transformations of measured tokens — and records every one in
+> `THEME-PROVENANCE.md`. Eight tests now hold the *rules* rather than the
+> digits; two were checked with positive controls. Confirmed live in rendered
+> pixels: `inset` is `#131313` (26 × 0.72), not waku's `#151515`.
+>
+> This still is not a verdict. Step 5 applies to the second remedy exactly as
+> it applied to the first, and by the same reasoning — a builder cannot clear
+> its own transplant, including the second time.
+
+> **First remedy, 2026-08-19 — superseded by the above.** Step 5 below says a builder
 > cannot clear its own transplant, and that still stands: what follows is a
 > claim awaiting a fresh critic, not a verdict. What was done, against the five
 > steps: the header prose is rewritten (1); the `0.000_000_1` literal is gone,
