@@ -22,7 +22,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | row | verdict | one-line reason |
 |---|---|---|
 | F-TAB-09 | PASSED | real native GTK "Open File" dialog driven end-to-end twice: a markdown file and a code file, each opened in the correct editor mode |
-| F-CORE-FILE-04 | | |
+| F-CORE-FILE-04 | PASSED | a real markdown link, clicked live in the running app, resolved and opened a new tab with the target file's content |
 | F-CORE-FILE-03A | | |
 | F-GIT-RUN-01 | | |
 | F-TAB-20 | | |
@@ -144,5 +144,41 @@ type — the full VERIFY clause. `reference/linux-progress/wf-rest4/f-tab-09-01-
 (the dialog itself, Recenti view showing `notes.md` after the first open — proving the OS's own
 recents list recorded the interaction, a detail no synthetic stand-in produces) and
 `f-tab-09-03-code-file-opened.png` (the second tab). **F-TAB-09 -> PASSED.**
+
+---
+
+## F-CORE-FILE-04 — PASSED
+
+**Missing half named in the brief**: "A WORKING link resolving and opening a new tab. It was
+wrongly passed by cross-reference to F-EDIT-13, which is the missing/binary ERROR path — same
+module, different behaviour." (This is exactly the "equivalence by assertion" failure mode
+`EVIDENCE-STANDARD.md` and the lane brief both call out — quoting the two rows' own text confirms
+they cover different clauses: F-CORE-FILE-04 is "Markdown/document file links remove trailing
+`:line[:column]`... resolved path and line/column target" for a link that **works**; F-EDIT-13 is
+"See missing-Markdown and unreadable-code-file states" — a file that does **not** open. No shared
+evidence is legitimate between them.)
+
+**Production wiring confirmed by reading first** (not accepted as verdict): `file_view.rs`'s
+Preview-mode renderer installs a `LinkClickOverride` closure (`file_view.rs:1026`) that calls
+`resolve_file_link` (from `tiller_project`, not a test-only helper) against the open file's own
+directory and emits `FileViewEvent::OpenFile(resolved.path)` on success. `main.rs:3910-3911`
+subscribes to that exact event in the app's own workspace-construction code (not inside any
+`#[cfg(test)]` block) and calls `workspace.add_file_tab(path.clone(), cx)` — the same tab-creation
+path `F-TAB-09` above just proved live opens real new tabs.
+
+**Then driven live, in the same running instance as F-TAB-09** (reusing its already-open
+`wf-rest4-gitfolder` worktree — no new app boot needed): created two real files in the worktree,
+`link-test.md` (containing `[relative target](target.md)`) and `target.md` (containing distinct
+target-marker text), opened `link-test.md` via the Files panel — it rendered in Preview mode with
+"relative target" shown as a real underlined, orange-colored hyperlink. **Left-clicked the rendered
+link glyphs** (`click 500 186`, hitting real Preview-mode text, not a `debug_selector` in a test).
+Result: a **new tab `target.md`** appeared in the tab strip, path bar reads
+`/home/enzopalmisano/wf-rest4-gitfolder/target.md` (the relative link correctly resolved against
+the open file's own directory, not the cwd or some other base), rendered in Markdown Preview
+showing "Target / This is the F-CORE-FILE-04 link target." — the real file's real content, not a
+stub.
+
+`reference/linux-progress/wf-rest4/f-core-file-04-link-rendered.png` (the clickable link before the
+click) and `f-core-file-04-link-opens-new-tab.png` (the new tab after). **F-CORE-FILE-04 -> PASSED.**
 
 ---
