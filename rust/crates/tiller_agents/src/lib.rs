@@ -531,17 +531,18 @@ mod tests {
     }
 
     /// F-AGENT-OMP-03: the noninteractive summarizer flags are
-    /// `--print --no-tools`. The Swift original spells the program `omp`,
-    /// but this port launches adapters by `executable_name()` — the binary
-    /// the distribution actually ships is `oh-my-pi`, with no `omp` alias
-    /// (settled for the launch/resume commands; the summarizer follows the
-    /// same discipline rather than generating a command no PATH can
-    /// resolve).
+    /// `--print --no-tools`, and the program is `omp` — the name the
+    /// Swift original always used and the `bin` that
+    /// `@oh-my-pi/pi-coding-agent` ships. An earlier revision of this
+    /// doc comment asserted the distribution has "no `omp` alias"; that
+    /// was read off an unrelated npm package of the same name, and it is
+    /// false. See `OhMyPiAdapter::executable_name` for the collision and
+    /// the live evidence.
     #[test]
     fn omp_summarizer_command_uses_the_distribution_binary_name() {
         assert_eq!(
             OhMyPiAdapter.summarizer_command("summarize this"),
-            Some("oh-my-pi --print --no-tools 'summarize this'".to_string())
+            Some("omp --print --no-tools 'summarize this'".to_string())
         );
         let command = OhMyPiAdapter
             .summarizer_command("x")

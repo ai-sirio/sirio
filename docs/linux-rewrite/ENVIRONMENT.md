@@ -22,7 +22,7 @@ The Pi 5 section below is history. Measured 2026-08-18 on the machine this work 
 | desktop session | **COSMIC** (Pop!_OS) on Wayland, socket `wayland-1` in `/run/user/1000` |
 | `cargo build --workspace` | **exit 0 in 14.5 s** (warm target), 2 warnings (`browser.rs:827` `pump_task`; `main.rs:9864` `sidebar_projects`) |
 | workflow fan-out cap | `min(16, cores-2)` = 10 by the formula — **but 10 is not survivable here, see below** |
-| agent CLIs | `claude`, **`codex` 0.147.0**, **`opencode` 1.18.18**, **`pi`** all present; `oh-my-pi` still upstream-broken |
+| agent CLIs | `claude`, **`codex` 0.147.0**, **`opencode` 1.18.18**, **`pi`**, and **`omp` 17.3.8** all present and runnable (omp corrected 2026-08-19 — see "Agent CLIs actually installed") |
 
 ## The real concurrency ceiling is about 5, not 10 — measured 2026-08-18 14:34
 
@@ -83,9 +83,14 @@ finding does **not** hold here. This is what the `F-BRW` bucket needs.
 > use `:1`, take `Scripts/linux-drive.sh`'s lock and say in your evidence that you used the shared
 > session.
 
-`oh-my-pi` remains unrunnable: `bin/oh-my-pi.js` carries TypeScript annotations behind a
+~~`oh-my-pi` remains unrunnable: `bin/oh-my-pi.js` carries TypeScript annotations behind a
 `#!/usr/bin/env node` shebang, so it dies at `bin/oh-my-pi.js:176` under **both** node and bun
-(re-measured 2026-08-18). Upstream defect, not an environment gap.
+(re-measured 2026-08-18). Upstream defect, not an environment gap.~~
+
+**Struck 2026-08-19.** Every word above is true of the npm package `oh-my-pi`, and that package is
+not the agent. It is an unrelated, broken VS Code extension that happens to own the name. The agent
+is **`@oh-my-pi/pi-coding-agent`** (github.com/can1357/oh-my-pi, omp.sh), it ships the binary
+**`omp`**, and `omp 17.3.8` runs on this box. See "Agent CLIs actually installed" below.
 
 ---
 
@@ -368,36 +373,58 @@ verdicts in both directions.
 | `claude` | installed |
 | `codex` | installed |
 | `opencode` | 1.18.18, installed and runs |
-| `oh-my-pi` | 0.2.0 — **ships the binary `oh-my-pi`, with no `omp` alias** |
+| `omp` | **17.3.8, installed and runs** — `@oh-my-pi/pi-coding-agent`, binary `omp` |
 | `pi` | installed |
 
-**Corrected 2026-08-14.** This section previously stated that `tiller_agents/src/omp.rs:35`
-hardcodes `"omp"` and that the adapter therefore seeks a binary the distribution does not ship. That
-reading was of the wrong function. The adapter keeps two distinct names, and only one of them is a
-binary:
+**Corrected 2026-08-19, and this is the third correction to this entry — read why before trusting
+any name here.** The agent is the npm package **`@oh-my-pi/pi-coding-agent`**
+(github.com/can1357/oh-my-pi, homepage omp.sh), whose `bin` is **`omp`**. Installed globally via
+bun; `omp --version` prints `omp/17.3.8`.
 
-```rust
-fn id(&self)              -> &'static str { "omp" }        // :35 — Tiller's internal identifier
-fn executable_name(&self) -> &'static str { "oh-my-pi" }   // :43 — the actual binary
-// and both command builders spawn the real name:
-//   :69  oh-my-pi --hook <file>
-//   :81  oh-my-pi --hook <file> --resume=<ref>
-```
+The unscoped npm package **`oh-my-pi` is a different project** — `acidsugarx`, versions 0.1.0/0.1.1/
+0.2.0, `main: ./dist/extension.js`, a VS Code extension. Its 0.2.0 `bin/oh-my-pi.js` really is
+broken exactly as this file described for five days. All of that was true, and none of it was about
+our agent.
 
-`id()` is what pass 16 read as a binary name. The launch path uses `oh-my-pi`, which is what the
-distribution installs, so the adapter is name-correct today.
+**How three careful passes got this wrong, because the same trap is still open for other tools.**
+
+- Pass 16 misread `omp.rs:35` (`id()`) as the binary name and called the adapter defective.
+- The 2026-08-14 pass corrected that misreading and then *ratified the wrong conclusion*: it checked
+  that a binary named `oh-my-pi` was on PATH, found one, and wrote "the adapter is name-correct
+  today". Something by that name was indeed installed. It was the wrong program. **Presence of the
+  expected name is not identity.** `--version` is the check that separates them, and no pass in the
+  chain ran it.
+- A pass did search npm for `omp` and found `omp@1.0.0`, a squatted placeholder whose description is
+  literally `"new"` — still true, still not the project, still must not be installed. Finding a
+  squatter at the bare name made "there is no `omp`" feel confirmed. The real package is **scoped**,
+  and a bare-name search cannot see it.
+- The 2026-08-19 pass then proved exhaustively that every published `oh-my-pi` version is unusable
+  and parked three rows as `UNREACHABLE`. Rigorous, reproducible, and about the wrong package.
+
+Each pass corrected its predecessor's stated error while inheriting the unstated premise underneath
+it. The premise — *`oh-my-pi` is the name of the thing we are looking for* — was never itself
+measured, because it arrived as background rather than as a claim.
+
+**The Swift original was right the whole time.** `OhMyPiAdapter.swift:41/46/50` spells `omp` at all
+three call sites. The Rust port changed it to `oh-my-pi` and wrote a code comment asserting the
+distribution ships no `omp` alias, which turned an inherited assumption into a load-bearing
+in-repo fact. Fixed 2026-08-19: `executable_name()` is `"omp"` again, and the comment there now
+records this collision so a fourth pass cannot repeat it.
 
 **No symlink was ever created**, and none is needed — that decision still stands and is still the
-right one: papering over a name mismatch with a symlink would have hidden whether the adapter or the
-environment was wrong. Keep it that way if this ever regresses.
+right one: papering over a name mismatch with a symlink would have hidden which side was wrong. It
+is also the reason this was recoverable at all.
 
-The omp rows are therefore *unexercised*, not defective: nothing blocks a launch and nobody has
-launched one. Verify through the hook — `tillerctl notify` arriving from the generated hook file is
-the clause — because a session that launches but emits nothing is a different failure from one that
-cannot launch at all.
+Verified live 2026-08-19 by `rust/crates/tiller_agents/tests/omp_live.rs`, which asks the adapter
+for its own command rather than typing a lookalike: `prepare()` writes `.tiller/omp-hook.ts`,
+`command()` launches it, and the hook drives `tillerctl notify` through `running` → `needs-input` →
+`done`. Run it with `TILLER_LIVE_OMP=1 cargo test -p tiller_agents --test omp_live -- --ignored`.
 
-Note also that the npm package `omp@1.0.0` is a squatted placeholder — its description is literally
-`"new"`. It is not the project and must not be installed.
+**One thing still does not work**, inherited faithfully from Swift: the hook reads the session id
+from `payload?.session?.id ?? payload?.sessionId ?? payload?.session?.file`, but omp's real
+`SessionStartEvent` is `{ type: "session_start" }` and carries none of them, so `--agent-session` is
+never sent and resume gets no ref. The id is reachable via `pi.sessionManager`
+(`hooks/types.ts:186`). Not yet fixed; not covered by an existing row.
 
 ## Reading the persistence database
 
