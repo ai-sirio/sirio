@@ -90,6 +90,16 @@ pub enum GitError {
         /// The budget that was exceeded.
         timeout: std::time::Duration,
     },
+    /// The caller cancelled the invocation via a
+    /// [`crate::GitCancellationToken`] while it was still running, and the
+    /// process (and its whole process group) was killed. Distinct from
+    /// [`GitError::TimedOut`] (the runner's own deadline fired) and from
+    /// [`GitError::CommandFailed`] (git ran to completion and reported
+    /// failure), so a caller can tell "I stopped this" apart from either.
+    Cancelled {
+        /// The command that was cancelled, args joined for diagnostics.
+        command: String,
+    },
 }
 
 impl fmt::Display for GitError {
@@ -124,6 +134,9 @@ impl fmt::Display for GitError {
                     f,
                     "git {command} did not finish within {timeout:?} and was killed"
                 )
+            }
+            GitError::Cancelled { command } => {
+                write!(f, "git {command} was cancelled")
             }
         }
     }
