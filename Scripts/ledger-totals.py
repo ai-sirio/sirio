@@ -35,6 +35,21 @@ LEDGER = Path(__file__).resolve().parent.parent / "docs" / "linux-rewrite" / "IN
 # A row looks like:  | `F-CHAT-08` | FAILED — absent | evidence… | pass 12 |
 ROW = re.compile(r"^\|\s*`(F-[A-Z0-9-]+)`\s*\|")
 
+# Rows that look like inventory rows but are not in the denominator.
+#
+# The `ACP-*` appendix is the only such family today, and it is excluded **by the user's
+# explicit ruling**, recorded in the ledger's own section heading: "these 14 rows are an
+# appendix … the denominator stays 389". It is a decision, not an oversight — and it was
+# nearly "fixed" as an oversight, because the counter simply did not match them and so said
+# nothing about them at all. Silence is what made a deliberate exclusion look like a bug.
+#
+# So they are matched and reported, never added: the footer states how many rows sit outside
+# the denominator and under which family, which is also what the ledger asks progress reports
+# to say ("plus 14 newly-found ACP rows not yet in the denominator"). Their table is 3-column
+# by design — no `judged` cell — so they are kept out of the malformed-row check too.
+APPENDIX_ROW = re.compile(r"^\|\s*`((?!F-)[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)`\s*\|")
+FAMILY = re.compile(r"^([A-Z]+)-")
+
 # Which `judged` values count as an independent critic pass.
 #
 # The criterion is structural, not reputational: the agent that set the verdict neither built
@@ -49,7 +64,12 @@ ROW = re.compile(r"^\|\s*`(F-[A-Z0-9-]+)`\s*\|")
 CRITIC_PASS = re.compile(r"pass \d+|sweep \S+, \d{4}-\d{2}-\d{2}")
 
 # Verdicts that carry a free-text tail we fold into one bucket for counting.
-PREFIX_BUCKETS = ("UNREACHABLE", "NOT EXERCISED — blocked on display", "half-proven")
+#
+# "PASSED" is here for `PASSED (measured)` — a pass whose evidence is a number rather than a
+# screenshot. It is strictly stronger than a bare PASSED, so folding it loses nothing a count
+# of "is this done" cares about; the qualifier stays visible in the row itself. No other
+# verdict in ORDER has "PASSED" as a prefix, so the fold cannot swallow anything else.
+PREFIX_BUCKETS = ("UNREACHABLE", "NOT EXERCISED — blocked on display", "half-proven", "PASSED")
 
 ORDER = [
     "PASSED",
@@ -116,6 +136,7 @@ def main() -> int:
     lines = text.splitlines()
 
     counts: Counter[str] = Counter()
+    families: Counter[str] = Counter()
     malformed: list[tuple[int, str, int]] = []
     raw_pipe: list[tuple[int, str]] = []
     total = 0
@@ -123,6 +144,10 @@ def main() -> int:
     for n, line in enumerate(lines, 1):
         m = ROW.match(line)
         if not m:
+            appendix = APPENDIX_ROW.match(line)
+            if appendix:
+                fam = FAMILY.match(appendix.group(1))
+                families[fam.group(1) if fam else "?"] += 1
             continue
         total += 1
         row_id = m.group(1)
@@ -143,6 +168,11 @@ def main() -> int:
     for key in sorted(set(counts) - set(ORDER)):
         print(f"  {key:<{width}}  {counts[key]}   <-- not in the documented vocabulary")
     print(f"  {'TOTAL':<{width}}  {sum(counts.values())}")
+
+    if families:
+        outside = ", ".join(f"{n} {fam}-*" for fam, n in sorted(families.items()))
+        print(f"\noutside the denominator by the user's ruling: {outside}")
+        print("report these as \"plus N rows not yet in the denominator\", never folded in.")
 
     if malformed:
         print(f"\n{len(malformed)} row(s) do not have exactly 4 cells — a raw `|` in the")
