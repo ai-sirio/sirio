@@ -215,11 +215,12 @@ fn read_directory(root: &Path, relative_root: &Path) -> Result<Vec<FileTreeEntry
         });
     }
     entries.sort_by(|left, right| {
-        (!left.is_directory, left.name.to_lowercase(), &left.name).cmp(&(
-            !right.is_directory,
-            right.name.to_lowercase(),
+        crate::file_sort::compare_file_tree_names(
+            left.is_directory,
+            &left.name,
+            right.is_directory,
             &right.name,
-        ))
+        )
     });
     Ok(entries)
 }
@@ -263,6 +264,25 @@ mod tests {
         assert!(
             tree.iter()
                 .all(|entry| entry.relative_path != Path::new(".git"))
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn loads_file_tree_in_natural_numeric_order() {
+        // F-CORE-FILE-01: `file10.txt` must not render before `file2.txt`.
+        let root = temp_root();
+        for name in ["file10.txt", "file2.txt", "file1.txt", "a1b10", "a1b2"] {
+            fs::write(root.join(name), b"x").unwrap();
+        }
+
+        let tree = load_file_tree(&root).unwrap();
+        assert_eq!(
+            tree.iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a1b2", "a1b10", "file1.txt", "file2.txt", "file10.txt"]
         );
 
         let _ = fs::remove_dir_all(root);
