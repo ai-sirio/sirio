@@ -736,6 +736,50 @@ type SharedWebEvents = Rc<RefCell<Vec<WebEvent>>>;
 /// converge.
 type SharedScaleCorrection = Rc<Cell<Option<f64>>>;
 
+/// F-BRW: whether the native child window is currently mapped, mirrored on our
+/// side because wry exposes `set_visible` but no way to read it back.
+///
+/// The webview is a real X11 child window layered *above* GPUI's GL surface. It
+/// is not a GPUI element and takes no part in GPUI's paint, clip or z-order, so
+/// leaving [`NativeWebViewElement`] out of a frame's element tree does not hide
+/// it — it only means nobody moved it that frame. Before this existed,
+/// `set_visible` was called from exactly two places, both `Drop` impls, and
+/// never with `true`: an opened Browser tab therefore kept painting its last
+/// page over whatever occupied the same rectangle afterwards, for the life of
+/// the process. Reproduced four independent times by the F-BRW critic, which
+/// also found it hiding the origin URL on the Permissions screen (F-BRW-08).
+///
+/// It starts `true` because that is what wry leaves behind: `build_as_child`
+/// ends in `XMapWindow`, so the window is mapped before we ever touch it.
+/// Initialising this to `false` would make the first hide a no-op against a
+/// window that is, in fact, on screen — which is the original bug wearing a
+/// flag.
+type SharedNativeVisibility = Rc<Cell<bool>>;
+
+/// The state a freshly built webview is actually in. Named rather than written
+/// inline so the reason above has somewhere to be tested; see
+/// `the_visibility_mirror_starts_where_wry_leaves_the_window`.
+fn initial_native_visibility() -> SharedNativeVisibility {
+    Rc::new(Cell::new(true))
+}
+
+/// Map or unmap the native child, skipping the call when it already agrees.
+///
+/// The idempotence is load-bearing, not tidiness: `prepaint` runs every frame
+/// and asks for `true` every time, so an unconditional call would drive an
+/// X11 map request at frame rate.
+fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, want: bool) {
+    if flag.get() == want {
+        return;
+    }
+    if let Some(webview) = webview.borrow().as_ref() {
+        if webview.set_visible(want).is_err() {
+            return;
+        }
+    }
+    flag.set(want);
+}
+
 /// F-CTRL-BROWSER-06: shadows `console.log/warn/error/info/debug` with
 /// wrappers that append to `window.__tillerConsole` before calling through
 /// to the original method, so page output keeps working in devtools while
@@ -827,6 +871,8 @@ pub struct BrowserSurface {
     /// F-BRW-01: GTK/GDK-side geometry correction, calibrated once against
     /// real X11 window attributes; see [`SharedScaleCorrection`].
     webview_scale_correction: SharedScaleCorrection,
+    /// F-BRW: whether the native child is mapped; see [`SharedNativeVisibility`].
+    webview_visible: SharedNativeVisibility,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
     /// Load-bearing by existing, not by being read. A GPUI [`Task`] is
@@ -916,6 +962,7 @@ impl BrowserSurface {
             address_focused: false,
             webview,
             webview_scale_correction: Rc::new(Cell::new(None)),
+            webview_visible: initial_native_visibility(),
             web_events,
             events: Vec::new(),
             pump_task,
@@ -926,6 +973,26 @@ impl BrowserSurface {
     /// Borrows the testable state for host synchronization.
     pub fn state(&self) -> &BrowserState {
         &self.state
+    }
+
+    /// Map or unmap the native child window.
+    ///
+    /// The host has to call this because GPUI cannot: the webview is an X11
+    /// child window above GPUI's surface, so dropping the element from the
+    /// render tree hides nothing. Every surface that stops being shown — a tab
+    /// that is no longer the group's active one, any browser at all while
+    /// Settings covers the pane area — has to be told, or its last page keeps
+    /// painting over whatever takes that rectangle next.
+    ///
+    /// Safe to call every frame; it is a no-op when the state already agrees.
+    pub fn set_native_visible(&self, visible: bool) {
+        apply_native_visible(&self.webview, &self.webview_visible, visible);
+    }
+
+    /// Whether the native child is currently mapped. Exists for tests — wry
+    /// offers no read-back, so this reports our mirror of it.
+    pub fn native_visible(&self) -> bool {
+        self.webview_visible.get()
     }
 
     /// The error produced while constructing this surface (e.g. an invalid
@@ -1351,8 +1418,11 @@ impl Render for BrowserSurface {
         self.address_focused = self.address_focus.is_focused(window);
         let entity = cx.entity();
         let permission = self.state.permission_prompt().cloned();
-        let webview =
-            NativeWebViewElement::new(self.webview.clone(), self.webview_scale_correction.clone());
+        let webview = NativeWebViewElement::new(
+            self.webview.clone(),
+            self.webview_scale_correction.clone(),
+            self.webview_visible.clone(),
+        );
 
         div()
             .id("browser-surface")
@@ -1449,9 +1519,7 @@ impl Render for BrowserSurface {
 
 impl Drop for BrowserSurface {
     fn drop(&mut self) {
-        if let Some(webview) = self.webview.borrow().as_ref() {
-            let _ = webview.set_visible(false);
-        }
+        apply_native_visible(&self.webview, &self.webview_visible, false);
     }
 }
 
@@ -1732,13 +1800,19 @@ fn scale_rect(rect: &Rect, factor: f64) -> Rect {
 struct NativeWebViewElement {
     webview: SharedWebView,
     scale_correction: SharedScaleCorrection,
+    visible: SharedNativeVisibility,
 }
 
 impl NativeWebViewElement {
-    fn new(webview: SharedWebView, scale_correction: SharedScaleCorrection) -> Self {
+    fn new(
+        webview: SharedWebView,
+        scale_correction: SharedScaleCorrection,
+        visible: SharedNativeVisibility,
+    ) -> Self {
         Self {
             webview,
             scale_correction,
+            visible,
         }
     }
 }
@@ -1785,6 +1859,13 @@ impl Element for NativeWebViewElement {
         _window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
+        // Reaching prepaint *is* the signal that this surface is on screen:
+        // the element only enters the tree for the group's active tab, and the
+        // Settings branch returns before building the pane tree at all. The
+        // host is responsible for the matching hide — see
+        // [`BrowserSurface::set_native_visible`].
+        apply_native_visible(&self.webview, &self.visible, true);
+
         if let Some(webview) = self.webview.borrow().as_ref() {
             // F-BRW-01: `bounds` arrives in GPUI's internal layout units,
             // which are `1/window.scale_factor()` smaller than physical
@@ -1850,6 +1931,47 @@ impl Element for NativeWebViewElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The mirror has to start where wry leaves the window, and wry leaves it
+    /// mapped: `build_as_child` ends in `XMapWindow`.
+    ///
+    /// This is the whole bug in one value. Start the mirror at `false` and the
+    /// first `set_native_visible(false)` sees "already hidden" and returns
+    /// without calling wry — against a window that is, in fact, on screen. The
+    /// browser then keeps painting over Settings and Chat exactly as it did
+    /// before any of this existed, and every test below still passes, because
+    /// they only ever observe the mirror.
+    ///
+    /// So this test is not about the constant. It is the place the reason is
+    /// written down.
+    #[test]
+    fn the_visibility_mirror_starts_where_wry_leaves_the_window() {
+        assert!(
+            initial_native_visibility().get(),
+            "wry maps the child window on creation, so our mirror must start mapped"
+        );
+    }
+
+    #[test]
+    fn hiding_and_showing_only_call_through_on_a_real_change() {
+        // No webview: this exercises the flag arithmetic, not the X11 window.
+        // The mirror is the part that decides whether wry is called at all, and
+        // it is the part that can be wrong without anything failing to compile.
+        let webview: SharedWebView = Rc::new(RefCell::new(None));
+        let flag = initial_native_visibility();
+
+        apply_native_visible(&webview, &flag, true);
+        assert!(flag.get(), "showing an already-shown child leaves it shown");
+
+        apply_native_visible(&webview, &flag, false);
+        assert!(!flag.get(), "hiding a shown child hides it");
+
+        apply_native_visible(&webview, &flag, false);
+        assert!(!flag.get(), "hiding twice is idempotent");
+
+        apply_native_visible(&webview, &flag, true);
+        assert!(flag.get(), "a hidden child can be shown again");
+    }
 
     #[test]
     fn address_submission_normalizes_http_and_reports_invalid_input() {

@@ -6916,6 +6916,50 @@ impl TillerWorkspace {
         (surface_id, browser)
     }
 
+    /// F-BRW: unmap every browser surface that is not on screen this frame.
+    ///
+    /// GPUI cannot do this for us. The webview is a real X11 child window
+    /// layered *above* GPUI's GL surface, taking no part in GPUI's paint, clip
+    /// or z-order — so a browser left out of the element tree stays mapped and
+    /// keeps painting its last page over whatever occupies that rectangle
+    /// next. The critic reproduced it four independent times: after any Browser
+    /// tab was used, Settings and Chat rendered underneath the leftover page
+    /// for the rest of the process, and it hid the origin URL on the
+    /// Permissions screen (F-BRW-08).
+    ///
+    /// The matching "show" is in `NativeWebViewElement::prepaint`, which runs
+    /// only for a surface that really is in the tree. Two things take a browser
+    /// off screen and neither reaches the pane tree: a tab that stops being its
+    /// group's active tab, and Settings, whose branch in `render` returns
+    /// before `render_group_surfaces` is ever called — hence the parameter
+    /// rather than a second call site.
+    ///
+    /// Hiding only what is off screen, instead of hiding everything and letting
+    /// prepaint re-show the active one, is deliberate: the latter would toggle
+    /// the visible browser off and on again every frame, i.e. an X11 map
+    /// request at frame rate.
+    fn hide_offscreen_browsers(&self, settings_covering: bool, cx: &App) {
+        let on_screen: Vec<usize> = if settings_covering {
+            Vec::new()
+        } else {
+            self.tab_machinery
+                .groups()
+                .iter()
+                .filter_map(|group| group.active_tab)
+                .collect()
+        };
+        for tab in &self.tabs {
+            if on_screen.contains(&tab.id) {
+                continue;
+            }
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Browser(surface) = content {
+                    surface.read(cx).set_native_visible(false);
+                }
+            });
+        }
+    }
+
     fn browser_surface(&self) -> Option<Entity<BrowserSurface>> {
         let mut browser = None;
         for tab in &self.tabs {
@@ -10713,6 +10757,7 @@ impl Render for TillerWorkspace {
         self.drain_browser_events(cx);
         self.sync_activity(cx);
         self.sync_empty_pane_prompts(cx);
+        self.hide_offscreen_browsers(self.show_settings, cx);
 
         if self.show_settings {
             return div()
