@@ -90,6 +90,21 @@ pub enum GitError {
         /// The budget that was exceeded.
         timeout: std::time::Duration,
     },
+    /// The command produced more output than the runner retains, so the
+    /// captured bytes are only a prefix of what git wrote.
+    ///
+    /// The buffered path raises this rather than returning the prefix, because
+    /// every one of its callers parses the output as a complete document — a
+    /// truncated `status --porcelain` or `worktree list` would be read as a
+    /// short but valid listing, and the caller would act on a silently wrong
+    /// picture of the repository. The streaming runner takes the opposite
+    /// choice for the opposite reason: see `GitCommandResult::truncated`.
+    OutputTruncated {
+        /// The command whose output overflowed, args joined for diagnostics.
+        command: String,
+        /// The per-stream byte cap that was hit.
+        limit: usize,
+    },
     /// The caller cancelled the invocation via a
     /// [`crate::GitCancellationToken`] while it was still running, and the
     /// process (and its whole process group) was killed. Distinct from
@@ -133,6 +148,13 @@ impl fmt::Display for GitError {
                 write!(
                     f,
                     "git {command} did not finish within {timeout:?} and was killed"
+                )
+            }
+            GitError::OutputTruncated { command, limit } => {
+                write!(
+                    f,
+                    "git {command} produced more than {limit} bytes on one stream, \
+                     so its output was truncated and cannot be parsed"
                 )
             }
             GitError::Cancelled { command } => {

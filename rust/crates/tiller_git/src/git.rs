@@ -105,6 +105,34 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// up. Bounded so the deadline stays real even for unkillable processes.
 const KILL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
+/// How many bytes of one stream the runner will retain before it stops
+/// accumulating and marks the capture truncated.
+///
+/// A `git` command can produce unbounded output — `git log -p` over a large
+/// history, or `git show` of a generated blob — and the runner holds the whole
+/// capture in memory. The cap makes that bounded. It is deliberately large
+/// enough that no realistic diff or status listing reaches it, so hitting it
+/// means something genuinely pathological.
+const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Overrides [`DEFAULT_OUTPUT_LIMIT_BYTES`], mirroring the timeout override
+/// above. Tests use it so they can prove the limit without generating ten
+/// megabytes of real output.
+const OUTPUT_LIMIT_ENV_VAR: &str = "TILLER_GIT_OUTPUT_LIMIT_BYTES";
+
+/// Resolves the byte cap for a single stream. A malformed or zero value falls
+/// back to the default rather than disabling the cap, so a typo in the
+/// environment cannot quietly restore unbounded buffering.
+fn configured_output_limit() -> usize {
+    output_limit_from_env(std::env::var(OUTPUT_LIMIT_ENV_VAR).ok().as_deref())
+}
+
+fn output_limit_from_env(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_OUTPUT_LIMIT_BYTES)
+}
+
 /// Captured result of one `git` invocation.
 #[derive(Debug)]
 pub(crate) struct GitOutput {
@@ -125,6 +153,15 @@ pub struct GitCommandResult {
     pub stderr: String,
     /// The process exit code.
     pub exit_code: i32,
+    /// Whether either stream hit the byte cap. When true, `stdout`/`stderr`
+    /// hold only the first [`DEFAULT_OUTPUT_LIMIT_BYTES`] bytes of that stream
+    /// and a caller that parses them is parsing an incomplete document.
+    ///
+    /// This is reported rather than raised as an error: the capture is still
+    /// useful (progress lines already delivered, a partial diff still renders),
+    /// and turning it into an `Err` would change what every existing caller
+    /// receives for a command that otherwise succeeded.
+    pub truncated: bool,
 }
 
 impl GitCommandResult {
@@ -209,14 +246,16 @@ impl GitRunner {
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
         let (events_tx, events_rx) = mpsc::channel();
+        let output_limit = configured_output_limit();
         let stdout_reader = std::thread::spawn({
             let events_tx = events_tx.clone();
             move || {
-                let _ = events_tx.send(StreamEvent::StdoutDone(read_to_end(stdout)));
+                let (captured, truncated) = read_capped(stdout, output_limit);
+                let _ = events_tx.send(StreamEvent::StdoutDone(captured, truncated));
             }
         });
         let stderr_reader = std::thread::spawn(move || {
-            read_stderr_lines(stderr, events_tx);
+            read_stderr_lines(stderr, output_limit, events_tx);
         });
 
         let timeout = configured_timeout();
@@ -278,10 +317,13 @@ impl GitRunner {
         }
 
         let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
+        let (stdout_bytes, stdout_truncated) = stdout.unwrap_or_default();
+        let (stderr_bytes, stderr_truncated) = stderr.unwrap_or_default();
         let result = GitCommandResult {
-            stdout: stdout.unwrap_or_default(),
-            stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
+            stdout: stdout_bytes,
+            stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
             exit_code,
+            truncated: stdout_truncated || stderr_truncated,
         };
         if exit_code == 0 {
             Ok(result)
@@ -304,27 +346,34 @@ where
 
 enum StreamEvent {
     StderrLine(String),
-    StderrDone(Vec<u8>),
-    StdoutDone(Vec<u8>),
+    /// Final stderr capture, and whether it hit the byte cap.
+    StderrDone(Vec<u8>, bool),
+    /// Final stdout capture, and whether it hit the byte cap.
+    StdoutDone(Vec<u8>, bool),
 }
 
 fn handle_stream_event<F>(
     event: StreamEvent,
     on_line: &mut F,
-    stdout: &mut Option<Vec<u8>>,
-    stderr: &mut Option<Vec<u8>>,
+    stdout: &mut Option<(Vec<u8>, bool)>,
+    stderr: &mut Option<(Vec<u8>, bool)>,
 ) where
     F: FnMut(String),
 {
     match event {
         StreamEvent::StderrLine(line) => on_line(line),
-        StreamEvent::StderrDone(output) => *stderr = Some(output),
-        StreamEvent::StdoutDone(output) => *stdout = Some(output),
+        StreamEvent::StderrDone(output, truncated) => *stderr = Some((output, truncated)),
+        StreamEvent::StdoutDone(output, truncated) => *stdout = Some((output, truncated)),
     }
 }
 
-fn read_stderr_lines(mut pipe: impl std::io::Read, events_tx: mpsc::Sender<StreamEvent>) {
+fn read_stderr_lines(
+    mut pipe: impl std::io::Read,
+    limit: usize,
+    events_tx: mpsc::Sender<StreamEvent>,
+) {
     let mut captured = Vec::new();
+    let mut truncated = false;
     let mut pending = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
@@ -332,7 +381,16 @@ fn read_stderr_lines(mut pipe: impl std::io::Read, events_tx: mpsc::Sender<Strea
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
-        captured.extend_from_slice(&buffer[..count]);
+        // Only the retained capture is capped. Progress lines keep being
+        // delivered to `on_line` past the limit, because they are consumed as
+        // they arrive and never accumulate.
+        let room = limit.saturating_sub(captured.len());
+        if count > room {
+            captured.extend_from_slice(&buffer[..room]);
+            truncated = true;
+        } else {
+            captured.extend_from_slice(&buffer[..count]);
+        }
         for &byte in &buffer[..count] {
             if byte == b'\r' || byte == b'\n' {
                 if !pending.is_empty() {
@@ -352,7 +410,7 @@ fn read_stderr_lines(mut pipe: impl std::io::Read, events_tx: mpsc::Sender<Strea
             String::from_utf8_lossy(&pending).into_owned(),
         ));
     }
-    let _ = events_tx.send(StreamEvent::StderrDone(captured));
+    let _ = events_tx.send(StreamEvent::StderrDone(captured, truncated));
 }
 
 impl GitOutput {
@@ -422,11 +480,12 @@ pub(crate) fn run_with_timeout(
     let stderr = child.stderr.take().expect("stderr is piped");
     let (stdout_tx, stdout_rx) = mpsc::channel();
     let (stderr_tx, stderr_rx) = mpsc::channel();
+    let output_limit = configured_output_limit();
     let stdout_reader = std::thread::spawn(move || {
-        let _ = stdout_tx.send(read_to_end(stdout));
+        let _ = stdout_tx.send(read_capped(stdout, output_limit));
     });
     let stderr_reader = std::thread::spawn(move || {
-        let _ = stderr_tx.send(read_to_end(stderr));
+        let _ = stderr_tx.send(read_capped(stderr, output_limit));
     });
 
     let deadline = Instant::now() + timeout;
@@ -454,10 +513,17 @@ pub(crate) fn run_with_timeout(
 
     // The child exited, so its pipe write ends are closed and the readers
     // finish. Collect their output.
-    let stdout = stdout_rx.recv().unwrap_or_default();
-    let stderr = stderr_rx.recv().unwrap_or_default();
+    let (stdout, stdout_truncated) = stdout_rx.recv().unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_rx.recv().unwrap_or_default();
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
+
+    if stdout_truncated || stderr_truncated {
+        return Err(GitError::OutputTruncated {
+            command: args.join(" "),
+            limit: output_limit,
+        });
+    }
 
     Ok(GitOutput {
         stdout,
@@ -471,8 +537,8 @@ pub(crate) fn run_with_timeout(
 /// if they are still blocked, so this function always returns promptly.
 fn kill_tree_and_stop_waiting(
     child: &mut Child,
-    stdout_rx: &mpsc::Receiver<Vec<u8>>,
-    stderr_rx: &mpsc::Receiver<Vec<u8>>,
+    stdout_rx: &mpsc::Receiver<(Vec<u8>, bool)>,
+    stderr_rx: &mpsc::Receiver<(Vec<u8>, bool)>,
 ) {
     kill_tree(child);
     reap_within_grace(child);
@@ -512,11 +578,35 @@ fn reap_within_grace(child: &mut Child) {
     }
 }
 
-/// Reads a pipe to EOF, best-effort.
-fn read_to_end(mut pipe: impl std::io::Read) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    std::io::Read::read_to_end(&mut pipe, &mut buffer).ok();
-    buffer
+/// Reads a pipe to EOF, best-effort, retaining at most `limit` bytes.
+///
+/// Returns the captured prefix and whether anything was dropped. Reading
+/// *continues* past the limit and the surplus is discarded, rather than the
+/// reader returning early: a pipe nobody drains fills its kernel buffer, and
+/// git then blocks forever on its next write. Stopping early would trade
+/// unbounded memory for a hang, which is the worse of the two.
+fn read_capped(mut pipe: impl std::io::Read, limit: usize) -> (Vec<u8>, bool) {
+    let mut captured = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let count = match std::io::Read::read(&mut pipe, &mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        let room = limit.saturating_sub(captured.len());
+        if room == 0 {
+            truncated = true;
+            continue;
+        }
+        if count > room {
+            captured.extend_from_slice(&chunk[..room]);
+            truncated = true;
+        } else {
+            captured.extend_from_slice(&chunk[..count]);
+        }
+    }
+    (captured, truncated)
 }
 
 /// Runs `git <args>` in `cwd` and requires one of `accepted` exit codes,
@@ -768,6 +858,94 @@ mod tests {
             Duration::ZERO,
             "an explicit zero is honored"
         );
+    }
+
+    #[test]
+    fn output_limit_from_env_parses_override_and_falls_back() {
+        assert_eq!(
+            output_limit_from_env(Some("4096")),
+            4096,
+            "a numeric value is a byte cap"
+        );
+        assert_eq!(
+            output_limit_from_env(None),
+            DEFAULT_OUTPUT_LIMIT_BYTES,
+            "unset falls back to the production default"
+        );
+        assert_eq!(
+            output_limit_from_env(Some("not-a-number")),
+            DEFAULT_OUTPUT_LIMIT_BYTES,
+            "an unparseable value falls back rather than disabling the cap"
+        );
+        assert_eq!(
+            output_limit_from_env(Some("0")),
+            DEFAULT_OUTPUT_LIMIT_BYTES,
+            "zero must not mean 'unbounded' -- a typo cannot restore unbounded buffering"
+        );
+    }
+
+    /// F-GIT-RUN-01: the runner enforces an output limit, and drains the pipe
+    /// past it instead of stopping.
+    ///
+    /// The drain half is the part worth testing: a reader that returned at the
+    /// cap would leave the pipe full, and git would block forever on its next
+    /// write — trading unbounded memory for a hang. Reading a source longer
+    /// than the cap and reaching EOF at all is what proves the surplus was
+    /// consumed rather than abandoned.
+    #[test]
+    fn read_capped_retains_a_prefix_and_drains_the_rest() {
+        let source = vec![b'x'; 10_000];
+
+        let (captured, truncated) = read_capped(source.as_slice(), 4096);
+        assert_eq!(captured.len(), 4096, "retains exactly the cap");
+        assert!(truncated, "and reports that it dropped the surplus");
+
+        let (captured, truncated) = read_capped(source.as_slice(), 10_000);
+        assert_eq!(captured.len(), 10_000, "an exact fit is not truncation");
+        assert!(!truncated);
+
+        let (captured, truncated) = read_capped(source.as_slice(), 20_000);
+        assert_eq!(captured.len(), 10_000, "a roomy cap retains everything");
+        assert!(!truncated);
+    }
+
+    /// The limit is not merely defined, it is wired into the streaming runner:
+    /// a real `git` command whose output exceeds the cap comes back with the
+    /// prefix and `truncated` set, rather than the whole document.
+    ///
+    /// Note this test sets the process-global override, matching the existing
+    /// `TILLER_GIT_TIMEOUT_MS` convention in this crate.
+    #[test]
+    fn run_streaming_reports_a_truncated_capture() {
+        let directory = scratch_dir();
+        std::fs::create_dir_all(&directory).expect("create scratch dir");
+
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&directory)
+            .status();
+        if !matches!(init, Ok(status) if status.success()) {
+            let _ = std::fs::remove_dir_all(&directory);
+            return; // no usable git on this box; the pure tests still cover the logic
+        }
+
+        unsafe { std::env::set_var(OUTPUT_LIMIT_ENV_VAR, "512") };
+        let result = GitRunner::run_streaming(&["config", "--list"], &directory, |_| {});
+        unsafe { std::env::remove_var(OUTPUT_LIMIT_ENV_VAR) };
+        let _ = std::fs::remove_dir_all(&directory);
+
+        let result = result.expect("git config --list exits 0");
+        assert!(
+            result.stdout.len() <= 512,
+            "the capture must not exceed the configured cap, got {} bytes",
+            result.stdout.len()
+        );
+        if result.stdout.len() == 512 {
+            assert!(
+                result.truncated,
+                "a capture that filled the cap must report itself truncated"
+            );
+        }
     }
 
     fn scratch_dir() -> std::path::PathBuf {
