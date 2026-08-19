@@ -249,3 +249,33 @@ test view_tests::system_shell_falls_back_to_bin_zsh_when_shell_is_unset ... ok
 Confirmed the test is genuinely landed in the current tree (not merely described in a doc) and
 passes for real, right now, on this host. Promoted to PASSED — the ledger's `half-proven` is stale
 and should be brought up to date to match `FINISH-sweep-tail.md`.
+
+## F-TERM-UI-02 — Logo/Super-click terminal URLs route through the clicked pane
+
+**Promoted: PASSED.** The VERIFY clause is explicit: "Cmd-click URLs in **two panes** and confirm
+each opens through the clicked pane's router." The ledger's existing evidence covered exactly one
+pane; the missing half was the second, discriminating pane.
+
+Printed a distinct, unique URL into two independent Terminal tabs in the `wf-sweep2-fixture`
+worktree — `https://example.com/PANE-ONE-UI02` in tab 1, `https://example.org/PANE-FOUR-DIFFERENT`
+in tab 4 — so each pane's URL is unmistakably its own, not shared boilerplate. Modifier-clicked
+(held `Logo` via `wtype -M logo -s 600 -m logo` backgrounded, clicked partway through its hold
+window, matching this platform's confirmed modifier per `event.modifiers.platform`) the URL text
+in each pane in turn:
+
+- Modclick in tab 1 on `https://example.com/PANE-ONE-UI02` opened a new **Browser** tab whose
+  address bar reads exactly that URL —
+  `reference/linux-progress/wf-sweep2/f-term-ui-02-pane1-modclick-opens-pane1-url.png`.
+- Modclick in tab 4 on `https://example.org/PANE-FOUR-DIFFERENT` opened a **second, independent**
+  Browser tab whose address bar reads exactly *that* URL —
+  `reference/linux-progress/wf-sweep2/f-term-ui-02-pane4-modclick-opens-pane4-url.png` (the
+  printed-URL setup shot is
+  `reference/linux-progress/wf-sweep2/f-term-ui-02-pane4-distinct-url-printed.png`) — while the
+  first Browser tab from pane 1's click is still present, unchanged, in the tab strip.
+
+Two panes, two distinct URLs, two correctly-routed Browser tabs with no cross-contamination
+(neither tab shows the other's URL) — the exact two-pane discrimination the clause asks for.
+Promoted to PASSED. (The red in-page banner both Browser tabs show —
+`Direct XCB build failed: the window handle kind is not supported` — is this nested compositor's
+own inability to embed a webview surface, unrelated to URL routing, which is what this row's clause
+actually covers.)
