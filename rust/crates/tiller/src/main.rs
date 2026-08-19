@@ -6345,9 +6345,13 @@ impl TillerWorkspace {
         };
 
         let mut terminals = Vec::new();
+        let mut browsers = Vec::new();
         self.tabs[index].panes.for_each(&mut |_, content| {
             if let Some(terminal) = content.terminal() {
                 terminals.push(terminal);
+            }
+            if let TabContent::Browser(surface) = content {
+                browsers.push(surface.clone());
             }
         });
         for terminal in terminals {
@@ -6355,6 +6359,15 @@ impl TillerWorkspace {
             // Interrupt first, then send EOF so the login shell exits and the
             // alacritty event loop observes child exit and reaps the PTY.
             terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+        }
+        for browser in browsers {
+            // F-BRW: same reason as the terminals above — `Drop` is not a close
+            // path. The webview is an X11 child window whose unmap and destroy
+            // are buffered on GDK's connection and flushed only by the
+            // surface's own GTK pump, which is exactly what closing the tab
+            // takes away. `hide_offscreen_browsers` cannot cover this either:
+            // it walks `self.tabs`, and a closed tab is no longer in it.
+            browser.update(cx, |surface, _| surface.close_native());
         }
         self.tabs.remove(index);
         if self.tab_menu_tab == Some(tab_id) {
@@ -7961,6 +7974,12 @@ impl TillerWorkspace {
                 .push(PaneEvent::Close { id: focused_pane });
             if let Some(terminal) = removed.terminal() {
                 terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+            }
+            if let TabContent::Browser(surface) = &removed {
+                // F-BRW: a browser leaf closed out of a split leaves the tab
+                // alive, so nothing else ever gets to it — see the same call
+                // in `close_tab` for why `Drop` does not suffice.
+                surface.update(cx, |surface, _| surface.close_native());
             }
             let replacement = tab.panes.first_id().unwrap_or(focused_pane);
             tab.focused_pane = replacement;

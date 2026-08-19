@@ -262,6 +262,14 @@ run_root_stage "test-wayland-drive-reap.sh" env PYTHONDONTWRITEBYTECODE=1 \
 run_root_stage "test-virtual-pointer-outlives-compositor.sh" env PYTHONDONTWRITEBYTECODE=1 \
     bash Scripts/Tests/test-virtual-pointer-outlives-compositor.sh
 
+# F-BRW: the premise the browser tab-close fix rests on — that wry's unmap sits
+# in Xlib's output buffer until something flushes it. No Rust assertion can see
+# this; the request is made either way and the difference is only in what the X
+# server was told. Boots its own Xvfb (never the operator's display) and skips
+# itself where gcc, Xvfb or the gtk3 headers are absent. ~1s where it runs.
+run_root_stage "test-x11-unmap-needs-a-flush.sh" env PYTHONDONTWRITEBYTECODE=1 \
+    bash Scripts/Tests/test-x11-unmap-needs-a-flush.sh
+
 # --- Cross-platform compile gates (macOS, Windows) ---
 #
 # The user now requires macOS/Windows compatibility (docs/linux-rewrite/PORTABILITY.md). GPUI,
