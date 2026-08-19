@@ -324,6 +324,22 @@ impl<T> PaneNode<T> {
         placement: SplitPlacement,
         content: T,
     ) -> bool {
+        // F-CORE-WSP-06: a live caller always mints `new_id` from a
+        // monotonic counter (`self.next_pane_id`), so this can never fire
+        // for a real split -- it exists for the one caller that does *not*
+        // control `new_id`: `replay_pane_events`, replaying a persisted
+        // `pane_events` blob. `SessionTabState::decode` only rejects
+        // syntactically invalid JSON; a blob where two `Split` events name
+        // the same `new_id` decodes cleanly and would otherwise land two
+        // leaves under one id -- the same leaf id then answers to two
+        // different live `TabContent`s for every id-keyed lookup
+        // (`contains`, activity's `pane-{id}` status, focus). Refusing the
+        // split here is the same graceful-degradation shape the `focused`
+        // check below already uses for a dangling reference: the malformed
+        // event is dropped, not applied.
+        if self.contains(new_id) {
+            return false;
+        }
         let mut content = Some(content);
         self.split_focused_inner(focused, new_id, direction, placement, &mut content)
     }

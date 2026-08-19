@@ -16054,6 +16054,55 @@ mod tests {
         assert!(tree.contains(2));
     }
 
+    /// F-CORE-WSP-06: `SessionTabState::decode` only rejects a `pane_events`
+    /// blob that isn't valid JSON. A blob where two `Split` events assign
+    /// the *same* `new_id` is perfectly valid JSON — `new_id` is just a
+    /// `usize`, deserialized with no uniqueness constraint — so it sails
+    /// through `decode` and reaches `replay_pane_events` unflagged. This is
+    /// exactly the "duplicate split/tab/content ID" scenario the dead
+    /// `WorkspaceLayout::validate` model was designed to catch; the port's
+    /// real persistence path had no equivalent guard until this test forced
+    /// one. A live split can never produce this (`new_id` always comes from
+    /// `self.next_pane_id`, a counter that only increases), so this can only
+    /// be reached by a corrupted or hand-edited `tab_state.state` row —
+    /// exactly the attack surface `F-PERSIST-DB-07` already used to corrupt
+    /// `pane_events` at the JSON-syntax level; this is the same surface at
+    /// the semantic level, one layer deeper.
+    #[test]
+    fn pane_event_history_ignores_a_split_whose_new_id_collides_with_an_existing_pane() {
+        let events = vec![
+            PaneEvent::Split {
+                focused: 0,
+                new_id: 1,
+                direction: "horizontal".into(),
+            },
+            // Malformed: reuses id 1, which the first Split already
+            // assigned to a still-live leaf elsewhere in the tree.
+            PaneEvent::Split {
+                focused: 0,
+                new_id: 1,
+                direction: "vertical".into(),
+            },
+        ];
+
+        let tree = replay_pane_events(0, "root", &events, |id| match id {
+            1 => "right",
+            _ => "unexpected",
+        });
+
+        assert_eq!(
+            tree.leaf_ids().len(),
+            2,
+            "a colliding new_id must be refused, not produce a third leaf sharing id 1: got {:?}",
+            tree.leaf_ids()
+        );
+        assert_eq!(
+            tree.leaf_ids(),
+            vec![0, 1],
+            "the malformed second Split must leave the tree exactly as the first one built it"
+        );
+    }
+
     #[test]
     fn agent_tab_created_from_id_keeps_the_catalog_brand_icon() {
         let expected = [
