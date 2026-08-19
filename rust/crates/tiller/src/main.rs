@@ -8912,12 +8912,17 @@ impl TillerWorkspace {
             .map(|candidate| candidate.id)
             .collect::<Vec<_>>();
         items.push(TabContextItem::separator());
-        items.push(TabContextItem::disabled(
-            "Move to This Pane",
-            "move-to-current-pane",
-            TabContextAction::MoveToCurrentPane,
-            "no other tab is available",
-        ));
+        // F-TAB-12: there used to be an unconditionally-`disabled(...)`
+        // "Move to This Pane" entry here. It could never become enabled --
+        // this menu only ever opens on a tab already belonging to
+        // `machinery.active_group()` (the tab strip renders exclusively
+        // that group's tabs; see `render_open_tabs`), so `group.id` here is
+        // always the active group already. Its only plausible Swift
+        // equivalent (`SplitContentMenu.swift`'s "This Pane" bucket) picks
+        // a sibling tab and gives it a brand-new adjacent split -- exactly
+        // what "Move to New Pane" below already does for any tab,
+        // regardless of its current group. So there is no capability left
+        // to restore: the real one already lives under "Move to New Pane".
         if other_groups.is_empty() {
             items.push(TabContextItem::enabled(
                 "Move to New Pane",
@@ -9043,9 +9048,6 @@ impl TillerWorkspace {
             }
             TabContextAction::MoveLater => {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
-            }
-            TabContextAction::MoveToCurrentPane => {
-                self.move_selected_tab(MoveTarget::CurrentPane, cx)
             }
             TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
                 self.move_selected_tab(MoveTarget::Group(group_id), cx)
@@ -12363,6 +12365,57 @@ mod tests {
             Some("https://example.test/from-terminal"),
             "a terminal link click must queue OpenBrowserLink (the same in-app \
              Browser tab route bind_chat's ChatEvent::OpenLink uses)"
+        );
+    }
+
+    /// F-TAB-12: `tab_context_items()` used to build a "Move to This Pane"
+    /// entry as `TabContextItem::disabled(..., "no other tab is available")`
+    /// *unconditionally* -- no branch anywhere could ever enable it. That
+    /// was not a missing condition to add: the tab context menu only ever
+    /// opens on a tab that already belongs to `active_group` (`render_open_tabs`
+    /// filters the visible tab strip to `tab.group_id == active_group`, and
+    /// every other path that sets `tab_menu_tab` -- the right-click handler,
+    /// the keyboard `OpenTabMenu` handler -- draws from the same active
+    /// group), so "move it to this (its own) pane" never had a distinct
+    /// destination to move to. The Swift original's actual "This Pane"
+    /// capability (`SplitContentMenu.swift`'s "This Pane" bucket, wired
+    /// through `WorkspaceCoordinator.requestSplit` with `.moveExistingTab`)
+    /// always creates a brand-new adjacent split for the chosen tab -- which
+    /// is exactly what "Move to New Pane" already does here for any
+    /// right-clicked tab, regardless of which group it started in. So the
+    /// real capability was never missing, just mislabeled as a second,
+    /// permanently-dead item. This pins the fix at the level the item was
+    /// built: with a second, pre-existing pane group in play, nothing sits
+    /// between the preceding separator and the live "Move to Pane 1" entry.
+    #[gpui::test]
+    fn tab_context_menu_never_offers_a_this_pane_move(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            // Tab 1 already lives in a second, pre-existing pane group; tab
+            // 0 (the one being right-clicked below) stays in the active
+            // group 0, matching how the menu is always actually opened.
+            workspace.tabs[1].group_id = 1;
+            workspace.rebuild_tab_machinery();
+            workspace.tab_menu_tab = Some(0);
+            workspace
+        });
+
+        let items = workspace.read_with(cx, |workspace, _| workspace.tab_context_items());
+
+        let move_to_pane_1 = TabContextItem::enabled(
+            "Move to Pane 1",
+            "move-to-pane-1",
+            TabContextAction::MoveToPane(1),
+        );
+        let index = items
+            .iter()
+            .position(|item| *item == move_to_pane_1)
+            .expect("the only other pane group must be offered as a live destination");
+        assert!(
+            index > 0 && items[index - 1] == TabContextItem::separator(),
+            "\"Move to Pane 1\" must sit directly after its separator -- \
+             nothing (in particular no disabled \"Move to This Pane\" \
+             placeholder) may sit between them"
         );
     }
 
