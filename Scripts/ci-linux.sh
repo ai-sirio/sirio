@@ -249,6 +249,19 @@ run_root_stage "test-crash-freeze-supervise.py" env PYTHONDONTWRITEBYTECODE=1 \
 run_root_stage "test-visual-sweep.sh" env PYTHONDONTWRITEBYTECODE=1 \
     bash Scripts/Tests/test-visual-sweep.sh
 
+# The critics' own instrument. Both of these guard leaks that have already cost
+# this machine real resources — 184 orphaned virtual-pointers at once, and before
+# that a disk filled to within hours of full — and both failures are invisible
+# from inside a critic run: the harness keeps working perfectly while the debris
+# accumulates behind it, so nothing short of a gate catches a regression.
+run_root_stage "test-wayland-drive-reap.sh" env PYTHONDONTWRITEBYTECODE=1 \
+    bash Scripts/Tests/test-wayland-drive-reap.sh
+# Skips itself with exit 0 where sway, gcc or wayland-scanner are absent, so it is
+# safe on a machine that cannot host a nested compositor. Takes ~10s where it can:
+# it really does start one, drive it, and kill it.
+run_root_stage "test-virtual-pointer-outlives-compositor.sh" env PYTHONDONTWRITEBYTECODE=1 \
+    bash Scripts/Tests/test-virtual-pointer-outlives-compositor.sh
+
 # --- Cross-platform compile gates (macOS, Windows) ---
 #
 # The user now requires macOS/Windows compatibility (docs/linux-rewrite/PORTABILITY.md). GPUI,
