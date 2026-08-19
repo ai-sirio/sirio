@@ -34,7 +34,35 @@ If that is what actually happens at runtime, a real window manager is drawing a 
 are drawing three more controls underneath it — two rows of window controls, which is a visible
 defect and precisely what the directive objects to.
 
-## The first task is a measurement, not a change
+## Measured, 2026-08-19: we do ask the window manager to decorate us
+
+Run live from a private Xvfb (booted with `-displayfd`, killed afterwards), against
+`/dev/shm/tt/debug/tiller`. The app's mapped window carries:
+
+```
+_MOTIF_WM_HINTS(_MOTIF_WM_HINTS) = 0x2, 0x0, 0x1, 0x0, 0x0
+```
+
+That is `[1 << 1, 0, 1, 0, 0]` verbatim — the `WindowDecorations::Server` arm of
+`x11/window.rs:1874`. Flags = `MWM_HINTS_DECORATIONS`, decorations = **1, enabled**.
+
+Two notes on reading this correctly. The app creates six X windows and only one is mapped; a probe
+that takes the last id finds an unmapped one where the property is genuinely absent, which is how
+the first attempt at this measurement produced a false negative. Match on `IsViewable` first. And
+the vendored `rust/vendor/gpui_linux` is byte-identical to upstream on this path — it is patched
+only for the `wl_data_device` `Drop` race (P133) — so there is no local override to suspect.
+
+**What this proves and what it does not.** It proves our side of the contract: we ask for
+server-side decorations, so `titlebar.rs`'s premise that "GPUI on X11 hands us a bare window" does
+not hold for the revision we pin. It does not prove what a window manager does with the hint,
+because no window manager is installed on this machine (`openbox`, `marco`, `xfwm4`, `mutter`,
+`i3`, `fluxbox`, `metacity`, `twm`, `icewm` are all absent) and the user's own `cosmic-comp` is off
+limits. Under Xvfb nothing decorates anything, so the visual half of the question is still open.
+
+Which means the likely case is now the strongly-favoured one: a real WM honours the hint and draws
+a titlebar, and we draw three more controls beneath it.
+
+## The remaining measurement, and then the change
 
 **Do not start by deleting the circles.** Establish what the window actually looks like under a
 real window manager first, because the answer decides whether this is a deletion or a redesign:
