@@ -115,3 +115,23 @@ second half (that agent's accent color changes anywhere it's shown) is now prove
 direct observation, not inferred from a comment. Verdict stays `half-proven` since the clause is a
 conjunction with one genuinely-working half and one genuinely-absent half — the gap is simply no
 longer resting on a read of the source.
+
+## F-TERM-03 — Running / exit-0 / exit-N / signal status on terminal output
+
+**Promoted: PASSED.** Running, exit-0, and exit-7 pills were already live-proven. The named
+missing half was the signal-9 case, which ~10 straight `wayland-drive.sh` attempts failed to
+reproduce, root-caused as GPU/compositor contention from concurrent sibling lanes rather than a
+Tiller defect. Also hit and fixed *this* pass: the resumed instance's virtual-keyboard device had
+silently expired (`swaymsg -t get_inputs` showed only the pointer, matching
+`WAYLAND-LANE.md`'s named failure mode exactly), so `type`/`key` were protocol-level no-ops for a
+few calls until a fresh long-lived `wtype -M shift -s 14400000 -k Shift_L` restored
+`wlr_virtual_keyboard_v1` — recorded here since it is precisely the trap the brief warned about
+and cost real time to diagnose.
+
+With the keyboard restored: opened a fresh Terminal tab, typed `exec sleep 100` (replacing the pty's
+own shell with `sleep` directly, so Tiller's `waitpid` on its immediate child is exercised, not a
+nested subprocess), confirmed it running, then sent `kill -9` to that exact PID from the host.
+Forced repaint shows the tab title flip to **`! signal 9`** and the status bar read **"Process
+terminated by signal 9"** verbatim —
+`reference/linux-progress/wf-sweep2/f-term-03-signal-9-terminated.png`. All four VERIFY states
+(running, exit 0, exit N, signal) now have live evidence; promoted to PASSED.
