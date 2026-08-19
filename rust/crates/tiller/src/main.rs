@@ -9951,7 +9951,39 @@ impl TillerWorkspace {
                     div()
                         .id("centre-surface")
                         .debug_selector(|| "centre-surface".into())
-                        .flex_1()
+                        .relative()
+                        // F-CHAT (chat surface renders empty): this used to be
+                        // `.flex_1()`, letting Taffy grow this node to fill the
+                        // remaining height of `centre-column` (`h_full` minus
+                        // the tab bar above). That resolves correctly for a
+                        // freshly-created chat tab (`add_chat_tab`), but for a
+                        // pane tree built by `restore_tabs` -- both at app
+                        // startup and via `select_worktree` -- the computed
+                        // height came out oversized (measured ~1656px against
+                        // a real window height in the ~970px range) and never
+                        // self-corrected on later frames. A chat pane's
+                        // transcript is a `flex_1` child of `chat-root`, so it
+                        // grew to fill that wrong height and pushed the
+                        // composer off the bottom of the actually-visible
+                        // area -- present, but invisible. Every other pane
+                        // kind sits under this same node but has no such
+                        // flex_1-vs-fixed-sibling split inside it, so an
+                        // oversized ambient height here never became visibly
+                        // wrong for them.
+                        //
+                        // `window.viewport_size()` is a plain field the
+                        // platform backend writes synchronously on its resize
+                        // callback (`Window::bounds_changed`) -- not a value
+                        // Taffy computes or caches -- so subtracting the two
+                        // fixed bars above and below `centre-column`, plus the
+                        // tab bar, gives the same number flex-grow *should*
+                        // have produced, without going through whatever in
+                        // the flex/percentage chain was producing a stale
+                        // result specifically after `restore_tabs`.
+                        .h(window.viewport_size().height
+                            - px(TITLE_BAR_HEIGHT)
+                            - px(STATUS_BAR_HEIGHT)
+                            - px(TAB_BAR_HEIGHT))
                         .w_full()
                         .overflow_hidden()
                         .child(centre_surface),
@@ -16267,6 +16299,72 @@ mod tests {
             cx.debug_bounds("pane-surface").map(|b| b.size),
             root.size,
             transcript.size
+        );
+    }
+
+    /// F-CHAT diagnostic (chat surface renders empty): the same geometry
+    /// invariant as the sibling test above, but for a chat tab built by
+    /// `restore_tabs` -- the constructor `select_worktree` and app-startup
+    /// both use -- instead of a direct `workspace.tabs[0] = OpenTab { .. }`
+    /// assignment. The two construction paths are not equivalent: a
+    /// restore-built chat tab's composer was found pushed off the bottom of
+    /// the pane (the transcript's `flex_1` grows to consume the whole
+    /// height), even though every field on the `Chat` entity itself is
+    /// identical to the working, directly-constructed case.
+    #[gpui::test]
+    async fn drawn_restored_chat_composer_stays_within_the_center_surface(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let restored = RestoredSession {
+                working_directory: workspace.working_directory.clone(),
+                tabs: vec![SessionTab {
+                    id: "test-restored-chat".into(),
+                    title: "Chat".into(),
+                    kind: "chat".into(),
+                    agent_id: None,
+                    active: true,
+                }],
+                tab_states: vec![SessionTabState::default()],
+                diagnostics: Vec::new(),
+            };
+            let mut activity_model = AgentActivityModel::new();
+            let (tabs, active) = restore_tabs(
+                &restored,
+                &workspace.working_directory.clone(),
+                Some(window),
+                &mut activity_model,
+                &BTreeMap::new(),
+                cx,
+            );
+            workspace.tabs = tabs;
+            workspace.active_tab = active;
+            workspace.activity = activity_model;
+            workspace.rebuild_tab_machinery();
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let centre = cx
+            .debug_bounds("centre-surface")
+            .expect("the centre surface wrapper is mounted");
+        let root = cx
+            .debug_bounds("chat-root")
+            .expect("the chat root is mounted");
+        let composer = cx
+            .debug_bounds("composer")
+            .expect("the composer is mounted");
+        let centre_bottom = centre.origin.y + centre.size.height;
+        let composer_bottom = composer.origin.y + composer.size.height;
+        assert!(
+            composer_bottom <= centre_bottom + px(1.0),
+            "the restored chat's composer must stay within the visible center surface, \
+             not be pushed off the bottom by an oversized transcript; \
+             centre-surface={:?} chat-root={:?} composer={:?}",
+            centre,
+            root.size,
+            composer,
         );
     }
 
