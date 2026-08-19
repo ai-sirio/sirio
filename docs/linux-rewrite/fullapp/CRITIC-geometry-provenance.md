@@ -232,26 +232,65 @@ not merely asserted.
 ## Build and render
 
 CARGO_TARGET_DIR was set to `/var/tmp/critic-geom-target`, unique to this pass, never
-`/dev/shm`. `cargo test -p tiller_theme -p tiller_ui --lib` and `cargo build -p tiller --bin
-tiller` were both queued from the actual `_solo1238094` worktree. The machine is shared with
-several other agents' concurrent builds (`ps aux` showed at least four other live `cargo`
-processes throughout this pass), and a from-scratch GPUI build compiles several hundred crates;
-this did not finish inside my working window. **I could not complete a live render check or a live
-test run before filing this report.** That is a real hole in this verification, not a finding
-about the remedy — recorded plainly rather than guessed at. Anyone re-running this only needs:
+`/dev/shm`. The build finished on a later pass than the one that first wrote this report (the
+machine was shared with several other agents' concurrent builds and a from-scratch GPUI build
+compiles several hundred crates), and once it did I drove the actual binary — the render check the
+first save-point of this report had flagged as incomplete.
+
+`cargo build -p tiller --bin tiller` from the real `_solo1238094` worktree produced
+`/var/tmp/critic-geom-target/debug/tiller` (294MB, unstripped, built at commit `3e940a02`,
+timestamp after HEAD's commit — confirmed current, not stale). Drove it with
+`Scripts/wayland-drive.sh`, which boots its own nested headless Sway/Wayland compositor (no
+`DISPLAY`, no shared `wayland-*` socket — a fresh one per invocation, killed with the drive):
+
+- **Cold boot** (`ctl` untouched): renders cleanly at 1715×972, 5000+ distinct colours, sidebar,
+  tab strip, and Files panel all in their expected positions. No black frame, no letterboxing, no
+  panic in `$APP_LOG`.
+- **`ctl project.add path=/tmp/critic-geom-fixture`** (a throwaway one-commit git repo I created
+  under `/tmp`, outside this repo and outside `_tiller-refs/`) then a real click on the resulting
+  worktree row: the sidebar project entry, the "master" worktree row, and the Files panel's tree
+  (`readme.md`) all render — the worktree-selection path that exercises the sidebar/file-tree
+  layout code actually runs, not just the "no worktree selected" placeholder frame the very first
+  boot shows.
+- **The tab-creation `+` picker** opens correctly positioned under the button and lists all five
+  real adapters (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) plus New Terminal/Changes/New
+  Browser/New Chat — confirming `AgentCatalog.all` reaches the Linux tab bar and the picker's own
+  layout (rows, icons, hover states) renders without corruption.
+
+**What I deliberately did not do: open a live chat tab with real transcript content.**
+`Chat::launch_with_command_and_persistence` (`tiller/src/main.rs`) spawns the real agent CLI
+process the instant a tab is created — before any prompt is typed or sent — so clicking "Claude
+Code" in that picker would have started a real `claude` subprocess under my own credentials on this
+machine, not a mock. That is outside what a geometry-provenance check needs and I judged the risk
+(an unbounded live agent turn, possible API cost, no clean way to guarantee zero side effects
+inside a 180-second budget) not worth it for a task that only needs to confirm a content-column
+*width*, not exercise a real conversation. `tiller_ui` has no golden-image/PNG test harness for the
+chat transcript specifically (checked: no snapshot infra beyond `cx.simulate_*` bounds assertions),
+so there was no safe way to get real rendered transcript prose on screen without either spawning a
+live agent or writing new test code — and my brief does not authorize modifying source. **This
+remains the one part of "BUILD IT AND LOOK AT IT" I did not complete: I looked at the chrome around
+the transcript (sidebar, tabs, file tree, the picker that creates a chat), not at a populated
+transcript's own wrapped text.** Reading `chat.rs`'s constant (§5) and its honest, hedged
+doc-comment is the closest substitute I have to actually watching the column wrap.
+
+Screenshots from this pass: `/var/tmp/critic-geom-shots/` (`02-dark-transcript.png` cold boot,
+`02-after-worktree-click.png` project loaded and selected, `02-claude-chat-launching.png` the
+open tab-creation picker). Anyone who wants to finish the transcript-content half of this check
+only needs:
 
 ```
 export CARGO_TARGET_DIR=/var/tmp/<unique>
-cd rust && cargo test -p tiller_theme -p tiller_ui --lib
-cargo build -p tiller --bin tiller
+cd rust && cargo build -p tiller --bin tiller
 TILLER_WL_BIN=$CARGO_TARGET_DIR/debug/tiller ../Scripts/wayland-drive.sh /tmp/shots '
-  shot dark-transcript
-  ctl surface.settings.open
-  ctl surface.settings.select section=appearance
-  shot appearance
-  shot light-transcript
+  ctl project.add path=/some/throwaway/git/repo
+  click <worktree-row-x> <worktree-row-y>
+  click <tab-plus-x> <tab-plus-y>
+  click <Claude-Code-menu-item-x-y>
+  shot chat-open
 '
 ```
+— accepting that this spawns a real agent process, which is the exact tradeoff this pass declined
+to make.
 
 ## Claims I tried to refute and could not
 
@@ -264,6 +303,11 @@ TILLER_WL_BIN=$CARGO_TARGET_DIR/debug/tiller ../Scripts/wayland-drive.sh /tmp/sh
   nothing stronger.
 - `chat.rs:45-46`'s named defect is fixed and fixed honestly.
 - No constant's value was quietly changed alongside its comment.
+- The remedy survives contact with the real renderer for everything I could safely drive: a real
+  project/worktree load, sidebar and file-tree layout, and the tab-creation picker all render
+  correctly from the built binary, with no crash, no black frame, and no layout corruption (see
+  Build and render). I did not get real transcript prose on screen — see that section for why —
+  so this is confirmation of the chrome around `TRANSCRIPT_WIDTH`'s use, not of the wrap itself.
 
 ## Claims I refuted
 
@@ -290,6 +334,13 @@ was opened to cure: a document sounding more certain than its own method earns.
 Second, smaller gap: the leftover "waku's measured scale" claims at `lib.rs:917`/`2115` and
 `conformance.rs`'s module header are the same defect this document exists to eliminate, missed by
 an incomplete grep, in files the remedy's own commit message claims were fully swept.
+
+Third, smallest: the live render check reached the chat surface's surrounding chrome (sidebar,
+file tree, the picker that creates a chat tab) but not a populated transcript, because reaching one
+safely required either spawning a real coding-agent subprocess under live credentials or writing
+new test code, and neither was in scope for confirming a column width (see Build and render). The
+comment fix at `chat.rs:45-46` is verified by reading; it is not verified by watching text actually
+wrap at 720px.
 
 ## Explicitly NOT findings
 
