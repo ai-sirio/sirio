@@ -91,16 +91,92 @@ Enter to the destructive action by reflex:
 
 ### Live drive
 
-Not yet performed at the time of this write-up — the box had another agent (`tt-chat-971757`)
-mid live-drive (3 running `debug/tiller` instances, load average 13-14) when this fix reached the
-verification stage, and per the environment rules a quiet box for someone else's decisive
-measurement takes priority over a non-essential parallel drive. This section will be updated (or
-a follow-up note added) once the live `wayland-drive.sh` keyboard-chord and mouse-path checks are
-run. The automated `ctrl-alt-w`-driven regression test above exercises the identical GPUI
-event-dispatch path a real chord takes (`cx.simulate_keystrokes`, not a direct method call),
-which is the same reason the codebase's other live-vs-test pairs (e.g. `CRITIC-modal.md`'s own
-F-TERM-05 section) treat that path as trustworthy evidence, but it is not a substitute for the
-task's explicit request to also drive the real chord end-to-end and check the mouse path.
+Performed once the box quieted down (load dropped from ~14-24 to ~5-8 after `tt-chat-971757`'s
+own drive finished). Built the fix's binary standalone (`CARGO_TARGET_DIR=/var/tmp/cargo-target-modalfocus-1981730
+cargo build -p tiller --bin tiller`, pinned to `/tmp/tiller-mf-1981730` per `wayland-drive.sh`'s
+own snapshot advice) and drove it under `Scripts/wayland-drive.sh` with a private label
+(`TILLER_WL_LABEL=mf1981730`), never touching `DISPLAY=:1`/`wayland-0`/`wayland-1`. Screenshots are
+committed at `docs/linux-rewrite/fullapp/builder-modal-focus-shots/`.
+
+The command (worktree/project selection landed, by chance, on this fix's own `linux-rewrite`
+worktree row in the auto-registered sidebar — harmless, since nothing beyond typed-but-unsent text
+touched it):
+
+```
+TILLER_WL_LABEL=mf1981730 TILLER_WL_BIN=/tmp/tiller-mf-1981730 TILLER_WL_KEEP=1 \
+  Scripts/wayland-drive.sh docs/linux-rewrite/fullapp/builder-modal-focus-shots '
+ctl project.add path=<scratch repo>
+click 168 183
+shot 00a-worktree-selected
+chord ctrl t
+shot 00-terminal-tab-created
+click 1200 500
+type PREAMBLE_1981730
+shot 01-preamble-typed-no-dialog
+chord ctrl+alt w
+shot 02-dialog-open-via-real-chord
+type LEAK_1981730
+shot 03-leak-attempt-while-dialog-open
+key Escape
+shot 04-after-escape-cancels
+type CANARY_1981730
+shot 05-canary-after-cancel-focus-restored
+chord ctrl+alt w
+shot 06-dialog-reopened-for-enter-test
+key Return
+shot 07-after-enter-cancels-not-closes
+chord ctrl+alt w
+shot 08-dialog-open-for-mouse-click-test
+' 8
+```
+
+Step by step, against `01-baseline.png` through `11-08-dialog-open-for-mouse-click-test.png`:
+
+1. **Typed into the terminal first, proving real focus** (`03-00-terminal-tab-created.png` →
+   `04-01-preamble-typed-no-dialog.png`): `PREAMBLE_1981730` lands at the bash prompt, unsent
+   (no Enter). This doubles as the **positive control** the task asked for — it proves this
+   detection method (typed text landing at a real, live PTY's prompt, read straight off the
+   screenshot) can see a keystroke arrive at all, before trusting any "didn't arrive" result below.
+2. **The real `ctrl-alt-w` chord** (`chord ctrl+alt w`, not a mouse click) opens the banner —
+   `05-02-dialog-open-via-real-chord.png`: "Close terminal? This tab's process will be terminated.
+   Close anyway?", Cancel / Close Anyway.
+3. **`LEAK_1981730` typed while the banner is open never reaches the PTY.** The comparison that
+   matters is the *final* state, not the frame immediately after Escape (see the timing note
+   below): `08-05-canary-after-cancel-focus-restored.png` and every later screenshot show the
+   prompt line as exactly `PREAMBLE_1981730CANARY_1981730` — `LEAK_1981730` is nowhere in it.
+4. **Escape cancels.** `07-04-after-escape-cancels.png` — captured too early to show the closed
+   banner (see below), but `08-05-...png`, captured after the canary's own `wtype` process-spawn
+   delay, unambiguously shows the banner gone and the tab alive.
+5. **Cancelling restores keyboard focus to the terminal.** `CANARY_1981730` (typed *after* Escape)
+   lands right after `PREAMBLE_1981730` on the same prompt line — the terminal is typeable again,
+   not stuck.
+6. **Enter cancels, not closes** (`09-06-dialog-reopened-for-enter-test.png` → reopened via
+   `ctrl-alt-w` again, then `key Return`): `10-07-after-enter-cancels-not-closes.png` shows the
+   banner gone and the same tab still open with the same prompt content — Enter did not trigger
+   "Close Anyway".
+7. **Mouse path still works.** Reopened the banner once more (`11-08-dialog-open-for-mouse-click-test.png`),
+   read the Cancel button's pixel position off that screenshot (~857,518), and sent one real click
+   through the same persistent virtual-pointer device `wayland-drive.sh`'s own `click` action uses
+   (written directly to its FIFO after the script's `TILLER_WL_KEEP=1` exit, since a second
+   `wayland-drive.sh` invocation would have killed and restarted the instance) —
+   `12-mouse-click-cancel-real-virtual-pointer.png` shows the banner closed by that click, cursor
+   sitting on the now-empty spot where Cancel was, tab still alive.
+
+**One timing artefact, called out rather than smoothed over:** `07-04-after-escape-cancels.png`
+still shows the banner open, immediately after `key Escape`. This is a capture race in the drive
+harness, not the app: `shot()` forces its repaint by resizing the window and grabs the frame as
+soon as sway reports the new size laid out, with no guarantee the Escape key event (delivered
+asynchronously over the Wayland wire) has been processed by the app yet by that instant. The next
+real screenshot in the same run (`08-05-...png`, taken after `type CANARY_1981730`'s own
+`wtype` process spawn — tens of milliseconds of real elapsed time), and the same live instance
+queried directly with `grim` afterward, both show the banner gone and the terminal content already
+advanced past that point. Recorded here rather than dropped, since a critic re-reading these
+screenshots without this note could misread `07` as evidence Escape failed.
+
+Every instance was torn down by matching its own `TILLER_SOCKET`/`SWAYSOCK`/`TILLER_WL_LABEL`
+environment values (the same scoped `kill_ours` the script itself uses), confirmed by `pgrep`
+finding nothing left and no stray `/tmp/mf1981730*` files afterward. `DISPLAY`/`wayland-0`/`wayland-1`
+were never referenced.
 
 ## Branch reconciliation
 
