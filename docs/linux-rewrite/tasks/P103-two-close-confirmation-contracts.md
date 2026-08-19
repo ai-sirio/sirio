@@ -91,3 +91,43 @@ hand-write the one-line gate removal.
 doc comment stops implying it governs every close; it governs the Activity row. Fix the comment in
 the same change, or the next reader re-derives the wrong contract from it — which is how this
 started.
+
+## Do not merge the modal branch yet — a second critic refuted the first
+
+A fresh refuter overturned the modal wave's own `PASSED` verdicts for **F-TERM-08** and
+**F-TAB-26**, and it is right. The observation is not in dispute; the severity is.
+
+`render_pane_close_confirm` (`main.rs:8370-8416`) builds the "Close terminal?" banner as a plain
+absolutely-positioned div. It never calls `.track_focus()` or `window.focus()`, and
+`handle_root_key_down` (`main.rs:10211-10244`) only special-cases `self.palette_open`. So the
+dialog never takes keyboard focus and nothing routes keys to it.
+
+**The consequence is worse than a missing affordance.** When the confirmation opens while the
+terminal holds focus — the ordinary case for anyone who just pressed the documented `ctrl-alt-w`
+chord — every subsequent keystroke, Enter included, goes straight into the live PTY underneath
+(`TerminalView::on_key_down`/`key_bytes`, `tiller_terminal/src/lib.rs:1501-1534`, `:2144-2176`,
+forward anything not matched to a bound action). The user believes a blocking confirmation is up
+and is in fact typing into their shell.
+
+The Swift original does not have this exposure: `TerminalContextMenuProvider.showCloseConfirmAlert`
+(`App/TerminalContextMenuProvider.swift:58-69`) uses `NSAlert.runModal()`, a real OS-level
+application-modal call that synchronously blocks all input until a button is clicked. A hand-rolled
+GPUI overlay gets none of that for free, and this one did not add it.
+
+**Why the first critic missed it, which is the transferable part.** It did check that a keypress
+does not leak (`03-confirm-ignores-keypress-q.png`) — but captured that check from the
+*mouse-driven* right-click path, which likely never put keyboard focus on the terminal at all. The
+control passed because it exercised a state the bug cannot occur in. It also pressed the real
+`ctrl-alt-w` chord and confirmed the same dialog appeared, but did not re-run the leak check from
+*that* entry point. Drive the chord a person would actually press, and re-run the control from the
+path where the failure is possible — not the one where it is structurally absent.
+
+Note the same primitive's Set Title variant does claim focus properly (`PendingTitlePrompt::
+needs_focus` + `focus.focus(window, cx)`, `main.rs:10926-10938`), so this is an isolated omission in
+one variant, not a design choice — which is also why "build the primitive once, use it twice" did
+not protect against it.
+
+**Merge blocker.** F-TERM-05 stands (its own focus handling is real and its four keystroke-driven
+tests pass). F-TERM-08 and F-TAB-26 do not, until the close-confirm variant claims focus and maps
+Escape to cancel. Leave Enter unbound to the destructive action, or bind it only after checking the
+Swift alert's own default-button convention.
