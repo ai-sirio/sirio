@@ -289,6 +289,43 @@ struct TerminalHandle {
     last_cell_width: Arc<Mutex<Option<Pixels>>>,
 }
 
+/// The shell a `TerminalShell::System` pane falls back to when `$SHELL` is unset,
+/// together with the arguments that make it a login shell.
+///
+/// This is the last OS-specific assumption in the PTY spawn path, so it is gated
+/// per platform instead of shared. The reference implementation hardcodes
+/// `/bin/zsh` — macOS's default login shell. Inheriting that constant on Linux is
+/// not merely an unusual choice: `/bin/zsh` does not exist on a stock box, so the
+/// pane fails to spawn and the user gets no shell at all.
+///
+/// Each platform is named explicitly rather than folded into a single `cfg(unix)`
+/// arm, for the reason recorded further down this file — `cfg(unix)` silently
+/// hands macOS the Linux branch, which is how that earlier bug happened.
+#[cfg(target_os = "macos")]
+fn default_system_shell() -> (String, Vec<String>) {
+    ("/bin/zsh".to_string(), vec!["-il".to_string()])
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn default_system_shell() -> (String, Vec<String>) {
+    // POSIX guarantees `/bin/sh`, so it is the floor that can never fail to
+    // exist; bash is preferred when present because it is what a login shell on
+    // these systems normally is.
+    let program = ["/bin/bash", "/bin/sh"]
+        .into_iter()
+        .find(|candidate| std::path::Path::new(candidate).exists())
+        .unwrap_or("/bin/sh");
+    (program.to_string(), vec!["-il".to_string()])
+}
+
+/// `$SHELL` and the `-il` login convention are POSIX notions, so Windows resolves
+/// its own interpreter and passes no login arguments.
+#[cfg(windows)]
+fn default_system_shell() -> (String, Vec<String>) {
+    let program = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    (program, Vec::new())
+}
+
 impl TerminalHandle {
     fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
@@ -345,8 +382,11 @@ impl TerminalHandle {
 
         let tty_shell = match shell {
             TerminalShell::System => {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-                Shell::new(shell, vec!["-il".to_string()])
+                let (program, args) = match std::env::var("SHELL") {
+                    Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
+                    _ => default_system_shell(),
+                };
+                Shell::new(program, args)
             }
             TerminalShell::WithArguments { program, args } => {
                 Shell::new(program.clone(), args.clone())
@@ -3053,17 +3093,27 @@ mod view_tests {
         );
     }
 
-    /// F-TERM-PTY-04: `TerminalShell::System` prefers `$SHELL`, falling back
-    /// to the literal `/bin/zsh` when it is unset. This box has no `/bin/zsh`
-    /// installed (verified: `ls /bin/zsh` -> no such file), which turns
-    /// "which shell did the fallback choose" into an unusually sharp,
-    /// unfakeable discriminator: with `$SHELL` removed, spawning
-    /// `TerminalShell::System` must fail, and the failure message must name
-    /// exactly `/bin/zsh` -- not merely "a shell failed to start", not the
-    /// real login shell (`bash`), which would succeed and prove nothing
-    /// about the *fallback* branch at all.
+    /// F-TERM-PTY-04: `TerminalShell::System` prefers `$SHELL`, and falls back to
+    /// a shell that actually exists on *this* platform when it is unset.
+    ///
+    /// The previous version of this test asserted the opposite — that the fallback
+    /// names `/bin/zsh` and therefore *fails* to spawn here — using the absence of
+    /// `/bin/zsh` on this box as an unfakeable discriminator. The discriminator was
+    /// sound; the expectation was not. It enshrined a faithful port of macOS's
+    /// default login shell as correct behaviour, when on Linux it meant a pane with
+    /// `$SHELL` unset opened no shell at all.
+    ///
+    /// So the discriminator is kept and inverted. Spawning must now SUCCEED with
+    /// `$SHELL` removed, which is false for any build that still hardcodes a
+    /// macOS-only path — red on the old code, green on the new.
     #[test]
-    fn system_shell_falls_back_to_bin_zsh_when_shell_is_unset() {
+    fn system_shell_falls_back_to_a_shell_that_exists_on_this_platform() {
+        let (program, _args) = default_system_shell();
+        assert!(
+            std::path::Path::new(&program).exists(),
+            "the fallback must name a shell present on this platform, got: {program}"
+        );
+
         let previous = std::env::var_os("SHELL");
         unsafe { std::env::remove_var("SHELL") };
 
@@ -3081,14 +3131,13 @@ mod view_tests {
         }
         let _ = std::fs::remove_dir_all(&working_directory);
 
-        let error = result.err().expect(
-            "no /bin/zsh exists on this box, so the System shell fallback must fail to spawn",
-        );
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("/bin/zsh"),
-            "the spawn failure must name the exact fallback path /bin/zsh, got: {message}"
-        );
+        match result {
+            Ok(handle) => drop(handle),
+            Err(error) => panic!(
+                "with $SHELL unset the System shell must still spawn via the platform \
+                 fallback ({program}), but it failed: {error:#}"
+            ),
+        }
     }
 
     /// A real PTY must expose the shell's OSC title and its settled scrollback
