@@ -2702,8 +2702,30 @@ fn tab_has_file(tab: &OpenTab) -> bool {
     has_file
 }
 
+/// F-CORE-WSP-02: two paths name the same open document when they are
+/// exactly equal (the common case, and the only one that still holds when
+/// `path` doesn't exist on disk -- a brand-new, not-yet-saved file has
+/// nothing for `canonicalize` to resolve) or when both sides resolve to the
+/// same real path once symlinks are followed.
+fn paths_name_the_same_document(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// `open_paths` only ever contains this workspace's own already-open tabs
+/// (`add_file_tab` builds it from `self.tabs`, one `TillerWorkspace` per
+/// worktree), so this dedup is worktree-scoped by construction -- the same
+/// absolute path open in a different worktree's window is a different
+/// `self.tabs` entirely and never reaches this comparison.
 fn file_path_is_already_open(open_paths: &[PathBuf], path: &Path) -> bool {
-    open_paths.iter().any(|open_path| open_path == path)
+    open_paths
+        .iter()
+        .any(|open_path| paths_name_the_same_document(open_path, path))
 }
 
 fn tab_has_terminal(tab: &OpenTab) -> bool {
@@ -6674,7 +6696,8 @@ impl TillerWorkspace {
                 let mut matches_path = false;
                 tab.panes.for_each(&mut |_, content| {
                     if let TabContent::File { view } = content {
-                        matches_path |= view.read(cx).path() == path.as_path();
+                        matches_path |=
+                            paths_name_the_same_document(view.read(cx).path(), path.as_path());
                     }
                 });
                 matches_path
@@ -16186,6 +16209,51 @@ mod tests {
             &open_paths,
             Path::new("/tmp/other.md")
         ));
+    }
+
+    /// F-CORE-WSP-02: `document_content_id`'s own dead-model test claims
+    /// document identity "resolves symlinks and [is] worktree-scoped".
+    /// Before this test, `file_path_is_already_open` was plain `PathBuf`
+    /// equality with no `canonicalize` anywhere near it -- opening a
+    /// symlink and then its target (or vice versa) opened two tabs for the
+    /// same file. Real files and a real symlink on disk, not string
+    /// manipulation: the two paths differ lexically but must be recognised
+    /// as the same open document.
+    #[test]
+    fn opening_a_symlink_to_an_already_open_file_reuses_the_same_tab() {
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-wsp02-symlink-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let target = dir.join("note.md");
+        let alias = dir.join("alias.md");
+        std::fs::write(&target, b"content").expect("write target file");
+        std::os::unix::fs::symlink(&target, &alias).expect("create symlink");
+
+        let open_paths = vec![target.clone()];
+        assert!(
+            file_path_is_already_open(&open_paths, &alias),
+            "a symlink to an already-open file must be recognised as the same document"
+        );
+
+        // And the reverse direction: the symlink is open, the real path is
+        // the one being newly requested.
+        let open_paths = vec![alias.clone()];
+        assert!(
+            file_path_is_already_open(&open_paths, &target),
+            "the real path of an already-open symlink must be recognised as the same document"
+        );
+
+        // A genuinely different file in the same directory must still be
+        // treated as different -- this is not "anything in the directory
+        // matches".
+        let other = dir.join("other.md");
+        std::fs::write(&other, b"different content").expect("write other file");
+        assert!(!file_path_is_already_open(&vec![target.clone()], &other));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
