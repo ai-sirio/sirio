@@ -19128,6 +19128,134 @@ mod tests {
         );
     }
 
+    /// F-SID-14: the worktree context menu's agent-panel items used to
+    /// target whichever worktree happened to be `working_directory` at
+    /// drain time (~40ms later, on a background timer), not the one
+    /// actually right-clicked -- a stray `SidebarEvent::SelectWorktree`
+    /// for a *different* row landing in that window flips
+    /// `working_directory` back before the queued action runs (wave N,
+    /// live: sqlite proof that every agent-panel tab's own `worktree_id`
+    /// foreign key silently got rewritten to whichever worktree most
+    /// recently won that race; New Terminal and New Chat were unaffected
+    /// in that drive, but the vulnerable mechanism -- trusting
+    /// `working_directory` at a later, unsynchronized read -- was shared
+    /// by all three).
+    ///
+    /// This reproduces the exact interleaving deterministically, with no
+    /// timer and no click timing to get unlucky on: it drains the one
+    /// queued action through the same two match arms the app's real
+    /// 40ms background loop uses (that loop lives in the app's bootstrap
+    /// closure, not a directly callable method, so this replicates its
+    /// two arms verbatim -- see `WorkspaceAction::NewTab` /
+    /// `NewTabForWorktree`'s handling at the drain site), after
+    /// simulating the race with a direct `select_worktree` back to the
+    /// *other* worktree in between, exactly where wave N's live evidence
+    /// placed it.
+    #[gpui::test]
+    async fn agent_panel_context_action_survives_a_worktree_switch_race(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Widen the single-worktree fixture to two worktrees under one
+        // project, the same pattern `tray_jump_lands_on_the_target_worktrees_worst_status_tab`
+        // uses above.
+        let path_b = workspace.update_in(&mut cx, |workspace, window, cx| {
+            let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let path_a = workspace.working_directory.clone();
+            let path_b = std::env::temp_dir().join(format!(
+                "tiller-sid14-b-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path_b).expect("create second fixture worktree");
+
+            let project = workspace.project_catalog.projects()[0].clone();
+            let mut worktrees = project.worktrees.clone();
+            worktrees.push(session::CatalogWorktree {
+                branch: "b".into(),
+                path: path_b.clone(),
+                is_primary: false,
+            });
+            workspace.project_catalog =
+                ProjectCatalog::from_projects(vec![session::CatalogProject {
+                    worktrees,
+                    ..project
+                }]);
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &path_a,
+            )));
+
+            // Right-click B's row and choose Claude Code -- the exact
+            // dispatch site `handle_sidebar_context_action` reaches from a
+            // real context-menu click.
+            workspace.handle_sidebar_context_action(
+                &SidebarContextTarget::Worktree {
+                    path: path_b.clone(),
+                    is_primary: false,
+                },
+                SidebarContextAction::NewTab(NewTabAction::ClaudeCode),
+                cx,
+            );
+
+            // The race: a stray SelectWorktree for the *other* row lands
+            // before the drain runs, flipping `working_directory` back to
+            // A -- exactly the interleaving wave N's evidence names.
+            workspace
+                .select_worktree(path_a, Some(window), cx)
+                .expect("select_worktree back to A succeeds");
+
+            path_b
+        });
+
+        let queued = workspace.update(&mut cx.cx, |workspace, _| {
+            let mut actions = workspace.pending_actions.lock().unwrap();
+            std::mem::take(&mut *actions)
+        });
+        assert_eq!(queued.len(), 1, "exactly one action must have been queued");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            match queued.into_iter().next().unwrap() {
+                WorkspaceAction::NewTab(action) => workspace.open_action(action, window, cx),
+                WorkspaceAction::NewTabForWorktree(path, action) => {
+                    if workspace.working_directory != path {
+                        workspace
+                            .select_worktree(path, Some(window), cx)
+                            .expect("select_worktree back to the right-clicked worktree succeeds");
+                    }
+                    workspace.open_action(action, window, cx);
+                }
+                _ => panic!("only NewTab/NewTabForWorktree can be queued by this dispatch site"),
+            }
+        });
+
+        let new_tab_persistence_id = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .tabs
+                .last()
+                .expect("the agent tab was created")
+                .persistence_id
+                .clone()
+        });
+        let worktree_b_id = session::persisted_worktree_id(&path_b);
+        assert!(
+            new_tab_persistence_id.starts_with(&worktree_b_id),
+            "the agent-panel tab must be created under the right-clicked \
+             worktree (B, id {worktree_b_id:?}), not whichever worktree the \
+             race left as `working_directory` (A) -- got persistence_id {:?}; \
+             on the unfixed tree (plain WorkspaceAction::NewTab, no captured \
+             path) this assertion is the failure",
+            new_tab_persistence_id
+        );
+
+        let _ = std::fs::remove_dir_all(&path_b);
+    }
+
     /// Right-clicks the fixture's first worktree row (id 1) and parks.
     fn right_click_sidebar_row(cx: &mut VisualTestContext) {
         let bounds = cx
