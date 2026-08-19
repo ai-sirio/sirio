@@ -14,6 +14,20 @@ I am the critic, not the builder — none of `FIX-waveN-failures.md`'s six rows 
 here; every verdict below is this pass's own live drive, both sides (reproduce broken, confirm
 fixed), per `EVIDENCE-STANDARD.md`.
 
+### Summary
+
+| Row | Verdict | Notes |
+| --- | --- | --- |
+| F-TAB-26 | **PASSED** | Sole-pane and multi-pane cases both live-driven; fixed-position Close-Anyway-button trap documented. |
+| F-TAB-14 | **PASSED** | Double-click rename confirmed; context-menu "silent fail" re-confirmed as a harness artifact, not an app defect. |
+| F-TAB-24 | **PASSED** | Core claim, 3+-tab case, drop-clears-snapshot all closed. Sidebar-drag claim tested anyway — live result contradicts the report's own characterization (recorded as an additional finding, not a row-verdict change). |
+| F-CHG-02 | **PASSED** | Non-matching-project gap closed with a `workspace.current` control-socket discriminator. |
+| F-CHG-18 | **PASSED** | Drag-and-drop gesture independently reproduced from scratch, twice on the fixed binary, once as a negative control on the pre-fix binary. |
+| F-SET-15 | **PASSED** | Codex click-back gap closed; "Add Account not wired" gap live-confirmed (not just re-read) via a DB row count before/after. |
+
+All six rows promote from the ledger's `half-proven` to `PASSED`. No row in this pass came back
+`FAILED`, `UNREACHABLE`, or `NOT EXERCISED`.
+
 ---
 
 ## F-TAB-26 — Close Anyway on a tab's sole pane
