@@ -455,3 +455,52 @@ picker was ever opened, showing the field at its `/tmp` default with no "Restore
 Full recipe and root-cause writeup: `reference/linux-progress/wf-sweep2/f-prj-18-repro-recipe.sh`.
 This closes the picker path end-to-end: dialog renders, folder selection works, and the choice
 propagates back into the app's own state. Promoted to PASSED.
+
+## F-PRJ-14 — Avatar tab "Choose PNG..." picker
+
+**Promoted: PASSED.** The ledger's evidence for this row was the strongest-worded hang claim of the
+three portal rows: "xdg-desktop-portal-gtk spawns via D-Bus activation but FileChooser.OpenFile
+hangs past its dconf window-position notification and never shows a dialog, reproduced with the app
+bypassed entirely via raw gdbus calls (4 attempts) and confirmed as a genuine kernel poll block via
+/proc/<pid>/wchan." That specific claim -- OpenFile hangs even via raw gdbus, independent of the app
+-- turned out to describe exactly the same missing-`XDG_CURRENT_DESKTOP`-in-the-router's-own-
+environment bug fixed for F-PRJ-18 in this same pass: a raw gdbus `OpenFile` call against a portal
+missing that variable goes out to a backend that was never spawned, and the caller sits in
+`poll_schedule_timeout` (a real `wchan` entry, correctly read as "genuinely blocked in the kernel" --
+it is, just blocked waiting on a reply nobody will ever send, not blocked inside GTK/dconf logic).
+
+Verified this directly rather than assuming the F-PRJ-18 fix would carry over: reused the exact same
+now-healthy portal from the F-PRJ-18 drive (confirmed the running Tiller process's own
+`/proc/<pid>/environ` already carries `XDG_CURRENT_DESKTOP=GNOME`, `WAYLAND_DISPLAY=wayland-14`, and
+the correct `DBUS_SESSION_BUS_ADDRESS` -- no environment mismatch between the app and what was being
+monitored). `rust/vendor/gpui_linux/src/linux/platform.rs:396` (`prompt_for_paths`) confirmed both
+this row's "Choose PNG..." and F-PRJ-18's "Choose..." go through the identical
+`ashpd::desktop::file_chooser::OpenFileRequest` call, differing only in the boolean `directory(...)`
+flag -- so proving the mechanism healthy for one strongly predicts it for the other, but was checked
+live anyway rather than inferred.
+
+First click attempt at the button's visual center reproduced what looked like the old hang (nothing
+opened) -- but a `dbus-monitor --session` trace running through two separate attempts (3s and 5s
+waits) showed **zero** D-Bus traffic at all, not a hung call. A positive control in the same sheet
+(typing "testuser" into the neighbouring GitHub-avatar field, `reference/linux-progress/wf-sweep2/
+f-prj-14-avatar-tab-before.png` before / confirmed working after) ruled out a general click/keyboard
+delivery failure in that panel. A retry a few pixels off the first coordinates fired immediately: the
+`dbus-monitor` trace (`reference/linux-progress/wf-sweep2/f-prj-14-dbus-trace-openfile-succeeds.log`)
+shows the full chain -- app calls `org.freedesktop.portal.FileChooser.OpenFile`, the router relays to
+`org.freedesktop.impl.portal.FileChooser.OpenFile` on the gtk backend, the backend writes its
+remembered window geometry via `ca.desrt.dconf.Writer.user`, and a real "Open File" window appears
+with accept-label "Choose a PNG" (`reference/linux-progress/wf-sweep2/
+f-prj-14-open-file-dialog-renders.png`) -- concluded this was a virtual-pointer hit-test precision
+artifact of the drive environment, not an app defect, and is recorded as a caveat in the recipe for
+future drives rather than silently discarded.
+
+Built a real 4x4 PNG fixture (`reference/linux-progress/wf-sweep2/f-prj-14-test-fixture-avatar.png`),
+searched for it by name from the dialog (GTK rendered a live thumbnail of the actual pixel content,
+confirming real file bytes were read, not just a filename match --
+`reference/linux-progress/wf-sweep2/f-prj-14-search-selects-avatar-png.png`), and accepted it. The
+app's own Avatar tab immediately showed the applied swatch and the label "Current:
+wf-prj14-avatar.png" (`reference/linux-progress/wf-sweep2/f-prj-14-avatar-applied-after-picker.png`)
+-- confirming `apply_local_png` (`project_identity.rs:623`) actually re-read the file, passed its PNG
+signature and size-cap checks, and committed it as the project's `AvatarSource::LocalPng`, not merely
+that a path string landed somewhere. Full recipe:
+`reference/linux-progress/wf-sweep2/f-prj-14-repro-recipe.sh`. Promoted to PASSED.
