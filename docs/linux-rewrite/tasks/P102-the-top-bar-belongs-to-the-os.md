@@ -19,6 +19,26 @@ unconditionally either — it asks the platform. The rule is **never draw when t
 not "never draw". See the risk section below for why the unconditional reading would be a worse
 defect than the one being fixed.
 
+**Corrected 2026-08-19 by the scout, and it sharpens the reconciliation rather than breaking it.**
+Zed's *default* on Linux is **client-side** decorations, not server-side:
+`assets/settings/default.json` sets `"window_decorations": "client"` and `WindowDecorations::Client`
+is `#[default]` in `settings_content/src/workspace.rs`. Zed draws its own titlebar and its own
+controls by default, and only stops when a user opts into `window_decorations: "server"`. That is
+the *opposite* posture from this port, which requests `Server`.
+
+So "resolve it like Zed" cannot mean "copy Zed's default", because Zed's default is the very thing
+the user rejected. What transfers is Zed's **mechanism**, not its policy: it reads
+`window.window_decorations()` per render at ~6 independent call sites and matches on it, so every
+element that touches the window edge decides for itself. We keep our `Server` request — which is
+what makes the OS draw the bar the user asked for — and adopt Zed's conditional so that under
+`Client` (a compositor that refuses SSD) the window is still closable. Policy ours, mechanism Zed's.
+
+Note also that Zed reads the setting **once**, at window creation (`zed.rs::build_window_options`),
+and never calls `request_decorations` again; live CSD↔SSD transitions only reach the app through
+Wayland's `xdg-decoration` `Configure`, announced over the generic `on_appearance_changed` callback
+that also carries OS light/dark changes. X11 has no renegotiation channel at all — it decides once
+and never upgrades a resolved `Server` decision if a WM appears later.
+
 ## Where we stand, per platform
 
 **macOS is already correct and must not be touched.** `main.rs:11945` opens the window with
@@ -109,3 +129,45 @@ Three outcomes, three different jobs:
   would no longer draw. `cluster_start()` is also read by `conformance.rs:235-250` and by
   `titlebar.rs`. Removing them is part of the job, not a follow-up — a dead token that still has
   tests is how a deleted feature comes back.
+
+## Landed 2026-08-19 — `85270f5e`, merged into `linux/gpui-waku`
+
+`tiller_ui/src/titlebar.rs` reads `Window::window_decorations()` fresh every render and builds the
+three-dot cluster only under `Decorations::Client { .. }`. Under `Server` nothing is constructed
+where they were — no div, no hitbox, not "drawn but hidden". The icon cluster is unconditional in
+both branches, and its leading edge moves from `traffic_light_cluster_gap` to `traffic_light_inset`
+when the lights are absent, so it does not stay pinned to a gap that follows a group nobody drew.
+
+macOS is carved out with `cfg!(target_os = "macos")` rather than left to fall out of the
+`Decorations` match. This is load-bearing and not defensive coding: AppKit's `PlatformWindow` never
+overrides `window_decorations()`, so it inherits gpui's blanket `Server` default — without the
+carve-out this same logic would silently stop drawing on macOS too. Zed does the same thing for the
+same reason, hard-coding `PlatformStyle::Mac => None` instead of letting a generic match decide.
+
+A test seam was needed and is worth knowing about: `TestWindow` always answers `Server`, so a drawn
+test can never reach the `Client` branch on its own. `TitleBar::with_decorations` injects an
+override, which is how both branches were verified rather than only the one the harness can reach.
+
+**Critic verdict:** compiled, launched, both branches verified live, macOS path untouched, window
+still closable, 425 tests passing (`tiller_ui` 368 + `tiller_theme` 57), no new clippy warnings.
+
+### The one thing still unverified, and it needs software this box does not have
+
+**Nobody has seen this rendered under a real window manager.** None is installed (`openbox`,
+`marco`, `xfwm4`, `mutter`, `i3`, `fluxbox`, `metacity`, `twm`, `icewm` all absent) and the user's
+`cosmic-comp` is off limits. What is proven is the code half: under `Server` our row draws zero
+dots, confirmed by a real screenshot, and the `_MOTIF_WM_HINTS` bit pattern is unchanged and live
+(`0x2, 0x0, 0x1, 0x0, 0x0` — decorations enabled). What is *not* proven is the visual outcome:
+whether the OS titlebar and our icon row read as one coherent bar or as an orphaned icon strip
+floating under someone else's chrome. That is a design question the user asked to be shown rather
+than designed around, and it needs either a lightweight WM installed here or the user's own eyes on
+COSMIC.
+
+### A dead token the critic refused to let pass quietly
+
+`Spacing::traffic_light_inset` (`tiller_theme/src/lib.rs:500`, default `px(14.0)` at `:535`) now has
+**zero consumers** in the Rust tree except its own `Default` init and a bare value assertion at
+`:2047`. It is pre-existing, not introduced by `85270f5e` — but it is exactly the
+dead-token-with-a-live-test shape this task's brief warned about, which is how a deleted feature
+comes back. Note the lookalike trap before touching it: this is a *different* field from the
+`BrowserChrome::traffic_light_inset` the new code reads, and macOS still needs the latter.
