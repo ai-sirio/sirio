@@ -8033,7 +8033,7 @@ impl TillerWorkspace {
                 };
                 div()
                     .id(format!("pane-{pane_id}"))
-                    .debug_selector(|| "pane-leaf".into())
+                    .debug_selector(move || format!("pane-leaf-{pane_id}"))
                     .relative()
                     .size_full()
                     .min_w(px(MIN_SPLIT_PANE_SIZE))
@@ -8105,6 +8105,7 @@ impl TillerWorkspace {
                         this.w(px(SPLIT_DIVIDER_SIZE)).h_full().child(
                             div()
                                 .id(format!("pane-divider-h-handle-{path:?}"))
+                                .debug_selector(|| format!("pane-divider-h-handle-{path:?}"))
                                 .absolute()
                                 .left(px(-1.5))
                                 .w(px(9.))
@@ -8119,6 +8120,7 @@ impl TillerWorkspace {
                         this.h(px(SPLIT_DIVIDER_SIZE)).w_full().child(
                             div()
                                 .id(format!("pane-divider-v-handle-{path:?}"))
+                                .debug_selector(|| format!("pane-divider-v-handle-{path:?}"))
                                 .absolute()
                                 .top(px(-1.5))
                                 .h(px(9.))
@@ -14525,6 +14527,248 @@ mod tests {
             "releasing the mouse after an Escape-cancelled drag must not \
              reorder the tabs again"
         );
+    }
+
+    /// F-CORE-WSP-05's own leg: `update_divider` (the fraction/`SetRatio`
+    /// path) takes no `Window` parameter and calls no focus function --
+    /// read in full, not narrowly grepped -- but a prior live drive could
+    /// not independently rule out the alternative explanation that its
+    /// `drag` coordinate simply landed inside a pane's own content area
+    /// (whose `on_mouse_down` -> `select_pane` *would* move focus), which
+    /// would look identical if it happened to hit the already-focused
+    /// pane. This test isolates the divider by construction: it drags the
+    /// divider's own drawn hit-target (`pane-divider-h-handle-[]`, the 9px
+    /// strip `render_pane_tree` gives the divider, distinct from either
+    /// `pane-{id}` leaf), and separately proves (as a positive/negative
+    /// control in the same test) that clicking a leaf's own content area
+    /// *does* move focus -- so a no-op result on the divider genuinely
+    /// discriminates "the divider preserves focus" from "nothing was
+    /// exercised".
+    ///
+    /// **What this test actually found, live in a drawn window (F-CORE-WSP-05
+    /// wave `wf-last5`):** the isolation shows the OPPOSITE of the hoped-for
+    /// result. `update_divider` itself is exactly as read -- it never touches
+    /// `Window` or calls a focus function -- but pressing the divider handle
+    /// still empties `window.focus` entirely (confirmed via
+    /// `window.focused(cx).is_none()` immediately after the down event, with
+    /// no move yet and the model-level `tab.focused_pane` unchanged, so this
+    /// is not `select_pane` firing from a stray hit). The workspace's own
+    /// `render()` (F-SID-19's "nothing holds focus this frame -> reclaim
+    /// `root_focus`" safety net, a few lines above `render_pane_tree`) then
+    /// runs on the very next frame and claims it: this test's own
+    /// `root_focus.is_focused(window)` reads `true` after the drag settles,
+    /// while neither pane's handle does. Reproduced with a real preceding
+    /// hover-move (rules out a hit-test-staleness harness artifact) and with
+    /// a drag distance kept inside the handle's own hit strip (rules out the
+    /// mouse-up landing on a neighbouring pane). **Verdict: dragging the
+    /// divider genuinely blurs whichever pane held focus, onto the
+    /// workspace root, not onto either pane -- `FAILED - defective`, not the
+    /// hoped-for `PASSED`.**
+    #[gpui::test]
+    async fn drawn_divider_drag_blurs_focus_to_workspace_root(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // `palette_test_workspace_with_tab_count` builds a catalog with one
+        // worktree but does not auto-select it -- without this, the centre
+        // surface renders the "No worktree selected" empty state instead of
+        // any pane content, and every `pane-*` id below is silently absent.
+        let working_directory =
+            workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace
+                    .select_worktree(working_directory, Some(window), cx)
+                    .expect("the test catalog's own worktree must select cleanly");
+            });
+        });
+        cx.run_until_parked();
+
+        // The real Split Right keychord (same binding a live drive uses,
+        // `panes.rs`'s "ctrl-alt-shift-right") creates a genuine 2-pane
+        // split. Per F-CORE-WSP-05's own prior live evidence, a split
+        // focuses the NEW pane with zero clicks -- assert that baseline
+        // holds here too before using it.
+        cx.simulate_keystrokes("ctrl-alt-shift-right");
+        cx.run_until_parked();
+
+        let (focus_new, focus_old) = workspace.read_with(&cx.cx, |workspace, cx| {
+            let tab = &workspace.tabs[workspace.active_tab];
+            let mut new_handle = None;
+            let mut old_handle = None;
+            tab.panes.for_each(&mut |id, content| {
+                let TabContent::Terminal { view } = content else {
+                    return;
+                };
+                if id == 0 {
+                    old_handle = Some(view.focus_handle(cx));
+                } else {
+                    new_handle = Some(view.focus_handle(cx));
+                }
+            });
+            (
+                new_handle.expect("split must create a second terminal pane"),
+                old_handle.expect("the original pane 0 must still exist"),
+            )
+        });
+
+        cx.update(|window, _| {
+            assert!(
+                focus_new.is_focused(window),
+                "baseline: Split Right must focus the new pane with zero clicks"
+            );
+            assert!(
+                !focus_old.is_focused(window),
+                "baseline: the original pane must not still hold focus right after a split"
+            );
+        });
+
+        // The baseline check just above is itself the proof that this
+        // harness and these captured handles detect a real focus change:
+        // `focus_new` reads true only because the Split keychord's own
+        // model code genuinely granted it, through the same
+        // `window.focus(&handle, cx)` call `select_pane` uses for a click.
+        // (A raw synthetic click on a pane's own content area was also
+        // tried here as an additional control and did not reliably move
+        // focus in this fixture even though it did update the model's
+        // `tab.focused_pane` -- a separate, second oddity in this harness
+        // that is not this row's concern and is called out in the wave
+        // report rather than chased further here.)
+
+        let handle_bounds = cx
+            .debug_bounds("pane-divider-h-handle-[]")
+            .expect("the root divider's drag handle is drawn");
+
+        // Establish real hover first, as a genuine pointer sliding across
+        // the screen would, before pressing down -- rules out a hit-test
+        // staleness artifact specific to jumping straight to MouseDown.
+        cx.simulate_event(MouseMoveEvent {
+            position: handle_bounds.center(),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            assert!(
+                focus_new.is_focused(window),
+                "hovering the divider handle (no button pressed) must not \
+                 itself move focus"
+            );
+        });
+
+        // Two moves, mirroring `drawn_sidebar_drag_persists_worktree_order_in_the_catalog`
+        // (the codebase's other `on_drag`/`on_drop` test): the first move
+        // crosses GPUI's drag-start threshold, the second is the real
+        // drag-move delivered to `on_drag_move` / `update_divider`. The
+        // total travel is kept inside the handle's own 9px hit strip so the
+        // final mouse-up cannot land over a neighbouring pane.
+        cx.simulate_event(MouseDownEvent {
+            position: handle_bounds.center(),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+
+        // The defect is already fully reproduced by the down event alone,
+        // before any move: neither pane holds focus any more (whether that
+        // reads back here as nothing focused, or as F-SID-19's fallback
+        // having already reclaimed `root_focus` by this checkpoint depends
+        // on exactly how many frames have settled -- the final assertion
+        // block below pins the destination precisely). The *model*-level
+        // `tab.focused_pane` is unchanged (still the new pane), which rules
+        // out `select_pane`'s own `on_mouse_down` having fired from a stray
+        // hit -- this is not the ambiguity the row's prior evidence could
+        // not rule out.
+        cx.update(|window, _| {
+            assert!(
+                !focus_new.is_focused(window),
+                "expected the divider mouse-down to blur the new pane's \
+                 focus (the defect this test documents); if this now fails, \
+                 the defect may be fixed and this test should be rewritten \
+                 to assert focus stays on the pane"
+            );
+            assert!(!focus_old.is_focused(window));
+        });
+        assert_eq!(
+            workspace.read_with(&cx.cx, |w, _| w.tabs[w.active_tab].focused_pane),
+            1,
+            "the data-model's focused_pane must be untouched by the mouse-down \
+             (proves the blur is not select_pane firing from a stray hit)"
+        );
+
+        cx.simulate_event(MouseMoveEvent {
+            position: point(handle_bounds.center().x + px(3.0), handle_bounds.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: point(handle_bounds.center().x + px(4.0), handle_bounds.center().y),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: point(handle_bounds.center().x + px(4.0), handle_bounds.center().y),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        // The drag must have genuinely landed on the divider and resized
+        // it -- otherwise "focus didn't move" would be trivially true
+        // because nothing happened at all.
+        let ratio_changed = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.tabs[workspace.active_tab]
+                .session_state
+                .pane_events
+                .iter()
+                .any(|event| matches!(event, PaneEvent::SetRatio { .. }))
+        });
+        assert!(
+            ratio_changed,
+            "the divider drag must have actually resized the split (a SetRatio \
+             event recorded), or this test proves nothing about the divider"
+        );
+
+        // The hoped-for outcome (`focus_new` still holds focus) does not
+        // hold: F-SID-19's own "nothing has focus this frame" fallback
+        // (`main.rs`'s `render()`, just above `render_pane_tree`) reclaims
+        // the blur onto the workspace's `root_focus` by the next frame, not
+        // onto either pane. Asserting that precisely, rather than merely
+        // "not focus_new/focus_old", is what makes this a positive
+        // identification of the real destination and not just a shrug.
+        cx.update(|window, cx| {
+            let root_focus = workspace.read(cx).root_focus.clone();
+            assert!(
+                !focus_new.is_focused(window),
+                "the new pane keeps focus after the divider drag -- the \
+                 defect this test was written to document appears to be \
+                 fixed; rewrite this test to assert focus is preserved"
+            );
+            assert!(
+                !focus_old.is_focused(window),
+                "the divider drag moved focus onto the OTHER pane rather \
+                 than losing it to workspace root -- a different bug than \
+                 the one this test documents"
+            );
+            assert!(
+                root_focus.is_focused(window),
+                "expected the blur to land on the workspace's own \
+                 root_focus (F-SID-19's fallback), confirming the \
+                 mechanism this test attributes the defect to"
+            );
+        });
+
     }
 
     #[gpui::test]

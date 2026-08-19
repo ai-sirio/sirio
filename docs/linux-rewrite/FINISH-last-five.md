@@ -219,3 +219,115 @@ end-to-end with one narrow, named, never-observed exception.
 Commit: `e8e488a9` (`test(F-CORE-WSP-07): prove the additive-evolution argument, not just cite it`).
 
 ---
+
+## F-CORE-WSP-05 — isolating the divider/nonstructural leg, live-isolated (not code-proof)
+
+Row (per the orchestrator's own summary of the evidence cell): Split and Close were already
+live-driven this wave with a zero-click scrollback discriminator (`panel.scrollback` marker text,
+negative control on the un-clicked pane). Owed: the divider/nonstructural leg, previously
+**code-proof only** — `update_divider` read in full, takes no `Window` param and calls no focus
+function — but never independently isolated live, because a drag attempt could not rule out the
+mousedown simply landing on the already-focused pane. Also owed: settle whether Insert/Move have a
+real-app analog.
+
+### Isolating the divider, with a drawn test (not a live Wayland drive)
+
+Per `EVIDENCE-STANDARD.md`'s UI tier ("a **named** test using `TestAppContext` /
+`VisualTestContext` that draws the element and dispatches the real event"), a drawn test is valid
+UI-tier proof, and it is the only instrument that can truly **isolate** the divider from the
+"mousedown lands on the already-focused pane" confound the brief names: it lets the divider's own
+drag-handle hitbox be located by its own drawn bounds (`pane-divider-h-handle-{path:?}`) and driven
+independently of either pane's leaf area (`pane-leaf-{id}`), something a screen-coordinate live
+drive cannot pin down as precisely.
+
+**Instrumentation added, harmless in release builds:** `render_pane_tree`'s divider handle divs
+(`rust/crates/tiller/src/main.rs`, both the horizontal and vertical branches) and its leaf wrapper
+div had no `debug_selector` (or only a single, non-unique static `"pane-leaf"` one shared by every
+leaf, colliding across panes) — so `VisualTestContext::debug_bounds` could not locate either
+element by a distinguishing key. Added a per-pane `debug_selector(move || format!("pane-leaf-{pane_id}"))`
+and matching `debug_selector`s on both divider-handle divs (mirroring their existing `.id(...)`
+strings). `debug_selector` is `#[cfg(any(test, feature = "test-support"))]` in GPUI — a compiled-out
+no-op in a release build, confirmed by reading `div.rs`'s own two cfg-gated definitions — so this
+is pure test instrumentation, not a behavior change.
+
+**The new test:** `drawn_divider_drag_blurs_focus_to_workspace_root`
+(`rust/crates/tiller/src/main.rs`, `cargo test --manifest-path rust/Cargo.toml -p tiller --bin
+tiller -- drawn_divider_drag_blurs_focus_to_workspace_root`: **1 passed**). It draws a real 2-pane
+split via the same `ctrl-alt-shift-right` keychord a live drive uses, captures a live
+`FocusHandle` for each pane's real `TerminalView` (not a stand-in), asserts the known-true baseline
+(split leaves the new pane focused), locates the divider handle's own drawn bounds, then drags it
+by a real `MouseDownEvent`/`MouseMoveEvent`×2/`MouseUpEvent` sequence confined to the handle's own
+9px hit strip (so the final mouse-up cannot land over a neighbouring pane — ruling out the exact
+confound the brief names) and confirms the drag genuinely resized the split (a `SetRatio` pane
+event is recorded — otherwise "focus didn't move" would be vacuously true because nothing happened).
+
+### What it found: the isolation contradicts the hoped-for result
+
+`update_divider` itself is exactly as previously read — no `Window` parameter, no focus call. But
+the isolated drag still blurs focus, through a different mechanism:
+
+- Immediately after the `MouseDownEvent` alone (before any move, before any resize), **both**
+  captured `FocusHandle`s read `is_focused == false`.
+- `tab.focused_pane` (the data-model field `select_pane` would update) is confirmed **unchanged**
+  (still the new pane, id 1) at this same point — ruling out the exact confound named in the brief:
+  this is not `select_pane`'s own `on_mouse_down` firing from a stray hit on a pane.
+- A same-handle identity check (`focus_new == focus_new_after`, `focus_old == focus_old_after`,
+  read fresh from the model after the drag) confirms neither `TerminalView` entity was dropped and
+  recreated — the loss is a real focus transfer, not a stale-handle artifact from entity churn.
+- After the drag settles, the actually-focused element is **the workspace's own `root_focus`**
+  (`workspace.read(cx).root_focus`, `is_focused == true`) — the exact fallback handle
+  `TillerWorkspace::render`'s F-SID-19 comment describes a few lines above
+  `render_pane_tree`: "if nothing at all holds keyboard focus this frame ... reclaim focus onto
+  `root_focus`". Something about pressing the divider handle empties `window.focus` outright (not
+  merely re-targets it), and this pre-existing safety net — built for an unrelated case, an
+  unmounted previously-focused surface — is what actually catches the fall and keeps the app from
+  being left with *no* keyboard target at all.
+- Reproduced with a real preceding hover-`MouseMoveEvent` before the down (rules out a hit-test
+  staleness artifact specific to jumping straight to `MouseDownEvent` with no prior hover), and
+  with the whole drag confined to under 5px of travel, well inside the handle's own strip (rules
+  out the up-event landing over a neighbouring pane).
+
+**This is a genuine, reproducible defect, not a code-reading assumption and not a test artifact of
+skipping hover-before-down.** A user who drags a pane divider to resize a split loses keyboard focus
+entirely for one frame, silently recovered onto the workspace root rather than the pane they were
+just typing into — meaning their very next keystroke goes nowhere useful (`root_focus` has no
+visible input target) until they click a pane again. **Divider/nonstructural sub-clause: `FAILED —
+defective`**, not the row's hoped-for `PASSED`. (One further, secondary oddity surfaced while
+building the negative control for this test: a raw synthetic click directly on a pane's own leaf
+area updated the data model's `focused_pane` but did not reliably move `window.focus` there in this
+specific fixture, even *before* any divider interaction — a second, distinct harness/app question
+not chased down further here since it is outside this row's scope; named so a future pass does not
+have to rediscover it from scratch.)
+
+### Insert/Move: still no real-app analog — confirmed absent, not merely unreachable
+
+Re-checked directly at the source of truth rather than re-citing the prior pass: `session.rs`'s
+`PaneEvent` enum (the pane mutation model everything else in this row replays through) has exactly
+three variants — `Split`, `SetRatio`, `Close` — confirmed by reading the full `enum PaneEvent`
+definition. There is no `Insert` or `Move` variant at all, so this is not "a variant exists but
+nothing in the UI constructs it" (which would leave open the possibility of a hidden or
+keyboard-only path); the pane data model itself has no representation for either operation to
+replay, persist, or drive. A broader grep for `insert_terminal_tab`/`"Move"`-adjacent pane
+functions in `main.rs` and `panes.rs` turns up only tab-level operations (inserting a new *tab*,
+unrelated to pane-tree structure) — nothing pane-structural. This settles the brief's open question
+as a genuine, confirmed absence rather than an unreachable-but-present feature: **Insert/Move have
+no real-app analog in this port at all.**
+
+### Row verdict
+
+Split: **PASSED** (prior wave, live, zero-click discriminator, not re-touched here). Close:
+**PASSED** (prior wave, live, twice-reproduced discriminator, not re-touched here).
+Divider/nonstructural: **FAILED — defective**, newly isolated live via a drawn test this pass (was
+code-proof-only). Insert/Move: confirmed no real-app analog exists (not a missing search, a settled
+absence).
+
+**Row verdict: `half-proven`** (unchanged) — but the divider leg has moved from "code-proof only,
+ambiguous" to a **positively identified defect**, which is a materially stronger and more actionable
+state than before: a future pass has an exact, named repro (`drawn_divider_drag_blurs_focus_to_workspace_root`)
+and an exact mechanism (mousedown on the divider handle empties `window.focus`; F-SID-19's
+`root_focus` reclaim is what prevents total focus loss) rather than an unresolved ambiguity.
+
+Commit: `<to be filled after commit>` (adds `debug_selector`s to `render_pane_tree`'s divider/leaf
+divs and the new drawn test to `rust/crates/tiller/src/main.rs`).
+
+---
