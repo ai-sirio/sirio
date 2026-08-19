@@ -947,6 +947,20 @@ pub struct Settings {
     /// `None` in every UI-only/test construction; the host wires this once
     /// via [`Self::with_database_path`], right after [`Self::with_snapshot`].
     database_path: Option<PathBuf>,
+    /// F-SET-15: isolated accounts stored for Claude/Codex — the only two
+    /// providers the reference app's own `AgentAccountStore` ever gave
+    /// multi-account support (OpenCode Go and Ollama Cloud authenticate
+    /// with a single pasted cookie, not a CLI login, so there is nothing
+    /// for a second isolated account to mean there). Loaded from the
+    /// database alongside the identity cache; empty in every UI-only/test
+    /// construction that never called [`Self::with_database_path`].
+    claude_accounts: Vec<tiller_persistence::AgentAccountRecord>,
+    codex_accounts: Vec<tiller_persistence::AgentAccountRecord>,
+    /// The selected account id for each provider, `None` meaning "System
+    /// default" (the CLI's own unmodified on-disk login). Persisted under
+    /// the same key the Swift app's `AgentAccountStore` used.
+    active_claude_account_id: Option<String>,
+    active_codex_account_id: Option<String>,
 }
 
 /// The display data for one AI Provider card — everything the renderer
@@ -1067,6 +1081,10 @@ impl Settings {
             agent_search_focus: cx.focus_handle(),
             agent_colors: initial.agent_colors,
             database_path: None,
+            claude_accounts: Vec::new(),
+            codex_accounts: Vec::new(),
+            active_claude_account_id: None,
+            active_codex_account_id: None,
         }
     }
 
@@ -1079,7 +1097,128 @@ impl Settings {
     pub fn with_database_path(mut self, path: PathBuf) -> Self {
         self.database_path = Some(path);
         self.sync_account_identity_cache();
+        self.sync_agent_accounts();
         self
+    }
+
+    /// F-SET-15: (re)loads the isolated Claude/Codex account lists and each
+    /// provider's current selection from the database. A no-op until
+    /// [`Self::with_database_path`] has been called, same as the identity
+    /// cache above.
+    fn sync_agent_accounts(&mut self) {
+        let Some(path) = self.database_path.clone() else {
+            return;
+        };
+        let Ok(db) = tiller_persistence::AppDatabase::open(&path) else {
+            return;
+        };
+        self.claude_accounts = db.agent_accounts("claude").unwrap_or_default();
+        self.codex_accounts = db.agent_accounts("codex").unwrap_or_default();
+        self.active_claude_account_id = db.active_agent_account_id("claude").unwrap_or(None);
+        self.active_codex_account_id = db.active_agent_account_id("codex").unwrap_or(None);
+    }
+
+    /// Selects the active account for `provider_id` (`"claude"` |
+    /// `"codex"`) — `None` returns to "System default". Persists to the
+    /// database (a no-op provider, or a database not yet wired, still
+    /// updates the in-memory badge so tests and previews work without a
+    /// database) and moves the "Active" badge on the next render.
+    pub fn select_agent_account(
+        &mut self,
+        provider_id: &str,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if provider_id != "claude" && provider_id != "codex" {
+            return;
+        }
+        if let Some(path) = self.database_path.clone()
+            && let Ok(db) = tiller_persistence::AppDatabase::open(&path)
+        {
+            let _ = db.set_active_agent_account_id(provider_id, account_id.as_deref());
+        }
+        match provider_id {
+            "claude" => self.active_claude_account_id = account_id,
+            "codex" => self.active_codex_account_id = account_id,
+            _ => unreachable!("checked above"),
+        }
+        cx.notify();
+    }
+
+    /// Registers a new isolated account for `provider_id` (`"claude"` |
+    /// `"codex"`) and makes it the active selection. `config_dir_path` is
+    /// the isolated directory this account's CLI invocations should be
+    /// pointed at (`CLAUDE_CONFIG_DIR`/`CODEX_HOME`-style); `None` creates a
+    /// fresh, empty one (mirrors the Swift store's `newAccountConfigDir`),
+    /// for a caller that has not set one up. This does not move any
+    /// credentials into the directory or complete a login — that remains
+    /// the CLI's own job, the same as it always was for "System default".
+    /// Returns the new account's id.
+    pub fn add_agent_account(
+        &mut self,
+        provider_id: &str,
+        label: String,
+        config_dir_path: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        if provider_id != "claude" && provider_id != "codex" {
+            return None;
+        }
+        let path = self.database_path.clone()?;
+        let db = tiller_persistence::AppDatabase::open(&path).ok()?;
+        let id = format!(
+            "acct-{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default(),
+            self.claude_accounts.len() + self.codex_accounts.len()
+        );
+        // Mirrors the Swift store's `newAccountConfigDir`: a caller may
+        // register an already-existing directory it set up out of band
+        // (e.g. a pre-authenticated `CODEX_HOME` copied in by a script);
+        // otherwise a fresh, empty isolated directory is created here,
+        // alongside the app's own database rather than in a fixed OS
+        // location, since this rewrite has no `Application Support`
+        // equivalent path threaded through yet.
+        let config_dir_path = match config_dir_path {
+            Some(explicit) => explicit,
+            None => {
+                let dir = path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("agent-accounts")
+                    .join(provider_id)
+                    .join(&id);
+                std::fs::create_dir_all(&dir).ok()?;
+                dir.to_string_lossy().into_owned()
+            }
+        };
+        let record = tiller_persistence::AgentAccountRecord {
+            id: id.clone(),
+            provider: provider_id.to_string(),
+            label,
+            config_dir_path,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or_default(),
+        };
+        db.save_agent_account(&record).ok()?;
+        let _ = db.set_active_agent_account_id(provider_id, Some(&id));
+        match provider_id {
+            "claude" => {
+                self.claude_accounts.push(record);
+                self.active_claude_account_id = Some(id.clone());
+            }
+            "codex" => {
+                self.codex_accounts.push(record);
+                self.active_codex_account_id = Some(id.clone());
+            }
+            _ => unreachable!("checked above"),
+        }
+        cx.notify();
+        Some(id)
     }
 
     /// Reconciles the just-discovered Claude/Codex account states against
@@ -1498,6 +1637,7 @@ impl Settings {
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
         self.provider_accounts = ProviderAccountStates::discovered();
         self.sync_account_identity_cache();
+        self.sync_agent_accounts();
         cx.notify();
     }
 
@@ -2430,24 +2570,69 @@ impl Settings {
             )
             .into_any_element()
         };
-        card = card
-            .child(controls::subsection_header(
-                "Accounts",
-                "Showing accounts for this device. New accounts are added there.",
-                account_action,
+        // F-SET-15: the "System default" row's "Active" badge is a
+        // selection marker among however many accounts exist for this
+        // provider, not a hardcoded claim — it is active exactly when no
+        // isolated account is selected. Claude/Codex may have any number of
+        // additional isolated accounts (from `add_agent_account`); every
+        // other provider keeps exactly the one always-active row it always
+        // had, since the reference app never gave them multi-account
+        // support either (see the comment above `account_action`).
+        let (accounts, active_account_id) = match provider {
+            ProviderKind::Claude => (
+                self.claude_accounts.as_slice(),
+                &self.active_claude_account_id,
+            ),
+            ProviderKind::Codex => (
+                self.codex_accounts.as_slice(),
+                &self.active_codex_account_id,
+            ),
+            ProviderKind::OpenCodeGo | ProviderKind::OllamaCloud => (&[][..], &None),
+        };
+        let select_entity = entity.clone();
+        let select_provider_id = provider_id;
+        card = card.child(controls::subsection_header(
+            "Accounts",
+            "Showing accounts for this device. New accounts are added there.",
+            account_action,
+            theme,
+        ));
+        card = card.child(controls::account_row(
+            format!("system-default-{select_provider_id}"),
+            "System default".to_string(),
+            "Use your current CLI login on this device.".to_string(),
+            active_account_id.is_none(),
+            theme,
+            {
+                let entity = select_entity.clone();
+                let provider_id = select_provider_id;
+                move |_, _, cx| {
+                    entity.update(cx, |settings, cx| {
+                        settings.select_agent_account(provider_id, None, cx)
+                    });
+                }
+            },
+        ));
+        for account in accounts {
+            let is_active = active_account_id.as_deref() == Some(account.id.as_str());
+            let account_id = account.id.clone();
+            card = card.child(controls::account_row(
+                format!("account-{}", account.id),
+                account.label.clone(),
+                account.config_dir_path.clone(),
+                is_active,
                 theme,
-            ))
-            // The "Active" badge on the System default row is a *selection*
-            // marker, not a credential claim: this app has no isolated
-            // accounts, so the current CLI login is definitionally the
-            // account agent terminals use. It stays true by construction,
-            // not because anything was checked at render time.
-            .child(controls::account_row(
-                "System default",
-                "Use your current CLI login on this device.",
-                true,
-                theme,
+                {
+                    let entity = select_entity.clone();
+                    let provider_id = select_provider_id;
+                    move |_, _, cx| {
+                        entity.update(cx, |settings, cx| {
+                            settings.select_agent_account(provider_id, Some(account_id.clone()), cx)
+                        });
+                    }
+                },
             ));
+        }
         card
     }
 
@@ -5426,6 +5611,107 @@ mod tests {
             rendered.opencode_go.label, "Unknown",
             "a provider without a local store reports Unknown, not a guess"
         );
+    }
+
+    /// F-SET-15: `account_row` used to take no click callback, and
+    /// `settings.rs` had exactly one hardcoded `account_row("System
+    /// default", ..., true, ...)` call with zero selection state — a second
+    /// account could never exist, let alone be selected. A second Claude
+    /// account is seeded straight into the database (the same seam
+    /// `with_account_states` uses to avoid touching this machine's real
+    /// auth files), then the test clicks its drawn row like a user would
+    /// and asserts the "Active" badge really moved: both in the persisted
+    /// selection state and in a re-opened database handle, proving this is
+    /// a real write, not an in-memory-only toggle.
+    #[gpui::test]
+    async fn clicking_a_second_account_row_moves_the_active_badge(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-settings-account-row-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let db_path = dir.join("tiller.sqlite");
+        {
+            let db = tiller_persistence::AppDatabase::open(&db_path).expect("open db");
+            db.save_agent_account(&tiller_persistence::AgentAccountRecord {
+                id: "acct-work".to_string(),
+                provider: "claude".to_string(),
+                label: "Work".to_string(),
+                config_dir_path: "/tmp/tiller-agent-accounts/claude/acct-work".to_string(),
+                created_at: 1,
+            })
+            .expect("seed a second account");
+        }
+
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .with_account_states(ProviderAccountStates {
+                    claude: ProviderAccountStatus::from_account_state(LocalAccountState::SignedIn),
+                    ..ProviderAccountStates::discovered()
+                })
+                .with_database_path(db_path.clone())
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let providers = cx
+            .debug_bounds("settings-category-AiProviders")
+            .expect("AI Providers category is offered");
+        cx.simulate_click(providers.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Sanity: before any click, System default is active and the seeded
+        // account is not — otherwise the click below could pass vacuously.
+        let active_before = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .active_claude_account_id
+                .clone()
+        });
+        assert_eq!(
+            active_before, None,
+            "sanity: System default starts active, nothing selected yet"
+        );
+
+        let work_row = cx
+            .debug_bounds("account-acct-work")
+            .expect("the seeded second account renders its own drawn row");
+        cx.simulate_click(work_row.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let active_after = cx.update(|window, cx| {
+            window
+                .root::<Settings>()
+                .flatten()
+                .expect("settings root")
+                .read(cx)
+                .active_claude_account_id
+                .clone()
+        });
+        assert_eq!(
+            active_after,
+            Some("acct-work".to_string()),
+            "clicking the second account row must move the active selection to it"
+        );
+
+        // The write must be real, not in-memory-only: a fresh handle on the
+        // same file sees the same selection.
+        let reopened = tiller_persistence::AppDatabase::open(&db_path).expect("reopen db");
+        assert_eq!(
+            reopened.active_agent_account_id("claude").expect("read"),
+            Some("acct-work".to_string()),
+            "the moved selection must be durable, not just an in-process toggle"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[gpui::test]

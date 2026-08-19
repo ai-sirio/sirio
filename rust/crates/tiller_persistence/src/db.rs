@@ -18,9 +18,9 @@ use crate::MAX_DATABASE_BYTES;
 use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
-    AppSettings, AppearanceMode, ChatSessionSummary, ChatTranscript, ChatTurn, FileIconTheme,
-    MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord, SidebarState, TabRecord,
-    TabStateRecord, WorktreeRecord, settings_keys,
+    AgentAccountRecord, AppSettings, AppearanceMode, ChatSessionSummary, ChatTranscript, ChatTurn,
+    FileIconTheme, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord, SidebarState,
+    TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
 
 /// Durable storage for what Tiller must remember across launches.
@@ -778,6 +778,93 @@ impl AppDatabase {
     }
 
     // ------------------------------------------------------------------
+    // Isolated agent accounts (F-SET-15)
+    // ------------------------------------------------------------------
+
+    /// All isolated accounts stored for one provider (`"claude"` |
+    /// `"codex"`), oldest first — matches the Swift store's own
+    /// `sorted { $0.createdAt < $1.createdAt }`.
+    pub fn agent_accounts(
+        &self,
+        provider: &str,
+    ) -> Result<Vec<AgentAccountRecord>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, provider, label, config_dir_path, created_at
+             FROM agent_account
+             WHERE provider = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map([provider], |row| {
+            Ok(AgentAccountRecord {
+                id: row.get(0)?,
+                provider: row.get(1)?,
+                label: row.get(2)?,
+                config_dir_path: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Inserts one isolated account. Ids are caller-supplied and unique by
+    /// construction (a fresh UUID), so this is a plain insert, not an
+    /// upsert — unlike `account_identity`, this is a list, not a cache.
+    pub fn save_agent_account(&self, record: &AgentAccountRecord) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO agent_account (id, provider, label, config_dir_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                record.id,
+                record.provider,
+                record.label,
+                record.config_dir_path,
+                record.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Removes one isolated account and reports whether a row was deleted.
+    pub fn delete_agent_account(&self, id: &str) -> Result<bool, PersistenceError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM agent_account WHERE id = ?1", [id])?
+            > 0)
+    }
+
+    /// The currently selected account id for a provider, or `None` for
+    /// "System default" (the CLI's own unmodified on-disk login). Stored
+    /// under the exact UserDefaults key the Swift app used
+    /// (`"agentAccounts.<provider>.activeId"`) in the same generic
+    /// `setting` table `AppSettings` already uses, since this is one
+    /// nullable string per provider, not a record warranting its own table.
+    pub fn active_agent_account_id(
+        &self,
+        provider: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        self.setting_value(&active_agent_account_key(provider))
+    }
+
+    /// Sets (or, with `None`, clears back to "System default") the active
+    /// account id for a provider.
+    pub fn set_active_agent_account_id(
+        &self,
+        provider: &str,
+        id: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let key = active_agent_account_key(provider);
+        match id {
+            Some(id) => set_setting(&transaction, &key, id)?,
+            None => {
+                transaction.execute("DELETE FROM setting WHERE key = ?1", [&key])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
 
@@ -1485,6 +1572,12 @@ fn upsert_tab(tx: &rusqlite::Transaction, tab: &TabRecord) -> rusqlite::Result<(
     Ok(())
 }
 
+/// The exact UserDefaults key format the Swift `AgentAccountStore` used:
+/// `"agentAccounts.<provider>.activeId"`.
+fn active_agent_account_key(provider: &str) -> String {
+    format!("agentAccounts.{provider}.activeId")
+}
+
 fn set_setting(tx: &rusqlite::Transaction, key: &str, value: &str) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO setting (key, value) VALUES (?1, ?2)
@@ -1579,5 +1672,89 @@ mod save_tabs_tests {
             .find(|s| s.tab_id == "chat-1")
             .expect("chat session must survive an ordinary tab autosave");
         assert_eq!(session.turn_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod agent_account_tests {
+    use super::*;
+    use crate::model::AgentAccountRecord;
+
+    /// F-SET-15: a provider starts with zero isolated accounts and a `None`
+    /// active id ("System default"). Saving one makes it listable and
+    /// selectable; selecting it persists across a fresh handle on the same
+    /// file, the same durability guarantee every other setting in this file
+    /// gets.
+    #[test]
+    fn saved_accounts_are_listed_and_selection_survives_a_reopen() {
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-agent-account-test-{}-{}",
+            std::process::id(),
+            unix_timestamp_millis()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("accounts.sqlite");
+
+        {
+            let db = AppDatabase::open(&path).expect("open");
+            assert_eq!(
+                db.agent_accounts("claude").expect("list"),
+                Vec::new(),
+                "a fresh database has no isolated accounts for any provider"
+            );
+            assert_eq!(
+                db.active_agent_account_id("claude").expect("active"),
+                None,
+                "no account selected yet means System default"
+            );
+
+            let work = AgentAccountRecord {
+                id: "acct-work".into(),
+                provider: "claude".into(),
+                label: "Work".into(),
+                config_dir_path: "/tmp/tiller-agent-accounts/claude/acct-work".into(),
+                created_at: 1,
+            };
+            db.save_agent_account(&work).expect("save account");
+            db.set_active_agent_account_id("claude", Some("acct-work"))
+                .expect("select account");
+        }
+
+        // A fresh handle on the same file — proves this round-trips through
+        // SQLite, not just an in-process cache.
+        let reopened = AppDatabase::open(&path).expect("reopen");
+        let accounts = reopened
+            .agent_accounts("claude")
+            .expect("list after reopen");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].label, "Work");
+        assert_eq!(
+            reopened
+                .active_agent_account_id("claude")
+                .expect("active after reopen"),
+            Some("acct-work".to_string()),
+            "the selected account must survive a reopen, same as every other setting"
+        );
+        assert_eq!(
+            reopened.agent_accounts("codex").expect("codex list"),
+            Vec::new(),
+            "accounts are scoped per provider"
+        );
+
+        // Clearing back to System default removes the setting row entirely
+        // rather than leaving a stale/empty-string sentinel behind.
+        reopened
+            .set_active_agent_account_id("claude", None)
+            .expect("clear selection");
+        assert_eq!(
+            reopened
+                .active_agent_account_id("claude")
+                .expect("active after clear"),
+            None,
+            "clearing selection must return to System default"
+        );
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

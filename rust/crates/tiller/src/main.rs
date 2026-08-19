@@ -543,6 +543,17 @@ enum ControlAction {
     ReadSettings {
         reply: ControlReply,
     },
+    AddAgentAccount {
+        provider: String,
+        label: String,
+        config_dir_path: Option<String>,
+        reply: ControlReply,
+    },
+    SelectAgentAccount {
+        provider: String,
+        account_id: Option<String>,
+        reply: ControlReply,
+    },
     ReadPane {
         id: String,
         query: PaneQuery,
@@ -1295,6 +1306,8 @@ impl ControlHandler for AppControlHandler {
                     "surface.settings.open",
                     "surface.settings.select",
                     "surface.settings.read",
+                    "settings.account.add",
+                    "settings.account.select",
                     "surface.chat.open",
                     "surface.chat.send",
                     "surface.chat.compose",
@@ -1481,6 +1494,55 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.settings.read" => {
                 self.queue_action(request, |reply| ControlAction::ReadSettings { reply })
+            }
+            // F-SET-15: registers an isolated Claude/Codex account and
+            // selects it, the real production entry point that gives the
+            // Accounts section a second, genuinely selectable row —
+            // `tillerctl`'s equivalent of a caller that already has an
+            // isolated `CLAUDE_CONFIG_DIR`/`CODEX_HOME` set up and wants
+            // Tiller to remember it (or, with `configDirPath` omitted, a
+            // fresh empty one to point a login at). Not a test-only shim:
+            // this is the same control-socket surface `project.add` and
+            // `notify` live on.
+            "settings.account.add" => {
+                let Some(provider) = request.params.get("provider").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "settings.account.add requires provider",
+                    );
+                };
+                let Some(label) = request.params.get("label").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "settings.account.add requires label",
+                    );
+                };
+                let config_dir_path = request.params.get("configDirPath").cloned();
+                self.queue_action(request, move |reply| ControlAction::AddAgentAccount {
+                    provider,
+                    label,
+                    config_dir_path,
+                    reply,
+                })
+            }
+            "settings.account.select" => {
+                let Some(provider) = request.params.get("provider").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "settings.account.select requires provider",
+                    );
+                };
+                // Absent or empty means "System default".
+                let account_id = request
+                    .params
+                    .get("id")
+                    .cloned()
+                    .filter(|id| !id.is_empty());
+                self.queue_action(request, move |reply| ControlAction::SelectAgentAccount {
+                    provider,
+                    account_id,
+                    reply,
+                })
             }
             "surface.chat.open" => {
                 let worktree = request.params.get("worktree").cloned();
@@ -3362,6 +3424,32 @@ impl TillerWorkspace {
                                 }
                                 ControlAction::ReadSettings { reply } => {
                                     let result = workspace.control_read_settings(cx);
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::AddAgentAccount {
+                                    provider,
+                                    label,
+                                    config_dir_path,
+                                    reply,
+                                } => {
+                                    let result = workspace.control_add_agent_account(
+                                        &provider,
+                                        label,
+                                        config_dir_path,
+                                        cx,
+                                    );
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::SelectAgentAccount {
+                                    provider,
+                                    account_id,
+                                    reply,
+                                } => {
+                                    let result = workspace.control_select_agent_account(
+                                        &provider,
+                                        account_id,
+                                        cx,
+                                    );
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::ReadPane { id, query, reply } => {
@@ -7218,6 +7306,54 @@ impl TillerWorkspace {
             return Err("Settings surface is not open".to_string());
         }
         settings_report_pairs(&self.settings.read(cx).report())
+    }
+
+    /// F-SET-15: registers an isolated account for `provider`
+    /// (`"claude"` | `"codex"`) and selects it — the real production entry
+    /// point behind `settings.account.add`. Deliberately does not require
+    /// the Settings surface to be open (the entity exists from boot,
+    /// independent of visibility), the same way `notify` does not require
+    /// any particular pane to be focused.
+    fn control_add_agent_account(
+        &mut self,
+        provider: &str,
+        label: String,
+        config_dir_path: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let id = self.settings.update(cx, |settings, cx| {
+            settings.add_agent_account(provider, label, config_dir_path, cx)
+        });
+        match id {
+            Some(id) => Ok(vec![("id".to_string(), id)]),
+            None => Err(format!(
+                "settings.account.add: unknown provider '{provider}' or no database wired"
+            )),
+        }
+    }
+
+    /// F-SET-15: selects the active account for `provider`
+    /// (`"claude"` | `"codex"`), `account_id: None` returning to "System
+    /// default" — the real production entry point behind
+    /// `settings.account.select`.
+    fn control_select_agent_account(
+        &mut self,
+        provider: &str,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        if provider != "claude" && provider != "codex" {
+            return Err(format!(
+                "settings.account.select: unknown provider '{provider}'"
+            ));
+        }
+        self.settings.update(cx, |settings, cx| {
+            settings.select_agent_account(provider, account_id.clone(), cx)
+        });
+        Ok(vec![(
+            "activeId".to_string(),
+            account_id.unwrap_or_default(),
+        )])
     }
 
     /// Resolves the persisted tab id used by `surface.chat.*` to the one
