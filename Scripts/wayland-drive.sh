@@ -85,8 +85,15 @@
 #      in true arrival order. Off by default: it is verbose and only worth paying for when a
 #      question is specifically about event ORDER (e.g. was a modifier applied before a click's
 #      button event reached the app), which no screenshot can answer.
+#      TILLER_WL_PORTAL=1 runs an XDG portal on this instance's private bus, so rows that open a
+#      native folder picker (Add Project, worktree location) actually work. Off by default because
+#      it costs two more processes and most rows never touch a portal.
+#      TILLER_WL_HOST_DBUS=1 opts OUT of the private bus and shares the caller's. Read the note
+#      above the bus setup before using it: on a desktop login this is what puts a real "Open
+#      Folder" window on the operator's own screen.
 #
 # Exit: 0 ok · 2 no binary · 3 compositor never came up · 4 app died · 5 first frame blank
+#       6 the session bus could not be isolated
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -116,8 +123,11 @@ VP_ACK="$INPUT_DIR/ack"
 VP_READY="$INPUT_DIR/ready"
 VP_LOG="$INPUT_DIR/virtual-pointer.log"
 VK_LOG="$INPUT_DIR/virtual-keyboard.log"
+DBUS_LOG="/tmp/$LABEL-dbus.log"
 VP_PID=""
 VK_PID=""
+DBUS_PID=""
+PORTAL_PIDS=""
 POINTER_ENABLED=0
 POINTER_COMMAND_ID=0
 
@@ -163,6 +173,12 @@ kill_lane_descendants() {
 cleanup() {
   [ -n "${TILLER_WL_KEEP:-}" ] && {
     echo "NOTE: leaving $LABEL running (SOCK=$SOCK WAYLAND_DISPLAY=$WD VP_FIFO=$VP_FIFO)"
+    # The bus daemon stays too, and it is the one leftover an environment scan
+    # will not find: it is the *server*, so it carries no
+    # DBUS_SESSION_BUS_ADDRESS of its own to match on. Find it by its socket
+    # path instead, which is why that path is named after the label:
+    #   pkill -f "$LABEL-dbus.sock"
+    [ -n "${DBUS_PID:-}" ] && echo "      private bus still up: pid $DBUS_PID on /tmp/$LABEL-dbus.sock"
     return 0
   }
   [ -n "${VP_PID:-}" ] && kill "$VP_PID" 2>/dev/null || true
@@ -173,6 +189,14 @@ cleanup() {
   # instance leaked past cleanup and survived `pkill -x tiller` too.
   kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
   kill_ours SWAYSOCK "$SWAYSOCK" sway
+  # The bus goes last: the portal backends above are its clients and exit when
+  # it does, and killing it first would strand them looking for a socket that
+  # no longer exists. A leaked dbus-daemon is as much a leak as a leaked
+  # compositor, and harder to spot — it costs no CPU and shows up only as a
+  # /tmp socket nobody owns.
+  for p in $PORTAL_PIDS; do kill "$p" 2>/dev/null || true; done
+  [ -n "${DBUS_PID:-}" ] && kill "$DBUS_PID" 2>/dev/null || true
+  rm -f "/tmp/$LABEL-dbus.sock" 2>/dev/null || true
   return 0
 }
 trap cleanup EXIT
@@ -194,6 +218,60 @@ gaps inner 0
 gaps outer 0
 output HEADLESS-1 resolution ${W1}x${H1}
 EOF
+
+# A private session bus, before anything that could use one starts.
+#
+# This lane isolates the display and leaves the bus alone, which is only half a
+# sandbox — and the missing half reaches further than the display does. Tiller's
+# folder picker is `cx.prompt_for_paths` -> ashpd -> an XDG portal call, and a
+# portal call goes wherever DBUS_SESSION_BUS_ADDRESS points. Inherited from a
+# desktop login that is `unix:path=/run/user/$UID/bus`, so the request lands on
+# the *user's own session*, and their portal backend opens a real "Open Folder"
+# window on the screen in front of them. Measured 2026-08-19: a critic drove the
+# Add-Project menu four times before noticing, on a live COSMIC session.
+#
+# Isolation is therefore the default and opting out is explicit. With no portal
+# running on the private bus a picker request fails instead of succeeding
+# somewhere it shouldn't, which is the right failure: a row that "passed" by
+# opening a dialog on the operator's desktop was never testing this app in the
+# first place. Set TILLER_WL_PORTAL=1 to get a portal on the private bus, for
+# rows that genuinely need the picker to work.
+if [ "${TILLER_WL_HOST_DBUS:-0}" = "1" ]; then
+  echo "WARN: TILLER_WL_HOST_DBUS=1 — this instance shares the caller's session bus." >&2
+  echo "      A native picker opened here reaches the real desktop." >&2
+elif command -v dbus-daemon >/dev/null 2>&1; then
+  # Naming the socket ourselves rather than parsing --print-address: the address
+  # is then known before the daemon exists, so cleanup can remove it even if the
+  # daemon never came up.
+  DBUS_SOCK="/tmp/$LABEL-dbus.sock"
+  rm -f "$DBUS_SOCK"
+  dbus-daemon --session --nofork --address="unix:path=$DBUS_SOCK" >"$DBUS_LOG" 2>&1 &
+  DBUS_PID=$!
+  for _ in $(seq 1 50); do
+    [ -S "$DBUS_SOCK" ] && break
+    sleep 0.1
+  done
+  if [ ! -S "$DBUS_SOCK" ]; then
+    echo "FAIL: private session bus never came up — see $DBUS_LOG" >&2
+    exit 6
+  fi
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_SOCK"
+  unset DBUS_SESSION_BUS_PID DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE
+  if [ "${TILLER_WL_PORTAL:-0}" = "1" ] && [ -x /usr/libexec/xdg-desktop-portal ]; then
+    /usr/libexec/xdg-desktop-portal >>"$DBUS_LOG" 2>&1 &
+    PORTAL_PIDS="$!"
+    for backend in /usr/libexec/xdg-desktop-portal-gtk /usr/libexec/xdg-desktop-portal-gnome; do
+      [ -x "$backend" ] || continue
+      "$backend" >>"$DBUS_LOG" 2>&1 &
+      PORTAL_PIDS="$PORTAL_PIDS $!"
+      break
+    done
+  fi
+else
+  echo "FAIL: dbus-daemon is not installed, so this lane cannot isolate the session bus." >&2
+  echo "      Install it, or set TILLER_WL_HOST_DBUS=1 to accept reaching the real desktop." >&2
+  exit 6
+fi
 
 env -u WAYLAND_DISPLAY -u DISPLAY \
     XDG_RUNTIME_DIR=/run/user/"$(id -u)" \
