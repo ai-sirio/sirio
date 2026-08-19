@@ -106,25 +106,35 @@ fn make_repo() -> TempDir {
 
 #[test]
 fn streaming_lines_arrive_incrementally_before_completion() {
-    use std::os::unix::fs::PermissionsExt;
-
     ensure_generous_timeout();
     let dir = TempDir::new();
-    let script = dir.path().join("emitter.sh");
     // Two LF lines separated by a sleep, then a CR-separated pair: the
     // reader must deliver on both delimiters, and must deliver the first
     // line while the process is still sleeping.
-    std::fs::write(
-        &script,
-        "#!/bin/sh\necho alpha >&2\nsleep 1.2\necho beta >&2\nprintf 'gamma\\rdelta\\n' >&2\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    //
+    // The emitter is handed to `sh -c` rather than written to a file and
+    // exec'd, and that is deliberate — do not "simplify" it back. Writing an
+    // executable and then exec'ing it inside a multi-threaded test binary
+    // races: `fs::write` holds a write fd, a sibling test's `fork` (this
+    // target spawns ~25 git processes through `make_repo`) copies the whole
+    // fd table into its child, and until that child reaches `execve` the
+    // kernel still counts a writer on our inode — so our own exec fails with
+    // ETXTBSY, "Text file busy". `O_CLOEXEC`, which Rust sets by default,
+    // does not close that window: the fd is dropped at the child's `execve`,
+    // not at its `fork`. It cost one red workspace run at load 24. Passing
+    // the body as an argument removes the precondition instead of retrying
+    // around it: no file is written, so no writer fd can be inherited.
+    let emitter = "echo alpha >&2\nsleep 1.2\necho beta >&2\nprintf 'gamma\\rdelta\\n' >&2\n";
 
     let mut arrivals: Vec<(String, Instant)> = Vec::new();
-    let result = GitRunner::run_streaming_with_binary(&script, &[], dir.path(), |line| {
-        arrivals.push((line, Instant::now()));
-    })
+    let result = GitRunner::run_streaming_with_binary(
+        Path::new("/bin/sh"),
+        &["-c", emitter],
+        dir.path(),
+        |line| {
+            arrivals.push((line, Instant::now()));
+        },
+    )
     .expect("the emitter runs");
     let finished = Instant::now();
 
