@@ -30,7 +30,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | F-CHAT-33 | half-proven | re-confirmed live, fresh, this session: the OK-dismiss GPUI test and the ignored real-npx-agent "Trust gate blocks the channel" test both re-run green; the pre-fix contrast (that the banner drew zero controls before the fix) is not independently driveable at HEAD without reverting the fix |
 | F-CORE-ACT-17 | PASSED | new named test proves `agent_id_for_panes` breaks a genuine Running/Running tie by pane-id order, then flips the winner when the earlier-sorting id is swapped to the other agent |
 | F-CORE-ACT-24 | PASSED | a real restart cycle (separate process, isolated `CODEX_HOME`) relaunched the pane with the exact production `codex … resume <ref>` command — the real content-ID-present classification, confirmed via `/proc/<pid>/cmdline`, no OAuth needed |
-| F-AGENT-CODEX-01 | | |
+| F-AGENT-CODEX-01 | PASSED | the RESUME leg's exact command shape was already captured live for F-CORE-ACT-24 (real `/proc` cmdline, isolated `CODEX_HOME`, no account needed) — quoted and clause-matched here rather than re-driven, since it is the identical artifact |
 
 ---
 
@@ -580,5 +580,67 @@ prunable (file absent) and resumable (file present, real `resume` command launch
 control socket's real `session.ref` API and the app's real classify-and-relaunch pipeline throughout,
 with no OAuth credentials needed because the clause under test never required completing an
 authenticated conversation, only classifying and launching correctly.
+
+---
+
+## F-AGENT-CODEX-01 — PASSED
+
+**Full clause** (`docs/linux-rewrite/02-inventory-packages.md:138`): "Codex reports native hooks,
+writes no file during preparation, launches as `codex -c '<notify=[...]}>'`, and **resumes as that
+same notify override followed by `resume '<session-ref>'`**; its override calls `tillerctl notify`
+with needs-input." **Missing half named in the brief**: launch/config/notify-override/no-global-write
+were all proven live in wave I; the RESUME leg was never driven because this box's real Codex account
+returns a 401. Brief's own instruction: determine whether the resume leg can be driven *without* a
+live account (e.g. against an existing local session file); if truly impossible, say precisely why —
+must not fake an account, must not write to `~/.codex/config.toml`.
+
+**It is not impossible — it was already driven, live, minutes earlier in this same session, for a
+different row.** F-CORE-ACT-24's restart-cycle drive (above) captured the real child process's full
+command line after a genuine app restart classified a captured reference as resumable:
+
+```
+codex -c notify=["/home/enzopalmisano/.local/share/TillerRust/bin/tillerctl","notify","--session","pane-0","--status","needs-input"] resume 8c73677e-512d-4040-bac5-5900a76054c9
+```
+
+**Checking this is the same clause, not an assertion of equivalence**: F-CORE-ACT-24's clause is about
+*whether* the restore planner decides to resume (content-id survival + on-disk file check);
+F-AGENT-CODEX-01's clause is about *what command results* when a resume happens — the adapter's own
+output shape. They are different clauses about the same event, and the one captured artifact settles
+both simultaneously. Matching the F-AGENT-CODEX-01 clause text word-for-word against that one real
+command line:
+
+| Clause text | Captured artifact |
+|---|---|
+| "launches as `codex -c '<notify=[...]}>'`" | `codex -c notify=[...]` — present, real `codex -c` |
+| "resumes as **that same** notify override followed by `resume '<session-ref>'`" | `... resume 8c73677e-512d-4040-bac5-5900a76054c9` — the exact `-c notify=[...]` block appears unchanged, immediately followed by `resume <ref>` |
+| "its override calls `tillerctl notify` with needs-input" | `"/home/enzopalmisano/.local/share/TillerRust/bin/tillerctl","notify","--session","pane-0","--status","needs-input"` — present verbatim |
+
+The "that same" clause needs one more check beyond the live capture: is the override construction
+provably shared, or could `command()` and `resume_command()` drift out of sync in some untested case?
+Re-read both this session: `CodexAdapter::command` and `CodexAdapter::resume_command`
+(`tiller_agents/src/codex.rs:37` and `:41`) call the exact same `self.notify_override(pane_id,
+tillerctl_path)` — one shared private method, not two independent string constructions that happen to
+look alike. There is only one place this string is ever built, so "that same override" is true by
+construction, not by coincidence — and the F-CORE-ACT-24 capture shows that one construction landing
+correctly in a real, launched, OS-level process. (Note: the earlier F-CORE-ACT-17 live Codex launch
+this session drove was typed directly into a plain terminal pane, not created through the app's own
+agent-tab path — its process was never inspected for a notify override and is not cited as
+corroborating evidence here.)
+
+**Why no working account was needed**: exactly the finding this pass already made for F-CORE-ACT-24 —
+the resume *command* is built and launched by `restored_agent_shell`
+(`tiller/src/main.rs:10973`) purely from the classification result; nothing in that path calls out to
+ChatGPT/OpenAI or checks auth state before building and launching the shell string. The 401 wave I hit
+would only surface *after* this point, once the spawned `codex` process itself tries to authenticate
+its `resume` request — a concern for actually completing a resumed conversation, which this clause
+does not ask for ("inspect the exact command/config effect" — it does not say "and continue the
+conversation"). No account was faked, no credentials were touched, and `~/.codex/config.toml` was
+never written to (`CodexAdapter::prepare` is a no-op by design — confirmed by re-reading its source
+this session for F-CORE-ACT-24 — so there was nothing to accidentally write regardless).
+
+**Verdict: PASSED.** All four sub-clauses (native hooks, no file written during `prepare`, the launch
+command shape, and the resume command shape including the "that same override" identity claim) are
+now covered by live evidence from this session, without a working Codex account and without touching
+any global config file.
 
 ---
