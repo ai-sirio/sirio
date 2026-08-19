@@ -95,12 +95,18 @@ impl ActivitySurface {
 
 /// The git state the Files tree paints, for both halves of the tree.
 ///
-/// `files` holds one entry per changed path, exactly as `git status`
-/// reports it. `directories` is [`tiller_git::directory_statuses`]'s
-/// aggregate: every non-root ancestor of every changed path, resolved with
-/// conflicted > changed > untracked, and with a rename contributing both its
-/// destination *and* its original ancestors (F-GIT-STATUS-02). Both are
-/// keyed by worktree-relative path.
+/// `files` holds one entry per changed path, resolved with
+/// [`DirectoryGitStatus::for_file`] — the full four-way vocabulary
+/// (conflicted > untracked > staged > modified) a single file needs, and
+/// that the Changes list already uses. `directories` is
+/// [`tiller_git::directory_statuses`]'s aggregate: every non-root ancestor
+/// of every changed path, resolved with [`DirectoryGitStatus::for_entry`]'s
+/// narrower conflicted > changed > untracked (staged collapses into
+/// changed there, on purpose — a directory roll-up, matching the Swift
+/// original), and with a rename contributing both its destination *and*
+/// its original ancestors (F-GIT-STATUS-02). Both are keyed by
+/// worktree-relative path. The two halves deliberately use two different
+/// precedence orders on the same `DirectoryGitStatus` type — see F-CHG-06.
 ///
 /// This replaced a `HashSet<PathBuf>` of changed paths plus a
 /// `changed.starts_with(relative)` roll-up done in `read_tree`: that
@@ -309,7 +315,7 @@ impl RightPanel {
                                 .entries
                                 .iter()
                                 .map(|entry| {
-                                    (entry.path.clone(), DirectoryGitStatus::for_entry(entry))
+                                    (entry.path.clone(), DirectoryGitStatus::for_file(entry))
                                 })
                                 .collect(),
                             // F-GIT-STATUS-02: the tested aggregate, not a
@@ -1362,13 +1368,16 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
     None
 }
 
-/// The Files tree's marker hue. The three cases are the three the model
-/// distinguishes, and they must stay three *different* colours: rendering
-/// them all as `git_modified` is what made F-GIT-STATUS-02's precedence
-/// ordering unobservable in the frame.
+/// The Files tree's marker hue. The four cases are the four the model
+/// distinguishes (a directory row never actually carries `Staged` — see
+/// [`DirectoryGitStatus::for_entry`] — but a file row can), and they must
+/// stay four *different* colours: rendering them all as `git_modified` is
+/// what made F-GIT-STATUS-02's precedence ordering unobservable in the
+/// frame, and rendering `Staged` as `git_modified` is F-CHG-06.
 fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
     match status {
         DirectoryGitStatus::Conflicted => theme.git_conflict,
+        DirectoryGitStatus::Staged => theme.git_staged,
         DirectoryGitStatus::Changed => theme.git_modified,
         DirectoryGitStatus::Untracked => theme.git_untracked,
     }
@@ -2800,6 +2809,153 @@ mod tests {
             cx.debug_bounds("file-status-conflicted-conflict/also_mod.txt")
                 .is_none(),
             "…and does not inherit its parent's conflict"
+        );
+    }
+
+    /// A real repository carrying, at once: a purely staged add, a purely
+    /// staged rename (zero unstaged component on either), a file that is
+    /// staged *and* further modified in the worktree, a purely unstaged
+    /// modification, and a genuinely untracked file. All five sit at the
+    /// repo root so every marker renders on the very first frame, with no
+    /// expansion needed.
+    fn staged_marker_fixture(dir: &Path) {
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "tests@example.invalid"]);
+        git(dir, &["config", "user.name", "Tiller tests"]);
+        git(dir, &["config", "commit.gpgSign", "false"]);
+        for (relative, contents) in [
+            ("modified-only.txt", "base\n"),
+            ("staged-and-modified.txt", "base\n"),
+            ("rename-source.txt", "rename me\n"),
+        ] {
+            std::fs::write(dir.join(relative), contents).expect("write fixture file");
+        }
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "base tree"]);
+
+        // Unstaged modification only — zero staged component.
+        std::fs::write(dir.join("modified-only.txt"), "base\nedited\n")
+            .expect("edit modified-only");
+
+        // Staged, then edited again in the worktree: index and worktree
+        // both carry a change on the same path at once.
+        std::fs::write(dir.join("staged-and-modified.txt"), "base\nstaged\n")
+            .expect("stage-then-edit: first edit");
+        git(dir, &["add", "staged-and-modified.txt"]);
+        std::fs::write(
+            dir.join("staged-and-modified.txt"),
+            "base\nstaged\nedited again\n",
+        )
+        .expect("stage-then-edit: second edit");
+
+        // A pure staged rename — zero unstaged component.
+        git(dir, &["mv", "rename-source.txt", "staged-rename.txt"]);
+
+        // A pure staged add — brand new file, fully staged, zero unstaged
+        // component.
+        std::fs::write(dir.join("staged-add.txt"), "new + staged\n")
+            .expect("write staged-add");
+        git(dir, &["add", "staged-add.txt"]);
+
+        // A genuinely untracked file, for contrast.
+        std::fs::write(dir.join("untracked-only.txt"), "untracked\n")
+            .expect("write untracked-only");
+    }
+
+    /// F-CHG-06: the Files-tree marker must be able to show "staged" as
+    /// distinct from "changed", exactly like the Changes list already can.
+    /// Pixel-sampling on the live app found a staged rename, a staged add
+    /// and a plain unstaged modification all rendering the identical amber
+    /// dot — this pins the fix with the actual rendered marker, not just
+    /// the pure classification function.
+    ///
+    /// The Swift original's contract (`GitStatusStyle.color`,
+    /// `GitPanelTypes.swift`) resolves a file's own marker as conflicted >
+    /// untracked > staged > modified — notably, staged wins even when the
+    /// same file *also* carries unstaged changes. That combination is the
+    /// one a two-state (or even a naively-ordered four-state) marker gets
+    /// wrong invisibly: `staged-and-modified.txt` below must still read as
+    /// staged, not modified.
+    #[gpui::test]
+    async fn the_files_tree_marks_a_staged_file_distinctly_from_a_merely_changed_one(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = TempDir::new();
+        staged_marker_fixture(&dir.0);
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
+        let panel = cx
+            .update_window(window.into(), |_, window, _| {
+                window.root::<RightPanel>().flatten().expect("panel root")
+            })
+            .expect("right panel entity");
+        cx.update(|app| panel.update(app, |panel, cx| panel.refresh(cx)));
+        let cx = VisualTestContext::from_window(window.into(), cx);
+        pump_until(&cx.cx, || {
+            panel.read_with(&cx.cx, |panel, _| {
+                panel
+                    .file_tree
+                    .iter()
+                    .any(|node| node.name == "untracked-only.txt")
+            })
+        });
+        cx.cx.run_until_parked();
+
+        // A pure staged add: zero unstaged component, must not fall back
+        // to "changed" for lack of a staged colour.
+        assert!(
+            cx.debug_bounds("file-status-staged-staged-add.txt").is_some(),
+            "a fully-staged new file is marked staged"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-staged-add.txt")
+                .is_none(),
+            "…and not merely changed"
+        );
+
+        // A pure staged rename: same shape.
+        assert!(
+            cx.debug_bounds("file-status-staged-staged-rename.txt")
+                .is_some(),
+            "a staged rename's destination is marked staged"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-staged-rename.txt")
+                .is_none(),
+            "…and not merely changed"
+        );
+
+        // The awkward one: staged AND further modified in the worktree.
+        // The Swift contract has staged win here too.
+        assert!(
+            cx.debug_bounds("file-status-staged-staged-and-modified.txt")
+                .is_some(),
+            "a file that is both staged and further modified still reads as staged"
+        );
+        assert!(
+            cx.debug_bounds("file-status-changed-staged-and-modified.txt")
+                .is_none(),
+            "…the unstaged component must not steal the marker back to changed"
+        );
+
+        // A plain unstaged modification stays changed.
+        assert!(
+            cx.debug_bounds("file-status-changed-modified-only.txt")
+                .is_some(),
+            "a purely unstaged modification is still changed"
+        );
+        assert!(
+            cx.debug_bounds("file-status-staged-modified-only.txt")
+                .is_none(),
+            "…it never reads as staged"
+        );
+
+        // Untracked stays untracked, distinct from staged.
+        assert!(
+            cx.debug_bounds("file-status-untracked-untracked-only.txt")
+                .is_some(),
+            "an untracked file keeps its own colour, distinct from staged"
         );
     }
 
