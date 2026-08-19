@@ -222,3 +222,30 @@ an independent trigger.
 
 This is a genuine instrumented count — 6 inputs, 1 output, arriving after gesture-end rather than
 tracking it — not a restatement of a source-code constant. Promoted to PASSED.
+
+## F-TERM-PTY-04 — Shell fallback, terminfo choice, scrollback restore, settled resize
+
+**Already closed by a sibling pass; verified, not re-driven.** `INVENTORY-LEDGER.md` still shows
+`half-proven` for this row, but `docs/linux-rewrite/FINISH-sweep-tail.md` (`### F-TERM-PTY-04 —
+PASSED (upgraded, shell-fallback leg)`) records that an earlier pass this same day already closed
+the named gap — "shell-fallback chain confirmed by **code**" is not a verdict per
+`EVIDENCE-STANDARD.md` — by adding a real named test,
+`system_shell_falls_back_to_bin_zsh_when_shell_is_unset`
+(`rust/crates/tiller_terminal/src/lib.rs:3066`), which removes `$SHELL` from the process env and
+asserts a real spawned PTY's failure message names the literal fallback path `/bin/zsh` (this host
+genuinely has no `/bin/zsh`, making the assertion a sharp, unfakeable discriminator, not a
+tautology). The ghostty-terminfo half of the clause is `N/A - platform` by the row's own PLATFORM
+note (Linux hardcodes `TERM=xterm-256color`, no ghostty branch exists to drive), and the
+scrollback-restore leg was untouched and already had a passing-test discriminator before this.
+
+Per this lane's own rule against re-proving what's already proven, this pass did not re-drive it —
+it reproduced the gate with its own command instead of trusting the doc's claim:
+
+```
+cargo test --manifest-path rust/Cargo.toml -p tiller_terminal system_shell_falls_back_to_bin_zsh_when_shell_is_unset
+test view_tests::system_shell_falls_back_to_bin_zsh_when_shell_is_unset ... ok
+```
+
+Confirmed the test is genuinely landed in the current tree (not merely described in a doc) and
+passes for real, right now, on this host. Promoted to PASSED — the ledger's `half-proven` is stale
+and should be brought up to date to match `FINISH-sweep-tail.md`.
