@@ -6,13 +6,18 @@ of flex_1`, branch `fix/chat-empty-971757`, worktree `/var/tmp/tt-chat-971757`.
 ## What it was
 
 The ACP-backed Chat tab rendered **completely empty** — no composer, no placeholder, no error
-message — but only when the tab was built by `restore_tabs` rather than `add_chat_tab`. That is,
-after a full app restart or a `select_worktree` worktree switch, both of which reconstruct tabs from
-persisted session state. Creating a chat fresh from the `+` menu was never affected.
+message — in any session where `restore_tabs` had run, which is any session that opened a worktree
+with persisted tabs: a full app restart, or a `select_worktree` worktree switch.
 
-That asymmetry is why this looked intermittent for so long, and why the first read of it was
-"probably host contention": whether you saw the bug depended on how you got to the chat, not on
-anything visible in the UI.
+**What triggers it is the session having restored tabs, not how the individual tab was made.** An
+earlier version of this document said fresh creation from the `+` menu "was never affected". That
+turned out to be wrong and is disproved below by a deliberate run: a chat created from the `+` menu
+*inside an already-restored session* is blank too. The distinction only looked real because a
+brand-new worktree has no persisted tabs, so reaching the `+` menu from a clean session avoids the
+precondition rather than the bug.
+
+That is why this looked intermittent for so long, and why the first read of it was "probably host
+contention": whether you saw it depended on how you had arrived, not on anything visible in the UI.
 
 ## Root cause
 
