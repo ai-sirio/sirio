@@ -39,10 +39,48 @@
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::GitError;
+
+/// A caller-held handle that cancels a running [`GitRunner::run_streaming`]
+/// (or [`GitRunner::run_streaming_cancellable`]) invocation from another
+/// thread. Cloning shares the same underlying flag, so the handle that
+/// started the command and the handle used to cancel it may live on
+/// different threads — e.g. a background worker thread running the git
+/// process and the GPUI surface that owns a "Cancel" affordance.
+///
+/// Setting the flag does not itself kill anything. The runner's poll loop
+/// already wakes every [`POLL_INTERVAL`] to check its deadline; cancellation
+/// is checked on that same cadence, and once observed the runner kills the
+/// whole process group exactly the way a timeout does (see [`kill_tree`]) and
+/// returns [`GitError::Cancelled`] instead of the command's output. Calling
+/// [`Self::cancel`] after the process has already exited has no effect — the
+/// runner reports whatever the process actually did.
+#[derive(Clone, Debug, Default)]
+pub struct GitCancellationToken(Arc<AtomicBool>);
+
+impl GitCancellationToken {
+    /// A fresh, uncancelled token.
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Requests cancellation of whatever invocation this token was passed
+    /// to. Idempotent and safe to call from any thread, any number of times,
+    /// whether or not a command is currently running.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`Self::cancel`] has been called.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// The git binary to invoke, resolved via `PATH`.
 const GIT_BINARY: &str = "git";
@@ -122,6 +160,25 @@ impl GitRunner {
         binary: &Path,
         args: &[&str],
         cwd: &Path,
+        on_line: F,
+    ) -> Result<GitCommandResult, GitError>
+    where
+        F: FnMut(String),
+    {
+        Self::run_streaming_cancellable(binary, args, cwd, None, on_line)
+    }
+
+    /// Cancellable form of [`Self::run_streaming_with_binary`]. When
+    /// `cancellation` is `Some` and its token is cancelled while the process
+    /// is still running, the process group is killed the same way a timeout
+    /// kills it and [`GitError::Cancelled`] is returned instead of the
+    /// command's output. `cancellation: None` behaves exactly like
+    /// [`Self::run_streaming_with_binary`] — this is its full implementation.
+    pub fn run_streaming_cancellable<F>(
+        binary: &Path,
+        args: &[&str],
+        cwd: &Path,
+        cancellation: Option<&GitCancellationToken>,
         mut on_line: F,
     ) -> Result<GitCommandResult, GitError>
     where
@@ -175,6 +232,14 @@ impl GitRunner {
             match child.try_wait() {
                 Ok(Some(exit)) => status = Some(exit),
                 Ok(None) => {
+                    if cancellation.is_some_and(GitCancellationToken::is_cancelled) {
+                        kill_tree(&mut child);
+                        reap_within_grace(&mut child);
+                        drop(events_rx);
+                        return Err(GitError::Cancelled {
+                            command: args.join(" "),
+                        });
+                    }
                     if Instant::now() >= deadline {
                         kill_tree(&mut child);
                         reap_within_grace(&mut child);
@@ -551,6 +616,133 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "timeout took {elapsed:?} — the deadline is not enforced"
+        );
+    }
+
+    /// Proves cancellation is real, not merely reported: a fake git script
+    /// that writes its own pid to a file and then streams progress for ~10s
+    /// is run through [`GitRunner::run_streaming_cancellable`] on a worker
+    /// thread. The test waits for genuine proof the process is running — its
+    /// pid file exists *and* at least one progress line has arrived over the
+    /// `on_line` callback — before cancelling, so a cancel that raced a
+    /// process which never truly started could not pass by accident. It then
+    /// asserts both halves of the clause: the runner reports
+    /// [`GitError::Cancelled`], and the pid captured from the child is
+    /// actually gone from the process table afterward (`kill(pid, 0)`
+    /// fails), not just that the runner stopped waiting on it.
+    ///
+    /// Before this test existed, no code path in this crate (or anywhere in
+    /// the workspace — the whole `Cancel*`/`cancel` vocabulary was absent)
+    /// could stop a running git operation at all: cancelling meant nothing
+    /// to call, so this exact test could not even be written against the
+    /// pre-fix runner.
+    #[cfg(unix)]
+    #[test]
+    fn git_cancellation_kills_the_child_and_reports_cancelled() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+
+        let scratch = scratch_dir();
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let pid_file = scratch.join("child.pid");
+        let script = scratch.join("slow-git.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ $i -lt 100 ]; do\n  \
+                 echo \"Receiving objects: $i% (1234/5678)\" 1>&2\n  i=$((i + 2))\n  \
+                 sleep 0.1\ndone\n",
+                pid_file.display()
+            ),
+        )
+        .expect("write fake git script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git script executable");
+
+        let token = GitCancellationToken::new();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let handle = {
+            let token = token.clone();
+            let lines = Arc::clone(&lines);
+            let script = script.clone();
+            let cwd = scratch.clone();
+            std::thread::spawn(move || {
+                GitRunner::run_streaming_cancellable(&script, &[], &cwd, Some(&token), {
+                    let lines = Arc::clone(&lines);
+                    move |line| lines.lock().unwrap().push(line)
+                })
+            })
+        };
+
+        // Proof #1: the process actually started — its own pid landed on
+        // disk, written from inside the running script.
+        let start_deadline = Instant::now() + Duration::from_secs(5);
+        let mut pid: Option<i32> = None;
+        while Instant::now() < start_deadline {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(parsed) = text.trim().parse::<i32>() {
+                    pid = Some(parsed);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid = pid.expect("fake git child never wrote its pid — it did not start");
+
+        // Proof #2: it is genuinely mid-flight, not merely spawned — at
+        // least one progress line reached the streaming callback.
+        let progress_deadline = Instant::now() + Duration::from_secs(5);
+        while lines.lock().unwrap().is_empty() && Instant::now() < progress_deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !lines.lock().unwrap().is_empty(),
+            "no progress line arrived before cancellation — the process was never observed running"
+        );
+
+        token.cancel();
+
+        let result = handle.join().expect("runner thread panicked");
+        let _ = std::fs::remove_dir_all(&scratch);
+
+        assert!(
+            matches!(result, Err(GitError::Cancelled { .. })),
+            "expected Cancelled, got {result:?}"
+        );
+
+        // The reported outcome alone is not proof: confirm the pid is
+        // actually gone from the process table, not merely that the runner
+        // gave up waiting on it.
+        let mut still_alive = true;
+        let reap_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < reap_deadline {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                still_alive = false;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !still_alive,
+            "pid {pid} answers kill(pid, 0) after cancellation — the child was not killed"
+        );
+    }
+
+    /// Exercises the "launch failure" leg of the row's VERIFY clause (a
+    /// missing git command), which no existing test in this crate covered:
+    /// every prior test either ran the real system `git` or a fake script
+    /// that itself exists on disk. Pointing the runner at a path with
+    /// nothing there must report [`GitError::Spawn`], not panic or hang.
+    #[test]
+    fn missing_git_binary_reports_spawn_failure() {
+        let scratch = scratch_dir();
+        let missing = scratch.join("this-binary-does-not-exist-git");
+        let result = GitRunner::run_streaming_with_binary(&missing, &["--version"], Path::new("/"), |_| {});
+        assert!(
+            matches!(result, Err(GitError::Spawn { .. })),
+            "expected Spawn for a missing binary, got {result:?}"
         );
     }
 
