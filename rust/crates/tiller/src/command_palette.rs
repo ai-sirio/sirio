@@ -86,6 +86,7 @@ impl PaletteDisabledReason {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Window(WindowCommandDisabledReason::NoActiveFile) => "No active file",
+            Self::Window(WindowCommandDisabledReason::NoActiveBrowser) => "No active browser",
             Self::Sidebar(SidebarDisabledReason::AlreadyGitProject) => "Git is already initialized",
             Self::NoActiveTab => "No active tab",
             Self::NoRetainedChat => "No retained chat sessions",
@@ -239,6 +240,24 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             WindowCommand::RestoreLaunchSnapshot,
             "History: Restore Previous Launch",
             Some("Ctrl+Shift+O"),
+            context,
+        ),
+        // F-WIN-06: distinct label from the '+' menu's own "New Browser"
+        // row (`NewTabAction::NewBrowser`, listed separately below) --
+        // same two-routes-one-destination shape "New Terminal Tab" already
+        // has alongside "New Terminal", so a keyboard-bindable window
+        // command and a mouse-driven menu item can list side by side
+        // without reading as a duplicate.
+        window_entry(
+            WindowCommand::NewBrowser,
+            "New Browser Tab",
+            Some("Ctrl+Shift+L"),
+            context,
+        ),
+        window_entry(
+            WindowCommand::FocusAddressBar,
+            "Focus Address Bar",
+            Some("Ctrl+L"),
             context,
         ),
         PaletteEntry::enabled(
@@ -581,5 +600,55 @@ mod tests {
                 WindowCommandDisabledReason::NoActiveFile
             ))
         );
+    }
+
+    /// F-WIN-06: New Browser Tab is always available (it creates a tab, the
+    /// same as New Terminal Tab), while Focus Address Bar needs an active
+    /// browser tab to focus into -- the same shape SaveFile already has for
+    /// "needs an active editor".
+    #[test]
+    fn new_browser_tab_is_always_enabled_and_focus_address_bar_needs_a_browser_tab() {
+        let new_browser = entries(&context())
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::Window(WindowCommand::NewBrowser))
+            .expect("New Browser Tab is always listed");
+        assert!(new_browser.is_enabled());
+        assert_eq!(new_browser.shortcut, Some("Ctrl+Shift+L"));
+
+        let mut no_browser = context();
+        no_browser.active_tab_kind = Some(TabKind::Terminal);
+        let disabled = entries(&no_browser)
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::Window(WindowCommand::FocusAddressBar))
+            .expect("Focus Address Bar is always listed");
+        assert_eq!(
+            disabled.disabled_reason,
+            Some(PaletteDisabledReason::Window(
+                WindowCommandDisabledReason::NoActiveBrowser
+            ))
+        );
+
+        let mut with_browser = context();
+        with_browser.active_tab_kind = Some(TabKind::Browser);
+        let enabled = entries(&with_browser)
+            .into_iter()
+            .find(|entry| entry.command == PaletteCommand::Window(WindowCommand::FocusAddressBar))
+            .expect("Focus Address Bar is always listed");
+        assert!(enabled.is_enabled());
+        assert_eq!(enabled.shortcut, Some("Ctrl+L"));
+    }
+
+    /// F-WIN-06: the '+' menu's mouse-driven "New Browser" row
+    /// (`NewTabAction::NewBrowser`) and the keyboard-bindable "New Browser
+    /// Tab" window command must coexist without colliding on a label --
+    /// the same two-routes shape "New Terminal"/"New Terminal Tab" already
+    /// has.
+    #[test]
+    fn new_browser_tab_and_the_plus_menus_new_browser_do_not_collide() {
+        let commands = entries(&context());
+        assert!(commands.iter().any(|entry| entry.label == "New Browser Tab"
+            && entry.command == PaletteCommand::Window(WindowCommand::NewBrowser)));
+        assert!(commands.iter().any(|entry| entry.label == "New Browser"
+            && entry.command == PaletteCommand::NewTab(NewTabAction::NewBrowser)));
     }
 }

@@ -21,7 +21,7 @@ use std::{
 };
 
 use gpui::{
-    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle,
+    App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle, Focusable,
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, KeyDownEvent,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     Render, ShapedLine, SharedString, Style, Task, TextRun, Window, div, fill, point, prelude::*,
@@ -1042,6 +1042,11 @@ impl BrowserSurface {
         &self.state
     }
 
+    // `impl Focusable for BrowserSurface` below gives the host (F-WIN-06's
+    // "Focus Address Bar" command) a way to move keyboard focus into the
+    // address field without going through a synthetic click, the same way
+    // `Chat::focus_handle` hands out its composer's handle.
+
     /// Map or unmap the native child window.
     ///
     /// The host has to call this because GPUI cannot: the webview is an X11
@@ -1492,6 +1497,17 @@ fn browser_button(
                 .on_click(move |_, _, cx| callback(cx))
         })
         .child(label)
+}
+
+/// F-WIN-06: hands out the address bar's own focus handle -- the same
+/// pattern `Chat`'s `Focusable` impl uses for its composer -- so a host
+/// command (Focus Address Bar, `ctrl-l`) can call `browser.focus_handle(cx)`
+/// through `Entity<BrowserSurface>`'s blanket `Focusable` impl and hand the
+/// result straight to `window.focus`, with no bespoke accessor.
+impl Focusable for BrowserSurface {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.address_focus.clone()
+    }
 }
 
 impl Render for BrowserSurface {
