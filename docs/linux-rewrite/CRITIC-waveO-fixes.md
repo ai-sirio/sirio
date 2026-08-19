@@ -131,3 +131,104 @@ reinforces it; the failure only ever reproduces at synthetic-input speeds no hum
 Both named gaps are closed: (1) the double-click fix is independently re-confirmed (and its own
 harness trap identified and documented); (2) the context-menu race was re-tried with a generous
 sleep and did not overturn the harness-artifact conclusion — it reproduces only without one.
+
+---
+
+## F-TAB-24 — Escape mid-tab-drag restores the pre-drag order
+
+**Verdict: PASSED** (core claim, 3+-tab case, and drop-clears-snapshot case all independently
+live-confirmed; a fourth, broader claim about sidebar drags — not part of this ledger row — was
+tested anyway and the builder's own characterization of it did **not** hold up live, recorded below
+as an additional finding, not a change to this row's verdict)
+
+### Code check
+
+`git show 128a2ecf -- rust/crates/tiller/src/main.rs` matches the report: `TabDragSnapshot` (id order
++ active tab, taken when a tab drag starts) and `cancel_tab_drag` (an `on_action` listener for the
+same `CloseSettingsSurface`/Escape action F-SET-02 uses, checked first) which restores `self.tabs`
+from the snapshot and calls `cx.stop_active_drag`, returning `false` (falling through to F-SET-02's
+own settings-close/propagate logic) when `tab_drag_snapshot` is `None`. The listener has to be an
+`on_action`, not a raw key listener, because `Window::dispatch_key_down_up_event` (raw key dispatch)
+is not reached while `cx.active_drag` is `Some`, while keybinding-matched action dispatch still is —
+the report's stated reason, confirmed by reading `cancel_tab_drag`'s call site directly.
+
+### Reproduced original defect (pre-fix binary, lane `wfj2pre24c`, preceded by `wfj2pre24`/`wfj2pre24b`)
+
+First attempt (`wfj2pre24`) used only 2 intermediate `move` waypoints with no sleep between them and
+showed **no** reorder even *without* Escape — a false-negative risk (gesture not registering at all,
+which would make the defect look fixed on an unfixed binary purely from a weak drag recipe). Fixed by
+adding more waypoints with `sleep 0.1–0.2` between each; `wfj2pre24b` (5 waypoints, no Escape,
+positive control) then genuinely reordered the tabs, validating the recipe. `wfj2pre24c` repeated the
+identical recipe *with* `key Escape` pressed mid-drag (button still held, before `up`): **hard
+discriminator** — terminal self-identifies as `wf-judge2-tiller-PREFIX` (screenshot
+`/tmp/wf-judge2/shots/pre24c/02-01-baseline-order.png`, baseline tab order **Chat, Terminal**); after
+the Escape-mid-drag gesture, `/tmp/wf-judge2/shots/pre24c/03-02-after-escape-mid-drag.png` shows the
+order **flipped to Terminal, Chat** despite the Escape press — the pre-fix binary drops the reorder
+into place regardless of Escape, exactly as the ledger and report describe.
+
+### Confirmed fix (current-HEAD binary, lane `wfj2fix24`)
+
+Identical recipe on `/tmp/wf-judge2-tiller`: baseline **Chat, Terminal**
+(`02-01-baseline-order.png`); after Escape-mid-drag, `03-02-after-escape-mid-drag.png` shows order
+**unchanged, still Chat, Terminal** — hard discriminator, tab strip screenshot. A same-lane positive
+control (`04-03-positive-control-no-escape.png`, identical waypoints, no Escape) shows the order
+**does** flip to Terminal, Chat without the keypress — ruling out "gesture too weak to register" as
+an alternative explanation for the fix-side result.
+
+**3+-tab case (the builder's own named gap, closed here):** opened a third tab (`chord ctrl t`) in
+the same worktree, giving **Terminal, Chat, Terminal** (`02-10-three-tabs-baseline.png`). Escape
+mid-drag on the third tab: `02-20-3tab-escape-mid-drag.png` shows order **unchanged** (T, C, T). A
+matched positive control without Escape (`02-21-3tab-positive-control-no-escape.png`, screenshot
+caught mid-relayout per the `shot`-forces-a-real-resize trap but the tab strip itself is legible)
+shows the order **does** change to **Terminal, Terminal, Chat** — confirming the drag registers and
+that Escape, specifically, is what holds the 3-tab order in place.
+
+**Drop-clears-snapshot case (the builder's own named gap, closed here):** in the same lane, after
+letting the positive-control drag actually **drop** (committing Terminal↔Chat, order now T, T, C), a
+*subsequent, unrelated* Escape press was sent. `03-22-escape-after-drop-noop.png` shows the order
+**stays T, T, C** — the already-committed reorder is not spuriously reverted by a stray Escape after
+the drag is over, confirming `tab_drag_snapshot` is correctly cleared on a successful drop and doesn't
+linger to corrupt a later, unrelated Escape.
+
+### Additional finding: sidebar drag (`ReorderScope::Projects`/`Worktrees`) — not part of this row
+
+The report's own words on this: *"sidebar drags (`ReorderScope::Projects` / `Worktrees`) use a
+structurally different preview/commit split (`Sidebar::preview_reorder`/`confirm_reorder`, which
+*also* mutates its `rows` vector live on hover with no Escape handling of its own) — untouched by
+this pass and not covered by the ledger row, but a critic auditing 'drag cancel' more broadly should
+know it is not fixed there."* Code check confirms the claim's premise: `grep -rn stop_active_drag`
+across every crate finds exactly one call site, inside `cancel_tab_drag`, gated on
+`self.tab_drag_snapshot.is_some()` — `sidebar.rs` has no Escape or `active_drag` handling of its own
+at all.
+
+Live-driving it anyway (lane `wfj2sidebar`, fresh `project.add` on this repo — `worktreeCount:"6"` —
+giving 6 draggable worktree rows under one project header): a robust drag of the `9a42249` row
+through 7 waypoints down to below `984defa`, **no** Escape, moved it unambiguously to the bottom of
+the list (`/tmp/wf-judge2/shots/sidebar/03-51-robust-after-no-escape.png`) — positive control,
+gesture registers. The identical recipe with `key Escape` inserted before the final `up`
+(`03-61-robust-escape-after.png`) left the row order **completely unchanged**, matching the pristine
+baseline. Repeated once more with a shorter recipe (down/up at the `9a42249`/`wl-proof-branch`
+boundary): same pattern — a one-position swap without Escape
+(`03-41-after-matched-posctrl-no-escape.png`), no change at all with Escape
+(`03-31-after-escape-mid-drag.png`). Two independent gesture recipes, each run with and without
+Escape, all four runs consistent: **the sidebar drag did not land when Escape was pressed mid-drag,
+contradicting the report's characterization that this path has "no Escape handling of its own."**
+
+I can't fully explain this from the code — no call site stops or reverts a sidebar `RowDrag` on
+Escape — so the most likely explanation is an accidental side effect of F-SET-02's own "Escape
+returns focus to the sidebar, which is rendered again on the next frame" behavior (documented in the
+`handle_close_settings_surface` doc comment) landing on a component rebuild that re-derives `rows`
+from the canonical project list, discarding the live-only, never-`confirm_reorder`ed preview mutation
+— but that is inference, not something I directly observed, and I'm not treating it as evidence
+either way. What I *am* reporting as evidence is the observed, reproduced-4/4-times behavior: on this
+binary, right now, Escape mid-sidebar-drag does not leave a stray reorder on screen. This does not
+change F-TAB-24's own verdict (its clause is specifically about tab drags, and that clause is fully
+closed above) — it's recorded so the next critic auditing "drag cancel" more broadly starts from a
+live result instead of re-trusting a claim this pass's own drive did not reproduce.
+
+### Gap disposition
+
+All three of the report's own named gaps for this row (3+-tab case, drop-clears-snapshot case, and
+the caveat about sidebar drags being unaudited) are closed: the first two with a live PASS, the third
+by actually driving it — where the live result contradicts the report's characterization rather than
+confirming it.
