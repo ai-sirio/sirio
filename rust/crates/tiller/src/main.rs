@@ -14622,6 +14622,154 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// F-CORE-WSP-01: `TabKind`'s five variants are the port's real,
+    /// live content-kind taxonomy (the successor to the dead
+    /// `LegacyWorkspaceTab.ContentKind`), and `AgentActivityModel` is the
+    /// real activity layer -- but the row's specific per-kind identity
+    /// claim ("terminal activity exposes leaf pane IDs and chat exposes
+    /// its tab ID, while documents expose no activity pane") had never
+    /// been drawn side by side in one frame. This does: one tab of each
+    /// of the three kinds the clause actually distinguishes, with
+    /// activity registered identically under every one of their pane
+    /// ids -- the document tab's registration is adversarial, proving
+    /// `tab_status`'s exclusion is the real `TabContent::File { .. } =>
+    /// return` match arm and not a lucky absence of data under that key.
+    #[gpui::test]
+    async fn drawn_tab_status_distinguishes_split_terminal_chat_and_document(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory =
+            std::env::temp_dir().join(format!("tiller-wsp01-kinds-{}", std::process::id()));
+        std::fs::create_dir_all(&working_directory).expect("create wsp01 test directory");
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 30".into()],
+        };
+        let (terminal_a, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx)
+                .expect("spawn terminal leaf a")
+        });
+        let (workspace, cx) = cx.add_window_view(|_, cx| {
+            activity_test_workspace(terminal_a.clone(), working_directory.clone(), cx)
+        });
+
+        let file_path = working_directory.join("note.md");
+        std::fs::write(&file_path, b"hello").expect("write wsp01 test file");
+
+        workspace.update(cx, |workspace, cx| {
+            // Split the existing Terminal tab (id 0, sole leaf pane 0) into
+            // two leaves -- pane 0 stays unregistered (idle), pane 1 gets a
+            // registered agent, so the tab's *worst* status must surface.
+            let terminal_b = cx.new(|cx| {
+                TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                    .expect("spawn terminal leaf b")
+            });
+            let split = workspace.tabs[0].panes.split_focused(
+                0,
+                1,
+                SplitDirection::Horizontal,
+                TabContent::Terminal { view: terminal_b },
+            );
+            assert!(split, "the terminal tab must accept a second leaf");
+            workspace
+                .activity
+                .agent_spawned("pane-1", "codex", Instant::now());
+
+            // A Chat tab: a real ACP Chat entity (deliberately pointed at a
+            // missing binary -- the same tolerated-failure pattern
+            // `drawn_chat_transcript_gets_the_full_center_surface_height`
+            // already uses) with its own registered pane id.
+            let chat = cx.new(|cx| {
+                Chat::launch_with_command(
+                    AgentCommand::new("/definitely/missing/tiller-acp-agent"),
+                    working_directory.clone(),
+                    cx,
+                )
+            });
+            workspace.tabs.push(OpenTab {
+                id: 1,
+                persistence_id: "wsp01-chat".into(),
+                group_id: 0,
+                title: "Chat".into(),
+                kind: TabKind::AgentChat,
+                agent_icon: None,
+                agent_id: Some("codex".into()),
+                session_state: SessionTabState::with_root(2),
+                panes: PaneNode::leaf(2, TabContent::Chat(chat)),
+                focused_pane: 2,
+                title_is_auto_named: true,
+            });
+            workspace
+                .activity
+                .agent_spawned("pane-2", "codex", Instant::now());
+
+            // A document tab -- and the adversarial part: register activity
+            // under this pane's own id too. If `tab_status`'s File
+            // exclusion were ever accidental (an id that just never
+            // collided) rather than the real match-arm exclusion, this
+            // would flip the assertion below from absent to present.
+            let view = cx.new(|cx| FileView::new(file_path.clone(), cx));
+            workspace.tabs.push(OpenTab {
+                id: 2,
+                persistence_id: "wsp01-doc".into(),
+                group_id: 0,
+                title: "note.md".into(),
+                kind: TabKind::Editor,
+                agent_icon: None,
+                agent_id: None,
+                session_state: SessionTabState::with_root(3),
+                panes: PaneNode::leaf(3, TabContent::File { view }),
+                focused_pane: 3,
+                title_is_auto_named: true,
+            });
+            workspace
+                .activity
+                .agent_spawned("pane-3", "codex", Instant::now());
+
+            workspace.rebuild_tab_machinery();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Terminal tab (split, one leaf idle + one leaf running): the worst
+        // status across leaf pane ids wins.
+        assert!(
+            cx.debug_bounds("workspace-tab-status-running-0").is_some(),
+            "a split terminal tab must surface its worst leaf's status"
+        );
+        // Chat tab: its own registered pane id drives the glyph.
+        assert!(
+            cx.debug_bounds("workspace-tab-status-running-1").is_some(),
+            "a chat tab must surface its own registered activity"
+        );
+        // Document tab: no glyph at all, despite activity registered under
+        // its own pane id above -- proves the exclusion is real, not luck.
+        assert!(
+            cx.debug_bounds("workspace-tab-status-running-2").is_none(),
+            "a document tab must never surface activity, even when data exists under its pane id"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-status-idle-2").is_none(),
+            "a document tab draws no status glyph at all, not even idle"
+        );
+        assert!(
+            cx.debug_bounds("workspace-tab-status-2").is_some(),
+            "the tab-status wrapper itself is always drawn"
+        );
+
+        let doc_status = workspace.read_with(&cx.cx, |workspace, app| {
+            workspace.tab_status(&workspace.tabs[2], app)
+        });
+        assert_eq!(
+            doc_status, None,
+            "tab_status must return None for an all-File-pane tab, not Some(Idle)"
+        );
+
+        terminal_a.update(cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+    }
+
     /// P117: a completed chat turn returns a full transcript over the control socket and draws
     /// nothing on screen. The frame shows the composer at the *top* of the pane with ~670 px of
     /// empty below it, which is the layout a `flex_col` produces when its first child measured
