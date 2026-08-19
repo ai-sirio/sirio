@@ -136,9 +136,16 @@ constructs the tab through the **real `restore_tabs` constructor** instead of a 
 literal. The P117 test built its tab the way `add_chat_tab` does, which is the path that always
 worked — so it passed throughout, while the bug was live.
 
-## What is still owed
+## What was still owed, and is now measured
 
-Nobody has measured whether any *other* surface reached through `restore_tabs` inherits the same
-oversized `centre-surface` height. The fix corrects the height for every pane kind at once, so
-there is no reason to expect a survivor — but that is an argument, not a measurement, and the
-Browser and Changes tabs have not been driven through a restart since.
+Nobody had measured whether any *other* surface reached through `restore_tabs` inherited the same
+oversized `centre-surface` height. That has been done — see `BUILDER-browser-changes-restart.md`:
+a Browser tab and a Changes tab, both created through the real `+` menu and both put through a
+genuine restart so `restore_tabs` rebuilds them, render identically before and after. The Changes
+tab keeps its full diff list, section controls and Unified/Split toggle; the Browser pane's chrome
+is correctly sized and positioned.
+
+The red "Direct XCB build failed / unsupported handle: `Wayland(...)`" banner in the Browser frames
+is **identical before and after** the restart and is the known nested-Wayland harness limitation —
+no native window-handle path for embedding a browser surface in this sandboxed compositor. It is
+not a symptom of this bug, and is noted here so a later reader does not file it as a regression.
