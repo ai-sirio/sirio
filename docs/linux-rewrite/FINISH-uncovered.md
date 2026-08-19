@@ -27,7 +27,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | F-GIT-RUN-01 | half-proven | cancellation confirmed absent app-wide (not just in `tiller_git`) — no code path exists to stop a running git op on user request; everything else in the clause is green |
 | F-TAB-20 | PASSED | Ctrl-5 and Ctrl-9 each hit 14/14 across two independent trial batches, verified against a hard control-socket discriminator, not screenshots |
 | F-CHAT-25 | PASSED | AskUserQuestion's text/option/cancel arms all covered by named drawn tests, none of which existed at wave H's ledger writing |
-| F-CHAT-33 | | |
+| F-CHAT-33 | half-proven | re-confirmed live, fresh, this session: the OK-dismiss GPUI test and the ignored real-npx-agent "Trust gate blocks the channel" test both re-run green; the pre-fix contrast (that the banner drew zero controls before the fix) is not independently driveable at HEAD without reverting the fix |
 | F-CORE-ACT-17 | | |
 | F-CORE-ACT-24 | | |
 | F-AGENT-CODEX-01 | | |
@@ -338,5 +338,83 @@ Screenshots for one instance of each, taken immediately after a verified hit:
 `reference/linux-progress/wf-rest4/f-tab-20-ctrl5-jumps-to-position5.png` (target.md, position 5,
 active) and `f-tab-20-ctrl9-jumps-to-last.png` (the last Terminal tab, position 7, active).
 Combined with the ledger's own already-proven Ctrl-1 leg, **F-TAB-20 -> PASSED.**
+
+---
+
+## F-CHAT-33 — half-proven (re-confirmed live, not blind-trusted)
+
+**Missing half named in the brief**: turn-error/retryable half already PASSED (driven live in wave K);
+drive the remainder. The ledger row's evidence cell already claims the MCP-warning/non-retryable
+half is covered two ways — a drawn+click GPUI test for the OK-dismiss UI mechanism, and a fresh
+live re-run of the project's own `#[ignore]`d real-agent integration test proving the live scenario
+is structurally UNREACHABLE without mutating the user's global `~/.claude.json`. Per the brief's own
+rule ("no equivalence-by-assertion... a green test alone is not evidence unless independently
+confirmed"), the task here is to re-confirm that claim myself, live, fresh, rather than trust the
+ledger's wave-K prose.
+
+**Located the actual test** (it is not where the ledger's prose alone would suggest —
+`rust/crates/tiller_acp/tests/real_claude.rs` only has one `#[ignore]`d test, and it is unrelated,
+about a permission-nonce). The real MCP one lives inside `rust/crates/tiller_acp/src/lib.rs`'s own
+`#[cfg(test)]` module:
+
+```
+rust/crates/tiller_acp/src/lib.rs:2636-2638
+#[test]
+#[ignore = "needs a real agent over the network; flakes the gate under load"]
+fn real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json()
+```
+
+Its doc comment (lines 2600-2635) documents a two-gate diagnosis reached via two independent
+hand-drives outside the crate: (1) **Trust** — the first time any project's `.mcp.json` names a
+server, Claude marks it "Pending approval (run `claude` to approve)" and never attempts a
+connection; that approval lives in the user's own `~/.claude.json` (`enabledMcpjsonServers`), which
+nothing in Tiller's launch path populates, so every fresh Tiller project hits this on every session,
+not just a broken one; (2) **Channel** — even after manually pre-approving (outside this repo, not
+reproducible in an automated test without mutating shared global state) and re-driving, the real
+connection failure text arrived as ordinary `session/update` conversational content, never on the
+child process's own stderr, the only channel `drain_stderr`/`looks_like_mcp_warning` reads. The test
+itself only proves the unapproved case — the one every fresh Tiller project actually gets — and its
+assertion is written as a tripwire: if `mcp_warnings()` is ever non-empty here, it fails loudly and
+says to re-open F-CHAT-33.
+
+**Confirmed reachability before trusting it**: `AcpClient::mcp_warnings()` (`tiller_acp/src/lib.rs:714`)
+is called from `Chat::surface_mcp_warnings` in `tiller_ui/src/chat.rs:1194` — a different crate, so
+this isn't dead code sealed inside `tiller_acp`. `surface_mcp_warnings` itself is invoked from the
+real live event loop on every `AcpEvent::TurnEnded` (`chat.rs:1729`), not merely from a test harness.
+
+**Ran both tests live, fresh, myself, this session** (network + npx confirmed available first):
+
+```
+$ cargo test -p tiller_acp -- --ignored --exact \
+    'tests::real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json' --nocapture
+test tests::real_agent_stays_silent_on_stderr_for_an_unapproved_broken_mcp_json ... ok
+test result: ok. 1 passed; 0 failed; ... finished in 12.03s
+
+$ cargo test -p tiller_ui an_mcp_warning_offers_ok_to_dismiss
+test chat::tests::an_mcp_warning_offers_ok_to_dismiss ... ok
+test result: ok. 1 passed; 0 failed; ...
+```
+
+The first test spawned a real `npx -y @agentclientprotocol/claude-agent-acp@latest` process against
+a scratch directory with a real broken `.mcp.json`
+(`{"mcpServers":{"broken-server":{"command":"/definitely/missing/mcp-nonexistent-binary","args":[]}}}`),
+waited 10 real seconds past startup, and asserted `mcp_warnings()` stayed empty — independently
+reproducing the Trust-gate finding rather than trusting the code comment. No global config file was
+touched (per the hard constraint against mutating `~/.claude.json`).
+
+**What remains genuinely undriveable, and why**: the ledger evidence cell's own final clause — "the
+fixed behaviour is proven, the pre-fix contrast is not" — names the one thing that cannot be driven
+live at HEAD: demonstrating that *before* the fix, the banner drew zero interactive controls. Proving
+that live would require reverting the fix (a destructive/out-of-scope git operation this lane is
+forbidden from performing) or trusting the doc comment's own claim ("before this fix, its banner drew
+zero interactive controls at all") on `an_mcp_warning_offers_ok_to_dismiss`'s comment at
+`chat.rs:10521-10526` — which is history, not something this lane can independently re-drive without
+mutating repo state. That single clause is the honest remainder; everything else in the row is now
+independently re-confirmed live, this session, not carried forward from wave K on trust.
+
+**Verdict: half-proven** — both the OK-dismiss UI mechanism and the live-scenario-UNREACHABLE finding
+are now independently re-confirmed fresh (not just cited from a prior wave); the one gap is the
+pre-fix contrast, which is a historical claim rather than a live-driveable behavior under this lane's
+constraints (no reverting the fix, no checking out old code).
 
 ---
