@@ -1,7 +1,30 @@
 # Icon set — provenance and licence
 
+> **The "user's explicit request" below is UNVERIFIED, and the whole exception rests on it.**
+> Checked 2026-08-19. comet is one of the four apps the standing rule names as
+> inspiration-only, so importing 63 files from it is a gap *unless* the user asked for it —
+> which is exactly what the sentence below claims, and what nobody has ever checked.
+>
+> What I searched: every `*.jsonl` transcript under both
+> `~/.claude/projects/-home-enzopalmisano-Scrivania-Progetti-tiller{,-linux}/`, for
+> genuine user-role messages (excluding stop-hook goal restatements and system reminders)
+> containing `icon`, `icone`, `svg`, `comet`, or `zeronsh`. **Zero matches.** I also listed
+> every distinct genuine user message on 13–14 Aug, the day `b753ed69` landed the import:
+> none mentions icons.
+>
+> What that does *not* prove: the user orchestrated much of this work through herdr panes,
+> so a request typed to a pane agent would never appear in these transcripts at all. Absence
+> here is not proof the request never happened. It only means **this file's claim cannot
+> currently be substantiated, and should stop being treated as settled.**
+>
+> Two independent critics have now flagged this directory and both stood down on the
+> strength of the unverified sentence below — the first calling it out of scope, the second
+> recording it as already-declared. That is how an unchecked claim becomes load-bearing.
+> Nothing has been deleted: reversing this is the user's call, not a builder's or a critic's.
+
 The 63 SVGs in this directory come from **comet** (<https://github.com/zeronsh/comet>),
-`crates/ui/assets/icons/`, imported at the user's explicit request.
+`crates/ui/assets/icons/`, imported at what the importing session recorded as the user's
+explicit request. See the banner above before relying on that.
 
 **Licence: MIT — Copyright (c) 2026 Wing.** The MIT licence permits use, modification and
 redistribution provided the copyright notice and permission notice accompany the work. That is what
