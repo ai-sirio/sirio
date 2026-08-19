@@ -265,15 +265,6 @@ impl TabSelection {
         };
         Self { active, ..self }
     }
-
-    /// Select a 1-based tab position. Positions beyond the group select the
-    /// last tab, matching the documented Ctrl-9 behavior.
-    pub(crate) fn jump(self, position: usize) -> Self {
-        Self {
-            active: position.saturating_sub(1).min(self.tab_count - 1),
-            ..self
-        }
-    }
 }
 
 pub(crate) enum PaneNode<T> {
@@ -795,14 +786,6 @@ mod tests {
 
         let selection = TabSelection::new(3, 0).expect("a non-empty tab group");
         assert_eq!(selection.cycle(false).active(), 2);
-    }
-
-    #[test]
-    fn jumping_to_a_tab_uses_one_based_positions_and_clamps_to_the_last_tab() {
-        let selection = TabSelection::new(5, 0).expect("a non-empty tab group");
-        assert_eq!(selection.jump(1).active(), 0);
-        assert_eq!(selection.jump(5).active(), 4);
-        assert_eq!(selection.jump(9).active(), 4);
     }
 
     #[test]
