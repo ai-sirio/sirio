@@ -1945,6 +1945,41 @@ mod tests {
     }
 
     #[test]
+    fn an_old_blob_predating_chat_draft_still_decodes() {
+        // F-CORE-WSP-07: the row wants a rejected/versioned scheme for
+        // incompatible blobs; the counter-argument is that this format
+        // evolves additively via `#[serde(default)]` instead, and the one
+        // real historical field-add (`chat_draft`, F-CORE-WSP-08) proves it.
+        // This is a hand-written blob in the exact shape `encode()` produced
+        // *before* `chat_draft` existed -- not today's own `encode()` output
+        // with a field stripped out -- so it genuinely exercises "an old
+        // blob still decodes under new code", not a tautology.
+        let old_blob = r#"{"root_id":3,"pane_events":[{"Close":{"id":7}}],"scrollback":{"2":[104,105]}}"#;
+        let decoded = SessionTabState::decode(old_blob).expect("old blob must still decode");
+        assert_eq!(decoded.root_id, Some(3));
+        assert_eq!(decoded.pane_events, vec![PaneEvent::Close { id: 7 }]);
+        assert_eq!(decoded.scrollback.get(&2), Some(&vec![104u8, 105u8]));
+        assert_eq!(
+            decoded.chat_draft, "",
+            "missing chat_draft must default rather than fail decode"
+        );
+    }
+
+    #[test]
+    fn reordered_keys_decode_to_an_identical_state() {
+        // F-CORE-WSP-07's "canonical sorted JSON" clause is argued not
+        // required because nothing in this codebase diffs or hashes the
+        // persisted blob. Prove that directly: two blobs with the same
+        // fields in different key order must decode to the exact same
+        // struct (derived `PartialEq`), not merely both succeed.
+        let forward = r#"{"root_id":1,"pane_events":[],"scrollback":{},"chat_draft":"hi"}"#;
+        let reordered = r#"{"chat_draft":"hi","scrollback":{},"pane_events":[],"root_id":1}"#;
+        let a = SessionTabState::decode(forward).expect("forward-order blob decodes");
+        let b = SessionTabState::decode(reordered).expect("reordered blob decodes");
+        assert_eq!(a, b, "key order must not affect the decoded value");
+    }
+
+    #[test]
     fn tab_state_lives_in_its_own_schema_table() {
         let dir = TempDir::new();
         let db_path = dir.db_path("tab-state-schema");
