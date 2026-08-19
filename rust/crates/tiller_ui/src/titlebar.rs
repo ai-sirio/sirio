@@ -563,17 +563,49 @@ mod tests {
         );
     }
 
-    /// The row's own instruction: "check it resolves on this box before
-    /// building on it". `gsettings get
-    /// org.gnome.desktop.wm.preferences action-double-click-titlebar`
-    /// resolves to `'toggle-maximize'` on this dev box, which is also the
-    /// graceful-absence default -- so this assertion holds whether or not
-    /// the CI box that eventually runs it has the GNOME schema installed.
+    /// The half `from_gsettings_output` cannot cover: that `from_system`
+    /// asks `gsettings` the RIGHT question and feeds the answer to the
+    /// parser — the schema id, the key, the success check, the stdout
+    /// decoding.
+    ///
+    /// It gets its teeth from querying `gsettings` independently here: a
+    /// wrong schema or key inside `from_system` makes it fall back to the
+    /// default while this test's own query still returns the real value, so
+    /// the two disagree and the test fails.
+    ///
+    /// This previously asserted `ToggleMaximize` outright, reasoning that the
+    /// dev box was set to `toggle-maximize` and that an absent schema
+    /// degrades to the same value. That covers two cases and misses the
+    /// third: a machine whose schema is present and set to something else.
+    /// It duly failed on this very box once its titlebar preference was
+    /// changed to `minimize` — reporting a defect against code that was
+    /// behaving exactly as documented. A test may not pin the host's own
+    /// configuration as the expected value.
     #[test]
-    fn double_click_action_from_system_resolves_without_panicking() {
+    fn double_click_action_from_system_agrees_with_this_machine() {
+        let queried = std::process::Command::new("gsettings")
+            .args([
+                "get",
+                "org.gnome.desktop.wm.preferences",
+                "action-double-click-titlebar",
+            ])
+            .output();
+
+        let expected = match queried {
+            Ok(output) if output.status.success() => {
+                DoubleClickAction::from_gsettings_output(&String::from_utf8_lossy(&output.stdout))
+            }
+            // No GNOME schema at all — a CI container, another desktop, or no
+            // `gsettings` binary. The documented graceful-absence default is
+            // then the whole contract.
+            _ => DoubleClickAction::ToggleMaximize,
+        };
+
         assert_eq!(
             DoubleClickAction::from_system(),
-            DoubleClickAction::ToggleMaximize
+            expected,
+            "from_system must report what this machine's gsettings actually \
+             says, or the documented default when gsettings cannot answer"
         );
     }
 
