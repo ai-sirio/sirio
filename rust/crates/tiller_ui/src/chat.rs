@@ -11739,6 +11739,58 @@ mod tests {
         );
     }
 
+    /// F-CORE-FILE-03A: dropped item URLs are inserted in the user's drop
+    /// order, not re-sorted. `gpui::ExternalPaths` is backed by an ordered
+    /// `SmallVec` (`vendor/.../gpui/src/interactive.rs`), and
+    /// `drop_external_paths` iterates it with a plain `for path in &paths`
+    /// — but that is a claim about the source, and `EVIDENCE-STANDARD.md` is
+    /// explicit that reading code proves nothing. Drop BRAVO before ALPHA
+    /// (deliberately the reverse of alphabetical) and assert the draft's
+    /// `mention_paths` comes back BRAVO-then-ALPHA: if the classify/insert
+    /// path ever sorted, deduped-by-BTreeSet, or otherwise lost ordering,
+    /// this fails where the earlier attach test above (all-distinct-kinds,
+    /// order incidental) could not have caught it.
+    #[gpui::test]
+    async fn dropping_external_files_preserves_the_drop_order(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let bravo = dir.0.join("BRAVO.txt");
+        std::fs::write(&bravo, b"second alphabetically, dropped first").expect("write BRAVO.txt");
+        let alpha = dir.0.join("ALPHA.txt");
+        std::fs::write(&alpha, b"first alphabetically, dropped second").expect("write ALPHA.txt");
+        let cwd = dir.0.clone();
+
+        cx.update(Theme::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command = AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]);
+            Chat::from_test_command(command, cwd, cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        // Literal drop order: BRAVO first, ALPHA second — the reverse of
+        // alphabetical, so an accidental sort anywhere in the path would
+        // flip this and the assertion below would catch it.
+        let paths = ExternalPaths(vec![bravo.clone(), alpha.clone()].into_iter().collect());
+        cx.simulate_event(FileDropEvent::Entered {
+            position: composer.center(),
+            paths,
+        });
+        cx.simulate_event(FileDropEvent::Submit {
+            position: composer.center(),
+        });
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        let draft = chat.read_with(&cx.cx, |chat, _| chat.composer.draft());
+        assert_eq!(
+            draft.mention_paths,
+            vec!["BRAVO.txt".to_string(), "ALPHA.txt".to_string()],
+            "mention_paths must preserve the literal drop order (BRAVO then ALPHA), \
+             not alphabetise to ALPHA-then-BRAVO"
+        );
+    }
+
     /// F-CHAT-13 + F-CHAT-05: a drop that arrives while a permission is
     /// pending must be refused outright — no chip, no message — the same
     /// rule `insert_text`/`send` already enforce for the keyboard.
