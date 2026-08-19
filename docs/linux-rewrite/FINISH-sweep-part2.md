@@ -386,3 +386,72 @@ observable choice is correct in every topology reachable through this app's curr
 "New Worktree" entry point resolves `repo_root` from `project.path` via `enclosing_project_index`,
 confirmed by reading `sidebar.rs`, so there is no reachable path where `repo_root` and "the primary
 worktree" could diverge). Promoted to PASSED.
+
+## F-PRJ-18 — Worktree Location "Choose..." folder picker
+
+**Promoted: PASSED.** The ledger's evidence was "wave N: identical portal-hang retry against the
+Worktree Location section's Choose... folder picker; identical hang, isolated from the app the same
+way" -- i.e. the picker was never actually seen to work, only confirmed to hang the same way another
+row's picker did. Re-drove it against a fresh throwaway instance (`wf-sweep2-prj`, its own nested
+sway compositor, its own private `dbus-daemon --session` bus) and hit the same symptom first: click
+"Choose..." in the Project Settings sheet's Worktree Location section, wait, nothing visibly opens --
+`swaymsg get_tree` showed no new window at all, not even a mis-tiled one.
+
+Root-caused it instead of re-filing it as a re-confirmed hang. `ps aux` plus a per-PID `/proc/<pid>/
+environ` scan (grepping every `xdg-desktop-portal`/`xdg-desktop-portal-gtk` process on the host for
+which one was actually bound to *this* instance's private bus -- several sibling critics' portal
+daemons were running concurrently on *their own* private buses, and the first process inspected
+turned out to belong to a different sibling entirely, `wf-rest4`, bound to a different
+`DBUS_SESSION_BUS_ADDRESS` and a different `WAYLAND_DISPLAY`) found my own router process
+(`xdg-desktop-portal`, confirmed via its `/proc/<pid>/environ` matching my bus path exactly) running
+with **no `xdg-desktop-portal-gtk` backend anywhere on that bus**. Its own environment (dumped from
+`/proc/<pid>/environ`) had no `XDG_CURRENT_DESKTOP` set at all.
+
+That is the mechanism: xdg-desktop-portal picks a backend implementation for each interface
+(FileChooser, Account, ...) by reading `$XDG_CURRENT_DESKTOP` from **its own process environment at
+exec time** -- not from the D-Bus "activation environment" that `dbus-update-activation-environment`
+sets (that only applies to *future* dbus-activated processes). The prior waves' recipe called
+`dbus-update-activation-environment` with `WAYLAND_DISPLAY`/`GDK_BACKEND`/`XDG_RUNTIME_DIR`/
+`DBUS_SESSION_BUS_ADDRESS` but never `XDG_CURRENT_DESKTOP` -- so the already-running portal router had
+no way to resolve `org.freedesktop.impl.portal.FileChooser` to `gtk.portal`, never spawned a backend
+for it, and a click on "Choose..." went out over D-Bus to nobody: no error, no dialog, indistinguishable
+from a hang.
+
+Fix: kill the private-bus portal router (safe -- it is mine, owns no state) and relaunch it with
+`XDG_CURRENT_DESKTOP=GNOME` set directly in its own exec environment, not just the activation
+environment:
+
+```
+XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY=wayland-14 GDK_BACKEND=wayland \
+  nohup /usr/libexec/xdg-desktop-portal -v > /tmp/wf-sweep2-prj-portal.log 2>&1 &
+```
+
+The resulting log (`reference/linux-progress/wf-sweep2/f-prj-18-portal-log-after-xdg-current-desktop-fix.log`)
+now shows `Using gtk.portal for org.freedesktop.impl.portal.FileChooser in gnome` and
+`providing portal org.freedesktop.portal.FileChooser`, and a fresh `xdg-desktop-portal-gtk` process
+spawned on that exact bus. Re-clicking "Choose..." this time opened a real GTK "Open Folder" window
+(`reference/linux-progress/wf-sweep2/f-prj-18-portal-dialog-renders-after-fix.png`) -- titled
+"Open Folder", already correctly positioned/sized at (0,0) full-output in this headless sway setup, no
+extra floating/resize/move treatment needed this time.
+
+Typing a path directly into the GTK location bar (Ctrl+L) proved unreliable in this environment --
+`wtype -k BackSpace` sent three times removed zero characters (confirmed by screenshot before/after),
+and fast `wtype` text calls dropped/merged characters once (`/tmp/` became `/p/`). Switched to the
+dialog's own search feature instead: clicked the search icon, typed the target directory's bare name
+(`wf-prj18-target-dir`, a directory made specifically for this drive, unreachable by browsing from
+"Home" since it lives under `/tmp`) -- the search box did not drop characters -- got exactly one
+match, selected it
+(`reference/linux-progress/wf-sweep2/f-prj-18-portal-search-selects-target-dir.png`), and clicked the
+accept button (labelled "Choose a folder for new worktrees" -- the app's own dialog title, confirming
+the app drives the portal's accept-label, not a generic default).
+
+The dialog closed and the app's own Worktree Location text field now reads exactly
+`/tmp/wf-prj18-target-dir` -- the chosen path, not the prior default `/tmp` -- with a new "Restore
+Default" link appearing below it (absent while the field held the placeholder default), confirming
+the field's state genuinely changed rather than the screenshot merely refreshing:
+`reference/linux-progress/wf-sweep2/f-prj-18-field-updated-after-picker.png` (compare against
+`reference/linux-progress/wf-sweep2/f-prj-18-settings-before-default-tmp.png`, taken before the
+picker was ever opened, showing the field at its `/tmp` default with no "Restore Default" link).
+Full recipe and root-cause writeup: `reference/linux-progress/wf-sweep2/f-prj-18-repro-recipe.sh`.
+This closes the picker path end-to-end: dialog renders, folder selection works, and the choice
+propagates back into the app's own state. Promoted to PASSED.

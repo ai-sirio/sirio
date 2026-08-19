@@ -1,0 +1,102 @@
+XDP: Looking for portals configuration in '/home/enzopalmisano/.config/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/home/enzopalmisano/.config/xdg-desktop-portal/portals.conf'
+XDP: Looking for portals configuration in '/etc/xdg/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/etc/xdg/xdg-desktop-portal/portals.conf'
+XDP: Looking for portals configuration in '/etc/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/etc/xdg-desktop-portal/portals.conf'
+XDP: Looking for portals configuration in '/home/enzopalmisano/.local/share/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/home/enzopalmisano/.local/share/xdg-desktop-portal/portals.conf'
+XDP: Looking for portals configuration in '/usr/local/share/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/usr/local/share/xdg-desktop-portal/portals.conf'
+XDP: Looking for portals configuration in '/usr/share/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/usr/share/xdg-desktop-portal/portals.conf'
+XDP: Looking for portals configuration in '/usr/share/xdg-desktop-portal/gnome-portals.conf'
+XDP: Looking for portals configuration in '/usr/share/xdg-desktop-portal/portals.conf'
+XDP: load portals from /usr/share/xdg-desktop-portal/portals
+XDP: loading /usr/share/xdg-desktop-portal/portals/cosmic.portal
+XDP: portal implementation supports org.freedesktop.impl.portal.Access
+XDP: portal implementation supports org.freedesktop.impl.portal.FileChooser
+XDP: portal implementation supports org.freedesktop.impl.portal.Screenshot
+XDP: portal implementation supports org.freedesktop.impl.portal.Settings
+XDP: portal implementation supports org.freedesktop.impl.portal.ScreenCast
+XDP: loading /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal
+XDP: portal implementation supports org.freedesktop.impl.portal.Secret
+XDP: loading /usr/share/xdg-desktop-portal/portals/gtk.portal
+XDP: portal implementation supports org.freedesktop.impl.portal.FileChooser
+XDP: portal implementation supports org.freedesktop.impl.portal.AppChooser
+XDP: portal implementation supports org.freedesktop.impl.portal.Print
+XDP: portal implementation supports org.freedesktop.impl.portal.Notification
+XDP: portal implementation supports org.freedesktop.impl.portal.Inhibit
+XDP: portal implementation supports org.freedesktop.impl.portal.Access
+XDP: portal implementation supports org.freedesktop.impl.portal.Account
+XDP: portal implementation supports org.freedesktop.impl.portal.Email
+XDP: portal implementation supports org.freedesktop.impl.portal.DynamicLauncher
+XDP: portal implementation supports org.freedesktop.impl.portal.Lockdown
+XDP: portal implementation supports org.freedesktop.impl.portal.Settings
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.499: Choosing gtk.portal for org.freedesktop.impl.portal.Lockdown via the deprecated UseIn key
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.499: The preferred method to match portal implementations to desktop environments is to use the portals.conf(5) configuration file
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Lockdown in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.MemoryMonitor
+XDP: providing portal org.freedesktop.portal.PowerProfileMonitor
+XDP: providing portal org.freedesktop.portal.NetworkMonitor
+XDP: providing portal org.freedesktop.portal.ProxyResolver
+XDP: providing portal org.freedesktop.portal.Trash
+XDP: providing portal org.freedesktop.portal.GameMode
+XDP: providing portal org.freedesktop.portal.Realtime
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.586: No skeleton to export
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.586: Choosing gtk.portal for org.freedesktop.impl.portal.FileChooser via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.FileChooser in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.FileChooser
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.587: Choosing gtk.portal for org.freedesktop.impl.portal.AppChooser via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.AppChooser in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.OpenURI
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.587: Choosing gtk.portal for org.freedesktop.impl.portal.Print via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Print in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.Print
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.588: Choosing gtk.portal for org.freedesktop.impl.portal.Notification via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Notification in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.Notification
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.588: Choosing gtk.portal for org.freedesktop.impl.portal.Inhibit via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Inhibit in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.Inhibit
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.589: Choosing gtk.portal for org.freedesktop.impl.portal.Access via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Access in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.Device
+XDP: providing portal org.freedesktop.portal.WebExtensions
+XDP: providing portal org.freedesktop.portal.Location
+XDP: providing portal org.freedesktop.portal.Camera
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.593: Choosing gtk.portal for org.freedesktop.impl.portal.Account via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Account in gnome (fallback)
+XDP: using org.freedesktop.impl.portal.Account at org.freedesktop.impl.portal.desktop.gtk
+
+XDP: providing portal org.freedesktop.portal.Account
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.593: Choosing gtk.portal for org.freedesktop.impl.portal.Email via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.Email in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.Email
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:03:43.594: Choosing gnome-keyring.portal for org.freedesktop.impl.portal.Secret via the deprecated UseIn key
+XDP: Using gnome-keyring.portal for org.freedesktop.impl.portal.Secret in gnome (fallback)
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:04:08.694: Failed to create secret proxy: Errore nel chiamare StartServiceByName per org.freedesktop.secrets: È stato raggiunto il timeout
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:04:08.694: No skeleton to export
+
+(/usr/libexec/xdg-desktop-portal:1269482): xdg-desktop-portal-WARNING **: 04:04:08.694: Choosing gtk.portal for org.freedesktop.impl.portal.DynamicLauncher via the deprecated UseIn key
+XDP: Using gtk.portal for org.freedesktop.impl.portal.DynamicLauncher in gnome (fallback)
+XDP: providing portal org.freedesktop.portal.DynamicLauncher
+XDP: org.freedesktop.portal.Desktop acquired
+XDP: Handling OpenFile
+XDP: Handling OpenFile
+XDP: convert uri file:///tmp/wf-prj18-target-dir -> file:///tmp/wf-prj18-target-dir
+
