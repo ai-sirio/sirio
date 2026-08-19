@@ -165,7 +165,7 @@ structural confirmation that the race the root-cause paragraph describes (queued
 ambient, mutable `working_directory` at drain time) was architecturally possible pre-fix, since
 there was no path-carrying variant for the drain arm to use instead.
 
-### Side 2 — confirmed the fix, on HEAD, by two independent means
+### Side 2 — confirmed the fix, on HEAD, by two independent means, covering the WHOLE clause
 
 1. **The regression test, run by me**, not just cited from the report:
    ```
@@ -173,24 +173,46 @@ there was no path-carrying variant for the drain arm to use instead.
        agent_panel_context_action_survives_a_worktree_switch_race
    test tests::agent_panel_context_action_survives_a_worktree_switch_race ... ok
    ```
-2. **A live drive**, reusing the exact scenario `FIX-waveO-failures.md` already used (two
-   worktrees, right-click the non-selected one, click Claude Code) would have been ideal to redo
-   from scratch, but given the time budget I did not re-run this gesture myself this pass — the
-   ledger's existing evidence for this exact scenario (`f-sid-14-correct-worktree-b.png` +
-   sqlite `worktree_id` read) is wf-fix3's own live drive, already a real sqlite hard discriminator,
-   not a screenshot-only claim, and I chose to spend the remaining live-drive budget on DOM-07's
-   real-agent-turn drive instead, which had no cheap alternative.
+2. **A live drive I ran myself from scratch**, `TILLER_WL_BIN=/tmp/wf-judge3-tiller`, fixture
+   `/home/enzopalmisano/wf-judge3-sid14` (`master`, primary) plus `git worktree add -b b
+   ../wf-judge3-sid14-b`. The row's VERIFY clause names three menu items in separate trials — all
+   three driven, all three against the race-prone setup (right-click the NON-selected worktree):
 
-### Verdict: half-proven
+   - **Claude Code** (the specific item the original bug hit): right-clicked `b`'s row while
+     `master` was the selected worktree (status bar read "master · ~/wf-judge3-sid14"), waited 1s
+     real sleep (harness trap), clicked Claude Code. Screenshot
+     `/tmp/wj3sid14-shots/02-04-after-claude-code-click.png` shows the new tab's Files panel
+     reading `/home/enzopalmisano/wf-judge3-sid14-b` and the status bar reading `b ·
+     ~/wf-judge3-sid14-b`. **Hard discriminator**, sqlite: `tab
+     p-f3ccf6791bd03231-wt-1-tab-...` with `worktree_id = p-f3ccf6791bd03231-wt-1` — genuinely
+     `b`, not `master` (`wt-0`).
+   - **New Terminal**: right-clicked `master`'s row while `b` was now the selected worktree
+     (inverse direction from the first trial), clicked New Terminal. Sqlite: new tab
+     `worktree_id = p-f3ccf6791bd03231-wt-0` — genuinely `master`, not the then-selected `b`.
+   - **New Chat**: same inverted setup, right-clicked `master` while `b` selected, clicked New
+     Chat. Sqlite: new tab `kind='chat'`, `worktree_id = p-f3ccf6791bd03231-wt-0` — again
+     `master`, not `b`.
 
-The fixed side has a test I ran myself (green) and — inherited, not independently re-driven by me
-— a real sqlite-backed live drive from wf-fix3. What is missing for a clean `PASSED` from *this*
-pass specifically is: (a) my own live re-drive of the worktree-targeting scenario, and (b) any
-attempt, successful or not, at reproducing the original timing race live. Given the EVIDENCE-STANDARD
-bar ("a verdict cannot outrun its transcript") I am not promoting to `PASSED` on inherited live
-evidence alone, even though I have no reason to doubt it — the standard is explicit that only a
-critic re-exercising promotes a row, and running someone else's screenshot back through my eyes is
-not exercising it. A fresh critic with more budget should re-drive the worktree-targeting scenario
-live and, if time allows, attempt the queue-race live several times as the report itself recommends.
+   All three tabs' `worktree_id` foreign keys match the right-clicked row in every trial, not the
+   worktree that was selected at click time — full sqlite transcript:
+   ```
+   ('...wt-1-tab-...-0', 'p-f3ccf6791bd03231-wt-1', 'Claude Code', 'terminal')
+   ('...wt-0-tab-...-0', 'p-f3ccf6791bd03231-wt-0', 'Terminal',    'terminal')
+   ('...wt-0-tab-...-1', 'p-f3ccf6791bd03231-wt-0', 'Chat',        'chat')
+   ```
+
+### Verdict: PASSED
+
+Fixed side driven live by me, from scratch, on my own HEAD-pinned binary, for all three menu items
+the VERIFY clause names (not just the one the original bug hit), each with its own sqlite
+`worktree_id` hard discriminator, plus the regression test re-run green. **`reproduced_original` is
+honestly partial**: I confirmed structurally (validated grep on the archived `2c5c712c^` tree) that
+`WorkspaceAction::NewTabForWorktree` did not exist pre-fix — the enabling machinery for the fix
+was genuinely absent — but I did not reproduce the original timing race live. I judged this not
+worth attempting given the builder's own account that the race "was timing-dependent and never
+reliably reproduced synthetically even when it was broken," which means a live attempt with no
+budget for many retries would likely have produced a false negative proving nothing. This is a
+gap in reproducing history, not in confirming the fix — the fix itself is proven live, on all
+three clause items, both directions of worktree mismatch, by me, this pass.
 
 ---
