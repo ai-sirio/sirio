@@ -21,7 +21,7 @@ This file is written incrementally, one row at a time, and committed after each 
 
 | row | verdict | one-line reason |
 |---|---|---|
-| F-TAB-09 | (in progress) | |
+| F-TAB-09 | PASSED | real native GTK "Open File" dialog driven end-to-end twice: a markdown file and a code file, each opened in the correct editor mode |
 | F-CORE-FILE-04 | | |
 | F-CORE-FILE-03A | | |
 | F-GIT-RUN-01 | | |
@@ -84,5 +84,65 @@ not a unit test of a helper function):
 
 All three arms of the VERIFY clause (text / listed option / cancel) now have fresh, replayable,
 real-event-dispatching, production-reachable evidence. **F-CHAT-25 -> PASSED.**
+
+---
+
+## F-TAB-09 — PASSED
+
+**Missing half named in the brief**: the only remaining `NOT EXERCISED` row in the whole inventory.
+Open File is present and enabled in the tab menu, but its native GTK file picker
+(`cx.prompt_for_paths`) had never actually been driven — the existing test
+(`drawn_tab_context_open_file_uses_the_picker_and_adds_an_editor_tab`, main.rs:15001) uses
+`simulate_path_prompt_response`, a synthetic stand-in for the whole picker, which is exactly why
+this stayed NOT EXERCISED rather than PASSED.
+
+**Recipe followed**: `docs/linux-rewrite/FINISH-sidebar-proj-part2.md`'s private D-Bus/portal
+stack, with the ordering it calls "the whole trick" — `dbus-update-activation-environment` with the
+compositor's real `$WD` *before* the first portal-triggering click.
+
+**The exact trap the recipe warns about, hit and diagnosed live**: the first attempt failed with
+`[files] could not open the file picker: Couldn't open file picker due to missing xdg-desktop-portal
+implementation` even though a healthy `xdg-desktop-portal` process (started *after*
+`dbus-update-activation-environment`) was running and logging `providing portal
+org.freedesktop.portal.FileChooser`. Root cause, confirmed by `dbus-send
+org.freedesktop.DBus.GetNameOwner` + `GetConnectionUnixProcessID`: Tiller's own startup had
+already triggered D-Bus **bus activation** of a *different*, earlier `xdg-desktop-portal` process
+(PID 4006385, launched automatically at app boot, well before my `dbus-update-activation-environment`
+call) which held the `org.freedesktop.portal.Desktop` name and had no `WAYLAND_DISPLAY` in its own
+`/proc/<pid>/environ` at all. That process's GTK backend had already died once and, per the recipe's
+own description, `xdg-desktop-portal` "marks the whole interface unavailable for the rest of its
+process lifetime" — so every later request, including ones issued after the environment was fixed,
+kept hitting the same broken owner. Fix: `kill -9` the stale name-owner, confirm the bus name was
+released (`GetNameOwner` -> `NameHasNoOwner`), then start a fresh `xdg-desktop-portal` — which this
+time acquired `org.freedesktop.portal.Desktop` cleanly and served the request. This is a live,
+reproduced instance of the exact failure mode `FINISH-sidebar-proj-part2.md` predicted from reading
+("very likely what the predecessor's 'never maps' observation actually was"), now confirmed by
+directly inspecting the stale process's own environment rather than inferring it.
+
+**Positive-control gesture, twice, through the real dialog** (not `simulate_path_prompt_response`):
+right-clicked the Terminal tab (`rightclick 388 51`, with the required sleep before the menu-item
+click per `WAYLAND-LANE.md`'s trap), clicked **Open File**. The real GTK dialog mapped as a sway
+tile titled "Open File" (confirmed via `swaymsg -t get_tree`), was pinned floating/resized/moved
+per the recipe, and rendered as a genuine Italian-locale GNOME file chooser — Recenti/Home sidebar,
+real directory listing of this **actual home directory** (existing project folders from sibling
+lanes visible: `wf-prj-*`, `wf-sweep-*`, etc. — this is not a mock).
+
+- Navigated Home -> `wf-rest4-files`, selected **`notes.md`** (a real Markdown fixture file),
+  clicked the dialog's **Open File** confirm button. Result: a **new tab** `notes.md` appeared in
+  the tab strip, path bar reads `/home/enzopalmisano/wf-rest4-files/notes.md`, rendered in
+  **Markdown Preview** mode showing the file's actual heading and body text.
+  `reference/linux-progress/wf-rest4/f-tab-09-02-markdown-opened.png`.
+- Repeated: right-clicked a tab again, **Open File**, same real dialog, this time selected
+  **`script.rs`** (a real Rust fixture file) and confirmed. Result: a second **new tab** `script.rs`
+  appeared, path bar reads `/home/enzopalmisano/wf-rest4-files/script.rs`, rendered in the **Code**
+  editor with line numbers and Rust syntax highlighting (`fn`, string literal colouring), a **`Rust`**
+  language badge shown next to the path — visibly the different, appropriate editor mode from the
+  Markdown file.
+
+Both files: real picker, real selection, real new tab, each in the mode appropriate to its file
+type — the full VERIFY clause. `reference/linux-progress/wf-rest4/f-tab-09-01-real-gtk-picker.png`
+(the dialog itself, Recenti view showing `notes.md` after the first open — proving the OS's own
+recents list recorded the interaction, a detail no synthetic stand-in produces) and
+`f-tab-09-03-code-file-opened.png` (the second tab). **F-TAB-09 -> PASSED.**
 
 ---
