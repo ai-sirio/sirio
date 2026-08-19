@@ -74,3 +74,60 @@ is left out of the evidence above and only noted here as a process trap, not a d
 The builder's own named gap ("only the sole-pane path was re-driven live … the multi-pane case
 rests on the regression test's sibling assertions") is **closed**: both paths are now independently
 live-driven with a `panel.list` hard discriminator on each side of the fix.
+
+---
+
+## F-TAB-14 — double-click-to-rename + context-menu "silent fail"
+
+**Verdict: PASSED** (double-click-to-rename built and live-confirmed; the context-menu claim is
+independently re-confirmed as a harness timing artifact, not an app defect — matching, not
+overturning, the builder's own conclusion)
+
+### Code check
+
+`git show f8a60bf3 -- rust/crates/tiller/src/main.rs` matches the report: the tab row's `on_click`
+now matches on `ClickEvent::Mouse(mouse) => mouse.up.click_count`, calling `begin_tab_rename` when
+`click_count >= 2` and `select_tab` otherwise, kept as a single listener (not a sibling
+`on_mouse_down`) for the stated hitbox-nesting reason.
+
+### Reproduced original defect (pre-fix binary, lane `wfj2pre14`)
+
+Fresh boot, `project.add`. Double-clicked the Terminal tab (two real, separate `click 505 51`
+calls). **Hard discriminator**: `panel.list`'s `title` field for `pane-1` stays `"Terminal"`
+before and after; screenshot `/tmp/wf-judge2/shots/pre14/02-10-after-doubleclick.png` shows **no**
+rename box of any kind appears — clean absence, not a race (contrast with the fix side below,
+where the box always appears immediately). The double click only reselects, exactly as the ledger
+and the report describe.
+
+### Confirmed fix (current-HEAD binary)
+
+First two attempts (lane `wfj2tab14`, `wfj2tab14b`) reproduced a *different*, harness-side failure
+worth recording: the rename field visually opened on double-click every time, but typed text
+(`type RENAMEDBYJUDGE` / `type keytest123`) landed nowhere — not in the field, not leaked to the
+shell — even with a positive keyboard-alive control (`key z`, `type abctypecheck` both landed fine
+against a focused terminal in the same lane). `uptime` read **load average 25–40 on 12 cores**
+during these attempts (several other agents' builds/drives running concurrently, per
+`ENVIRONMENT.md`'s own warning about this box). Lane `wfj2tab14d` repeated the identical gesture
+with a **generous 2 s settle** before typing and 1 s before `Return` (plus a `PRECHECK` positive
+control typed into the terminal first, confirmed via `panel.scrollback` before the rename attempt):
+`panel.list` afterward reads `{"tab":"TerminalRENAMETEST","title":"TerminalRENAMETEST", ...}` for
+`pane-1` — hard discriminator, corroborated by a screenshot showing the tab strip and sidebar both
+reading `TerminalRENAMETEST`. **This pass's own false negative is the same class of harness trap
+`WAYLAND-LANE.md` documents for deferred menus** (input arriving before a freshly-mounted focus
+target finishes linking into the dispatch tree), now shown to bite a freshly-opened rename field
+too under load — recorded here so the next critic does not mistake a short sleep for a defect.
+
+### Context-menu "silent fail" — re-driven, conclusion holds
+
+Per the report's own named gap ("if a critic can still reproduce the silent-fail with a real,
+generous sleep … that would overturn this pass's harness-artifact conclusion"): lane `wfj2tab14f`,
+right-clicked the Terminal tab, **2 s sleep**, clicked "Rename" (`483, 133` in the drawn menu),
+**2 s sleep**, typed `CTXMENURENAME`, `Return`. `panel.list` → `title:"TerminalCTXMENURENAME"` —
+the context-menu path committed cleanly. This does **not** overturn the builder's conclusion; it
+reinforces it; the failure only ever reproduces at synthetic-input speeds no human gesture reaches.
+
+### Gap disposition
+
+Both named gaps are closed: (1) the double-click fix is independently re-confirmed (and its own
+harness trap identified and documented); (2) the context-menu race was re-tried with a generous
+sleep and did not overturn the harness-artifact conclusion — it reproduces only without one.
