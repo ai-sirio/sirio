@@ -236,6 +236,17 @@ EOF
 # opening a dialog on the operator's desktop was never testing this app in the
 # first place. Set TILLER_WL_PORTAL=1 to get a portal on the private bus, for
 # rows that genuinely need the picker to work.
+#
+# The daemon is started with WAYLAND_DISPLAY and DISPLAY stripped, and that is
+# load-bearing rather than tidy. A session bus *activates* services on demand
+# from the system's .service files, so a portal backend can appear on this bus
+# without TILLER_WL_PORTAL — measured: an app asking for
+# org.freedesktop.portal.Desktop had dbus-daemon start one unprompted. An
+# activated service inherits the daemon's environment, so if that carried a
+# display, an auto-started backend would open its window there. Stripped, it
+# has nowhere to draw and exits 1, which is the containment. Run from a desktop
+# terminal without this, "private bus" would still have put a window on the
+# operator's screen.
 if [ "${TILLER_WL_HOST_DBUS:-0}" = "1" ]; then
   echo "WARN: TILLER_WL_HOST_DBUS=1 — this instance shares the caller's session bus." >&2
   echo "      A native picker opened here reaches the real desktop." >&2
@@ -245,7 +256,8 @@ elif command -v dbus-daemon >/dev/null 2>&1; then
   # daemon never came up.
   DBUS_SOCK="/tmp/$LABEL-dbus.sock"
   rm -f "$DBUS_SOCK"
-  dbus-daemon --session --nofork --address="unix:path=$DBUS_SOCK" >"$DBUS_LOG" 2>&1 &
+  env -u WAYLAND_DISPLAY -u DISPLAY \
+      dbus-daemon --session --nofork --address="unix:path=$DBUS_SOCK" >"$DBUS_LOG" 2>&1 &
   DBUS_PID=$!
   for _ in $(seq 1 50); do
     [ -S "$DBUS_SOCK" ] && break
