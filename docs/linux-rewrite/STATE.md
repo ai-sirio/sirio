@@ -17,6 +17,65 @@ x86 desktop. Everything is committed — the working tree is no longer the state
 
 ---
 
+## 2026-08-19 08:00 — the suite was red at HEAD, and it was not a regression
+
+Read this before trusting any earlier "green" claim in this file.
+
+`cargo test -p tiller --bin tiller` was **194 passed / 3 failed at HEAD** on a clean tree. It is now
+**198 / 198**. The three failures had one shared cause, and it was not the divider fix that landed
+just before them:
+
+`~/.local/share/TillerRust/bin/tillerctl` was a **dangling symlink** into `rust/target/debug/`,
+left behind when the disk crisis cleaned `target/`. `install_tillerctl` treated it as a fatal
+conflict — `symlink_metadata` succeeds for a broken link while `is_executable_file` follows it and
+fails — so it returned "a non-executable file already exists" **forever**. Every agent launch goes
+through `resolve_tillerctl_for_process`, so the real app could not start *any* agent either. Fixed:
+a stale link is replaced, a real file is still refused. Two-sided proof: link recreated broken, the
+test passes and the link comes back pointing at the live binary.
+
+**The lesson worth keeping is about reading a red suite.** This project already says "a green test
+is not a passed row". The inverse bit us: three red tests looked exactly like a regression from the
+commit before them, and were not. Before blaming the last commit, check whether the tests depend on
+an artefact outside their own control — these three needed a sibling binary none of them builds.
+
+Two more real defects were found and fixed in the same pass, both from the goal's platform-gating
+clause rather than from any ledger row:
+
+- **Five ungated `/bin/zsh` sites in `main.rs`** — the same defect class as `F-TERM-PTY-04`, which
+  had only ever been fixed inside `tiller_terminal`. With `$SHELL` unset on Linux, the agent, the
+  install command and the summarizer all launched a shell that is not there. Both halves are
+  platform-specific, not just the program: `-lc` is POSIX and cmd.exe wants `/C`. All five now go
+  through `tiller_terminal::command_shell_invocation`, gated once.
+- **`conflict_resolution_shell` named `/bin/sh` twice, ungated** — resolving a conflict dropped the
+  user into a POSIX-minimal shell with none of their own setup, on every platform. Its test
+  asserted `/bin/sh`, i.e. it was pinning the defect; it now asserts the contract.
+
+`grep -rn '/bin/zsh' rust/crates --include='*.rs'` outside the gated module is now empty. The rest
+of the platform sweep came back clean: the `/proc` walks are `#[cfg(target_os = "linux")]`, and
+`tiller_usage::login_shell` is `#[cfg(unix)]` with a fallback list that exists on macOS too.
+
+**Still unchecked from the goal's four clauses:** the visual bar against the reference screenshots,
+the no-transplanted-code review (no local clones of waku/comet/t3code, so it needs disk to clone),
+and the real-ACP harness drive. The full-app critic pass has still never run.
+
+### The blocker is not the code
+
+`/var/log/syslog` is **358 GB** and growing at roughly 14 GB/hour. Freeing everything reconstructible
+that I own — sccache, the dead `/tmp/wf-*` lane artefacts, ~6 GB each time — buys about 25 minutes.
+That is why no lane-driving critic pass has been launched: five agents that build, run the app and
+screenshot would hit ENOSPC mid-pass and lose the work.
+
+Only the user can fix it: **`bash ~/FIX-SYSLOG-FLOOD.sh`** (needs sudo, no logout). Root cause is
+already established — an empty systemd --user activation environment meant `xdg-desktop-portal`
+registered no backend, so every COSMIC client hot-loops on a permanently-errored zbus connection.
+Repairing the portal does **not** stop processes that were already running; it was measured.
+
+Builds meanwhile go to RAM and cost no disk at all:
+`CARGO_TARGET_DIR=/dev/shm/tt CARGO_PROFILE_DEV_DEBUG=none SCCACHE_DIR=/dev/shm/sccache`.
+`tillerctl` must be on `PATH` for the agent tests: `export PATH=/dev/shm/tt/debug:$PATH`.
+
+---
+
 ## 2026-08-19 06:20 — 376 / 389, and the three things still owed
 
 Wave Q closed the last of the uncertainty. **`half-proven` is down from 32 to 1**, so every row is
