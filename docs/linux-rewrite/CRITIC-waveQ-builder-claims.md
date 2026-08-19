@@ -195,6 +195,71 @@ critic pass whose brief is these five specific fixes. See gap note.
 
 ---
 
+## F-CORE-DOM-08 — `OnceGate` wired into the restore-scrollback gate
+
+**Row** (`02-inventory-packages.md:36`): "A MainActor once-gate executes its closure once and ignores
+later fire calls." VERIFY: "Trigger the same one-shot restore or setup callback multiple times and
+confirm it has one observable effect." As the builder's own report says, and I confirmed
+independently, **there is no live user-visible symptom to reproduce** here: the pre-fix hand-rolled
+`bool` guard already implemented the identical one-shot contract correctly. The defect is
+reachability (the ported, tested `OnceGate` type had zero callers), not behavior — so "reproduce the
+original defect" for this row means reproducing the *unreachability*, not a bug.
+
+### Side 1 — structural reproduction, independently re-run on the pre-fix archive
+
+Not read from the report — re-run by me on `git archive 0b83f002^`:
+```
+$ grep -rn "OnceGate" rust/crates rust/vendor --include="*.rs" | grep -v /target/
+rust/crates/tiller_project/src/domain.rs:120:pub struct OnceGate(bool);
+rust/crates/tiller_project/src/domain.rs:122:impl OnceGate {
+rust/crates/tiller_project/src/domain.rs:192:        let mut gate = OnceGate::default();   # its own unit test
+rust/crates/tiller_project/src/lib.rs:53:    ... OnceGate, ...                              # re-export only
+```
+Zero hits in `tiller`/`tiller_ui`/etc. — confirmed on the archived tree myself, not re-quoted from
+the commit message. Also confirmed `restored_scrollback_scheduled: bool` at that point in the
+archive, with a hand-written check-and-set in `schedule_restored_scrollback` (not `.fire()`).
+
+### Side 2 — confirmed the fix via a test I ran myself, on HEAD
+
+```
+$ cargo test --manifest-path rust/Cargo.toml -p tiller --bin tiller \
+    schedule_restored_scrollback_is_gated_by_once_gate
+test tests::schedule_restored_scrollback_is_gated_by_once_gate ... ok
+```
+And independently, on HEAD (not the archive): `restored_scrollback_scheduled: OnceGate` and
+`self.restored_scrollback_scheduled.fire(...)` at the real call site (`main.rs:3172`, `:10572`) —
+confirmed by reading the live tree myself, matching what the test exercises.
+
+### A live relaunch attempt — inconclusive, reported honestly rather than folded into the verdict
+
+I attempted the same live quit/relaunch/read-scrollback drive WSP-06 used successfully (type a
+marker line, `ctl system.quit`, relaunch, read `panel.scrollback`). It did not cleanly reproduce
+either way: three separate attempts (including one with a 3-second post-quit sleep and a forced
+repaint before reading) all showed **pane-0's persisted `scrollback` at 0 bytes in the sqlite
+`tab_state` row itself** — i.e. the marker never made it into the *persisted* scrollback at all,
+which is a different pipeline stage (capture-on-quit into `session_state.scrollback`) from the one
+this row's fix touches (the *replay* gate that gets consulted once that data already exists). I did
+not chase this down further given the time budget — it may be a genuine, separate capture-timing
+issue, or an artifact of my own test sequencing (e.g. `pane-0`'s id shifting across the actions). I
+am flagging it rather than either hiding it or letting it stand in for this row's own evidence: **it
+does not bear on F-CORE-DOM-08's clause**, which is about the gate's one-shot contract once given
+data to replay, not about whether scrollback capture-before-quit succeeds. A fresh pass should
+either reproduce this cleanly (worth its own row if real) or rule it out as my own test artifact.
+
+### Verdict: PASSED
+
+Machine-tier row (`SRC: OnceGate.swift`, a restore/setup-callback contract, not a drawn/clicked UI
+element) — per `EVIDENCE-STANDARD.md` the acceptable proof is "a named test, or an executed
+socket/CLI transcript," which this has: a named regression test reaching the real app call site
+(not a bare `OnceGate` unit test in isolation), run green by me on HEAD, plus my own independent
+structural confirmation that the pre-fix tree genuinely could not reach `OnceGate::fire` anywhere.
+`reproduced_original` is honestly structural-only (there is no live-behavior original defect to
+reproduce, by the row's own nature — the hand-rolled bool already worked). The unrelated
+scrollback-capture flakiness above is reported as a gap, not allowed to weaken this row's own
+verdict, since it is a different mechanism than what this fix wires.
+
+---
+
 ## F-SID-14 — agent-panel context-menu items target the wrong worktree
 
 **Row** (`01-inventory-app.md:31`): "Open a terminal, agent panel, or chat for a worktree from its
@@ -290,3 +355,49 @@ gap in reproducing history, not in confirming the fix — the fix itself is prov
 three clause items, both directions of worktree mismatch, by me, this pass.
 
 ---
+
+## Summary
+
+| Row | Verdict | reproduced_original | Both sides driven by me this pass |
+|---|---|---|---|
+| F-CORE-WSP-02 | PASSED | true (live, pre-fix binary) | yes |
+| F-CORE-WSP-06 | PASSED | true (live, pre-fix binary) | yes |
+| F-SID-14 | PASSED | partial (structural only — see gap note) | fixed side yes, all 3 items, both directions |
+| F-CORE-DOM-07 | PASSED | true (live, pre-fix binary, real Claude turns) | yes |
+| F-CORE-DOM-08 | PASSED | structural only (row has no live-behavior defect by its own nature) | fixed side: named test + structural read |
+
+All five rows promoted from `half-proven` to `PASSED` this pass. Every promotion rests on evidence
+gathered by me this pass — a live drive, a test I ran myself, or a validated grep on an
+independently-built pre-fix tree — never on re-reading `FIX-waveO-failures.md` or the ledger's
+existing text, per `EVIDENCE-STANDARD.md`'s rule that only the critic may promote, and only by
+exercising.
+
+**Gaps left for a fresh pass, named plainly rather than buried:**
+- F-SID-14: the original timing race (a stray `SelectWorktree` landing between queue-push and
+  drain) was never independently reproduced live by anyone, including me — the builder's own report
+  says it "was never reliably reproduced synthetically even when it was broken."
+- F-CORE-DOM-08: a live relaunch/scrollback-restore drive, attempted three ways, consistently showed
+  0 bytes of persisted scrollback for the test pane — a possible capture-before-quit timing issue
+  unrelated to this row's own gate-wiring fix, not chased down further; worth its own investigation
+  if a fresh critic can reproduce it cleanly.
+- F-CORE-WSP-02: only the symlink-dedup clause was exercised; the row's other clauses (stable IDs
+  for terminal/browser content kinds, worktree scoping for kinds other than editor) were not
+  re-verified this pass.
+- F-CORE-WSP-06: only the duplicate-`new_id`-on-replay quarantine condition was exercised; the row's
+  other four conditions (empty nonroot groups, orphan tabs, invalid active references, nonfinite
+  fractions) are pre-existing behavior this fix did not touch and were out of this pass's scope.
+- F-CORE-DOM-07: the `codex`/`opencode`/`pi` summarizer-agent alternatives and the throttle actually
+  suppressing a rename within its 30s/200-char window were not driven this pass (only the default
+  `claude` summarizer path, matching the builder's own named gap).
+- **Environmental finding, not a row defect**: on this box, a fresh/default `TILLER_DB` auto-seeds a
+  second project pointing at the real, shared `tiller`/`tiller-linux` checkouts with all of sibling
+  agents' live worktrees. This cost significant setup time via misdirected sidebar clicks across
+  several of the drives above before switching to `ctl workspace.select` + the tab-bar `+` menu
+  instead of sidebar coordinates. Worth a note in `ENVIRONMENT.md` for the next agent who hits it.
+
+Fixtures used (real git repos, some with real symlinks, some with real `git worktree add`
+siblings): `/home/enzopalmisano/wf-judge3-{wsp02,wsp06,sid14,dom07,dom08}{,fix,b}`. Binaries:
+`/tmp/wf-judge3-tiller` (HEAD, `da808f0a`) and `/tmp/wf-judge3-pre-dom07-tiller` (`2c5c712c^`,
+serves both F-SID-14 and F-CORE-DOM-07) are retained; the WSP-02/WSP-06 pre-fix target trees were
+deleted mid-session to relieve disk pressure on this box after their binaries had already produced
+the sqlite/screenshot evidence quoted above, which is what persists as the replayable record.
