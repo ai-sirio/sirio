@@ -1,4 +1,27 @@
-# GAP — waku's theme source was read, not its screenshots
+# GAP (CLEARED) — waku's theme source was read, not its screenshots
+
+> **CLEARED 2026-08-19 by a fresh critic — `fullapp/CRITIC-theme-transplant-2.md`.**
+> The banner below was written before that pass returned and is kept as it stood;
+> its closing paragraph — "this still is not a verdict" — is the part that has since
+> been answered, and answered the way step 5 requires: by someone who did not write
+> the remedy.
+>
+> The critic judged `bdaa65e7` from an independent clone and re-derived rather than
+> read. Three methods, agreeing: a value-by-value Python re-implementation of both
+> `tiller_theme/src/lib.rs` and `_tiller-refs/waku/src/theme.rs`, showing all sixteen
+> previously-transplanted tokens now differ from waku in both appearances at 0.004
+> tolerance; positive controls, perturbing two named tests and watching them fail; and
+> a live `wayland-drive.sh` run with ImageMagick pixel sampling of the running binary.
+> Nothing was refuted.
+>
+> **What this clears, and what it does not.** It clears the sixteen `ThemeColors`
+> tokens named below. It says nothing about the geometry and typography constants —
+> `TRANSCRIPT_WIDTH`, `CONTENT_WIDTH`, `MARKDOWN_COLUMN_WIDTH` (720.0),
+> `USER_PILL_MAX_WIDTH` (540.0), and the type scale in `tiller_theme/src/lib.rs` —
+> whose doc comments still cite waku, one of them by naming a waku source symbol
+> (`chat.rs:46`, "waku's measured `CONTENT_MAX_WIDTH`"). Those carry the same defect
+> this document was opened for and have had no remedy and no critic. Reading this
+> banner as covering them would repeat exactly the mistake step 5 exists to prevent.
 
 > **Second remedy applied 2026-08-19, NOT cleared.** Step 5 ran and the first
 > remedy *failed* it: a fresh critic returned **TRANSPLANTS REMAIN**
