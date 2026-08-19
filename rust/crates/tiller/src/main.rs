@@ -11555,11 +11555,27 @@ fn install_tillerctl(source: &Path, destination: &Path) -> Result<(), String> {
     if is_executable_file(destination) {
         return Ok(());
     }
-    if std::fs::symlink_metadata(destination).is_ok() {
-        return Err(format!(
-            "cannot install tillerctl at {}: a non-executable file already exists",
-            destination.display()
-        ));
+    // `symlink_metadata` describes the link itself and `is_executable_file`
+    // follows it, so the two disagree on exactly one thing: a link whose
+    // target is gone. That is our own install after a rebuild moved or
+    // cleaned `target/`, and replacing it is the whole point of an installer.
+    // A real file is somebody else's and still refuses to be clobbered.
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            std::fs::remove_file(destination).map_err(|error| {
+                format!(
+                    "could not replace the stale tillerctl install at {}: {error}",
+                    destination.display()
+                )
+            })?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "cannot install tillerctl at {}: a non-executable file already exists",
+                destination.display()
+            ));
+        }
+        Err(_) => {}
     }
 
     #[cfg(unix)]
@@ -16538,6 +16554,72 @@ mod tests {
             .expect_err("missing tillerctl must be surfaced");
         assert!(error.contains("tillerctl is unavailable"));
         assert!(!error.contains("using bare tillerctl"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stale install is the ordinary end state of a rebuild: the symlink in
+    /// `XDG_DATA_HOME` outlives the `target/` directory it points into. The
+    /// resolver has to heal that itself. `symlink_metadata` succeeds for a
+    /// broken link, so the guard that keeps a real file from being clobbered
+    /// used to reject it as "a non-executable file already exists" -- and
+    /// because every agent launch funnels through `resolve_tillerctl_for_process`,
+    /// the app then refused to start any agent at all until a human deleted
+    /// the link by hand.
+    #[cfg(unix)]
+    #[test]
+    fn tillerctl_resolver_replaces_a_stale_install_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "tiller-tillerctl-stale-link-{}-{}",
+            std::process::id(),
+            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path_dir = root.join("path");
+        let data_home = root.join("data");
+        std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
+        let destination = data_home.join(TILLERCTL_INSTALL_SUBPATH);
+        std::fs::create_dir_all(destination.parent().expect("install parent"))
+            .expect("create install dir");
+        let path_tillerctl = path_dir.join("tillerctl");
+        std::fs::write(&path_tillerctl, b"tillerctl").expect("write PATH fixture");
+        make_executable(&path_tillerctl);
+
+        // The previous build's binary, now deleted: a link pointing at nothing.
+        std::os::unix::fs::symlink(root.join("deleted-target/debug/tillerctl"), &destination)
+            .expect("create the stale install symlink");
+        assert!(
+            std::fs::symlink_metadata(&destination).is_ok(),
+            "the fixture must be a dangling link, not an absent path"
+        );
+        assert!(
+            std::fs::metadata(&destination).is_err(),
+            "the fixture's link must resolve to nothing"
+        );
+
+        let environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                data_home.to_string_lossy().into_owned(),
+            ),
+            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
+        ]);
+
+        let resolved = resolve_tillerctl_path(&root.join("app/tiller"), &environment)
+            .expect("a stale link must be replaced, not treated as a fatal conflict");
+        assert_eq!(resolved, destination);
+        assert_eq!(
+            std::fs::canonicalize(&resolved).expect("healed installation exists"),
+            std::fs::canonicalize(&path_tillerctl).expect("PATH source exists")
+        );
+
+        // Negative control: a real file at the destination is somebody else's,
+        // and must still refuse to be clobbered.
+        std::fs::remove_file(&destination).expect("clear the healed link");
+        std::fs::write(&destination, b"not ours").expect("write conflicting file");
+        let error = resolve_tillerctl_path(&root.join("app/tiller"), &environment)
+            .expect_err("a real non-executable file must not be replaced");
+        assert!(error.contains("already exists"), "got {error}");
 
         let _ = std::fs::remove_dir_all(root);
     }
