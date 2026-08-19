@@ -734,6 +734,14 @@ struct ControlWorkspace {
 #[derive(Clone)]
 struct ControlState {
     projects: Vec<session::CatalogProject>,
+    /// F-CORE-DOM-01: the identity settings (display name, colour, icon)
+    /// and worktree defaults (pinned base branch, location override) that
+    /// `project.list` exposes alongside each project's git-derived fields --
+    /// its own VERIFY clause requires every persisted project field to be
+    /// "visible through the corresponding domain/control listing", which
+    /// `ctl project.list` did not satisfy before this: it exposed only
+    /// `id/isGit/name/path/worktreeCount/worktrees`.
+    project_settings: BTreeMap<String, session::CatalogProjectSettings>,
     workspaces: Vec<ControlWorkspace>,
     current: Option<usize>,
 }
@@ -792,8 +800,14 @@ impl ControlState {
             workspace.mounted = priority_paths.contains(&workspace.path);
         }
         let current = workspaces.iter().position(|worktree| worktree.selected);
+        let project_settings = catalog
+            .projects()
+            .iter()
+            .map(|project| (project.id.clone(), catalog.project_settings(&project.id)))
+            .collect();
         Self {
             projects: catalog.projects().to_vec(),
+            project_settings,
             workspaces,
             current,
         }
@@ -819,6 +833,16 @@ impl ControlState {
                         ])
                     })
                     .collect();
+                // F-CORE-DOM-01: the identity settings and worktree
+                // defaults persisted alongside this project -- unset
+                // optional fields report as empty strings, the same
+                // convention `comment` already uses on workspace rows,
+                // rather than omitting the key.
+                let settings = self
+                    .project_settings
+                    .get(&project.id)
+                    .cloned()
+                    .unwrap_or_default();
                 BTreeMap::from([
                     ("id".to_string(), project.id.clone()),
                     ("name".to_string(), project.name.clone()),
@@ -834,6 +858,24 @@ impl ControlState {
                     (
                         "empty".to_string(),
                         project.worktrees.is_empty().to_string(),
+                    ),
+                    (
+                        "displayName".to_string(),
+                        settings.display_name.unwrap_or_default(),
+                    ),
+                    ("color".to_string(), settings.color_hex.unwrap_or_default()),
+                    ("iconKind".to_string(), settings.icon_kind),
+                    (
+                        "iconValue".to_string(),
+                        settings.icon_value.unwrap_or_default(),
+                    ),
+                    (
+                        "defaultWorktreeBase".to_string(),
+                        settings.default_worktree_base.unwrap_or_default(),
+                    ),
+                    (
+                        "worktreeLocationOverride".to_string(),
+                        settings.worktree_location_override.unwrap_or_default(),
                     ),
                     (
                         "worktrees".to_string(),
@@ -3891,22 +3933,17 @@ impl TillerWorkspace {
 
     fn refresh_sidebar(&mut self, cx: &mut Context<Self>) {
         let projects = self.sidebar_projects();
-        let identities = sidebar_project_identities(&self.project_catalog);
-        // F-PRJ-17/F-PRJ-18: pushed the same way identities are, right after
+        let catalog = &self.project_catalog;
+        // F-PRJ-17/F-PRJ-18/F-CORE-DOM-01: pushed the same way after
         // `set_projects` rebuilds the row tree and resets both maps to
         // empty -- an already-open Project Settings sheet was seeded from
         // `project_worktree_defaults` in `open_project_settings`, so a
         // reopen after this refresh shows whatever `update_project_settings`
-        // just persisted.
-        let worktree_defaults = sidebar_project_worktree_defaults(&self.project_catalog);
+        // just persisted. Shares `seed_sidebar_identity_and_worktree_defaults`
+        // with boot's construction so the two can't drift apart again.
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_projects(projects, cx);
-            for (id, display_name, icon) in identities {
-                sidebar.set_project_identity(&id, display_name, icon, cx);
-            }
-            for (id, default_base, location_override) in worktree_defaults {
-                sidebar.set_project_worktree_defaults(&id, default_base, location_override, cx);
-            }
+            seed_sidebar_identity_and_worktree_defaults(sidebar, catalog, cx);
         });
         // `set_projects` rebuilds every row from the catalog, which drops the
         // per-row agent facts and the urgency order with them. Re-apply both
@@ -10990,6 +11027,34 @@ fn sidebar_project_worktree_defaults(
         .collect()
 }
 
+/// Applies a catalog's persisted per-project identity (display name, icon,
+/// colour) and worktree defaults (pinned base branch, location override) to
+/// an already-constructed sidebar — the one seeding step every caller that
+/// hands a catalog to a `Sidebar` must repeat, on top of whatever rows it
+/// built.
+///
+/// F-CORE-DOM-01: boot's one-time sidebar construction used to inline only
+/// the identity loop and never called `set_project_worktree_defaults` at
+/// all, unlike `refresh_sidebar`'s later updates, which always did both.
+/// `project_worktree_defaults` stayed an empty map — surviving on disk the
+/// whole time — until the next unrelated refresh (a project added, a
+/// worktree created, any other settings edit) happened to populate it.
+/// Reopening Project Settings right after a genuine restart, before any such
+/// refresh, read that still-empty map and showed the pin as unset. Both call
+/// sites now share this function so they cannot drift apart again.
+fn seed_sidebar_identity_and_worktree_defaults(
+    sidebar: &mut Sidebar,
+    catalog: &ProjectCatalog,
+    cx: &mut Context<Sidebar>,
+) {
+    for (id, display_name, icon) in sidebar_project_identities(catalog) {
+        sidebar.set_project_identity(&id, display_name, icon, cx);
+    }
+    for (id, default_base, location_override) in sidebar_project_worktree_defaults(catalog) {
+        sidebar.set_project_worktree_defaults(&id, default_base, location_override, cx);
+    }
+}
+
 /// Starts in the nearest repository when launched from one of its subdirectories.
 fn initial_working_directory() -> PathBuf {
     let current = std::env::current_dir().unwrap_or_else(|error| {
@@ -12010,7 +12075,6 @@ fn main() {
                     .collect();
                 let catalog_for_sidebar =
                     sidebar_projects_with_comments(&project_catalog, &comments_for_sidebar);
-                let identities_for_sidebar = sidebar_project_identities(&project_catalog);
                 let pending_for_chat_agent = pending_for_tab_bar.clone();
                 let pending_for_agent_settings = pending_for_tab_bar.clone();
                 let tab_bar = cx.new(|cx| {
@@ -12093,9 +12157,17 @@ fn main() {
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);
-                        for (id, display_name, icon) in identities_for_sidebar {
-                            sidebar.set_project_identity(&id, display_name, icon, cx);
-                        }
+                        // F-CORE-DOM-01: this one-time boot construction used
+                        // to stop at `set_project_identity`, leaving the
+                        // pinned worktree base/location unset until the next
+                        // unrelated refresh -- see
+                        // `seed_sidebar_identity_and_worktree_defaults`'s doc
+                        // comment.
+                        seed_sidebar_identity_and_worktree_defaults(
+                            &mut sidebar,
+                            &project_catalog,
+                            cx,
+                        );
                         sidebar
                     });
                     TillerWorkspace::new(
@@ -12422,6 +12494,37 @@ mod tests {
         repo
     }
 
+    /// A repo with two branches: `main` (checked out) and `release`, which
+    /// carries one extra commit `main` never gets. F-CORE-DOM-01/F-CORE-DOM-02
+    /// tests create a worktree with no explicit base and check for
+    /// `release-marker.txt` in it, to tell "cut from the pinned base" apart
+    /// from "cut from HEAD" by content, not just by branch name.
+    fn dom01_boot_seed_repo(tag: &str) -> PathBuf {
+        let repo = test_repo(tag);
+        std::fs::write(repo.join("README.md"), "root\n").expect("seed root fixture");
+        git_test(&repo, &["add", "README.md"]);
+        git_test(
+            &repo,
+            &["-c", "commit.gpgSign=false", "commit", "-q", "-m", "root"],
+        );
+        git_test(&repo, &["checkout", "-q", "-b", "release"]);
+        std::fs::write(repo.join("release-marker.txt"), "release\n").expect("seed release marker");
+        git_test(&repo, &["add", "release-marker.txt"]);
+        git_test(
+            &repo,
+            &[
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-q",
+                "-m",
+                "release marker",
+            ],
+        );
+        git_test(&repo, &["checkout", "-q", "main"]);
+        repo
+    }
+
     fn conflicted_test_repo(tag: &str) -> PathBuf {
         let repo = test_repo(tag);
         std::fs::write(repo.join("conflicted.txt"), "base\n").expect("seed conflict fixture");
@@ -12463,6 +12566,86 @@ mod tests {
                 .advance_clock(Duration::from_millis(5));
         }
         panic!("{selector} was not drawn");
+    }
+
+    /// F-CORE-DOM-01: `seed_sidebar_identity_and_worktree_defaults` is the
+    /// exact function boot's one-time sidebar construction calls. This test
+    /// drives it the same way — build the rows, seed identity and worktree
+    /// defaults in one pass, no `refresh_sidebar` in between — on a catalog
+    /// restored (`ProjectCatalog::from_restored`) with a pinned base and
+    /// location, exactly what a real restart hands `main()`.
+    ///
+    /// `Sidebar`'s seeded state is private to `tiller_ui`, so this drives it
+    /// through New Worktree instead of reading it directly: New Worktree's
+    /// own fallback (F-CORE-DOM-02) reads the very same
+    /// `project_worktree_defaults` map `open_project_settings` does, so a
+    /// worktree created with blank dialog fields right after this one-pass
+    /// seed proves the map was populated — the pinned base and location
+    /// reached the sidebar without a second, separate refresh.
+    #[gpui::test]
+    async fn boot_seeding_reaches_project_worktree_defaults_in_one_pass(cx: &mut TestAppContext) {
+        let repo = dom01_boot_seed_repo("core-dom-01-boot-seed");
+        let location_dir = repo
+            .parent()
+            .expect("scratch repo has a parent directory")
+            .join("dom-01-pinned-location");
+        std::fs::create_dir_all(&location_dir).expect("create pinned location dir");
+
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "boot-seed-project".to_string(),
+            session::CatalogProjectSettings {
+                default_worktree_base: Some("release".to_string()),
+                worktree_location_override: Some(location_dir.to_string_lossy().into_owned()),
+                ..session::CatalogProjectSettings::default()
+            },
+        );
+        let catalog = ProjectCatalog::from_restored(
+            vec![session::CatalogProject {
+                id: "boot-seed-project".into(),
+                name: "boot-seed-project".into(),
+                root_path: repo.clone(),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "main".into(),
+                    path: repo.clone(),
+                    is_primary: true,
+                }],
+            }],
+            settings,
+        );
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            let mut sidebar = Sidebar::from_projects(sidebar_projects(&catalog), cx);
+            seed_sidebar_identity_and_worktree_defaults(&mut sidebar, &catalog, cx);
+            sidebar
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let row_bounds = wait_for_drawn(&mut cx, "new-worktree-row");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        // Leave the dialog's own Base/Location fields blank.
+        cx.simulate_input("cleanbase1");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let expected_path = location_dir.join("boot-seed-project-cleanbase1");
+        assert!(
+            expected_path.is_dir(),
+            "the pinned Worktree Location, seeded at boot in one pass, placed \
+             the new worktree at {} instead of the project's sibling directory",
+            expected_path.display()
+        );
+        assert!(
+            expected_path.join("release-marker.txt").is_file(),
+            "the new worktree was cut from the pinned Default Worktree Base \
+             ('release'), seeded at boot in one pass -- not from HEAD -- the \
+             release-only marker file must be present at {}",
+            expected_path.display()
+        );
     }
 
     fn palette_test_workspace_with_tab_count(
@@ -17317,6 +17500,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17348,6 +17532,7 @@ mod tests {
     fn raw_notify_accepts_user_title_and_body() {
         let state = Arc::new(Mutex::new(ControlState {
             projects: Vec::new(),
+            project_settings: BTreeMap::new(),
             workspaces: Vec::new(),
             current: None,
         }));
@@ -17406,6 +17591,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17512,6 +17698,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17556,6 +17743,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17591,6 +17779,7 @@ mod tests {
     fn browser_methods_are_explicit_and_capabilities_are_truthful() {
         let state = Arc::new(Mutex::new(ControlState {
             projects: Vec::new(),
+            project_settings: BTreeMap::new(),
             workspaces: Vec::new(),
             current: None,
         }));
@@ -17767,6 +17956,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17820,6 +18010,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -17912,6 +18103,7 @@ mod tests {
         let handler = Arc::new(AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -18231,6 +18423,7 @@ mod tests {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -18256,11 +18449,85 @@ mod tests {
         );
     }
 
+    /// F-CORE-DOM-01's own VERIFY clause: "...confirm every field survives
+    /// and is visible through the corresponding domain/control listing."
+    /// `ctl project.list` used to expose only
+    /// `id/isGit/name/path/worktreeCount/worktrees` -- display name,
+    /// colour, icon, and the pinned worktree base/location were invisible
+    /// through the control surface even though they persisted correctly.
+    #[test]
+    fn project_list_exposes_identity_and_worktree_defaults() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "listed-project".to_string(),
+            session::CatalogProjectSettings {
+                color_hex: Some("green".to_string()),
+                display_name: Some("Renamed Project".to_string()),
+                icon_kind: "icon".to_string(),
+                icon_value: Some("folder".to_string()),
+                default_worktree_base: Some("feature".to_string()),
+                worktree_location_override: Some("/dev/shm/dom01".to_string()),
+            },
+        );
+        let catalog = ProjectCatalog::from_restored(
+            vec![session::CatalogProject {
+                id: "listed-project".into(),
+                name: "listed-project".into(),
+                root_path: PathBuf::from("/tmp/dom01-listed-project"),
+                is_git: true,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "master".into(),
+                    path: PathBuf::from("/tmp/dom01-listed-project"),
+                    is_primary: true,
+                }],
+            }],
+            settings,
+        );
+        let state = ControlState::from_catalog(&catalog, Path::new("/tmp/dom01-listed-project"));
+
+        let handler = AppControlHandler::new(
+            Arc::new(Mutex::new(state)),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/tiller-project-list-defaults-test.sock")),
+        );
+
+        let response = handler.handle(&tiller_control::protocol::request::project_list());
+        assert!(response.ok, "project.list failed: {:?}", response.error);
+        let rows = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("projects"))
+            .and_then(|encoded| tiller_control::protocol::rows::decode(encoded))
+            .expect("project rows");
+        let row = rows.first().expect("the listed project has a row");
+        assert_eq!(
+            row.get("displayName").map(String::as_str),
+            Some("Renamed Project")
+        );
+        assert_eq!(row.get("color").map(String::as_str), Some("green"));
+        assert_eq!(row.get("iconValue").map(String::as_str), Some("folder"));
+        assert_eq!(
+            row.get("defaultWorktreeBase").map(String::as_str),
+            Some("feature"),
+            "the pinned worktree base is visible through project.list"
+        );
+        assert_eq!(
+            row.get("worktreeLocationOverride").map(String::as_str),
+            Some("/dev/shm/dom01"),
+            "the worktree location override is visible through project.list"
+        );
+    }
+
     #[test]
     fn changes_mutations_validate_path_and_worktree_before_git() {
         let handler = AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
@@ -18308,6 +18575,7 @@ mod tests {
         let handler = Arc::new(AppControlHandler::new(
             Arc::new(Mutex::new(ControlState {
                 projects: Vec::new(),
+                project_settings: BTreeMap::new(),
                 workspaces: Vec::new(),
                 current: None,
             })),
