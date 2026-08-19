@@ -66,3 +66,28 @@ that lies. Resolve by intent:
 Both sides carry tests asserting their own behaviour, so the merged tree must also drop the
 now-wrong assertions from our side — a test that says "a finished pane closes without a prompt"
 is asserting the defect.
+
+## The two paths already exist separately in our code — the fix is surgical
+
+Located 2026-08-19, and it shrinks the job considerably. `main.rs` already has one function per
+Swift path, and both currently call the same gate:
+
+| our fn | Swift counterpart | today | must become |
+|---|---|---|---|
+| `request_close_terminal_at` (`main.rs:4823`, gate at `:4841`) | `SidebarView.swift:592`/`:720` | gated on `pane_close_needs_confirmation` | **unconditional** |
+| `request_close_activity` (`main.rs:4866`, gate at `:4873`) | `ActivitySectionView.swift:111` | gated | **stays gated** |
+
+So the F-TERM-08 half is not a 29-hunk reconciliation at all: it is removing the gate from
+`request_close_terminal_at` and leaving `request_close_activity` untouched. The test
+`drawn_activity_row_close_holds_a_running_tab_and_lets_an_idle_one_go` (`:13830`) covers the path
+that keeps the gate and must keep passing unchanged — it is the regression guard proving the two
+paths did not get collapsed into one.
+
+What the modal branch still carries that this does not: the `modal.rs` primitive itself, F-TERM-05's
+Set Title prompt, and F-TAB-26. Those are additive and are the reason to take the branch rather than
+hand-write the one-line gate removal.
+
+`pane_close_needs_confirmation` (`main.rs:2835`) keeps both its callers' semantics honest only if its
+doc comment stops implying it governs every close; it governs the Activity row. Fix the comment in
+the same change, or the next reader re-derives the wrong contract from it — which is how this
+started.
