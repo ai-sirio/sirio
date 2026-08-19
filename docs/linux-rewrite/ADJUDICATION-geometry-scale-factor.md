@@ -83,8 +83,17 @@ rather than assumes: at 2.00x, `CARD_TWO_LINE_HEIGHT = 51` is consistent with th
 
 ## Standing conclusions
 
-1. **Scale factor: 2.00x**, established from the Big-Sur-onward traffic-light spec, corroborated
-   independently by the card-height check (102/51) and by twin B's body-text line-pitch check.
+1. **Scale factor: 2.00x**, on three independent corroborations that agree:
+   - the Big-Sur-onward traffic-light spec — 28 px / 14 pt and 46 px / 23 pt, both exactly 2.000;
+   - the rendered body-text **line pitch**, 42 frame px, which is exactly 21.0 logical at 2.00x and
+     matches `Typography::body_line_height`'s existing 21.0. It resolves to a round number only at
+     2.00x, which is what makes it discriminating rather than merely consistent;
+   - the sidebar **card height**, 102 frame px against `CARD_TWO_LINE_HEIGHT` 51, giving exactly
+     2.000 in both frames — the check twin A found and discarded.
+
+   Three different features of the frame, three different reference values, one answer. Note the
+   raw pixel measurements were never in dispute: twin A, twin B and this adjudication each measured
+   28 px and 46 px independently and agreed to the pixel. Only the divisor was ever contested.
 2. **Content column: lower bound ~676-686 logical px.** Consistent with 720; not a confirmation of
    it. The open question of what the column *should* be (720 vs ~550 vs ~480) is a taste decision
    and remains the user's.
