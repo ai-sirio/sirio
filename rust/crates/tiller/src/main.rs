@@ -30,6 +30,7 @@ use tiller_git::{
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
 use tiller_project::{
     OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository,
+    numeric_tab_selection,
 };
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
@@ -97,6 +98,8 @@ actions!(
         ToggleSidebar,
         ToggleRightPanel,
         RestoreLaunchSnapshot,
+        NewBrowser,
+        FocusAddressBar,
     ]
 );
 
@@ -116,11 +119,14 @@ enum WindowCommand {
     ToggleSidebar,
     ToggleRightPanel,
     RestoreLaunchSnapshot,
+    NewBrowser,
+    FocusAddressBar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowCommandDisabledReason {
     NoActiveFile,
+    NoActiveBrowser,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,7 +135,7 @@ enum WindowCommandAvailability {
     Disabled(WindowCommandDisabledReason),
 }
 
-fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 6] {
+fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 8] {
     [
         (WindowCommand::NewTerminalTab, "ctrl-t"),
         (WindowCommand::OpenFile, "ctrl-o"),
@@ -139,6 +145,12 @@ fn linux_window_shortcuts() -> [(WindowCommand, &'static str); 6] {
         // F-WIN-07: Linux stand-in for macOS's `⇧⌘O` "History > Restore
         // Previous Launch" chord.
         (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
+        // F-WIN-06: Linux stand-in for macOS's `⇧⌘L` "New Browser" and `⌘L`
+        // "Focus Address Bar" chords (App/TillerApp.swift:73-81). The port
+        // draws no menu bar (see F-WIN-07 above), so both live only as
+        // window-level bindings and command-palette rows.
+        (WindowCommand::NewBrowser, "ctrl-shift-l"),
+        (WindowCommand::FocusAddressBar, "ctrl-l"),
     ]
 }
 
@@ -150,12 +162,22 @@ fn window_command_availability(
         WindowCommand::SaveFile if active_tab_kind != Some(TabKind::Editor) => {
             WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveFile)
         }
+        // F-WIN-06: focusing the address bar needs a browser tab to focus
+        // it *in* -- unlike SaveFile there is no silent fallback target, so
+        // this mirrors SaveFile's own no-active-file gate rather than
+        // inventing new behavior for the case the reference app's gate
+        // (`WorkspaceEngineGate`) never reaches, because this port has none.
+        WindowCommand::FocusAddressBar if active_tab_kind != Some(TabKind::Browser) => {
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
+        }
         WindowCommand::NewTerminalTab
         | WindowCommand::OpenFile
         | WindowCommand::SaveFile
         | WindowCommand::ToggleSidebar
         | WindowCommand::ToggleRightPanel
-        | WindowCommand::RestoreLaunchSnapshot => WindowCommandAvailability::Enabled,
+        | WindowCommand::RestoreLaunchSnapshot
+        | WindowCommand::NewBrowser
+        | WindowCommand::FocusAddressBar => WindowCommandAvailability::Enabled,
     }
 }
 
@@ -174,6 +196,8 @@ fn bind_window_keys(cx: &mut App) {
                 WindowCommand::RestoreLaunchSnapshot => {
                     KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
                 }
+                WindowCommand::NewBrowser => KeyBinding::new(shortcut, NewBrowser, None),
+                WindowCommand::FocusAddressBar => KeyBinding::new(shortcut, FocusAddressBar, None),
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
             // context) on purpose — it must fire even when the surface
@@ -7460,6 +7484,23 @@ impl TillerWorkspace {
         view.map(|view| (tab, view))
     }
 
+    /// F-WIN-06: the browser surface hosted by the *active* tab specifically
+    /// -- unlike [`Self::browser_surface`], which returns the first browser
+    /// found across every tab and exists for the control socket's
+    /// worktree-scoped `browser.*` methods. Focus Address Bar must move
+    /// focus into whichever browser is actually on screen, not an
+    /// off-screen one from another tab.
+    fn active_browser_surface(&self) -> Option<Entity<BrowserSurface>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let mut surface = None;
+        tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Browser(browser) = content {
+                surface = Some(browser.clone());
+            }
+        });
+        surface
+    }
+
     fn control_open_changes(
         &mut self,
         worktree: Option<&str>,
@@ -7781,20 +7822,23 @@ impl TillerWorkspace {
         self.select_tab(id, cx);
     }
 
+    /// F-CORE-DOM-06: routes the numeric tab chords (and `tab.select` off
+    /// the control socket, whose `position` is arbitrary external input)
+    /// through the one domain function so this and `numeric_tab_selection`
+    /// cannot drift apart. `position` beyond `u8::MAX` cannot name any real
+    /// chord or a sane control-socket index either, so it is treated the
+    /// same as any other out-of-range position: rejected, not clamped.
     fn select_tab_position(&mut self, position: usize, cx: &mut Context<Self>) {
         let ids = self
             .tab_machinery
             .group_tabs(self.tab_machinery.active_group())
             .unwrap_or(&[]);
-        let active = self
-            .tabs
-            .get(self.active_tab)
-            .and_then(|tab| ids.iter().position(|id| *id == tab.id))
-            .unwrap_or(0);
-        let Some(selection) = TabSelection::new(ids.len(), active) else {
+        let Ok(number) = u8::try_from(position) else {
             return;
         };
-        let index = selection.jump(position).active();
+        let Some(index) = numeric_tab_selection(number, ids.len()) else {
+            return;
+        };
         let id = ids[index];
         self.select_tab(id, cx);
     }
@@ -9696,6 +9740,39 @@ impl TillerWorkspace {
         self.open_action(NewTabAction::NewTerminal, window, cx);
     }
 
+    /// F-WIN-06: `ctrl-shift-l`, the Linux stand-in for `⇧⌘L` "New Browser"
+    /// (App/TillerApp.swift:73-81). Routes through the same `open_action`
+    /// the '+' menu's `NewTabAction::NewBrowser` item already drives, so the
+    /// chord and the mouse path cannot land two different tabs.
+    fn handle_new_browser(&mut self, _: &NewBrowser, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_action(NewTabAction::NewBrowser, window, cx);
+    }
+
+    /// F-WIN-06: `ctrl-l`, the Linux stand-in for `⌘L` "Focus Address Bar"
+    /// (App/TillerApp.swift:73-81). Disabled when the active tab is not a
+    /// browser -- there is no address bar to focus, and no fallback target
+    /// the reference app's own gate would pick either, so this is a no-op
+    /// (the `WindowCommandAvailability::Disabled` guard SaveFile already
+    /// uses for "no active editor" is reused for "no active browser" here).
+    fn handle_focus_address_bar(
+        &mut self,
+        _: &FocusAddressBar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_tab_kind = self.tabs.get(self.active_tab).map(|tab| tab.kind);
+        if !matches!(
+            window_command_availability(WindowCommand::FocusAddressBar, active_tab_kind),
+            WindowCommandAvailability::Enabled
+        ) {
+            return;
+        }
+        if let Some(browser) = self.active_browser_surface() {
+            let focus = browser.focus_handle(cx);
+            window.focus(&focus, cx);
+        }
+    }
+
     /// F-WIN-07: `ctrl-shift-o`, the Linux stand-in for `⇧⌘O`'s "History >
     /// Restore Previous Launch" -- the same path the titlebar's History
     /// button and the `session.restore` control door both drive.
@@ -10272,6 +10349,10 @@ impl TillerWorkspace {
                 }
                 WindowCommand::RestoreLaunchSnapshot => {
                     window.dispatch_action(Box::new(RestoreLaunchSnapshot), cx)
+                }
+                WindowCommand::NewBrowser => window.dispatch_action(Box::new(NewBrowser), cx),
+                WindowCommand::FocusAddressBar => {
+                    window.dispatch_action(Box::new(FocusAddressBar), cx)
                 }
             },
             PaletteCommand::Tab(command) => match command {
@@ -10870,6 +10951,8 @@ impl Render for TillerWorkspace {
             .on_action(cx.listener(Self::handle_open_file))
             .on_action(cx.listener(Self::handle_restore_launch_snapshot))
             .on_action(cx.listener(Self::handle_save_file))
+            .on_action(cx.listener(Self::handle_new_browser))
+            .on_action(cx.listener(Self::handle_focus_address_bar))
             .on_action(cx.listener(Self::handle_open_settings_shortcut))
             // F-TAB-24: this action/binding pair previously existed only in
             // the `show_settings` render branch above (there was nothing
@@ -12325,6 +12408,8 @@ mod tests {
             let toggle_sidebar = self.fired.clone();
             let toggle_right_panel = self.fired.clone();
             let restore_launch_snapshot = self.fired.clone();
+            let new_browser = self.fired.clone();
+            let focus_address_bar = self.fired.clone();
             div()
                 .key_context("WindowCommandFixture")
                 .track_focus(&self.focus_handle)
@@ -12353,6 +12438,14 @@ mod tests {
                     restore_launch_snapshot
                         .borrow_mut()
                         .push(WindowCommand::RestoreLaunchSnapshot);
+                }))
+                .on_action(cx.listener(move |_, _: &NewBrowser, _, _| {
+                    new_browser.borrow_mut().push(WindowCommand::NewBrowser);
+                }))
+                .on_action(cx.listener(move |_, _: &FocusAddressBar, _, _| {
+                    focus_address_bar
+                        .borrow_mut()
+                        .push(WindowCommand::FocusAddressBar);
                 }))
                 .child("window command fixture")
         }
@@ -16506,7 +16599,9 @@ mod tests {
         cx.update(|window, app| focus_handle.focus(window, app));
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o");
+        cx.simulate_keystrokes(
+            "ctrl-t ctrl-o ctrl-s ctrl-shift-s ctrl-shift-i ctrl-shift-o ctrl-shift-l ctrl-l",
+        );
         cx.run_until_parked();
 
         assert_eq!(
@@ -16518,6 +16613,8 @@ mod tests {
                 WindowCommand::ToggleSidebar,
                 WindowCommand::ToggleRightPanel,
                 WindowCommand::RestoreLaunchSnapshot,
+                WindowCommand::NewBrowser,
+                WindowCommand::FocusAddressBar,
             ],
             "Linux primary and secondary chords must reach typed shell actions"
         );
@@ -16534,6 +16631,8 @@ mod tests {
                 (WindowCommand::ToggleSidebar, "ctrl-shift-s"),
                 (WindowCommand::ToggleRightPanel, "ctrl-shift-i"),
                 (WindowCommand::RestoreLaunchSnapshot, "ctrl-shift-o"),
+                (WindowCommand::NewBrowser, "ctrl-shift-l"),
+                (WindowCommand::FocusAddressBar, "ctrl-l"),
             ]
         );
     }
@@ -16606,6 +16705,78 @@ mod tests {
             window_command_availability(WindowCommand::SaveFile, Some(TabKind::Editor)),
             WindowCommandAvailability::Enabled
         );
+    }
+
+    /// F-WIN-06: New Browser Tab always creates a tab, so it is available
+    /// regardless of what is currently active -- the same as New Terminal
+    /// Tab.
+    #[test]
+    fn new_browser_command_is_always_enabled() {
+        assert_eq!(
+            window_command_availability(WindowCommand::NewBrowser, None),
+            WindowCommandAvailability::Enabled
+        );
+        assert_eq!(
+            window_command_availability(WindowCommand::NewBrowser, Some(TabKind::Terminal)),
+            WindowCommandAvailability::Enabled
+        );
+    }
+
+    /// F-WIN-06: Focus Address Bar has nothing to focus into unless the
+    /// active tab is a browser -- there is no fallback target the way
+    /// SaveFile has none for "no active editor" either.
+    #[test]
+    fn focus_address_bar_is_disabled_without_an_active_browser_and_explains_why() {
+        assert_eq!(
+            window_command_availability(WindowCommand::FocusAddressBar, None),
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
+        );
+        assert_eq!(
+            window_command_availability(WindowCommand::FocusAddressBar, Some(TabKind::Terminal)),
+            WindowCommandAvailability::Disabled(WindowCommandDisabledReason::NoActiveBrowser)
+        );
+        assert_eq!(
+            window_command_availability(WindowCommand::FocusAddressBar, Some(TabKind::Browser)),
+            WindowCommandAvailability::Enabled
+        );
+    }
+
+    /// F-WIN-06 end to end: with a real browser tab active, the typed
+    /// `FocusAddressBar` handler must move keyboard focus into that
+    /// surface's own address field -- not just report `Enabled` in
+    /// isolation. The disabled/no-op path when the active tab is not a
+    /// browser is exhaustively covered above by
+    /// `window_command_availability` itself, the same guard the handler
+    /// calls before doing anything.
+    #[gpui::test]
+    async fn focus_address_bar_moves_focus_into_the_active_browsers_address_field(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let (_id, browser) = workspace.add_browser_tab("https://example.com", window, cx);
+            assert_eq!(
+                workspace.active_tab,
+                workspace.tabs.len() - 1,
+                "adding a browser tab makes it the active one"
+            );
+
+            workspace.handle_focus_address_bar(&FocusAddressBar, window, cx);
+            assert!(
+                browser.focus_handle(cx).is_focused(window),
+                "Focus Address Bar must move keyboard focus into the active \
+                 browser's own address field"
+            );
+        });
     }
 
     #[test]
@@ -20117,6 +20288,52 @@ mod tests {
             assert_eq!(
                 workspace.active_tab, 1,
                 "select_tab must have made the needs-input tab the active one"
+            );
+        });
+    }
+
+    /// F-CORE-DOM-06: pins the behaviour the numeric tab chords (ctrl-1
+    /// through ctrl-9) and the `tab.select` control-socket door rely on,
+    /// end to end through the real `select_tab_position` -- not just the
+    /// domain function it now calls in isolation. Ten tabs open so position
+    /// 9 has to actually pick the ninth tab's *and* the tenth tab's worth
+    /// of coverage: 9 must still land on the last tab (index 9), the same
+    /// "always last" contract `numeric_tab_selection` documents, which the
+    /// deleted `TabSelection::jump` got wrong once the group grew past nine
+    /// tabs (it would have clamped to the literal ninth instead).
+    #[gpui::test]
+    async fn numeric_tab_chords_select_the_absolute_position_and_reject_overflow(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 10));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_tab_position(5, cx);
+            assert_eq!(
+                workspace.active_tab, 4,
+                "position 5 selects the fifth tab (0-based index 4)"
+            );
+
+            workspace.select_tab_position(9, cx);
+            assert_eq!(
+                workspace.active_tab, 9,
+                "with ten tabs open, position 9 must still land on the last \
+                 tab, not the literal ninth"
+            );
+
+            workspace.select_tab_position(15, cx);
+            assert_eq!(
+                workspace.active_tab, 9,
+                "a position beyond the group is rejected, not clamped -- the \
+                 active tab must be unchanged"
             );
         });
     }
