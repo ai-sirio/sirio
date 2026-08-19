@@ -1,4 +1,45 @@
-# Decision needed — what Tiller does on a pure-Wayland compositor
+# Decision — Tiller forces X11 on Linux
+
+> **DECIDED 2026-08-19 by the user: "Forziamo X11" — option A below.**
+>
+> Tiller prefers the X11 backend on Linux. On a Wayland session it therefore runs as an XWayland
+> client, and the Browser tab works everywhere. The whole-app cost named under option A is accepted
+> knowingly; it is not an oversight to be re-litigated by a later critic.
+>
+> ## How it is implemented
+>
+> `gpui::guess_compositor()` (zed `c05e346`, `crates/gpui/src/platform.rs:97`) picks the backend
+> purely from the **process environment**: `WAYLAND_DISPLAY` non-empty wins, else `DISPLAY`
+> non-empty, else headless. No GPUI patch is needed and none should be written — the decision is
+> made by preparing the environment before GPUI reads it.
+>
+> At the top of `main`, in a Linux-gated module, before any thread starts (which is what makes
+> `std::env::set_var`/`remove_var` sound):
+>
+> - `DISPLAY` set and non-empty → clear `WAYLAND_DISPLAY` and set `GDK_BACKEND=x11`. **Both** are
+>   required: the first sends GPUI to X11, the second sends GDK — and therefore wry — to X11, so
+>   `gdk_x11_display_get_xdisplay` has an X11 display to return. Setting only the first gives a
+>   window wry still cannot attach to.
+> - `DISPLAY` empty or unset → change nothing. There is no X server and no XWayland to fall back to;
+>   forcing here would turn a working Wayland app into a headless one. The browser shows its
+>   fallback message and everything else keeps working.
+>
+> Escape hatch, on the existing `TILLER_*` precedent (`TILLER_SOCKET_ENABLE`, `TILLER_GIT_TIMEOUT_MS`):
+> `TILLER_FORCE_X11=0` opts out and keeps the app Wayland-native for anyone who prefers that and does
+> not need the browser.
+>
+> The decision itself must be a pure function — environment in, action out — so it can be tested
+> without a display, and the live proof is a critic starting the app on a Wayland session and
+> finding an XWayland client with a rendering page in it.
+>
+> ## What this changes about verification
+>
+> `Scripts/x11-nested-drive.sh` becomes the lane that matches how the app actually ships;
+> `Scripts/wayland-drive.sh` now exercises a configuration users will not normally be in. Rows
+> proven only under the Wayland lane are not thereby wrong, but the X11 lane is the one that counts
+> from here.
+
+## The original decision brief, kept for its reasoning
 
 `F-WIN-06` is `FAILED — defective` for one reason: under native Wayland the Browser tab is created,
 gets its sidebar entry and its address-bar chrome, and then shows a permanent red banner instead of
@@ -53,11 +94,15 @@ session. Both worlds, at the price of a restart the user has to accept.
 *Cost:* the most machinery, and a restart in the middle of a workflow is intrusive even when it is
 offered rather than forced.
 
-## Recommendation
+## Recommendation, and what was actually chosen
 
-**B now, C later if the browser turns out to matter day to day.** The app is native on the user's own
-desktop, nothing regresses, and the failure becomes explicable. A is a large, permanent, whole-app
-cost paid for one feature. C is the right answer only once we know that feature is used.
+I recommended **B now, C later if the browser turns out to matter day to day** — the app stays native
+on the user's own desktop, nothing regresses, and the failure becomes explicable.
+
+**The user chose A.** Recorded here rather than quietly replaced, because the reasoning against A is
+still true and someone will meet it later: on a Wayland desktop the whole app becomes an XWayland
+client, and scaling, per-monitor DPI, input and clipboard become XWayland's. That is the price, it
+was named before the choice, and the choice was made anyway. It is settled.
 
 ## What can be built without deciding
 
