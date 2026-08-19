@@ -20021,7 +20021,7 @@ mod tests {
         let commands = summarizer_candidate_commands("opencode", Some("omp"), "prompt");
         assert_eq!(commands.len(), 2);
         assert!(commands[0].starts_with("opencode run --pure"));
-        assert!(commands[1].starts_with("oh-my-pi --print --no-tools"));
+        assert!(commands[1].starts_with("omp --print --no-tools"));
 
         // Selected + fallback, both ported: two candidates in priority order.
         let commands = summarizer_candidate_commands("claude", Some("opencode"), "prompt");

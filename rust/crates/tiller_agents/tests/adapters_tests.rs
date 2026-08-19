@@ -106,13 +106,13 @@ fn pi_command_is_bare() {
 fn omp_command_points_at_the_worktree_local_hook() {
     assert_eq!(
         OhMyPiAdapter.command(WORKTREE, PANE_ID, TILLERCTL),
-        "oh-my-pi --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
+        "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts'"
     );
 }
 
 #[test]
 fn omp_uses_the_distribution_binary_name_for_discovery() {
-    assert_eq!(OhMyPiAdapter.executable_name(), "oh-my-pi");
+    assert_eq!(OhMyPiAdapter.executable_name(), "omp");
 }
 
 #[test]
@@ -126,11 +126,8 @@ fn availability_reports_each_catalog_binary_from_current_path() {
         vec!["claude", "codex", "opencode", "pi", "omp"]
     );
     for agent in &availability {
-        let expected_program = if agent.id == "omp" {
-            "oh-my-pi"
-        } else {
-            agent.id
-        };
+        // omp's id and its binary are the same string.
+        let expected_program = agent.id;
         assert_eq!(
             agent.executable,
             find_executable_in_path(expected_program, &std::env::var_os("PATH").unwrap()),
@@ -234,8 +231,9 @@ fn checked_lookup_prefers_a_found_binary_over_an_earlier_probe_error() {
 
 /// F-SET-17: the sweep-level entry points. A PATH made entirely of an
 /// unreadable directory fails the sweep; a PATH holding all five
-/// distribution binaries resolves every adapter (including omp's
-/// `oh-my-pi` executable name); recovery after the permission is fixed is
+/// distribution binaries resolves every adapter (omp's binary is
+/// `omp`, per `OhMyPiAdapter::executable_name`); recovery after the
+/// permission is fixed is
 /// the "observe the next result" half of the clause.
 #[cfg(unix)]
 #[test]
@@ -246,7 +244,7 @@ fn try_discover_fails_on_unsafe_absence_and_recovers_when_the_cause_is_fixed() {
         std::env::temp_dir().join(format!("tiller-agent-try-discover-{}", std::process::id()));
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).expect("create bin dir");
-    for name in ["claude", "codex", "opencode", "pi", "oh-my-pi"] {
+    for name in ["claude", "codex", "opencode", "pi", "omp"] {
         let file = bin.join(name);
         std::fs::write(&file, b"not launched").expect("write fixture");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
@@ -324,7 +322,7 @@ fn omp_resume_command() {
     assert_eq!(
         OhMyPiAdapter.resume_command(WORKTREE, PANE_ID, TILLERCTL, "sess-abc"),
         Some(
-            "oh-my-pi --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'"
+            "omp --hook '/Users/me/tiller/.tiller/omp-hook.ts' --resume='sess-abc'"
                 .to_string(),
         )
     );

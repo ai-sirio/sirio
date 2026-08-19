@@ -40,7 +40,24 @@ impl super::AgentAdapter for OhMyPiAdapter {
     }
 
     fn executable_name(&self) -> &'static str {
-        "oh-my-pi"
+        // The binary is `omp`, exactly as the Swift original spells it.
+        //
+        // This spent three passes as `oh-my-pi` because npm carries two
+        // unrelated packages whose names collide. `oh-my-pi` (acidsugarx,
+        // 0.2.0, `main: ./dist/extension.js`) is a broken VS Code
+        // extension that installs an `oh-my-pi` binary which cannot
+        // start. The agent is `@oh-my-pi/pi-coding-agent`
+        // (github.com/can1357/oh-my-pi, omp.sh), whose `bin` is `omp`.
+        // A pass verified the old name by checking that *something*
+        // called `oh-my-pi` was on PATH; something was, and it was the
+        // wrong program. Presence of a name is not identity — check
+        // `--version`.
+        //
+        // Live, 2026-08-19, omp v17.3.8: `omp --hook <file> --print
+        // --no-tools <prompt>` loaded this adapter's generated hook and
+        // fired session_start, turn_start, turn_end and session_shutdown
+        // in order, each reaching `tillerctl notify`.
+        "omp"
     }
 
     fn has_native_hooks(&self) -> bool {
@@ -74,7 +91,7 @@ impl super::AgentAdapter for OhMyPiAdapter {
 
     fn command(&self, worktree_path: &str, _pane_id: &str, _tillerctl_path: &str) -> String {
         let hook_path = format!("{worktree_path}/.tiller/omp-hook.ts");
-        format!("oh-my-pi --hook {}", shell_quote(&hook_path))
+        format!("omp --hook {}", shell_quote(&hook_path))
     }
 
     fn resume_command(
@@ -86,7 +103,7 @@ impl super::AgentAdapter for OhMyPiAdapter {
     ) -> Option<String> {
         let hook_path = format!("{worktree_path}/.tiller/omp-hook.ts");
         Some(format!(
-            "oh-my-pi --hook {} --resume={}",
+            "omp --hook {} --resume={}",
             shell_quote(&hook_path),
             shell_quote(session_ref)
         ))
@@ -100,12 +117,9 @@ impl super::AgentAdapter for OhMyPiAdapter {
     }
 
     fn summarizer_command(&self, prompt: &str) -> Option<String> {
-        // The Swift original spells the program `omp`; the distribution
-        // ships only `oh-my-pi` (no alias), so this follows the same
-        // executable-name discipline as `command`/`resume_command` above.
-        Some(format!(
-            "oh-my-pi --print --no-tools {}",
-            shell_quote(prompt)
-        ))
+        // F-AGENT-OMP-03. Live, 2026-08-19: `omp --print --no-tools
+        // 'Reply with exactly the word: ALIVE'` printed `ALIVE` on
+        // stdout, which is the summarizer contract.
+        Some(format!("omp --print --no-tools {}", shell_quote(prompt)))
     }
 }
