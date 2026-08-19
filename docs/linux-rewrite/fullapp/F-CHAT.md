@@ -2,12 +2,27 @@
 
 Independent re-drive of all 37 F-CHAT rows against the live app (binary `/dev/shm/tt/debug/tiller`,
 branch `linux/gpui-waku`). Driven with `Scripts/wayland-drive.sh`, label prefix `sweep4chat-*`,
-fixture repo `/dev/shm/sweep4chat-fixture` (throwaway git init). Real `claude` CLI behind the
-default `npx @agentclientprotocol/claude-agent-acp@latest` bridge was used for most rows; the
-committed `rust/crates/tiller_ui/tests/fixtures/chat_fixture.py` (via `TILLER_ACP_PROGRAM` pointed
-at a one-line wrapper, same technique prior waves used) was used only where a deterministic
-wire-level state was required (noted per row). Every existing verdict in the ledger was re-judged
-by driving, not copied.
+fixture repo `/dev/shm/sweep4chat-fixture` (throwaway git init). **Correction to an earlier draft
+of this preamble:** every row driven this pass — including runs I set out to run against the
+committed `rust/crates/tiller_ui/tests/fixtures/chat_fixture.py` via `TILLER_ACP_PROGRAM` pointed
+at a one-line wrapper — actually ran against the real `claude` CLI behind
+`npx @agentclientprotocol/claude-agent-acp@latest`. `TILLER_ACP_PROGRAM` is read by
+`Chat::launch_with_persistence()`/`default_chat_command()`, but the "New Chat → Claude Code"
+submenu path (`add_chat_tab(..., Some(adapter), ...)` → `acp_agent_command(adapter.acp_program())`
+in `rust/crates/tiller/src/chat.rs` and `rust/crates/tiller/src/main.rs`) resolves the adapter's
+own program directly and never consults the env var — by design, per that code's own comment, so a
+misconfigured env var can't silently downgrade a named-agent launch. The only route that honors the
+override is the agent-less "New Chat" (`NewTabAction::NewChat`, also reachable as "New Chat Here"
+in the command palette), which I could not drive reliably this pass (see Notes) — every attempt
+that opened the command palette via `chord ctrl+shift p` died in the harness's virtual-keyboard
+setup before any UI action ran, on 7 consecutive tries interleaved with unrelated scripts that
+succeeded cleanly, so I treat it as a harness-side flake tied to that specific chord this session,
+not evidence about the app. Net effect: **no row below is fixture-verified**; rows that the ledger
+or a prior wave verified only via fixture-driven deterministic wire states (thinking chunks,
+plan/question/subagent modes, the no-models fallback) could not be independently re-confirmed or
+re-refuted this pass and are marked NOT EXERCISED with that reason stated explicitly, rather than
+silently carried over as PASSED. Every other verdict below reflects a live re-drive against real
+Claude Code, not a copy of the ledger's own verdict.
 
 Screenshots referenced below live under `/dev/shm/sweep-4-F-CHAT/<run>/*.png` on this host — they
 are transient scratch, not committed artefacts; the frame names and what they show are described in
@@ -64,8 +79,8 @@ the label.
 | F-CHAT-28 | NOT EXERCISED | Subagent task card. Not re-driven this pass. |
 | F-CHAT-29 | NOT EXERCISED | Assistant message copy control. Not re-driven this pass. |
 | F-CHAT-30 | NOT EXERCISED | Code-block copy control. Not re-driven this pass. |
-| F-CHAT-31 | NOT EXERCISED | Diff preview expand. Not re-driven this pass. |
-| F-CHAT-32 | NOT EXERCISED | Revert edited file. Not re-driven this pass. |
+| F-CHAT-31 | half-proven | Asked real Claude Code to edit `calc.py` (`rcj/02-01-after-edit-request.png`); once the `Edit calc.py` tool step completed, the Files panel's `calc.py` row grew a `Diff` badge (`a.txt`, untouched, has none) — the app is correctly tracking which files changed this turn and surfacing that in the file list. I did not click the badge to confirm the diff preview itself renders (turn was still in progress and I stopped there to conserve remaining budget), so the VERIFY clause's "expand" step is unconfirmed — hence half-proven, not PASSED. |
+| F-CHAT-32 | NOT EXERCISED | Revert edited file. Not re-driven this pass; no revert control was visible in the `rcj` screenshot's Files panel next to the diffed `calc.py`, but the turn had not finished and the control may only appear post-turn or on hover — not enough to call this either way. |
 | F-CHAT-33 | NOT EXERCISED | MCP warning / retryable error dismiss. Not re-driven this pass; ledger's own transplanted-test evidence (genuine two-sided pre/post-fix contrast) is unusually strong and stands unchallenged. |
 | F-CHAT-34 | **FAILED — defective** | See headline and Defects. Ledger's PASSED is not reproducible through normal use. |
 | F-CHAT-35 | PASSED | Directly re-confirmed as a byproduct of the F-CHAT-34 investigation: a genuinely history-less Chat History popover (no persisted sessions reachable from the current tab) shows "No past chats" (`rcd/07-05-after-new-conversation.png`, `rce/06-05-chat-history-open.png`, `rcg/05-04-history-open.png` — three independent reproductions). This row's own narrow claim (the empty state renders) is true regardless of the F-CHAT-34 defect. |
@@ -147,16 +162,32 @@ but it is real, reproducible, and worth a look.
 ## Could not reach / not exercised this pass
 
 Time this pass went disproportionately into (a) resolving the `F-CHAT-15`/`ACP-12` contradiction
-live rather than trusting either side's paper trail, and (b) the `F-CHAT-34` Chat History
-investigation once the first live check contradicted the ledger — both paid off with a real,
-previously-unknown defect and a corrected stale note, but left less time for full-breadth coverage.
-The following rows were **NOT EXERCISED** this pass and their existing ledger verdicts were not
-independently re-driven (listed above per-row too, collected here for visibility):
-F-CHAT-02, 03, 05, 07, 11, 12, 13, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 36.
+live rather than trusting either side's paper trail, (b) the `F-CHAT-34` Chat History investigation
+once the first live check contradicted the ledger, and (c) discovering and confirming the
+`TILLER_ACP_PROGRAM` bypass described in the preamble — all three paid off with real findings but
+left less time for full-breadth coverage. The following rows were **NOT EXERCISED** this pass and
+their existing ledger verdicts were not independently re-driven (listed above per-row too, collected
+here for visibility):
+F-CHAT-02, 03, 05, 07, 11, 12, 13, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32, 33, 36.
+(F-CHAT-31 moved to half-proven this pass, see its row above.)
 
-None of these were found unreachable by any harness limitation discovered this pass — they simply
-were not attempted. No claim is made about their correctness either way beyond what the existing
-ledger already states.
+Two different reasons apply, and they should not be conflated:
+
+- **F-CHAT-02, 03, 05, 07, 11, 12, 13, 18, 19, 20, 29, 30, 32, 33** — simply not attempted this pass,
+  budget ran out first. No harness obstacle is claimed for these; a future pass driving real Claude
+  Code the same way I did for the rows above should be able to reach them directly. No claim is made
+  about their correctness either way beyond what the existing ledger already states.
+- **F-CHAT-21, 22, 23, 24, 25, 26, 27, 28, 36** — these need a wire-level state (thinking chunks,
+  plan/question/subagent shapes, or the no-models fallback) that real Claude Code either cannot
+  reliably produce on request (thinking chunks in particular: `WAYLAND-LANE.md` records that the
+  real ACP bridge only forwards thinking chunks with text, and current models default
+  `thinking.display` to omitted, so real Claude never emits one) or can only produce probabilistically
+  by prompting for the right tool use. Reaching them properly needs `chat_fixture.py` via the
+  agent-less "New Chat" path, which requires the command palette; every attempt to open it
+  (`chord ctrl+shift p`) this pass failed in the harness's virtual-keyboard setup before any UI action
+  ran — 7 consecutive failures on that exact script, interleaved with unrelated scripts that ran
+  clean on the same host — so I'm calling this a harness limitation this session, not evidence about
+  the app, and leaving these rows on the ledger's existing verdicts rather than guessing.
 
 ## Notes on my own harness slips (recorded so a later pass doesn't repeat them)
 
