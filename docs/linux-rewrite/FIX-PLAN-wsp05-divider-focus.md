@@ -65,16 +65,73 @@ Add to **both** handles (horizontal at ~8106 and vertical at ~8121), before `.on
 )
 ```
 
-`focus_active_pane` is shorthand for whatever the workspace already uses to focus
-`tab.focused_pane`'s handle — reuse the existing helper rather than adding one; the split path in
-`close_terminal_at`/`confirm_pending_pane_close` already threads `window` for exactly this purpose
-and is the precedent to copy.
+### The helper, written against the API this file already uses
 
-Note the closure needs `cx.listener`, so this must be built where a `Context<TillerWorkspace>` is in
-scope. At `8099` the surrounding code already has `drag_entity` (an entity handle for the
-workspace); if `cx` is not available at that exact point, use `drag_entity.update(cx, ...)` inside a
-plain `.on_mouse_down(MouseButton::Left, move |_, window, cx| { ... })` the same way
-`.on_drag_move` at `8143` already does.
+There is no existing "focus the focused pane" helper, so add one. The body is the same shape as
+`close_terminal_at`'s replacement-focus block at `main.rs:7930-7944`, which is the precedent to
+copy — it is the code that already knows how to turn a pane id into a focus handle:
+
+```rust
+/// Puts keyboard focus back on `tab_index`'s currently focused pane.
+///
+/// The divider needs this. It is a control, not a surface, and GPUI blurs
+/// whatever held focus when the mouse goes down on an interactive element
+/// carrying no focus handle of its own. Without re-asserting, focus falls
+/// through to F-SID-19's root reclaim and the pane quietly stops receiving
+/// keystrokes.
+fn refocus_focused_pane(
+    &mut self,
+    tab_index: usize,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+) {
+    let Some(tab) = self.tabs.get(tab_index) else {
+        return;
+    };
+    let target = tab.focused_pane;
+    let mut handle = None;
+    tab.panes.for_each(&mut |id, content| {
+        if id == target {
+            handle = match content {
+                TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
+                TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                TabContent::File { .. }
+                | TabContent::Changes(_)
+                | TabContent::Browser(_) => None,
+            };
+        }
+    });
+    if let Some(handle) = handle {
+        window.focus(&handle, cx);
+    }
+}
+```
+
+Note the `None` arms: file, changes and browser panes have no focus handle here, exactly as
+`close_terminal_at` treats them. For those the divider cannot restore focus to a pane, and the
+root-focus fallback remains correct — say so in the test rather than treating it as a failure.
+
+### Wiring it, at both handles
+
+The handler runs with `&mut App`, not `Context<Self>`, so use the entity rather than `cx.listener`
+— the same shape `.on_drag_move` at `8143` already uses. Add one more clone of the workspace entity
+alongside `drag_entity_move`/`drag_entity_drop` (`8132-8133`), then on **each** handle, before
+`.on_drag(...)`:
+
+```rust
+.on_mouse_down(gpui::MouseButton::Left, {
+    let entity = drag_entity_focus.clone();
+    move |_, window, cx| {
+        entity.update(cx, |workspace, cx| {
+            workspace.refocus_focused_pane(tab_index, window, cx);
+        });
+    }
+})
+```
+
+One thing to confirm on contact, which could not be checked without compiling: `drag_entity` is
+first bound above `8094` and the clone must be created before the `drag` div at `8099` consumes it.
+If the binding turns out to sit lower, move the clone up rather than reordering the div.
 
 ## How to verify it, in order
 
