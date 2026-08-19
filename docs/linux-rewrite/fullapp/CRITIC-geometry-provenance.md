@@ -204,7 +204,7 @@ back **empty** — every line of the diff outside `conformance.rs`'s two new tes
 rewrite. The commit message's "values are unchanged throughout" is true. Nobody quietly nudged a
 constant while rewriting its justification.
 
-### 8. Tests: read for tautology, not yet run to completion (see below)
+### 8. Tests: read for tautology, and run to completion — green, modulo known contention flakiness
 
 `radii_form_a_monotonic_scale` asserts a strict ordering across eight independently-declared
 constants — not tautological, and would catch a swapped pair that its sibling test,
@@ -215,9 +215,19 @@ three different files (`chat.rs`, `settings.rs`, `file_view.rs`) — genuinely r
 subsumed by, the literal-720 test next to it, since a *coordinated* drift of two of the three would
 pass the literal test's per-file checks and only this one would catch it.
 `body_line_height_stays_in_ratio_to_base_size` ties the one bold-"Measured" field to its
-unmeasured neighbour via a ratio band. All three read as real constraints from the source; I did
-not get a completed build in time to run the positive-control perturbations live before this
-report's deadline (see below).
+unmeasured neighbour via a ratio band. All three read as real constraints from the source.
+
+`cargo test -p tiller_theme -p tiller_ui --lib`, from a from-scratch `CARGO_TARGET_DIR` unique to
+this pass (`/var/tmp/critic-geom-target`): first run, **`tiller_theme`: 57/57 passed.**
+**`tiller_ui`: 366 passed, 2 failed** — `chat::tests::stopping_via_click_with_a_queued_item_still_sends_it`
+and `project_forms::tests::the_drawn_clone_button_cannot_start_a_second_clone`. Neither failure is
+in a file this remedy touches (the touched files are comment-only diffs, per §7), and the first of
+the two is the *exact* test `CRITIC-theme-transplant-2.md` already diagnosed as CPU-contention
+flakiness on this same shared machine. I re-ran both, this time in isolation
+(`--test-threads=1`, one test name each): both **passed**. I then re-ran the full
+`cargo test -p tiller_theme -p tiller_ui --lib` a second time, no filter, same target dir: **57
+passed / 368 passed, 0 failed anywhere.** Confirmed flakiness, not a real regression — resolved,
+not merely asserted.
 
 ## Build and render
 
