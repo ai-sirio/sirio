@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tiller_git::{DirectoryGitStatus, directory_statuses, status};
+use tiller_project::FileIconKey;
 use tiller_theme::Theme;
 
 use crate::editor::fs_actions;
@@ -1186,44 +1187,99 @@ fn files_action_button(
         .child(label)
 }
 
-/// The per-type file glyph for the Files tree, resolved from the embedded
-/// icon set — the Material set, the only one this platform offers (the
-/// settings screen is gated to match: SF Symbols is macOS-only, P19).
-/// Directories get the folder mark; a handful of well-known kinds get their
-/// own glyph, mirroring the Swift `FileIconTheme` intent (shell → terminal,
-/// git → branch, env/settings → gear); everything else shares the generic
-/// file mark.
+/// The per-type file glyph for the Files tree.
+///
+/// The classification — which name or extension gets which *logical* icon
+/// key — is [`FileIconKey`], ported 1:1 from the original's
+/// `FileIconKey.swift` (F-CORE-FILE-08): see that type for the exact
+/// exact-name/extension/directory-name tables and their fallback rule.
+///
+/// The *rendering* of each logical key is necessarily narrower than the
+/// original's: `rust/assets/icons/comet` (P76's replacement for the old
+/// Phosphor set) ships about fifty general-purpose UI glyphs, not a
+/// per-language icon font, so most [`FileIconKey`] variants collapse onto
+/// the generic [`Icon::File`] / [`Icon::FolderFill`] marks below rather than
+/// getting an invented shape that doesn't exist in the set — mixing a
+/// invented shape in among comet's glyphs is exactly what P76 ruled out.
+/// Only the handful of keys with an unambiguous comet shape (a terminal for
+/// shell scripts, a branch for git files, a gear for env/settings, an
+/// archive box, a key for lock files) get their own icon.
 fn file_glyph(path: &Path, is_dir: bool) -> Icon {
-    if is_dir {
-        return Icon::FolderFill;
-    }
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let lower = name.to_lowercase();
-    let extension = path
-        .extension()
-        .map(|ext| ext.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if matches!(extension.as_str(), "sh" | "bash" | "zsh" | "fish")
-        || lower.starts_with(".bash")
-        || lower.starts_with(".zsh")
-        || lower == ".profile"
-    {
-        return Icon::SquareTerminal;
+    let key = if is_dir {
+        FileIconKey::for_directory_name(&name)
+    } else {
+        FileIconKey::for_file_name(&name)
+    };
+    match key {
+        FileIconKey::Shell => Icon::SquareTerminal,
+        FileIconKey::Git | FileIconKey::FolderGit => Icon::GitBranch,
+        FileIconKey::Env | FileIconKey::Settings => Icon::Settings,
+        FileIconKey::Archive => Icon::Archive,
+        FileIconKey::Lock => Icon::Lock,
+        // Every other file key — the per-language kinds (Swift, Python,
+        // Rust, …), markup/data kinds (Json, Yaml, Markdown, …), media
+        // kinds (Image, Video, Audio, Font) and the remaining exact-name
+        // kinds (Docker, Makefile, Sql, Database, Log) — has no comet
+        // equivalent and shares the generic file mark.
+        FileIconKey::Swift
+        | FileIconKey::C
+        | FileIconKey::Cpp
+        | FileIconKey::CSharp
+        | FileIconKey::Java
+        | FileIconKey::Kotlin
+        | FileIconKey::Python
+        | FileIconKey::Ruby
+        | FileIconKey::Rust
+        | FileIconKey::Go
+        | FileIconKey::JavaScript
+        | FileIconKey::TypeScript
+        | FileIconKey::React
+        | FileIconKey::Vue
+        | FileIconKey::Html
+        | FileIconKey::Css
+        | FileIconKey::Sass
+        | FileIconKey::Json
+        | FileIconKey::Yaml
+        | FileIconKey::Toml
+        | FileIconKey::Xml
+        | FileIconKey::Markdown
+        | FileIconKey::Text
+        | FileIconKey::Pdf
+        | FileIconKey::Image
+        | FileIconKey::Video
+        | FileIconKey::Audio
+        | FileIconKey::Font
+        | FileIconKey::Sql
+        | FileIconKey::Database
+        | FileIconKey::Docker
+        | FileIconKey::Log
+        | FileIconKey::Makefile
+        | FileIconKey::File
+        | FileIconKey::Symlink => Icon::File,
+        // Every folder key beyond `.git` (Src, Tests, Docs, Github,
+        // NodeModules, Dist, Scripts, Config, Assets, Public, Packages,
+        // Vscode, Lib, Tools, and the plain default) shares the folder
+        // mark: comet has one folder shape, not fifteen.
+        FileIconKey::Folder
+        | FileIconKey::FolderSrc
+        | FileIconKey::FolderTests
+        | FileIconKey::FolderDocs
+        | FileIconKey::FolderGithub
+        | FileIconKey::FolderNodeModules
+        | FileIconKey::FolderDist
+        | FileIconKey::FolderScripts
+        | FileIconKey::FolderConfig
+        | FileIconKey::FolderAssets
+        | FileIconKey::FolderPublic
+        | FileIconKey::FolderPackages
+        | FileIconKey::FolderVscode
+        | FileIconKey::FolderLib
+        | FileIconKey::FolderTools => Icon::FolderFill,
     }
-    if lower.starts_with(".git")
-        || matches!(lower.as_str(), "gitignore" | "gitattributes" | "gitmodules")
-    {
-        return Icon::GitBranch;
-    }
-    if lower.starts_with(".env")
-        || matches!(lower.as_str(), ".editorconfig" | ".gitconfig" | ".npmrc")
-    {
-        return Icon::Settings;
-    }
-    Icon::File
 }
 
 fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<FileNode>, String> {
@@ -1428,44 +1484,55 @@ mod tests {
 
     #[test]
     fn file_glyph_resolves_known_kinds_from_the_embedded_set() {
-        // The Files tree's per-type glyphs come from the embedded set — the
-        // Material set, the only one this platform can render. The mapping is
-        // extension-driven so the glyph follows the file, not its folder.
-        assert_eq!(
-            file_glyph(Path::new("/repo/src/main.rs"), false),
-            Icon::File,
-            "unknown kinds share the generic file mark"
-        );
-        assert_eq!(
-            file_glyph(Path::new("/repo/deploy.sh"), false),
-            Icon::SquareTerminal
-        );
-        assert_eq!(
-            file_glyph(Path::new("/repo/.bashrc"), false),
-            Icon::SquareTerminal
-        );
-        assert_eq!(
-            file_glyph(Path::new("/repo/.gitignore"), false),
-            Icon::GitBranch
-        );
-        assert_eq!(
-            file_glyph(Path::new("/repo/gitmodules"), false),
-            Icon::GitBranch
-        );
-        assert_eq!(
-            file_glyph(Path::new("/repo/.env.local"), false),
-            Icon::Settings
-        );
-        assert_eq!(
-            file_glyph(Path::new("/repo/.editorconfig"), false),
-            Icon::Settings
-        );
-        assert_eq!(file_glyph(Path::new("/repo/Cargo.toml"), false), Icon::File);
-        assert_eq!(
-            file_glyph(Path::new("/repo/src"), true),
-            Icon::FolderFill,
-            "directories keep the folder mark"
-        );
+        // The Files tree's per-type glyphs are driven by `FileIconKey`
+        // (F-CORE-FILE-08), ported from the original's `FileIconKey.swift`.
+        // Comet ships far fewer shapes than the original's icon theme, so
+        // most kinds share the generic file mark — see `file_glyph`'s doc
+        // comment for which few don't.
+        let cases: &[(&str, bool, Icon)] = &[
+            ("/repo/src/main.rs", false, Icon::File),
+            ("/repo/deploy.sh", false, Icon::SquareTerminal),
+            (".gitignore", false, Icon::GitBranch),
+            ("Dockerfile", false, Icon::File), // no comet docker shape
+            ("Cargo.lock", false, Icon::Lock),
+            ("release.zip", false, Icon::Archive),
+            (".env", false, Icon::Settings),
+            ("service.env", false, Icon::Settings),
+            // Not in the original's tables — `pathExtension` treats a name
+            // that starts with `.` and has no *other* `.` as extension-less,
+            // and neither is an exact-name entry, so both fall back to the
+            // generic file mark rather than a heuristic Terminal/Settings
+            // guess. See `FileIconKey`'s own tests for the full table.
+            (".bashrc", false, Icon::File),
+            (".editorconfig", false, Icon::File),
+            (".env.local", false, Icon::File),
+            ("gitmodules", false, Icon::File), // no leading dot: not the exact-name key
+            ("Cargo.toml", false, Icon::File), // toml has no comet shape either
+        ];
+        for (path, is_dir, expected) in cases {
+            assert_eq!(
+                file_glyph(Path::new(path), *is_dir),
+                *expected,
+                "file_glyph({path:?}, {is_dir})"
+            );
+        }
+    }
+
+    #[test]
+    fn file_glyph_resolves_directory_kinds_and_falls_back_to_the_default_folder() {
+        let cases: &[(&str, Icon)] = &[
+            ("/repo/src", Icon::FolderFill),
+            ("/repo/.git", Icon::GitBranch),
+            ("/repo/node_modules", Icon::FolderFill),
+            ("/repo/random-name", Icon::FolderFill),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                file_glyph(Path::new(path), true),
+                *expected,
+                "file_glyph({path:?}, true)"
+            );
+        }
     }
 
     #[gpui::test]

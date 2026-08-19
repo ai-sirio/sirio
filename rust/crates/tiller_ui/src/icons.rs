@@ -131,6 +131,14 @@ pub enum Icon {
     /// mirrored — its divider sits on the opposite side, see the SVG diff
     /// in the P76 report). No SF mapping.
     PanelRight,
+    /// An archive file in the Files tree — zip, tar, 7z, … (SF
+    /// `archivebox`, comet `archive-minimalistic`). Added for F-CORE-FILE-08
+    /// (`FileIconKey::Archive`); no Phosphor predecessor.
+    Archive,
+    /// A lock file in the Files tree — `Cargo.lock`, `package-lock.json`, …
+    /// (SF `key`, comet `key-minimalistic`). Added for F-CORE-FILE-08
+    /// (`FileIconKey::Lock`); no Phosphor predecessor.
+    Lock,
 }
 
 /// The SF Symbol that replaces this icon's SVG on macOS, if any. This is
@@ -151,6 +159,8 @@ pub fn system_symbol(icon: Icon) -> Option<&'static str> {
         Icon::Plus => Some("plus"),
         Icon::File => Some("doc.text"),
         Icon::Globe => Some("globe"),
+        Icon::Archive => Some("archivebox"),
+        Icon::Lock => Some("key"),
         Icon::GitBranch
         | Icon::Sparkles
         | Icon::Shield
@@ -192,6 +202,8 @@ impl Icon {
             Icon::OhMyPi => "icons/agent-omp.svg",
             Icon::SidebarLeft => "icons/comet/sidebar-minimalistic-left.svg",
             Icon::PanelRight => "icons/comet/sidebar-minimalistic.svg",
+            Icon::Archive => "icons/comet/archive-minimalistic.svg",
+            Icon::Lock => "icons/comet/key-minimalistic.svg",
         }
     }
 
@@ -231,6 +243,10 @@ impl Icon {
             Icon::PanelRight => {
                 include_bytes!("../../../assets/icons/comet/sidebar-minimalistic.svg")
             }
+            Icon::Archive => {
+                include_bytes!("../../../assets/icons/comet/archive-minimalistic.svg")
+            }
+            Icon::Lock => include_bytes!("../../../assets/icons/comet/key-minimalistic.svg"),
         }
     }
 
@@ -587,6 +603,8 @@ impl AssetSource for TillerAssets {
             "icons/agent-omp.svg" => Icon::OhMyPi,
             "icons/comet/sidebar-minimalistic-left.svg" => Icon::SidebarLeft,
             "icons/comet/sidebar-minimalistic.svg" => Icon::PanelRight,
+            "icons/comet/archive-minimalistic.svg" => Icon::Archive,
+            "icons/comet/key-minimalistic.svg" => Icon::Lock,
             _ => return Ok(None),
         };
         Ok(Some(Cow::Borrowed(icon.svg())))
@@ -602,7 +620,7 @@ impl AssetSource for TillerAssets {
 }
 
 /// Every icon, used by [`TillerAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 23] = [
+pub const ALL_ICONS: [Icon; 25] = [
     Icon::FolderFill,
     Icon::GitBranch,
     Icon::MessageSquare,
@@ -626,6 +644,8 @@ pub const ALL_ICONS: [Icon; 23] = [
     Icon::OhMyPi,
     Icon::SidebarLeft,
     Icon::PanelRight,
+    Icon::Archive,
+    Icon::Lock,
 ];
 
 #[cfg(test)]
