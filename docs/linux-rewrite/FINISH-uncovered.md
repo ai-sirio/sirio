@@ -25,7 +25,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | F-CORE-FILE-04 | PASSED | a real markdown link, clicked live in the running app, resolved and opened a new tab with the target file's content |
 | F-CORE-FILE-03A | PASSED | new named test drops BRAVO then ALPHA (reverse-alphabetical) and asserts `mention_paths` preserves that literal order |
 | F-GIT-RUN-01 | half-proven | cancellation confirmed absent app-wide (not just in `tiller_git`) — no code path exists to stop a running git op on user request; everything else in the clause is green |
-| F-TAB-20 | | |
+| F-TAB-20 | PASSED | Ctrl-5 and Ctrl-9 each hit 14/14 across two independent trial batches, verified against a hard control-socket discriminator, not screenshots |
 | F-CHAT-25 | PASSED | AskUserQuestion's text/option/cancel arms all covered by named drawn tests, none of which existed at wave H's ledger writing |
 | F-CHAT-33 | | |
 | F-CORE-ACT-17 | | |
@@ -289,5 +289,54 @@ clause **is** proven; specifically the cancellation (and, per the unchanged carr
 output-limit) conjuncts are the confirmed-absent part. Naming the unproven part, as the standard
 requires: **cancellation does not exist anywhere in this app; output-limit enforcement does not
 exist either (`git.rs`'s `read_to_end` has no byte cap, only the wall-clock timeout).**
+
+---
+
+## F-TAB-20 — PASSED
+
+**Missing half named in the brief**: "Ctrl-1 jumped correctly; the rest of the row was not driven."
+The ledger row records Ctrl-5/Ctrl-9 as reproducing on 0 of several dozen keyboard-health-verified
+attempts in a prior wave, "not confidently distinguishable from delivery flakiness."
+
+**Set up 7 real tabs** (Terminal, notes.md, script.rs, link-test.md, target.md, Terminal, Terminal —
+via the "+" menu, reusing the already-open worktree from the F-TAB-09/F-CORE-FILE-04 rows above,
+same running instance, no relaunch). Verified keyboard health first, per `WAYLAND-LANE.md`'s
+explicit trap: started the persistent virtual-keyboard keeper (it had never been started for this
+kept-alive instance, since the original boot actions never used `type`/`key`), confirmed
+`swaymsg -t get_inputs` shows a live `wlr_virtual_keyboard_v1`, then proved delivery with a plain
+`wtype` string landing visibly in the terminal prompt before touching any chord.
+
+**First attempt reproduced the exact ledger finding** — a `chord ctrl 1`/`chord ctrl 5`/`chord ctrl
+9` sequence, judged only by screenshots, showed no tab change at all for two of the three presses.
+Rather than accept that as confirmation of absence (screenshots are a soft discriminator here — no
+positive/negative baseline between shots), switched to a **hard discriminator**: `panel.list` over
+the control socket returns each tab's `active` flag as real server-side state, and `tab.select
+index=1` resets to a known baseline over the *same* socket, independent of the keyboard path
+entirely — so a reset-then-chord-then-query cycle isolates exactly what the chord did, with no
+screenshot-timing ambiguity.
+
+Ran that cycle repeatedly, resetting to tab 1 before every attempt:
+
+```
+attempt 1-4:  chord5_hit=1 chord5_hit=1 chord5_hit=1 chord5_hit=1   (reset verified each time)
+attempt 1-4:  chord9_hit=1 chord9_hit=1 chord9_hit=1 chord9_hit=1
+second batch, 10 attempts each, alternating ctrl-5/ctrl-9 with a fresh reset before each:
+  ctrl5: 10/10   ctrl9: 10/10
+```
+
+**Ctrl-5 -> 14/14, Ctrl-9 -> 14/14**, combined across both batches — a clean, reproducible result,
+the opposite of the ledger's 0-hit finding. The likely explanation for the original flakiness: that
+attempt judged a rapid `chord ctrl 1; chord ctrl 5; chord ctrl 9` sequence purely by screenshot with
+no verified reset baseline between presses and no hard state check — exactly the kind of ambiguity
+`panel.list` was used here to eliminate. `Ctrl-9`'s clamp-to-last semantics were also confirmed
+structurally: `TabSelection::jump` (`rust/crates/tiller/src/panes.rs:271`) computes
+`position.saturating_sub(1).min(self.tab_count - 1)`, so any position at or past the tab count
+lands on the last tab by construction — verified live via `pane-6` (the 7th/last tab) becoming
+active on every one of the 14 Ctrl-9 attempts, never index 8.
+
+Screenshots for one instance of each, taken immediately after a verified hit:
+`reference/linux-progress/wf-rest4/f-tab-20-ctrl5-jumps-to-position5.png` (target.md, position 5,
+active) and `f-tab-20-ctrl9-jumps-to-last.png` (the last Terminal tab, position 7, active).
+Combined with the ledger's own already-proven Ctrl-1 leg, **F-TAB-20 -> PASSED.**
 
 ---
