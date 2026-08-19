@@ -23,7 +23,7 @@ This file is written incrementally, one row at a time, and committed after each 
 |---|---|---|
 | F-TAB-09 | PASSED | real native GTK "Open File" dialog driven end-to-end twice: a markdown file and a code file, each opened in the correct editor mode |
 | F-CORE-FILE-04 | PASSED | a real markdown link, clicked live in the running app, resolved and opened a new tab with the target file's content |
-| F-CORE-FILE-03A | | |
+| F-CORE-FILE-03A | PASSED | new named test drops BRAVO then ALPHA (reverse-alphabetical) and asserts `mention_paths` preserves that literal order |
 | F-GIT-RUN-01 | | |
 | F-TAB-20 | | |
 | F-CHAT-25 | PASSED | AskUserQuestion's text/option/cancel arms all covered by named drawn tests, none of which existed at wave H's ledger writing |
@@ -180,5 +180,43 @@ stub.
 
 `reference/linux-progress/wf-rest4/f-core-file-04-link-rendered.png` (the clickable link before the
 click) and `f-core-file-04-link-opens-new-tab.png` (the new tab after). **F-CORE-FILE-04 -> PASSED.**
+
+---
+
+## F-CORE-FILE-03A — PASSED
+
+**Missing half named in the brief**: "The drop-ORDERING clause (BRAVO then ALPHA) was never
+exercised; the row had been passed on `git merge-base --is-ancestor` alone. Ancestry proves the
+code did not change since some earlier commit, not that it works on this host."
+
+A prior pass (`FINISH-sweep-tail.md`) had already drafted this exact test but lost it to an
+`ENOSPC` disk-full outage before any `Edit` could land — the row was left explicitly unchanged.
+
+Read the mechanism first (not accepted as verdict): `gpui::ExternalPaths` is
+`pub struct ExternalPaths(pub SmallVec<[PathBuf; 2]>)` — an ordered vector, not a set — and
+`Chat::drop_external_paths` (`chat.rs:2517`) iterates it with a plain `for path in &paths`, pushing
+each into `mention_paths` in the order seen, with no sort/dedup-by-key anywhere on that path. That
+is a claim about the source, not a verdict; the standard requires a named test to make it one.
+
+**Wrote and ran that test**: `dropping_external_files_preserves_the_drop_order`
+(`rust/crates/tiller_ui/src/chat.rs`, next to the existing
+`dropping_external_files_attaches_chips_and_rejects_the_oversized_one` it's modeled on). Drops
+`BRAVO.txt` before `ALPHA.txt` — the reverse of alphabetical order, deliberately, so an accidental
+sort anywhere in the classify/insert path would flip the result and the assertion would catch it —
+through the same `FileDropEvent::Entered`/`Submit` sequence the existing attach test uses (a real
+`ExternalPaths` drag, GPUI's platform-drop mechanism, not a hand-built draft mutation), then asserts
+`draft.mention_paths == ["BRAVO.txt", "ALPHA.txt"]`, that literal order:
+
+```
+$ cargo test --manifest-path rust/Cargo.toml -p tiller_ui dropping_external_files_preserves_the_drop_order
+test chat::tests::dropping_external_files_preserves_the_drop_order ... ok
+```
+
+Re-ran the full `chat::` module to check for regressions: 77 passed, 1 failed
+(`a_permission_prompt_answers_both_ways`) — re-ran that one test alone and it passed clean
+(`ok`, 0.26s), matching `FINISH-sweep-tail.md`'s independently-recorded finding that this specific
+test flakes only under full-module concurrency; not something this change touched or introduced.
+
+**F-CORE-FILE-03A -> PASSED.** New test committed at `rust/crates/tiller_ui/src/chat.rs`.
 
 ---
