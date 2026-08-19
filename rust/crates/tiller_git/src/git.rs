@@ -120,10 +120,36 @@ const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 /// megabytes of real output.
 const OUTPUT_LIMIT_ENV_VAR: &str = "TILLER_GIT_OUTPUT_LIMIT_BYTES";
 
+/// A per-thread cap that outranks the environment, for the one test that needs
+/// to prove the limit is really wired into the runner.
+///
+/// It exists because the obvious spelling — `set_var` around the call — is a
+/// **process-global** mutation, and `cargo test` runs this crate's tests as
+/// threads in one process. That test held a 512-byte cap for the duration of a
+/// single `git config --list`, and any other test unlucky enough to shell out
+/// to git inside that window inherited it. `git init` prints roughly 670 bytes
+/// of `init.defaultBranch` advice on a machine where that setting is unset, so
+/// `initializes_a_folder_as_a_git_repository` failed with `OutputTruncated`
+/// — intermittently, more often under load, and in a crate whose code had not
+/// changed. It read exactly like a timing flake and was not one.
+///
+/// A thread-local cannot leak that way: each test owns its own thread, and the
+/// limit is resolved on the calling thread before the reader threads are
+/// spawned, so the value they capture is the right one.
+#[cfg(test)]
+thread_local! {
+    static OUTPUT_LIMIT_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Resolves the byte cap for a single stream. A malformed or zero value falls
 /// back to the default rather than disabling the cap, so a typo in the
 /// environment cannot quietly restore unbounded buffering.
 fn configured_output_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = OUTPUT_LIMIT_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
     output_limit_from_env(std::env::var(OUTPUT_LIMIT_ENV_VAR).ok().as_deref())
 }
 
@@ -913,8 +939,11 @@ mod tests {
     /// a real `git` command whose output exceeds the cap comes back with the
     /// prefix and `truncated` set, rather than the whole document.
     ///
-    /// Note this test sets the process-global override, matching the existing
-    /// `TILLER_GIT_TIMEOUT_MS` convention in this crate.
+    /// The cap is applied through [`OUTPUT_LIMIT_OVERRIDE`], a thread-local,
+    /// **not** through `set_var`. This test used to set the process-global
+    /// environment override for the duration of the call below, which any
+    /// concurrently-running test that shelled out to git inherited — see that
+    /// constant's own comment for the failure it caused.
     #[test]
     fn run_streaming_reports_a_truncated_capture() {
         let directory = scratch_dir();
@@ -929,9 +958,9 @@ mod tests {
             return; // no usable git on this box; the pure tests still cover the logic
         }
 
-        unsafe { std::env::set_var(OUTPUT_LIMIT_ENV_VAR, "512") };
+        OUTPUT_LIMIT_OVERRIDE.with(|limit| limit.set(Some(512)));
         let result = GitRunner::run_streaming(&["config", "--list"], &directory, |_| {});
-        unsafe { std::env::remove_var(OUTPUT_LIMIT_ENV_VAR) };
+        OUTPUT_LIMIT_OVERRIDE.with(|limit| limit.set(None));
         let _ = std::fs::remove_dir_all(&directory);
 
         let result = result.expect("git config --list exits 0");
@@ -946,6 +975,39 @@ mod tests {
                 "a capture that filled the cap must report itself truncated"
             );
         }
+    }
+
+    /// The regression guard for the leak itself, stated as the property that
+    /// was violated rather than as the symptom it produced.
+    ///
+    /// A sibling test capping the output at 512 bytes must not change what any
+    /// other test's thread sees, because `cargo test` runs them concurrently in
+    /// one process. When the cap was installed with `set_var`, it did, and
+    /// `initializes_a_folder_as_a_git_repository` failed with `OutputTruncated`
+    /// whenever its `git init` — around 670 bytes of `init.defaultBranch`
+    /// advice on a box where that setting is unset — overlapped the window.
+    #[test]
+    fn the_output_limit_override_is_confined_to_its_own_thread() {
+        OUTPUT_LIMIT_OVERRIDE.with(|limit| limit.set(Some(512)));
+
+        let seen_by_another_thread = std::thread::spawn(configured_output_limit)
+            .join()
+            .expect("the probe thread must not panic");
+
+        let seen_here = configured_output_limit();
+        OUTPUT_LIMIT_OVERRIDE.with(|limit| limit.set(None));
+
+        assert_eq!(
+            seen_here, 512,
+            "the override must apply on the thread that set it, or this test \
+             proves nothing about confinement"
+        );
+        assert_eq!(
+            seen_by_another_thread, DEFAULT_OUTPUT_LIMIT_BYTES,
+            "another thread must still see the default; a process-global \
+             override is what made a 670-byte `git init` fail in an unrelated \
+             test"
+        );
     }
 
     fn scratch_dir() -> std::path::PathBuf {
