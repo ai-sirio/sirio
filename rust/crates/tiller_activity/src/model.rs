@@ -552,3 +552,61 @@ pub fn identify_agent_from_process_names<'a>(
         .copied()
         .find(|id| names.iter().any(|name| name == id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-CORE-ACT-17 (identity half): "the agent identity query returns the
+    /// first matching agent in worktree tab/pane order" -- the sub-clause a
+    /// prior live drive (two agents at two *different* priorities) could not
+    /// exercise, because a real priority conflict never produces a tie.
+    ///
+    /// `agent_spawned` sets `.running` unconditionally (see its own doc
+    /// comment above), so two spawned agents with no later `notify` call are
+    /// a genuine tie at the only priority level present -- exactly the case
+    /// `main.rs:5765`'s live `sync_worktree_activity` feeds through this same
+    /// `agent_id_for_panes` call on every render. `list_for` (`tiller_control
+    /// /src/panel.rs:372`) sorts a worktree's panes by pane-id string before
+    /// handing them to this function, so pane-id order stands in for
+    /// tab/pane order here, exactly as it does for the live app's real
+    /// sequentially-assigned pane ids (`pane-0`, `pane-1`, ...).
+    #[test]
+    fn agent_id_for_panes_breaks_a_tie_by_pane_order_not_by_agent_identity() {
+        let now = Instant::now();
+
+        // pane-90 (claude) sorts before pane-91 (codex): claude must win.
+        let mut model = AgentActivityModel::new();
+        model.agent_spawned("pane-90", "claude", now);
+        model.agent_spawned("pane-91", "codex", now);
+        assert_eq!(
+            model.agent_id_for_panes(&["pane-90", "pane-91"]),
+            Some("claude"),
+            "both panes are tied at Running; the earlier pane-id must win"
+        );
+
+        // Same two agents, orders swapped via pane id (pane-80 < pane-91):
+        // codex now sorts first, so codex must win. If the tie-break were
+        // secretly keyed on agent identity (e.g. catalog order, or
+        // alphabetical agent id) rather than genuine pane order, this
+        // assertion would still see "claude" and fail.
+        let mut swapped = AgentActivityModel::new();
+        swapped.agent_spawned("pane-80", "codex", now);
+        swapped.agent_spawned("pane-91", "claude", now);
+        assert_eq!(
+            swapped.agent_id_for_panes(&["pane-80", "pane-91"]),
+            Some("codex"),
+            "swapping which pane-id sorts first must flip the winner"
+        );
+
+        // Sanity: a caller that (mis)orders the slice itself controls the
+        // outcome too -- `agent_id_for_panes` trusts the order it is given,
+        // it does not re-sort. This is the same slice-order contract
+        // `main.rs:5755`'s `refs` relies on after `list_for`'s own sort.
+        assert_eq!(
+            model.agent_id_for_panes(&["pane-91", "pane-90"]),
+            Some("codex"),
+            "the function must follow the slice order it is handed, not re-derive one"
+        );
+    }
+}
