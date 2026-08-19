@@ -44,6 +44,7 @@ use tiller_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent, acp_agent_command},
     file_view::{FileView, FileViewEvent},
+    modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     right_panel::{
         ActivityStatus, ActivitySurface, RightPanel, RightPanelActionEvent, RightPanelEvent,
     },
@@ -678,6 +679,26 @@ struct TabRename {
     tab_id: usize,
     draft: String,
     focus: FocusHandle,
+}
+
+/// F-TERM-05: the "Set Title" modal's pending state — the in-place analogue
+/// of the Swift original's `NSAlert` + prefilled `NSTextField`
+/// (`TerminalContextMenuProvider.showSetTitleAlert`). `draft` starts as the
+/// tab's current title and is edited by `handle_title_prompt_key`; OK
+/// (`confirm_title_prompt`) applies the trimmed draft through the same
+/// `apply_manual_tab_title` the sidebar's inline "Rename" (`TabRename`)
+/// uses, Cancel (or Escape) discards it untouched.
+struct PendingTitlePrompt {
+    tab_id: usize,
+    draft: String,
+    focus: FocusHandle,
+    /// Claimed by the first `render` after this opens. `set_terminal_title`
+    /// is a `cx.subscribe` callback (`Context::subscribe`'s own signature
+    /// carries no `Window`), so it cannot call `focus.focus(window, cx)`
+    /// itself; this flags the next frame that does have one (`render`) to
+    /// claim it instead — the same "poll once, from wherever `Window` is
+    /// actually reachable" shape `render` already uses for `window_active`.
+    needs_focus: bool,
 }
 
 /// F-TAB-24: pre-drag state for `TillerWorkspace::cancel_tab_drag`. Stores
@@ -2891,13 +2912,22 @@ fn activity_rank(status: ActivityStatus) -> u8 {
     agent_status_for_activity(status).map_or(4, AgentStatus::priority)
 }
 
-/// F-CORE-ACT-23: whether closing this activity would kill live work and
-/// therefore has to be confirmed first. The rule itself is
+/// F-CORE-ACT-23: whether closing an Activity-row tab would kill live work
+/// and therefore has to be confirmed first. The rule itself is
 /// `tiller_activity::ActivityStatus::requires_close_confirmation` — this
 /// only crosses the two identically-shaped `ActivityStatus` enums (the
-/// render-facing one in `tiller_ui`, the domain one in `tiller_activity`)
-/// so both the pane-close banner and the Activity panel's close button ask
-/// the same function rather than each carrying its own copy of the list.
+/// render-facing one in `tiller_ui`, the domain one in `tiller_activity`).
+///
+/// F-TERM-08: this governs only `request_close_activity` (the right panel's
+/// Activity row). It used to also gate `request_close_terminal_at` (the
+/// terminal context menu's "Close Terminal…"/"Close Tab…"), which made an
+/// ordinary shell's close silent — `ActivityStatus` only recognizes
+/// `AgentCatalog` CLIs, so a plain `sleep 300` (or any non-agent command) is
+/// always `Idle` and could never reach the gate, while the Swift original's
+/// two close paths build their alert with no gate on activity at all
+/// (`App/TerminalContextMenuProvider.swift:58`, `App/SidebarView.swift:601`/
+/// `:678`). `request_close_terminal_at` now holds every terminal close for
+/// confirmation unconditionally; only the Activity row still asks this.
 fn pane_close_needs_confirmation(status: ActivityStatus) -> bool {
     let domain =
         tiller_activity::ActivityStatus::from_agent_status(agent_status_for_activity(status));
@@ -3205,6 +3235,7 @@ struct TillerWorkspace {
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
     tab_rename: Option<TabRename>,
+    pending_title_prompt: Option<PendingTitlePrompt>,
     palette_open: bool,
     palette_query: String,
     palette_selected: usize,
@@ -3312,20 +3343,34 @@ struct Toast {
     message: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingPaneClose {
     tab_id: usize,
     pane_id: usize,
     /// F-CORE-ACT-23: an Activity-row close targets the whole tab, not the
     /// one pane the banner happens to be drawn over. Same held-close, same
-    /// banner, same `requires_close_confirmation` gate — only what
-    /// "Close Anyway" then closes differs.
+    /// banner — only what "Close Anyway" then closes differs, and only the
+    /// Activity-row path still runs `pane_close_needs_confirmation` to
+    /// decide *whether* to hold; the terminal-close path (F-TERM-08) holds
+    /// unconditionally and reuses this struct only for its banner wording.
     whole_tab: bool,
-    /// The status that made this close need confirming, captured at the
-    /// moment it was held. The banner describes *this* — it used to say
+    /// The status captured at the moment this close was held. F-TERM-08:
+    /// this no longer decides *whether* a terminal close is held — every
+    /// terminal close is — it only decides what the banner *says*. The
+    /// Activity-row path is the exception: there, this status is also what
+    /// `pane_close_needs_confirmation` gated on. It used to say
     /// "has running work" for all three confirming states, so an agent that
     /// had failed was announced as still working.
     status: ActivityStatus,
+    /// The dialog's own `FocusHandle`, claimed by `render` the first frame
+    /// after this opens (`needs_focus`, same shape as
+    /// `PendingTitlePrompt::needs_focus`) — see `render_pane_close_confirm`'s
+    /// doc comment for why the close-confirm variant needs one of its own
+    /// where the Set Title prompt's field claims focus for free.
+    focus: FocusHandle,
+    /// Claimed by the first `render` after this opens; see `focus`'s doc
+    /// comment and `PendingTitlePrompt::needs_focus`.
+    needs_focus: bool,
 }
 
 impl TillerWorkspace {
@@ -3822,6 +3867,7 @@ impl TillerWorkspace {
             tab_menu_open: false,
             tab_menu_tab: None,
             tab_rename: None,
+            pending_title_prompt: None,
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
@@ -4138,12 +4184,9 @@ impl TillerWorkspace {
                     return;
                 }
                 match delegated_terminal_context_action(event.action) {
-                    Some(TerminalContextCommand::SetTitle) => workspace.set_terminal_title(
-                        tab_id,
-                        pane_id,
-                        event.target.terminal_id(),
-                        cx,
-                    ),
+                    Some(TerminalContextCommand::SetTitle) => {
+                        workspace.set_terminal_title(tab_id, pane_id, cx)
+                    }
                     Some(TerminalContextCommand::Split {
                         direction,
                         placement,
@@ -4305,24 +4348,29 @@ impl TillerWorkspace {
         terminal
     }
 
-    fn set_terminal_title(
-        &mut self,
-        tab_id: usize,
-        pane_id: usize,
-        terminal_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+    /// F-TERM-05: the terminal context menu's "Set Title…" — opens the
+    /// prompt rather than applying anything itself (`confirm_title_prompt`
+    /// does that, once OK is clicked or Enter is pressed). Swift original:
+    /// `TerminalContextMenuProvider.showSetTitleAlert`, an `NSAlert` whose
+    /// `NSTextField` accessory is prefilled with `tuple.tab.title` — `draft`
+    /// here starts as that same current title for the same reason. Replaces
+    /// the earlier stub that ignored typed input entirely and set the tab's
+    /// title to a fixed `"Terminal {terminal_id}"` label from the raw
+    /// identity string the Linux context menu's `SetTitle` command carried —
+    /// there was never anywhere for the user to type a title at all.
+    fn set_terminal_title(&mut self, tab_id: usize, pane_id: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
         if !tab.panes.contains(pane_id) {
             return;
         }
-        // The Linux context event carries identity, not text. Use that stable
-        // identity as the app-owned title until a text-entry prompt is added.
-        tab.title = format!("Terminal {terminal_id}");
-        self.sync_activity(cx);
-        self.schedule_save(cx);
+        self.pending_title_prompt = Some(PendingTitlePrompt {
+            tab_id,
+            draft: tab.title.clone(),
+            focus: cx.focus_handle().tab_stop(true),
+            needs_focus: true,
+        });
         cx.notify();
     }
 
@@ -4853,9 +4901,10 @@ impl TillerWorkspace {
     }
 
     /// The interactive entry point for closing the focused pane (Cmd-W /
-    /// Ctrl-W). Gated by F-TERM-08: a pane doing live work is not closed
-    /// silently, it is held in `pending_pane_close` and rendered as a
-    /// confirm-or-cancel banner over the pane instead.
+    /// Ctrl-W). F-TERM-08: every close is held in `pending_pane_close` and
+    /// rendered as a confirm-or-cancel banner over the pane instead of
+    /// closing immediately — unconditionally, not just when the pane is
+    /// doing live work (see `pending_pane_close`'s own doc comment).
     ///
     /// F-CORE-WSP-05: `window` is threaded all the way to `close_terminal_at`
     /// so a keyboard-driven close moves *real* GPUI keyboard focus to the
@@ -4878,14 +4927,31 @@ impl TillerWorkspace {
     }
 
     /// The interactive entry point for closing a specific pane, e.g. the
-    /// terminal context menu's "Close Terminal…" item. See
-    /// `request_close_focused_pane` for the gating rule and for why `window`
-    /// is threaded through (F-CORE-WSP-05).
+    /// terminal context menu's "Close Terminal…" item.
+    ///
+    /// F-TERM-08/F-TAB-26: holds the close for confirmation
+    /// **unconditionally** — the Swift original's two close paths build
+    /// their alert with no gate on activity at all
+    /// (`App/TerminalContextMenuProvider.swift:58`,
+    /// `App/SidebarView.swift:601`/`:678`). This used to call
+    /// `pane_close_needs_confirmation(status)` first and close immediately
+    /// when it returned `false`, which made an ordinary shell's close
+    /// silent: `ActivityStatus` only recognizes `AgentCatalog` CLIs, so a
+    /// plain `sleep 300` (or any non-agent command) is always `Idle` and
+    /// could never reach the gate. Reproduced live: right-click "Close
+    /// Terminal…" on an idle sole terminal closed it instantly, no prompt.
+    /// `status` is still captured and still words the banner (see
+    /// `render_pane_close_confirm`) — it just no longer decides *whether*
+    /// the banner appears. `window` is no longer used here: the confirm
+    /// path always defers to `pending_pane_close`/`confirm_pending_pane_close`,
+    /// which captures its own `window` from the banner's `on_click` (the
+    /// F-CORE-WSP-05 focus-follow this parameter used to carry still
+    /// happens, just downstream of the confirmation rather than here).
     fn request_close_terminal_at(
         &mut self,
         tab_id: usize,
         pane_id: usize,
-        window: Option<&mut Window>,
+        _window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
@@ -4899,21 +4965,15 @@ impl TillerWorkspace {
         // a single-pane tab hit that guard and silently did nothing -- the
         // confirm banner dismissed but the tab never closed.
         let whole_tab = tab.panes.leaf_ids().len() <= 1;
-        if pane_close_needs_confirmation(status) {
-            self.pending_pane_close = Some(PendingPaneClose {
-                tab_id,
-                pane_id,
-                whole_tab,
-                status,
-            });
-            cx.notify();
-            return;
-        }
-        if whole_tab {
-            self.close_tab_by_id(tab_id, cx);
-            return;
-        }
-        self.close_terminal_at(tab_id, pane_id, window, cx);
+        self.pending_pane_close = Some(PendingPaneClose {
+            tab_id,
+            pane_id,
+            whole_tab,
+            status,
+            focus: cx.focus_handle().tab_stop(true),
+            needs_focus: true,
+        });
+        cx.notify();
     }
 
     /// F-CORE-ACT-23: the Activity panel's own close button. It used to call
@@ -4937,6 +4997,8 @@ impl TillerWorkspace {
                 pane_id,
                 whole_tab: true,
                 status,
+                focus: cx.focus_handle().tab_stop(true),
+                needs_focus: true,
             });
             cx.notify();
             return;
@@ -4958,9 +5020,47 @@ impl TillerWorkspace {
         }
     }
 
-    fn cancel_pending_pane_close(&mut self, cx: &mut Context<Self>) {
-        self.pending_pane_close = None;
+    /// `window` (when available) is used to return keyboard focus to the
+    /// pane/tab that was about to be closed -- same F-CORE-WSP-05/F-CORE-WSP-04
+    /// reasoning as `confirm_pending_pane_close` and `cancel_title_prompt`:
+    /// `pending`'s own `FocusHandle` is dropped with it, and nothing else
+    /// would otherwise claim focus, leaving the workspace keyboard-dead
+    /// until the user clicked back into the terminal.
+    fn cancel_pending_pane_close(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_pane_close.take()
+            && let Some(window) = window
+        {
+            self.focus_tab_content(pending.tab_id, window, cx);
+        }
         cx.notify();
+    }
+
+    /// The close-confirm banner's key handling. Escape and Enter both
+    /// cancel — matching `NSAlert`'s own convention in the Swift original
+    /// (`App/TerminalContextMenuProvider.swift:58-69`'s
+    /// `showCloseConfirmAlert`): the *first* button added to an `NSAlert` is
+    /// its default (Return-key-bound) button, and "Cancel" is added before
+    /// "Close" there, so Cancel holds both the default Return binding and
+    /// its own title-matched Escape binding — "Close" has no keyboard
+    /// equivalent at all in the reference, only a real click reaches it.
+    /// (Contrast the Set Title alert, `showSetTitleAlert`, which adds "OK"
+    /// first: Enter confirms there, matching `handle_title_prompt_key`.)
+    /// This deliberately does not bind Enter, or any other key, to the
+    /// destructive "Close Anyway" action. Every other key is swallowed here
+    /// too — this only runs while `pending_pane_close` is held (see the
+    /// `ModalFocus` wiring in `render_pane_close_confirm` and the
+    /// `self.pending_pane_close.is_some()` case in `handle_root_key_down`)
+    /// — so nothing typed while the banner is up reaches the terminal.
+    fn handle_pane_close_confirm_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" || key == "enter" || key == "return" {
+            self.cancel_pending_pane_close(Some(window), cx);
+        }
     }
 
     fn terminal_exit_label(tab: &OpenTab, cx: &App) -> Option<String> {
@@ -8385,75 +8485,143 @@ impl TillerWorkspace {
     ///
     /// The message names the state that made the close need confirming.
     /// A single hard-coded "has running work" described a failed agent as
-    /// still working.
+    /// still working. Since F-TERM-08 made the terminal-close path
+    /// unconditional, `status` here can now also be `Idle`/`Done` (an
+    /// ordinary shell, or a finished agent) — those get their own wording
+    /// rather than falling into a leftover "has running work" catch-all
+    /// that was only ever true back when the Activity row's
+    /// `requires_close_confirmation` gate was the only way to reach this.
+    ///
+    /// Built on `tiller_ui::modal::render_modal` — the same modal-sheet
+    /// primitive `render_title_prompt` uses for F-TERM-05's "Set Title"
+    /// prompt, so the one confirm-a-close/confirm-a-value shape is drawn
+    /// once. Selector ids (`pane-close-confirm`, `-cancel`, `-close`) are
+    /// unchanged from the hand-rolled div this replaced.
+    ///
+    /// `pending.focus` claims real GPUI focus on the first render after this
+    /// opens (`needs_focus`, wired below in `render`) — a refutation of an
+    /// earlier PASSED verdict found this banner never took focus at all: it
+    /// was drawn as a plain absolutely-positioned div with no
+    /// `.track_focus()`/`window.focus()` and no case in
+    /// `handle_root_key_down`, so opening it while a terminal held focus
+    /// (the ordinary case for `ctrl-alt-w`) left every subsequent keystroke,
+    /// Enter included, going straight into the live PTY underneath — the
+    /// user believed a blocking confirmation was up and was in fact typing
+    /// into their shell. `handle_pane_close_confirm_key` (wired both here,
+    /// via `ModalFocus`, and as a `handle_root_key_down` special case the
+    /// same way `self.palette_open` already gets one) closes that: Escape
+    /// and Enter both cancel and nothing else is forwarded anywhere while
+    /// the banner is up. See `docs/linux-rewrite/tasks/
+    /// P103-two-close-confirmation-contracts.md` for the refutation.
     fn render_pane_close_confirm(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
-        let pending = self.pending_pane_close?;
+        let pending = self.pending_pane_close.clone()?;
         let confirm_entity = entity.clone();
-        let cancel_entity = entity;
+        let cancel_entity = entity.clone();
+        let key_entity = entity;
         let subject = if pending.whole_tab { "tab" } else { "pane" };
         let message = match pending.status {
             ActivityStatus::NeedsInput => {
                 format!("This {subject} is waiting for input. Close anyway?")
             }
             ActivityStatus::Error => format!("This {subject}'s agent failed. Close anyway?"),
-            // Running is the only remaining confirming state; done and idle
-            // never reach here (`requires_close_confirmation`).
-            _ => format!("This {subject} has running work. Close anyway?"),
+            ActivityStatus::Running => format!("This {subject} has running work. Close anyway?"),
+            ActivityStatus::Idle | ActivityStatus::Done => {
+                format!("This {subject}'s process will be terminated. Close anyway?")
+            }
         };
-        Some(
-            div()
-                .id("pane-close-confirm")
-                .debug_selector(|| "pane-close-confirm".into())
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .bg(gpui::black().opacity(0.82))
-                .child(div().text_color(gpui::white()).child(message))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .id("pane-close-confirm-close")
-                                .debug_selector(|| "pane-close-confirm-close".into())
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(6.0))
-                                .bg(theme.tab_error)
-                                .text_color(gpui::white())
-                                .on_click(move |_, window, cx| {
-                                    confirm_entity.update(cx, |workspace, cx| {
-                                        workspace.confirm_pending_pane_close(Some(window), cx)
-                                    });
-                                })
-                                .child("Close Anyway"),
-                        )
-                        .child(
-                            div()
-                                .id("pane-close-confirm-cancel")
-                                .debug_selector(|| "pane-close-confirm-cancel".into())
-                                .cursor(gpui::CursorStyle::PointingHand)
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .rounded(px(6.0))
-                                .bg(gpui::white().opacity(0.15))
-                                .text_color(gpui::white())
-                                .on_click(move |_, _, cx| {
-                                    cancel_entity.update(cx, |workspace, cx| {
-                                        workspace.cancel_pending_pane_close(cx)
-                                    });
-                                })
-                                .child("Cancel"),
-                        ),
-                )
-                .into_any_element(),
-        )
+        Some(render_modal(
+            ModalSpec {
+                id: "pane-close-confirm",
+                title: "Close terminal?".into(),
+                body: message,
+                text_field: None,
+                buttons: vec![
+                    ModalButton::new(
+                        "cancel",
+                        "Cancel",
+                        ModalButtonTone::Plain,
+                        move |_, window, cx| {
+                            cancel_entity.update(cx, |workspace, cx| {
+                                workspace.cancel_pending_pane_close(Some(window), cx)
+                            });
+                        },
+                    ),
+                    ModalButton::new(
+                        "close",
+                        "Close Anyway",
+                        ModalButtonTone::Destructive,
+                        move |_, window, cx| {
+                            confirm_entity.update(cx, |workspace, cx| {
+                                workspace.confirm_pending_pane_close(Some(window), cx)
+                            });
+                        },
+                    ),
+                ],
+                focus: Some(ModalFocus::new(pending.focus.clone(), move |event, window, cx| {
+                    cx.stop_propagation();
+                    key_entity.update(cx, |workspace, cx| {
+                        workspace.handle_pane_close_confirm_key(event, window, cx);
+                    });
+                })),
+            },
+            theme,
+        ))
+    }
+
+    /// F-TERM-05: the "Set Title" modal — Swift's `showSetTitleAlert`
+    /// rebuilt on the same `render_modal` primitive as
+    /// `render_pane_close_confirm`, with its text-field variant instead.
+    /// The body text names the tab's *current* title, matching the Swift
+    /// alert's `"Enter the new title for \"\(tuple.tab.title):\""` literally
+    /// (the colon sits inside the closing quote in the original — kept
+    /// as-is rather than "corrected", since this is a contract to match,
+    /// not prose to improve).
+    fn render_title_prompt(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
+        let prompt = self.pending_title_prompt.as_ref()?;
+        let current_title = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == prompt.tab_id)
+            .map(|tab| tab.title.clone())
+            .unwrap_or_default();
+        let key_entity = entity.clone();
+        let confirm_entity = entity.clone();
+        let cancel_entity = entity;
+        Some(render_modal(
+            ModalSpec {
+                id: "set-title-prompt",
+                title: "Set Title".into(),
+                body: format!("Enter the new title for \"{current_title}:\""),
+                text_field: Some(ModalTextField::new(
+                    prompt.focus.clone(),
+                    prompt.draft.clone(),
+                    move |event, window, cx| {
+                        key_entity.update(cx, |workspace, cx| {
+                            workspace.handle_title_prompt_key(event, window, cx)
+                        });
+                    },
+                )),
+                buttons: vec![
+                    ModalButton::new("ok", "OK", ModalButtonTone::Accent, move |_, window, cx| {
+                        confirm_entity.update(cx, |workspace, cx| {
+                            workspace.confirm_title_prompt(window, cx)
+                        });
+                    }),
+                    ModalButton::new(
+                        "cancel",
+                        "Cancel",
+                        ModalButtonTone::Plain,
+                        move |_, window, cx| {
+                            cancel_entity.update(cx, |workspace, cx| {
+                                workspace.cancel_title_prompt(window, cx)
+                            });
+                        },
+                    ),
+                ],
+                focus: None,
+            },
+            theme,
+        ))
     }
 
     /// Renders one active tab surface per pane group. A group may be empty
@@ -9270,22 +9438,37 @@ impl TillerWorkspace {
         self.dismiss_tab_menu(cx);
     }
 
+    /// Applies a manual (non-auto) tab title: trim, and empty is a no-op
+    /// rather than a blank title — Swift's `AppModel.renameTab` rule,
+    /// applied here regardless of which UI triggered it. Shared by the
+    /// sidebar's inline "Rename" (`commit_tab_rename`) and the terminal's
+    /// "Set Title" modal (`confirm_title_prompt`, F-TERM-05) so the rule
+    /// lives in exactly one place rather than drifting between two copies.
+    /// Returns whether it actually applied a title.
+    fn apply_manual_tab_title(&mut self, tab_id: usize, title: &str, cx: &mut Context<Self>) -> bool {
+        let title = title.trim();
+        if title.is_empty() {
+            return false;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        tab.title = title.to_owned();
+        // F-CORE-DOM-07: a user-driven rename permanently opts this tab out
+        // of automatic renaming, mirroring Swift's `tab.titleIsAutoNamed =
+        // false` on manual rename.
+        tab.title_is_auto_named = false;
+        self.schedule_save(cx);
+        self.sync_activity(cx);
+        true
+    }
+
     fn commit_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rename) = self.tab_rename.take() else {
             return;
         };
-        let title = rename.draft.trim();
-        if !title.is_empty()
-            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == rename.tab_id)
-        {
-            tab.title = title.to_owned();
-            // F-CORE-DOM-07: a user-driven rename permanently opts this tab
-            // out of automatic renaming, mirroring Swift's
-            // `tab.titleIsAutoNamed = false` on manual rename.
-            tab.title_is_auto_named = false;
-            self.schedule_save(cx);
-            self.sync_activity(cx);
-
+        let title = rename.draft.trim().to_owned();
+        if self.apply_manual_tab_title(rename.tab_id, &title, cx) {
             // F-CORE-WSP-04: the rename widget's own FocusHandle is dropped
             // with `rename` above, and nothing else claims keyboard focus —
             // without this, committing a rename left focus on no rendered
@@ -9296,7 +9479,7 @@ impl TillerWorkspace {
             // (`FocusIntent::Tab`), not a one-off hardcoded assumption.
             let command = tiller_project::LayoutCommand::Rename {
                 tab: rename.tab_id.to_string(),
-                title: title.to_owned(),
+                title: title.clone(),
             };
             if tiller_project::classify_layout_command(&command).focus
                 == tiller_project::FocusIntent::Tab
@@ -9305,6 +9488,65 @@ impl TillerWorkspace {
             }
         }
         cx.notify();
+    }
+
+    /// F-TERM-05: Enter/OK — applies the trimmed draft through
+    /// `apply_manual_tab_title` (the same rule the sidebar's inline Rename
+    /// uses), and, either way, returns keyboard focus to the tab's content —
+    /// same F-CORE-WSP-04 reasoning as `commit_tab_rename`: the prompt's own
+    /// `FocusHandle` is dropped with `prompt` below, and nothing else would
+    /// otherwise claim focus.
+    fn confirm_title_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.pending_title_prompt.take() else {
+            return;
+        };
+        self.apply_manual_tab_title(prompt.tab_id, &prompt.draft, cx);
+        self.focus_tab_content(prompt.tab_id, window, cx);
+        cx.notify();
+    }
+
+    /// F-TERM-05: Cancel (or Escape) — discards the draft untouched.
+    fn cancel_title_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.pending_title_prompt.take() else {
+            return;
+        };
+        self.focus_tab_content(prompt.tab_id, window, cx);
+        cx.notify();
+    }
+
+    /// F-TERM-05: the "Set Title" modal's key handling — same
+    /// draft-string-plus-`FocusHandle` idiom as `handle_tab_rename_key`,
+    /// which this otherwise mirrors exactly (Enter commits, Escape cancels,
+    /// Backspace/Delete pop one character, anything else with a printable
+    /// `key_char` and no Cmd/Ctrl modifier is inserted).
+    fn handle_title_prompt_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        match key {
+            "enter" | "return" => self.confirm_title_prompt(window, cx),
+            "escape" => self.cancel_title_prompt(window, cx),
+            "backspace" | "delete" => {
+                if let Some(prompt) = self.pending_title_prompt.as_mut() {
+                    prompt.draft.pop();
+                }
+                cx.notify();
+            }
+            _ => {
+                if let Some(character) = event.keystroke.key_char.as_deref()
+                    && !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && character != "\n"
+                    && let Some(prompt) = self.pending_title_prompt.as_mut()
+                {
+                    prompt.draft.push_str(character);
+                    cx.notify();
+                }
+            }
+        }
     }
 
     /// Focuses the given tab's currently-focused pane content, when it has
@@ -10161,6 +10403,22 @@ impl TillerWorkspace {
             cx.stop_propagation();
             return;
         }
+        // F-TERM-08 refutation fix (P103): while the close-confirm banner is
+        // held open, every key stops here -- same shape as `palette_open`
+        // above. `render_pane_close_confirm`'s `ModalFocus` also claims real
+        // GPUI focus and captures keys on the banner's own backdrop, but
+        // this root-level case is the one that actually matters: it runs on
+        // every keystroke regardless of what happens to hold focus, so a
+        // stray key can never fall through to the terminal underneath even
+        // if the focus claim above raced or missed a frame. Before this
+        // existed, opening the banner over a focused terminal (the ordinary
+        // case for `ctrl-alt-w`) left every subsequent keystroke, Enter
+        // included, going straight into the live PTY.
+        if self.pending_pane_close.is_some() {
+            self.handle_pane_close_confirm_key(event, window, cx);
+            cx.stop_propagation();
+            return;
+        }
 
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
@@ -10869,6 +11127,34 @@ impl Render for TillerWorkspace {
         // activity transitions) carry no `Window`. `render` does, every
         // frame, so the value is cached here for those to read.
         self.window_active = window.is_window_active();
+        // F-TERM-05: the "Set Title" modal's field claims focus on the first
+        // render after it opens -- `set_terminal_title` has no `Window` to
+        // call `focus.focus(window, cx)` with itself (see
+        // `PendingTitlePrompt::needs_focus`'s own doc comment), so this is
+        // that same "poll once, from wherever `Window` is reachable" shape
+        // `window_active` above already uses, applied to focus instead.
+        if let Some(prompt) = self.pending_title_prompt.as_mut()
+            && prompt.needs_focus
+        {
+            prompt.needs_focus = false;
+            let focus = prompt.focus.clone();
+            focus.focus(window, cx);
+        }
+        // F-TERM-08 refutation fix (P103): the close-confirm banner claims
+        // real focus the same way, on the same "poll once" shape --
+        // `request_close_terminal_at`/`request_close_activity` have no
+        // `Window` either. Before this the banner never took focus at all,
+        // so opening it while a terminal held focus (the ordinary case for
+        // `ctrl-alt-w`) left the terminal as the actual keyboard-dispatch
+        // target and everything typed while the banner was up reached its
+        // PTY instead.
+        if let Some(pending) = self.pending_pane_close.as_mut()
+            && pending.needs_focus
+        {
+            pending.needs_focus = false;
+            let focus = pending.focus.clone();
+            focus.focus(window, cx);
+        }
         // F-SID-19: if nothing at all holds keyboard focus this frame (e.g.
         // the previously-focused surface -- a terminal, a sidebar row --
         // was just unmounted, and nothing claimed focus in its place, as
@@ -11019,6 +11305,7 @@ impl Render for TillerWorkspace {
                 this.child(self.render_command_palette(theme, cx.entity()))
             })
             .children(self.render_pane_close_confirm(theme, cx.entity()))
+            .children(self.render_title_prompt(theme, cx.entity()))
             .children(self.render_toast(theme, cx.entity()))
             .children(self.render_update_toast(theme, cx.entity()))
     }
@@ -13964,6 +14251,7 @@ mod tests {
         assert_eq!(
             workspace.read_with(&cx.cx, |workspace, _| workspace
                 .pending_pane_close
+                .as_ref()
                 .map(|pending| pending.status)),
             Some(ActivityStatus::Error),
             "the held close remembers the state that made it need confirming"
@@ -13986,13 +14274,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// F-CORE-ACT-23, drawn: the pane close prompt is requested for exactly
-    /// the statuses `tiller_activity::ActivityStatus::requires_close_confirmation`
-    /// names — running, needs-input, error — and for neither done nor idle.
-    /// Every status is attempted against a real pane, and the cancel is a
-    /// real click on the drawn banner.
+    /// F-TERM-08, drawn: the terminal-close prompt is now held
+    /// **unconditionally**, for every status — including a bare Idle close
+    /// (no `AgentStatus` ever notified at all, the fixture's own starting
+    /// state) and Done, neither of which
+    /// `tiller_activity::ActivityStatus::requires_close_confirmation` names.
+    /// This replaces a test of the same name's predecessor that asserted
+    /// "a finished pane closes without a prompt" as correct — that was
+    /// `request_close_terminal_at` wrongly reusing the Activity row's own
+    /// gate (F-CORE-ACT-23's `pane_close_needs_confirmation`), which is the
+    /// defect P103 documents: `ActivityStatus` only recognizes
+    /// `AgentCatalog` CLIs, so a plain `sleep 300` (or any non-agent
+    /// command) is always `Idle` and could never reach that gate.
+    /// Reproduced live: right-click "Close Terminal…" on an idle sole
+    /// terminal used to close it instantly, no prompt. Every status is
+    /// attempted against a real pane, cancel/confirm are real clicks on the
+    /// drawn banner, and the Activity row's own gate
+    /// (`request_close_activity`) is untouched — see
+    /// `drawn_activity_row_close_holds_a_running_tab_and_lets_an_idle_one_go`.
     #[gpui::test]
-    async fn drawn_pane_close_prompt_is_requested_for_exactly_the_urgent_statuses(
+    async fn drawn_pane_close_prompt_is_held_for_every_status_including_idle_and_done(
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
@@ -14009,15 +14310,36 @@ mod tests {
                 .expect("workspace root")
         });
 
-        // Running/NeedsInput/Error all hold the close for confirmation, and
-        // Cancel must leave the pane alone -- run this loop *before* either
-        // no-confirmation case below, both of which (correctly, since
-        // F-TAB-26's fix) actually remove this fixture's sole tab rather
-        // than leaving it standing.
+        // A bare Idle close (no status ever notified) is the exact scenario
+        // that used to close silently -- exercised first, on the fixture's
+        // untouched starting state, then cancelled so the tab survives for
+        // the loop below.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.request_close_terminal_at(0, 0, None, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "an idle pane with no status ever notified must still be held for confirmation"
+        );
+        let cancel = cx
+            .debug_bounds("pane-close-confirm-cancel")
+            .expect("the held close offers a cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "cancelling an idle close leaves the pane alone"
+        );
+
+        // Running/NeedsInput/Error/Done all hold the close for confirmation
+        // too, and Cancel must leave the pane alone.
         for status in [
             AgentStatus::Running,
             AgentStatus::NeedsInput,
             AgentStatus::Error,
+            AgentStatus::Done,
         ] {
             workspace.update(&mut cx.cx, |workspace, cx| {
                 workspace.activity.notify(
@@ -14048,16 +14370,9 @@ mod tests {
             );
         }
 
-        // Done: `ActivityStatus::from_agent_status` maps both `Done` and "no
-        // status notified at all" (Idle) to the same
-        // `requires_close_confirmation() == false` outcome
-        // (`tiller_activity/src/activity.rs`), so this one case stands for
-        // both -- closing this fixture's sole pane a second time to also
-        // cover a bare Idle close would leave no tab left for it to act on.
-        // F-TAB-26: this used to only need to show no prompt; now that the
-        // guard-clause bug is fixed, closing a status that needs no
-        // confirmation on a tab's *only* pane must really remove the tab,
-        // not silently leave it (that silent-leave was the bug).
+        // Confirming ("Close Anyway") on the final (Done) state actually
+        // removes the tab -- F-TAB-26's guard-clause fix still applies once
+        // confirmed, on a status that needs no *Activity-row* confirmation.
         workspace.update(&mut cx.cx, |workspace, cx| {
             workspace.activity.notify(
                 "pane-0",
@@ -14067,14 +14382,15 @@ mod tests {
             workspace.request_close_terminal_at(0, 0, None, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("pane-close-confirm").is_none(),
-            "a finished pane closes without a prompt"
-        );
+        let close_anyway = cx
+            .debug_bounds("pane-close-confirm-close")
+            .expect("the held close offers Close Anyway");
+        cx.simulate_click(close_anyway.center(), Modifiers::none());
+        cx.run_until_parked();
         assert_eq!(
             workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
             0,
-            "a finished pane that is its tab's only pane must actually close the tab"
+            "confirming a finished pane's close, on its tab's only pane, must actually close the tab"
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);
@@ -14249,6 +14565,367 @@ mod tests {
             workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
             0,
             "confirming an Activity close closes the whole tab, not just one pane"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-TERM-05, drawn: "Set Title" opens prefilled with the tab's current
+    /// title, real typed input lands in the field (proving
+    /// `PendingTitlePrompt::needs_focus` actually claims focus — if it
+    /// didn't, `simulate_input` below would land nowhere, not on the
+    /// field), and Enter commits `<prefill><typed>` — the field started
+    /// from the tab's own title, not blank. Swift original:
+    /// `TerminalContextMenuProvider.showSetTitleAlert`'s `NSTextField`,
+    /// prefilled with `tuple.tab.title`.
+    #[gpui::test]
+    async fn set_title_prompt_opens_prefilled_and_enter_commits_the_edit(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("set-title-enter");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs[0].title.clone()),
+            "Terminal",
+            "the fixture's tab starts titled \"Terminal\""
+        );
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_terminal_title(0, 0, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("set-title-prompt-field").is_some(),
+            "\"Set Title\" must open the prompt"
+        );
+
+        cx.simulate_input(" renamed");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("set-title-prompt-field").is_none(),
+            "Enter commits and dismisses the prompt"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs[0].title.clone()),
+            "Terminal renamed",
+            "the committed title is <prefill><typed>, proving the field started prefilled"
+        );
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| !workspace.tabs[0]
+                .title_is_auto_named),
+            "a manual Set Title, like a manual Rename, opts the tab out of auto-naming"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-TERM-05, drawn: Escape cancels — the draft is discarded untouched,
+    /// even after real typing landed in it.
+    #[gpui::test]
+    async fn escape_cancels_the_set_title_prompt_without_changing_the_title(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("set-title-escape");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_terminal_title(0, 0, cx);
+        });
+        cx.run_until_parked();
+
+        cx.simulate_input("this must not stick");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("set-title-prompt-field").is_none(),
+            "Escape dismisses the prompt"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs[0].title.clone()),
+            "Terminal",
+            "Escape must leave the title exactly as it was"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// F-TERM-05: "empty input is a no-op rather than a blank title" — a
+    /// draft that trims to empty, committed with Enter (not Escape), must
+    /// still leave the title alone. This is `apply_manual_tab_title`'s own
+    /// rule (shared with the sidebar's inline "Rename"), driven here
+    /// through the Set Title modal specifically.
+    #[gpui::test]
+    async fn set_title_prompt_treats_a_blank_committed_draft_as_a_no_op(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("set-title-blank");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_terminal_title(0, 0, cx);
+        });
+        cx.run_until_parked();
+
+        // Clear the prefilled "Terminal" one character at a time, then
+        // commit only whitespace.
+        let clear_prefill = "backspace ".repeat("Terminal".len());
+        cx.simulate_keystrokes(clear_prefill.trim());
+        cx.simulate_input("   ");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("set-title-prompt-field").is_none(),
+            "Enter dismisses the prompt even when the draft is blank"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs[0].title.clone()),
+            "Terminal",
+            "a blank (post-trim) draft must not overwrite the title"
+        );
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Pulls the fixture's one live `TerminalView` back out of a workspace
+    /// built by `worktree_urgency_test_workspace` -- needed to focus it
+    /// directly and to read its real PTY-backed screen content afterward.
+    fn urgency_fixture_terminal(
+        workspace: &Entity<TillerWorkspace>,
+        cx: &VisualTestContext,
+    ) -> Entity<TerminalView> {
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let mut view = None;
+            workspace.tabs[0].panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view: v } = content {
+                    view = Some(v.clone());
+                }
+            });
+            view.expect("the urgency fixture's sole tab has a terminal pane")
+        })
+    }
+
+    /// Positive control for
+    /// `pane_close_confirm_banner_blocks_keystrokes_from_reaching_the_focused_terminal`
+    /// below: with no dialog ever opened, real keystrokes sent to a
+    /// genuinely focused terminal reach its PTY and come back echoed onto
+    /// the screen. Proves the leak detector that test relies on can detect
+    /// a leak at all -- a detector that never fires proves nothing (a
+    /// refuted earlier verdict on this exact banner passed for exactly that
+    /// reason: it drove the mouse-only right-click path, which never put
+    /// keyboard focus on the terminal, so its own "no leak" check could not
+    /// have failed either way).
+    #[gpui::test]
+    async fn terminal_keystrokes_reach_the_pty_when_no_dialog_is_open(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("control-no-dialog");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let terminal = urgency_fixture_terminal(&workspace, &cx);
+
+        cx.update(|window, app| {
+            let focus = terminal.read(app).focus_handle(app);
+            focus.focus(window, app);
+        });
+        cx.run_until_parked();
+
+        let needle = format!("CONTROL_ECHO_{}", std::process::id());
+        cx.simulate_input(&needle);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            cx.background_executor.advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let seen = terminal.read_with(&cx.cx, |terminal, _| {
+                String::from_utf8_lossy(&terminal.snapshot().scrollback).contains(&needle)
+            });
+            if seen {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "control failed: typed input never reached the focused terminal's PTY \
+                     (the leak-detection test below cannot be trusted if this control cannot \
+                     pass)"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The refutation this closes (`docs/linux-rewrite/tasks/
+    /// P103-two-close-confirmation-contracts.md`): `render_pane_close_confirm`
+    /// used to draw the "Close terminal?" banner as a plain
+    /// absolutely-positioned div with no `.track_focus()`/`window.focus()`
+    /// and no case in `handle_root_key_down`, so it never took keyboard
+    /// focus. Opened while a terminal held focus -- the ordinary case for
+    /// the real `ctrl-alt-w` chord a person presses -- every keystroke,
+    /// Enter included, went straight into the live PTY underneath.
+    ///
+    /// Driven from the path where the failure is possible, which is the
+    /// specific thing the refuted earlier verdict got wrong: types into the
+    /// terminal *first* so it genuinely holds focus, opens the banner with
+    /// the real `ctrl-alt-w` chord (not a mouse click), types more text plus
+    /// Escape while it is up, and only then checks the PTY. Escape must
+    /// cancel (not close), and the leak needle must never appear -- checked
+    /// against the same fully-settled snapshot the positive control above
+    /// proved its own canary reaches, so an absent needle here cannot be
+    /// explained by "didn't wait long enough".
+    #[gpui::test]
+    async fn pane_close_confirm_banner_blocks_keystrokes_from_reaching_the_focused_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("leak-ctrl-alt-w");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let terminal = urgency_fixture_terminal(&workspace, &cx);
+
+        // Type into the terminal *first*, proving it genuinely holds focus
+        // before the banner ever opens -- the exact precondition the
+        // refuted verdict's mouse-driven check never reached.
+        cx.update(|window, app| {
+            let focus = terminal.read(app).focus_handle(app);
+            focus.focus(window, app);
+        });
+        cx.run_until_parked();
+        let preamble = format!("PREAMBLE_{}", std::process::id());
+        cx.simulate_input(&preamble);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            cx.background_executor.advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let seen = terminal.read_with(&cx.cx, |terminal, _| {
+                String::from_utf8_lossy(&terminal.snapshot().scrollback).contains(&preamble)
+            });
+            if seen {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setup failed: the terminal never echoed the preamble, so it was never really focused"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // The real chord a person presses -- not a mouse click on a context
+        // menu item, which is the path the refuted verdict's own check used
+        // and which never puts keyboard focus on the terminal at all.
+        cx.simulate_keystrokes("ctrl-alt-w");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "ctrl-alt-w must open the close-confirm banner"
+        );
+
+        let leak_needle = format!("LEAK_{}", std::process::id());
+        cx.simulate_input(&leak_needle);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_none(),
+            "Escape must cancel the banner"
+        );
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()),
+            1,
+            "Escape must cancel the close, not confirm it -- the tab must survive"
+        );
+
+        // Cancelling restores real keyboard focus to the terminal (see
+        // `cancel_pending_pane_close`) -- type a canary and wait for *it*,
+        // rather than sleeping a fixed duration, so the absence check below
+        // cannot be explained by "the test didn't wait long enough": by the
+        // time the canary (typed strictly after the leak needle) has been
+        // echoed back, anything typed earlier that reached the PTY would
+        // already be in the same buffer.
+        let canary = format!("CANARY_{}", std::process::id());
+        cx.simulate_input(&canary);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            cx.background_executor.advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            let seen = terminal.read_with(&cx.cx, |terminal, _| {
+                String::from_utf8_lossy(&terminal.snapshot().scrollback).contains(&canary)
+            });
+            if seen {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelling the banner never restored terminal focus -- the canary never echoed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let final_screen = terminal.read_with(&cx.cx, |terminal, _| {
+            String::from_utf8_lossy(&terminal.snapshot().scrollback).into_owned()
+        });
+        assert!(
+            !final_screen.contains(&leak_needle),
+            "keystrokes typed while the close-confirm banner was open must not reach the PTY"
         );
 
         shutdown_workspace_terminals(&workspace, &mut cx);

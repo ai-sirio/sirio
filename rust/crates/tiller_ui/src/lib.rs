@@ -16,6 +16,7 @@ pub mod composer;
 pub mod controls;
 pub mod editor;
 pub mod file_view;
+pub mod modal;
 pub mod project_forms;
 pub mod project_identity;
 pub mod right_panel;
