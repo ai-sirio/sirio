@@ -607,6 +607,24 @@ impl Default for Radii {
 /// `main.rs` for their own compact chrome, none of which this brief owns —
 /// changing those values would silently reflow surfaces P76 has no mandate
 /// to touch.
+///
+/// **P102 fallback-only fields.** `traffic_light_diameter`,
+/// `traffic_light_gap`, `traffic_light_cluster_gap` and
+/// [`Self::cluster_start`] exist only to lay out the three dots
+/// `titlebar.rs::traffic_light` draws — and per
+/// `docs/linux-rewrite/tasks/P102-the-top-bar-belongs-to-the-os.md`, that
+/// happens on Linux/Windows only when `Window::window_decorations()`
+/// reports `Decorations::Client` (nothing else will decorate the window
+/// then). Under `Decorations::Server` — the common case, since the GPUI
+/// revision this app pins already requests server-side decorations by
+/// default — none of these four are read; the row draws no dots and the
+/// icon cluster reuses `traffic_light_inset` as its own leading edge
+/// instead (see `titlebar.rs`'s `cluster_leading_gap`). `traffic_light_inset`
+/// itself is not fallback-only for that reason: it is read in both
+/// branches, on macOS unconditionally. `bar_height` and
+/// `cluster_button_gap` are unaffected either way — they size the row and
+/// the (always-drawn) icon cluster respectively, neither of which is a
+/// window control.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserChrome {
     /// The bar's total height (comet: 38px).
@@ -617,21 +635,35 @@ pub struct BrowserChrome {
     /// size of macOS's own dots, chosen independently for legibility at a
     /// 38px bar height (12 / 38 ≈ 0.32 of the bar), not copied from any
     /// comet inset constant.
+    ///
+    /// P102 fallback-only: read only when `titlebar.rs` draws the dots at
+    /// all — see the struct docs.
     pub traffic_light_diameter: Pixels,
     /// Edge-to-edge gap between adjacent lights (8px — with a 12px diameter
     /// this gives a 20px centre-to-centre pitch, the commonly cited macOS
     /// spacing; derived for legibility, not read from comet, which never
     /// lays this out itself).
+    ///
+    /// P102 fallback-only: read only when `titlebar.rs` draws the dots at
+    /// all — see the struct docs.
     pub traffic_light_gap: Pixels,
     /// Left inset of the first light. Reuses comet's own **non-macOS**
     /// baseline (`cluster_buttons_start(is_macos: false, ..) == 10.0`) —
     /// "how close to the edge do our own, non-OS-drawn controls sit" — rather
     /// than macOS's `{14, 15}` inset, which is calibrated to Apple's dot
     /// size and chrome, not ours.
+    ///
+    /// Not P102 fallback-only: `titlebar.rs` reads this in **both**
+    /// branches — as the lights' own inset when they are drawn, and as the
+    /// icon cluster's leading inset (its own "first control on the row"
+    /// case) when they are not.
     pub traffic_light_inset: Pixels,
     /// Gap between the last light and the first cluster button (8px — the
     /// same rhythm as `traffic_light_gap`, so the light group reads as one
     /// unit and the handoff to the cluster does not look accidental).
+    ///
+    /// P102 fallback-only: read only when `titlebar.rs` draws the dots at
+    /// all — see the struct docs.
     pub traffic_light_cluster_gap: Pixels,
     /// Gap between adjacent cluster buttons — comet's own measurement
     /// (`CLUSTER_BUTTONS_WIDTH = 24.0 * 3.0 + 2.0 * 2.0`, i.e. 2px gaps).
@@ -642,10 +674,13 @@ pub struct BrowserChrome {
 }
 
 impl BrowserChrome {
-    /// Where the button cluster starts, in px from the window's left edge —
-    /// **derived, not copied from comet's 88px** (that number is macOS's own
-    /// OS-drawn inset, sized to Apple's dot geometry, which this bar does
-    /// not use).
+    /// Where the button cluster starts, in px from the window's left edge,
+    /// **when the three traffic-light dots are drawn** — P102 fallback-only,
+    /// same as the fields it derives from (see the struct docs); with no
+    /// dots drawn the cluster starts at `traffic_light_inset` instead, not
+    /// this value. **Derived, not copied from comet's 88px** (that number
+    /// is macOS's own OS-drawn inset, sized to Apple's dot geometry, which
+    /// this bar does not use).
     ///
     /// `traffic_light_inset + 3 lights + 2 inter-light gaps +
     /// traffic_light_cluster_gap` = `10 + 3×12 + 2×8 + 8` = **70px** at the
