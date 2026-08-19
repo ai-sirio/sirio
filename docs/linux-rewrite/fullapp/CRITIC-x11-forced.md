@@ -284,7 +284,137 @@ what actually clears it.
 
 ---
 
+## Follow-up — F-WIN-06's actual VERIFY: the two key chords, driven for real
+
+The seven items above are the display-backend commit's own review. Separately, the ledger flagged
+that `F-WIN-06`'s VERIFY was never actually driven by anyone: *"Enable the universal workspace in
+the test build, press `⇧⌘L`, then press `⌘L`, and confirm a browser tab and focused address field
+respectively. SRC: `App/TillerApp.swift:76`."* Every browser tab in evidence up to this point —
+including in the seven items above — was created from the `+` menu, and an earlier pass
+(`FINISH-window-persist.md`) explicitly substituted the `+` menu for the chord and marked the row
+PASSED on that basis. A menu click proves the *action* exists; it proves nothing about whether the
+*chord* reaches it. This section drives the chords themselves, as real key events, against the
+same warm build.
+
+### 0. The "universal workspace" precondition
+
+`App/TillerApp.swift:76` gates both commands behind `WorkspaceEngineGate.isEnabled`
+(`App/Workspace/WorkspaceEngineGate.swift`) — a macOS-only flag (`UserDefaults` key
+`workspace.universalEngine` / env override `TILLER_UNIVERSAL_WORKSPACE`) that **defaults to
+`true`**. So on macOS these two menu commands are present out of the box; nothing needs enabling
+in the ordinary case.
+
+```
+grep -rn 'WorkspaceEngineGate\|universal.workspace\|UniversalWorkspace' rust/crates -i
+```
+→ **zero hits.** This gate, and the concept of a "universal workspace" toggle, does not exist
+anywhere in the Rust port — confirmed independently by an earlier critic pass (`F-AUTO-09` in
+`fullapp/F-AUTO.md`) and reconfirmed here. This is not a reachability problem to work around: the
+gate simply has no counterpart to enable, and its absence doesn't block anything by itself — the
+Browser *tab* is already unconditionally available via the `+` menu in this port, gate or no gate.
+The actual question is narrower and answerable directly: do the two *chords* reach anything?
+
+### 1. Source: no keybinding exists for either chord, anywhere
+
+```
+grep -rn 'KeyBinding::new' rust/crates --include='*.rs'
+```
+Every binding in the whole tree (30+ call sites across `main.rs`, `panes.rs`, `tab_bar.rs`,
+`chat.rs`, `settings.rs`) was enumerated by hand. None mention a browser action or an `l`/`L` key
+combination of any kind. `linux_window_shortcuts()` (`main.rs:129-140`) — the single table this
+codebase uses for every other macOS-chord-to-Linux-chord conversion (e.g. `⇧⌘O` →
+`"ctrl-shift-o"`, commented at `main.rs:135-136` as the explicit Linux stand-in) — lists exactly
+six commands, and neither "New Browser" nor "Focus Address Bar" is among them.
+
+Also checked: no keymap asset file exists (`find rust -iname '*keymap*'` → nothing; no
+`load_keymap`/`Keymap::` call anywhere) — every binding in this app is a literal `KeyBinding::new`
+call in source, so the grep above is exhaustive, not a sample.
+
+**The address-bar half is a stronger gap than "unbound."** There is no `FocusAddressBar` action —
+or any action — for it at all (`grep -rn 'FocusAddressBar\|focus_address\|AddressBar'` →
+zero hits). `rust/crates/tiller_ui/src/browser.rs:1429` gives the address field a `FocusHandle` and
+focuses it from an `on_click` mouse handler — the widget itself is focusable, it simply has no
+keyboard path to it, not even an inert one.
+
+### 2. Live drive — New Browser chord
+
+Build reused from the warm `/var/tmp/tt-x11-crit` target. Same private nested-Xwayland shape as
+case 2 above (`TILLER_X11_LABEL=win06crit TILLER_X11_KEEP=1 Scripts/x11-nested-drive.sh`), then
+driven directly against the kept-alive instance (`DISPLAY=:3`, `WINID=4194305`,
+`SWAYSOCK=/tmp/win06crit-sway.sock`) with hand-written `xdotool key --window $WINID <chord>` calls
+— real `XTestFakeKeyEvent`s, not the control socket. `project.add` + `workspace.select` against a
+disposable fixture repo first, then a real click on the Chat pane to give the **window** X11 input
+focus before any chord (`winb06-00-baseline-focused.png`, 7160 colours).
+
+Tried the Linux spelling this codebase's own `linux_window_shortcuts()` table uses everywhere else
+(cmd→ctrl, shift→shift), plus the literal macOS spelling in case GPUI maps `cmd` to `super` on
+Linux:
+
+| chord tried | exact command | `browser.get` after | screenshot | colours |
+|---|---|---|---|---|
+| `ctrl+shift+l` | `xdotool key --window 4194305 ctrl+shift+l` | `no browser surface` | `winb06-01-after-ctrl-shift-l.png` | 7160 |
+| `ctrl+l` | `xdotool key --window 4194305 ctrl+l` | `no browser surface` | `winb06-02-after-ctrl-l.png` | 7160 |
+| `super+shift+l` | `xdotool key --window 4194305 super+shift+l` | `no browser surface` | `winb06-03-after-super-shift-l.png` | 7160 |
+| `super+l` | `xdotool key --window 4194305 super+l` | `no browser surface` | `winb06-04-after-super-l.png` | 7160 |
+
+All four screenshots are colour-identical to the baseline (7160) — not just "no browser tab
+appeared," literally **zero pixels changed** for any of the four chords. `browser.get` (the same
+control-socket probe used throughout this report, here used only as a read-only assertion, not to
+drive the action) returned `"no browser surface"` after every one. **FAIL** — no candidate spelling
+of the new-browser chord does anything.
+
+### 3. Live drive — Focus Address Bar chord
+
+Opened a real Browser tab the only way this build supports — `+` menu → New Browser
+(`winb06-05-plus-menu-open.png` shows the real menu, coordinates read off this screenshot rather
+than guessed, per the harness's own documented coordinate trap). It auto-loaded
+`https://example.com/` (`winb06-06-browser-open-via-menu.png`; `browser.get` confirms
+`title:"Example Domain"`).
+
+Deliberately defocused the address field — clicked into the page content area, not the address bar
+(`click 600 400`, `winb06-07-defocused-address-bar.png`) — then:
+
+```
+xdotool key --window 4194305 ctrl+l
+xdotool type --window 4194305 --delay 20 -- CHORDTEST123
+```
+
+Result: `winb06-08-after-ctrl-l-and-type-no-change.png` is byte-identical in size to the
+pre-chord screenshot (62727 B both) and visually identical — address bar still reads
+`https://example.com/`, no cursor, no marker text anywhere on screen. The chord did not focus the
+field and the typed characters landed nowhere observable.
+
+**Control, to validate the instrument itself**: clicked the address bar directly
+(`click 584 89`), `ctrl+a`, typed the identical marker:
+
+```
+xdotool key --window 4194305 ctrl+a
+xdotool type --window 4194305 --delay 20 -- CHORDTEST123
+```
+
+`winb06-09-direct-click-proves-widget-works.png` shows the address field genuinely replaced with
+`CHORDTEST123` and a visible text cursor. This confirms the marker-typing method is valid and the
+widget itself works correctly — the `ctrl+l` chord specifically is what does nothing, not the
+field or the typing technique.
+
+**FAIL** — the address-bar chord does not focus the field, under any candidate spelling tried
+(and per item 1, there is no action registered for it to reach even in principle).
+
+### Verdict on F-WIN-06's VERIFY
+
+Both halves **FAIL** when driven as the row actually specifies — as key chords, not as menu
+clicks. This is not an unreachable-precondition situation (item 0 rules that out: the "universal
+workspace" gate has no counterpart to block on, and the Browser tab is unconditionally available
+regardless). It is a straightforward gap: the macOS build's `⇧⌘L`/`⌘L` menu commands were never
+given a Linux keybinding, and `⌘L`'s underlying action (focus the address field) was never even
+built as an action — only as a mouse-click handler. The tab-creation *capability* exists and works
+(via the `+` menu, and via the control socket, both previously proven); the *chords* the row asks
+about do not exist. Recommend recording this precisely rather than as "PASSED (substitute route)"
+or "unreachable" — neither describes what was actually found.
+
 ## Summary
+
+**7d4d2182 review (items 1–7)** — verdict **CLEARED**:
 
 | # | Case | Verdict |
 |---|---|---|
@@ -296,6 +426,12 @@ what actually clears it.
 | 6 | Platform gating | PASS |
 | 7 | Unit tests | PASS, but structurally weak — see above |
 
+**Follow-up — F-WIN-06's own VERIFY (new-browser and address-bar chords)** — verdict **FAIL**, both
+halves, per the "Follow-up" section above. This is a separate finding from the 7d4d2182 review: the
+display-backend commit is what makes the Browser tab's *content* render at all (proven above), but
+the specific keyboard chords `F-WIN-06`'s VERIFY names were never wired to anything in this port,
+independent of that commit.
+
 Non-blocking findings for the record:
 - A reproducible `Gdk-CRITICAL: _gdk_frame_clock_freeze: assertion 'GDK_IS_FRAME_CLOCK (clock)'
   failed` fires once at startup specifically when X11 is forced at runtime from a
@@ -305,4 +441,5 @@ Non-blocking findings for the record:
 - `display_backend`'s own unit tests only cover the pure `choose()` function, not
   `prepare_environment()`'s actual env mutation — noted under item 7.
 
-**CLEARED**
+**CLEARED** (7d4d2182, items 1–7). The F-WIN-06-VERIFY follow-up above is scored separately: both
+key chords **FAIL** to reach anything, live-driven and source-confirmed.
