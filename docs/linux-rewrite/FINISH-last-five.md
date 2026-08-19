@@ -331,3 +331,84 @@ Commit: `c4ec95ce` (adds `debug_selector`s to `render_pane_tree`'s divider/leaf 
 drawn test to `rust/crates/tiller/src/main.rs`).
 
 ---
+
+## F-CHAT-33 — the pre-fix/post-fix contrast, driven independently
+
+Row: "See turn errors and MCP configuration warnings with acknowledgement." VERIFY: "Trigger a
+turn error and an MCP warning in separate trials, confirm each banner, and click OK to dismiss it."
+(`01-inventory-app.md:191`, SRC `App/Chat/ChatPaneView.swift:177`.)
+
+**Already proven, not re-touched:** the turn-error/retryable half, and the MCP-warning UI control's
+existence and reachability from the live `TurnEnded` event loop (`chat.rs:1729`) — both re-run green
+fresh this wave, per the evidence cell.
+
+**Missing half, per the brief:** the pre-fix contrast — that the fix commit
+(`83be7a14`, `fix(F-CHAT-33): add an OK-to-dismiss control to every chat error banner`) genuinely
+changed observable behavior, rather than the two regression tests it added being trivially green
+against code that already passed them. The evidence cell called this "not independently driveable
+at HEAD without reverting the fix." Driven this pass exactly as the brief suggests.
+
+### Method: `git archive`, not `git checkout`
+
+Per the hard rules (no `git checkout`/`reset`/etc.), extracted the pre-fix tree to a disposable
+scratch directory:
+
+```
+git archive 407f7c9b | tar -x -C <scratch>/prefix-chat33   # 83be7a14^ == 407f7c9b
+```
+
+Transplanted the two regression tests `83be7a14` added
+(`an_mcp_warning_offers_ok_to_dismiss`, `a_retryable_turn_error_offers_ok_alongside_retry`) **verbatim**
+from HEAD's `rust/crates/tiller_ui/src/chat.rs` into the archived pre-fix tree's copy of the same
+file (both tests' own dependencies — `Entry::Error`, `ErrorKind::McpWarning`, `Chat::push_entry`,
+`refresh_frame`, `chat-retry`'s existing selector — were confirmed present in the pre-fix tree by
+grep before transplanting, so this is a pure test-only addition, not a disguised backport of the
+fix itself), then built and ran them there with `cargo test --manifest-path rust/Cargo.toml -p
+tiller_ui -- an_mcp_warning_offers_ok_to_dismiss a_retryable_turn_error_offers_ok_alongside_retry`.
+This is the scratch tree only; nothing in the real repo was touched for this row, and the scratch
+tree was deleted afterward (disk pressure).
+
+### Result: RED on pre-fix, independently reproduced
+
+```
+thread 'chat::tests::an_mcp_warning_offers_ok_to_dismiss' panicked at crates/tiller_ui/src/chat.rs:10288:9:
+the MCP warning must render its own banner
+
+thread 'chat::tests::a_retryable_turn_error_offers_ok_alongside_retry' panicked at crates/tiller_ui/src/chat.rs:10347:14:
+a retryable turn error must also offer OK to dismiss
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 349 filtered out
+```
+
+Both fail, independently confirming the fix commit's own claim rather than trusting it. The MCP
+test's exact failure point is a *stronger* pre-fix gap than the fix commit's own message described:
+it panics on the very first assertion (`chat-mcp-warning-banner` bounds is `None`) rather than on
+the OK-button assertion, because a direct read of the pre-fix render code (`chat.rs` around line
+4950 in that tree) shows the MCP-warning banner had no dedicated `debug_selector` at all pre-fix —
+only `chat-auth-required-banner`/`chat-disconnected-banner` were special-cased — and the only button
+branch was `.when(retryable, ...)`, so a non-retryable error (every `McpWarning`) drew zero
+interactive controls, full stop. The retryable-error test's failure matches the fix commit's own
+described panic message exactly.
+
+Re-confirmed GREEN at HEAD, fresh, this pass, on the real repo (not the scratch tree):
+
+```
+$ cargo test --manifest-path rust/Cargo.toml -p tiller_ui --lib -- an_mcp_warning_offers_ok_to_dismiss a_retryable_turn_error_offers_ok_alongside_retry
+test chat::tests::a_retryable_turn_error_offers_ok_alongside_retry ... ok
+test chat::tests::an_mcp_warning_offers_ok_to_dismiss ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 357 filtered out
+```
+
+### Row verdict
+
+Turn-error/retryable half: **PASSED** (prior wave, live, not re-touched here). MCP-warning UI
+control existence/reachability: **PASSED** (prior wave, not re-touched here). Pre-fix/post-fix
+contrast: **independently reproduced this pass** — RED on `407f7c9b` (pre-fix), GREEN on HEAD, by
+this critic, not by trusting the builder's commit message.
+
+**Row verdict: `half-proven` -> promoted to `PASSED`.** All three legs the evidence cell named are
+now independently driven: the live behavior, the control's reachability, and the fix's genuine
+causal effect (not just green tests against already-passing code). No code change was needed or
+made to the real repo for this row.
+
+---
