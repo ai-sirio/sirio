@@ -203,6 +203,32 @@ trap cleanup EXIT
 
 kill_ours TILLER_SOCKET "$SOCK" tiller
 kill_ours SWAYSOCK "$SWAYSOCK" sway
+# The three helpers below leak wherever cleanup() does not run, and cleanup()
+# deliberately does not run under TILLER_WL_KEEP. The app and the compositor are
+# safe because the two lines above reap them at startup; these three had no such
+# line, so a critic re-invoking this script with one fixed label accumulated one
+# of each per invocation.
+#
+# Measured 2026-08-19, after about twenty minutes of a KEEP-mode critic driving
+# label `fprjfreshD`: 20 dbus-daemons, 18 virtual-pointers and 13 wtypes alive,
+# against exactly one tiller and one sway. The age histogram of the survivors was
+# a new one every 50-90s — the invocation cadence — which is what identifies this
+# as a per-invocation leak rather than a per-pass one.
+#
+# `TILLER_WL_LABEL` is the key for all three: every child of this script inherits
+# it (dbus-daemon keeps it through `env -u WAYLAND_DISPLAY -u DISPLAY`, verified
+# in /proc/N/environ), and it is the one identifier the bus daemon carries — being
+# the *server*, it has no DBUS_SESSION_BUS_ADDRESS of its own to match on. When the
+# caller leaves TILLER_WL_LABEL unset, LABEL falls back to `wl-$$`, no process
+# carries that, and these three find nothing — correct, because a per-PID label
+# cannot have stale siblings in the first place.
+#
+# comm-scoping via kill_ours' `pgrep -x` is what keeps this safe: this script's own
+# comm is `bash`, so it can never match itself, and a critic that exports
+# TILLER_WL_LABEL into its own shell is not at risk either.
+kill_ours TILLER_WL_LABEL "$LABEL" dbus-daemon
+kill_ours TILLER_WL_LABEL "$LABEL" virtual-pointer
+kill_ours TILLER_WL_LABEL "$LABEL" wtype
 
 W1=1715 H1=972          # the two sizes shot() alternates between; see the repaint note below
 W2=1400 H2=900
