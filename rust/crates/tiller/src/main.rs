@@ -28,7 +28,9 @@ use tiller_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
 use tiller_persistence::{AppDatabase, AppSettings, AppearanceMode, FileIconTheme};
-use tiller_project::{TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository};
+use tiller_project::{
+    OnceGate, TabKind, UpdateEvent, UpdateState, current_branch, is_git_repository,
+};
 use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
     TerminalExitStatus, TerminalIdentity, TerminalLinkEvent, TerminalPaneCache,
@@ -3156,7 +3158,18 @@ struct TillerWorkspace {
     activity: AgentActivityModel,
     /// Prevents scheduling restored scrollback more than once before the
     /// first frame mounts the terminal entities.
-    restored_scrollback_scheduled: bool,
+    ///
+    /// F-CORE-DOM-08: this is exactly the "one-shot restore/setup callback"
+    /// `tiller_project::OnceGate` (ported from `OnceGate.swift:3`) was
+    /// written for, but a whole-tree grep for `OnceGate` found zero callers
+    /// anywhere in the app -- this field reimplemented the same guard by
+    /// hand instead of using it, so the ported type sat dead while an
+    /// unwired duplicate of its exact behaviour did the real work. Wired
+    /// here rather than built from scratch: `render` calls
+    /// `schedule_restored_scrollback` on every frame, and only the first
+    /// call whose tabs still carry persisted scrollback may schedule the
+    /// deferred replay.
+    restored_scrollback_scheduled: OnceGate,
     /// F-CORE-ACT-20: whether the OS considers this window focused, per
     /// `Window::is_window_active` -- a real, already-portable GPUI API
     /// (backed uniformly by every platform's own window, no linux-specific
@@ -3745,7 +3758,7 @@ impl TillerWorkspace {
             palette_previous_focus: None,
             root_focus: cx.focus_handle(),
             activity,
-            restored_scrollback_scheduled: false,
+            restored_scrollback_scheduled: OnceGate::default(),
             window_active: true,
             browser_origins,
             show_settings: false,
@@ -10545,18 +10558,22 @@ impl TillerWorkspace {
 
 impl TillerWorkspace {
     fn schedule_restored_scrollback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.restored_scrollback_scheduled
-            || !self
-                .tabs
-                .iter()
-                .any(|tab| !tab.session_state.scrollback.is_empty())
+        if !self
+            .tabs
+            .iter()
+            .any(|tab| !tab.session_state.scrollback.is_empty())
         {
             return;
         }
-        self.restored_scrollback_scheduled = true;
-        cx.defer_in(window, |workspace, _window, cx| {
-            replay_persisted_terminal_scrollback(&mut workspace.tabs, cx);
-            cx.notify();
+        // F-CORE-DOM-08: OnceGate::fire is a no-op (returns false, runs
+        // nothing) on every call after the first -- the same guard the old
+        // hand-rolled `bool` gave, now backed by the ported/tested type
+        // instead of duplicating its logic beside it.
+        self.restored_scrollback_scheduled.fire(|| {
+            cx.defer_in(window, |workspace, _window, cx| {
+                replay_persisted_terminal_scrollback(&mut workspace.tabs, cx);
+                cx.notify();
+            });
         });
     }
 }
@@ -18837,6 +18854,81 @@ mod tests {
                 .any(|window| window == needle),
             "restored terminal must contain the persisted nonce"
         );
+    }
+
+    /// F-CORE-DOM-08: `restored_scrollback_scheduled` used to be a hand-rolled
+    /// `bool` doing the exact job `tiller_project::OnceGate` was ported and
+    /// unit-tested for (`OnceGate.swift:3`) -- a validated whole-tree
+    /// `grep -rn "OnceGate" rust/ --include="*.rs"` found zero callers
+    /// outside `tiller_project` itself, so the ported type sat dead while an
+    /// unwired duplicate of its own logic did the real work in `main.rs`.
+    /// `schedule_restored_scrollback` now routes through
+    /// `OnceGate::fire` instead of a plain flag. This proves the specific
+    /// gap the caller-check found -- that the call site is now genuinely
+    /// governed by `OnceGate`, not merely behaviourally equivalent to it --
+    /// by firing a second, throwaway probe on the SAME field after the real
+    /// call and asserting it reports "already fired", exactly like
+    /// `tiller_project::domain::tests::once_gate_runs_only_the_first_callback`
+    /// asserts on a bare `OnceGate` in isolation. On the unfixed tree
+    /// (`restored_scrollback_scheduled: bool`) this test does not compile:
+    /// `error[E0599]: no method named `fire` found for type `bool` in the
+    /// current scope`.
+    #[gpui::test]
+    async fn schedule_restored_scrollback_is_gated_by_once_gate(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // Seed persisted scrollback on the fixture's own tab/pane so
+        // `schedule_restored_scrollback`'s guard condition is true.
+        workspace.update(&mut cx.cx, |workspace, _| {
+            let pane_id = workspace.tabs[0].focused_pane;
+            workspace.tabs[0]
+                .session_state
+                .scrollback
+                .insert(pane_id, b"F-CORE-DOM-08_PROBE".to_vec());
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.schedule_restored_scrollback(window, cx);
+        });
+
+        let already_fired = workspace.update(&mut cx.cx, |workspace, _| {
+            !workspace.restored_scrollback_scheduled.fire(|| {})
+        });
+        assert!(
+            already_fired,
+            "schedule_restored_scrollback's real call must have fired \
+             restored_scrollback_scheduled -- a second .fire() probe on the \
+             same field must return false, exactly as OnceGate::fire \
+             documents"
+        );
+
+        // The deferred replay this fire() scheduled must actually run and
+        // consume the persisted scrollback -- the observable effect the
+        // VERIFY clause names.
+        cx.run_until_parked();
+        let scrollback_left = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace.tabs[0].session_state.scrollback.len()
+        });
+        assert_eq!(
+            scrollback_left, 0,
+            "the persisted scrollback must have been replayed and cleared"
+        );
+
+        // A second call, now that the tab carries no persisted scrollback at
+        // all, must still be inert (the gate's own guard, and the `.any()`
+        // early return, both agree) -- no panic, no re-scheduling.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.schedule_restored_scrollback(window, cx);
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]
