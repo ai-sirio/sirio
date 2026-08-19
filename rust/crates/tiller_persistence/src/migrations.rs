@@ -242,6 +242,27 @@ fn migrate_v13(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v14 — isolated agent-CLI accounts (F-SET-15). Mirrors the Swift app's
+/// `AgentAccountRecord` table: a named reference to an isolated config
+/// directory, separate from `account_identity` (v13, a single-slot cache of
+/// whatever the CLI's own unmodified on-disk login currently reports).
+/// "Which account is active" is a small amount of per-provider state, not a
+/// record of its own, so it reuses the existing generic `setting` table
+/// under the same key the Swift app used
+/// (`"agentAccounts.<provider>.activeId"`) rather than adding a second
+/// table for one nullable string.
+fn migrate_v14(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_account (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            label TEXT NOT NULL,
+            config_dir_path TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -258,6 +279,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v11,
     migrate_v12,
     migrate_v13,
+    migrate_v14,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already

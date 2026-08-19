@@ -363,8 +363,23 @@ pub fn action_row(action: impl IntoElement, theme: Theme) -> Div {
         .bg(theme.card_fill)
 }
 
-/// A compact account row with the two status pills used by provider cards.
-pub fn account_row(label: &'static str, subtitle: &'static str, active: bool, theme: Theme) -> Div {
+/// A compact, selectable account row with the two status pills used by
+/// provider cards. `row_id` must be unique within its section (the caller
+/// derives it from the account's own id, or a fixed slug for "System
+/// default"). Clicking anywhere on the row invokes `on_select` — F-SET-15:
+/// this used to take no callback at all, so no row anywhere could ever
+/// become the active one, regardless of how many existed.
+pub fn account_row<F>(
+    row_id: String,
+    label: String,
+    subtitle: String,
+    active: bool,
+    theme: Theme,
+    on_select: F,
+) -> impl IntoElement
+where
+    F: Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+{
     let spacing = theme.cosmic.spacing;
     let mut badges = div()
         .flex()
@@ -408,8 +423,8 @@ pub fn account_row(label: &'static str, subtitle: &'static str, active: bool, th
                                 .text_size(theme.typography.headline)
                                 .text_color(theme.title)
                                 .child(text!(
-                                    id = format!("settings-account-label-{label}"),
-                                    label
+                                    id = format!("settings-account-label-{row_id}"),
+                                    label.clone()
                                 )),
                         )
                         .child(badges),
@@ -419,11 +434,16 @@ pub fn account_row(label: &'static str, subtitle: &'static str, active: bool, th
                         .text_size(theme.typography.footnote)
                         .text_color(theme.subtitle)
                         .child(text!(
-                            id = format!("settings-account-subtitle-{label}"),
+                            id = format!("settings-account-subtitle-{row_id}"),
                             subtitle
                         )),
                 ),
         )
+        .id(row_id.clone())
+        .debug_selector(move || row_id.clone())
+        .cursor(CursorStyle::PointingHand)
+        .hover(|style| style.bg(theme.row_hover))
+        .on_click(on_select)
 }
 
 /// A plain text action button.

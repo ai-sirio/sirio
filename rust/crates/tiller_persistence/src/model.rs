@@ -450,6 +450,30 @@ pub mod settings_ranges {
     pub const REFRESH_INTERVAL_MIN: std::ops::RangeInclusive<i64> = 1..=60;
 }
 
+/// One isolated agent-CLI account, as persisted (F-SET-15). Mirrors the
+/// Swift app's `AgentAccountRecord` (`App/AgentAccountStore.swift`): a
+/// named reference to an isolated config directory a provider CLI can be
+/// pointed at (`CLAUDE_CONFIG_DIR`/`CODEX_HOME`-style overrides), separate
+/// from the "System default" row that always exists and means "use the
+/// CLI's own on-disk login, unmodified." Only `claude` and `codex` carry
+/// isolated accounts in the Swift app; the Rust rewrite keeps the same
+/// scope rather than inventing multi-account support the reference never
+/// had for OpenCode Go / Ollama Cloud.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentAccountRecord {
+    /// Opaque stable id (a UUID string in the Swift app).
+    pub id: String,
+    /// `"claude"` | `"codex"`.
+    pub provider: String,
+    /// User-facing label shown in the account row.
+    pub label: String,
+    /// Absolute path of this account's isolated config directory.
+    pub config_dir_path: String,
+    /// Unix millis, for stable oldest-first ordering (matches the Swift
+    /// store's `sorted { $0.createdAt < $1.createdAt }`).
+    pub created_at: i64,
+}
+
 /// Per-worktree UI state for the sidebar: which projects are expanded and
 /// which worktree is selected. The Swift app keeps the selected worktree in
 /// UserDefaults (`session.selectedWorktreeId`) and does not persist

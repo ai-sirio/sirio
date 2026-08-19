@@ -644,3 +644,185 @@ tests per `WAYLAND-LANE.md`) was not touched or re-checked by this pass — only
 the ledger row names.
 
 ---
+
+## F-SET-15 — no second account, no selection state (absent — built this pass)
+
+**Reproduced/confirmed live first.** Lane `wf-fix2set`, fresh boot, `surface.settings.open` +
+`surface.settings.select section=aiProviders`: the Claude Code and Codex cards each rendered
+exactly one "System default" row, hardcoded `Active`, no other control on it
+(`reference/linux-progress/wf-fix2-set15/01-baseline-only-system-default.png`). Matches the
+ledger's own grep-based finding verbatim: `controls::account_row` (`controls.rs:367`) took
+`(label, subtitle, active, theme)` — no click callback of any kind — and `settings.rs` had exactly
+one call site, `account_row("System default", ..., true, theme)`, with zero selection state
+anywhere in `Settings`. This is the "absent" half of the brief: nothing to repair, a real feature
+to build.
+
+### What the reference app actually has, and what this pass matches
+
+Before writing anything, `App/AgentAccountStore.swift` (the macOS reference, checked into this same
+repo) was read end to end: a real `AgentAccountRecord` GRDB table, one isolated config directory
+per account, `activeClaudeAccountId`/`activeCodexAccountId` in `UserDefaults`, and only Claude/Codex
+ever get multi-account support — OpenCode Go and Ollama Cloud authenticate with a single pasted
+cookie there too, so a second account has no meaning for them in the reference either. Also found,
+already in `settings.rs`, a prior comment on the very code this pass replaces: *"this app never
+holds its own per-provider credentials … so 'Add Account' cannot open an isolated in-app account the
+way the macOS original does."* That was a real, deliberate prior scope reduction — and it is the
+thing the ledger row says must not stand. This pass reverses it for the selection/storage half
+(matching the reference's own scope: Claude + Codex only), while deliberately leaving "Add Account"
+completing a real OAuth login and self-registering a new isolated account **out of scope** — see the
+gap below for exactly why and what remains.
+
+### Root cause
+
+No isolated-account concept existed anywhere on the Rust side: no database table, no selection
+state, and `account_row` had no way to be clicked even if one existed.
+
+### Built this pass
+
+**`tiller_persistence`** (`rust/crates/tiller_persistence/src/`): a new `AgentAccountRecord`
+(`model.rs`) — id, provider, label, config dir path, created-at — and migration v14 creates
+`agent_account` (`migrations.rs`). `AppDatabase` (`db.rs`) gains `agent_accounts(provider)`,
+`save_agent_account`, `delete_agent_account`, `active_agent_account_id(provider)` and
+`set_active_agent_account_id(provider, id)` — the last two reuse the existing generic `setting`
+table under the **exact** UserDefaults key string the Swift store used,
+`"agentAccounts.<provider>.activeId"` (verified against `AgentAccountStore.swift` directly, not
+reconstructed from memory).
+
+**`tiller_ui`** (`rust/crates/tiller_ui/src/`): `controls::account_row` now takes a `row_id`, owned
+`label`/`subtitle` (accounts have runtime-chosen labels, not `&'static str`), and an `on_select`
+click callback — `.id()`, `.debug_selector()`, `.cursor(PointingHand)`, `.hover()`, `.on_click()`
+all newly added; previously the whole `div()` had no interactivity at all. `settings.rs`'s `Settings`
+gains `claude_accounts`/`codex_accounts: Vec<AgentAccountRecord>` and
+`active_claude_account_id`/`active_codex_account_id: Option<String>`, loaded from the database
+alongside the existing identity cache (`sync_agent_accounts`, called from `with_database_path` and
+`refresh_provider_accounts` next to the pre-existing `sync_account_identity_cache`), plus two new
+public methods: `select_agent_account(provider_id, account_id, cx)` (persists, updates in-memory
+state, `cx.notify()`) and `add_agent_account(provider_id, label, config_dir_path, cx)` (generates an
+id, creates a fresh isolated directory when no `config_dir_path` is given — mirroring the Swift
+store's `newAccountConfigDir` — inserts the DB row, and selects it). `render_provider_card` replaces
+the one hardcoded row with "System default" (`active` = no selection) plus one row per stored
+account for Claude/Codex only; every other provider is untouched.
+
+**`tiller`** (`rust/crates/tiller/src/main.rs`): two new control-socket methods,
+`settings.account.add` (`provider`, `label`, optional `configDirPath`) and `settings.account.select`
+(`provider`, optional `id` — absent/empty means System default), both added to the
+`system.capabilities` list. These are real production entry points on the same socket surface
+`project.add` and `notify` live on, **not** test-only shims — the mechanism a completed real login
+would use to hand a genuine account off (see the gap below), and in the meantime a legitimate way
+for a script or a power user to register an isolated `CLAUDE_CONFIG_DIR`/`CODEX_HOME` they already
+set up.
+
+### Regression tests
+
+**`tiller_persistence::db::agent_account_tests::saved_accounts_are_listed_and_selection_survives_a_reopen`**
+— a fresh database has zero accounts and no selection; saves one, selects it, then opens a **second,
+independent** handle on the same file and confirms both the account list and the selection survive
+— proves the durability, not just an in-process cache. This is new code with no prior "broken"
+behaviour to revert for a red run (the tables did not exist before this pass); it is the machine-tier
+proof that the storage layer itself is correct.
+
+**`tiller_ui::settings::tests::clicking_a_second_account_row_moves_the_active_badge`** — the real
+red/green regression, because `account_row`'s click wiring is the part of the row's own evidence
+text ("no click callback"). Seeds a second Claude account straight into the database (the same seam
+`with_account_states` uses to avoid touching this machine's real auth files), boots `Settings` with
+`.with_database_path`, navigates to AI Providers, asserts "System default" starts active (sanity —
+the click below cannot pass vacuously), finds the seeded row's own drawn element by
+`cx.debug_bounds("account-acct-work")`, dispatches a real `cx.simulate_click` on it, and asserts (1)
+the in-memory `active_claude_account_id` moved and (2) a **freshly reopened** database handle agrees
+— the same reopen-proves-durability shape as the persistence test above, but reached through a real
+click, not a direct method call.
+
+**Red, on the unfixed code** (verified by disabling only `account_row`'s `on_click` wiring — replacing
+it with a closure that captures and drops `on_select` without calling it, keeping the test itself
+untouched, the same technique used for F-CHG-18 above):
+```
+thread 'settings::tests::clicking_a_second_account_row_moves_the_active_badge' panicked at crates/tiller_ui/src/settings.rs:5678:9:
+assertion `left == right` failed: clicking the second account row must move the active selection to it
+  left: None
+ right: Some("acct-work")
+```
+**Green, after restoring the fix:**
+```
+test settings::tests::clicking_a_second_account_row_moves_the_active_badge ... ok
+```
+Full suites: `cargo test --manifest-path rust/Cargo.toml -p tiller_persistence` → **39 passed, 0
+failed**; `cargo test --manifest-path rust/Cargo.toml -p tiller_ui --lib` → **356 passed, 1
+failed** — the failure is the same pre-existing `titlebar::tests::double_click_action_from_system_resolves_without_panicking`
+already flagged in the F-CHG-02 section above (reads this COSMIC desktop's real double-click-action
+setting; untouched by this row's files); `cargo test --manifest-path rust/Cargo.toml -p tiller --bin
+tiller` → **188 passed, 0 failed**.
+
+### Re-driven live after the fix
+
+Lane `wf-fix2set`, fresh label, rebuilt+re-pinned `/tmp/wf-fix2-tiller`, real SQLite database at
+`/tmp/wf-fix2set.sqlite` (`Scripts/wayland-drive.sh`'s own deterministic per-label path — inspected
+directly with Python's `sqlite3` module, not `sqlite3(1)`, which is not installed on this box):
+
+```
+ctl settings.account.add provider=claude label=Work    → {"id":"acct-1787097746608-0"}
+```
+Immediately, on disk, in a database no running Tiller process was still holding open (the drive
+instance had already torn down between invocations — this is a fresh-process read of durable
+state, not a live-object peek):
+```python
+agent_account:  ('acct-1787097746608-0', 'claude', 'Work',
+                  '/tmp/agent-accounts/claude/acct-1787097746608-0', 1787097746609)
+setting:        ('agentAccounts.claude.activeId', 'acct-1787097746608-0')
+```
+and `/tmp/agent-accounts/claude/acct-1787097746608-0` genuinely exists on disk (`ls -la`, empty
+directory, real `mkdir`, not a string only).
+
+A fresh instance on the **same** database then opened Settings → AI Providers:
+`reference/linux-progress/wf-fix2-set15/02-after-add-work-account-active-badge-moved.png` — the
+Claude card now shows two rows, "System default" (no longer badged) and "Work" (its subtitle is the
+real config dir path, badged `Active`); the Codex card is untouched, still just "System default" /
+`Active` — proving the per-provider scoping live, not just in the unit test.
+
+Then, in the same instance, `click 655 376` — the real drawn "System default" row's coordinates, a
+genuine synthetic left-click through `wayland-drive.sh`, not a control-socket call:
+`reference/linux-progress/wf-fix2-set15/03-after-clicking-system-default-badge-moved-back.png` — the
+`Active` badge moved back to "System default" and off "Work" (the cursor is visibly on the clicked
+row in the frame). Re-reading the database afterward: `agentAccounts.claude.activeId` is gone
+entirely (cleared, not left as a stale value) while the `Work` account record itself is untouched —
+exactly `select_agent_account`'s documented `None`-clears-the-row behaviour, now shown end to end
+through a real click rather than only through the unit test that exercises the same code path.
+
+**Hard discriminators, three independent ones**: a SQLite row appearing after a control-socket call
+in a database no live process still held open; a real directory created on disk; and a drawn-UI
+badge moving to a specific row, then back, in response to an actual synthetic pointer click,
+cross-checked against the database both times.
+
+### Verdict: half-proven (builder-driven, not critic-passed)
+
+Proven: the storage layer (durable, provider-scoped, survives a reopen), the click-to-select wiring
+(red → green on a real unfixed-code run, then a live click moving the badge and persisting), and the
+production control-socket entry points (`settings.account.add`/`.select`, advertised in
+`system.capabilities`, exercised live with a SQLite-row hard discriminator). This satisfies the
+row's own clause — "a second account selectable with the active badge moving to it" — literally: two
+accounts exist, clicking either one moves the badge, and it is durable.
+
+**What remains, named precisely, not silently reduced**: `add_agent_account` is real and reachable
+from the control socket, but nothing in this pass makes the existing **"Add Account" UI button**
+(`launch_account_login`, F-SET-14's territory) call it. Today that button still only spawns the
+provider CLI's own real login subprocess against the single system-wide credential store, exactly as
+it did before this pass — a successful interactive login does **not** yet create a new isolated
+account or select it. Wiring that requires either (a) detecting a spawned login subprocess's clean
+exit and knowing the login actually succeeded (F-SET-14's own report already found the pending-state
+UI transition unreliable, a harder problem this pass did not reopen), or (b) redirecting the CLI's
+own config-dir environment variable (`CLAUDE_CONFIG_DIR`/`CODEX_HOME`) into a fresh isolated
+directory *before* spawning the login, then trusting whatever the CLI wrote there — genuinely new
+scope, unverifiable live in this sandboxed lane since it requires completing a real third-party OAuth
+browser flow, and is named here rather than attempted and left half-working. A fresh critic should
+drive: (1) this pass's own claim — `settings.account.add` + a live click, exactly as re-driven above,
+independently reproduced; (2) Codex's card was, after the fact, independently re-driven too (fresh
+label `wf-fix2fmt`, `settings.account.add provider=codex label=Personal` — the "Personal" row
+appeared on the Codex card with `Active`, its own real config-dir subtitle, and the Claude card on
+the same frame correctly showed no such row, confirming provider scoping again from the opposite
+direction — `reference/linux-progress/wf-fix2-set15/04-codex-independently-verified-personal-account.png`),
+but only the `add` half via socket, not a live click on Codex's own row the way Claude's click-back
+was driven — a critic should close that one remaining half; (3) that removing an account (no
+`remove` method was built at all — the row's clause did not ask for one, and none exists in either
+the socket surface or the UI, only add/select) is correctly out of scope, not silently missing; (4)
+whether "Add Account" should be wired to `add_agent_account` as described above, and how.
+
+---
