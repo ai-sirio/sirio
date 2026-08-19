@@ -7949,6 +7949,51 @@ impl TillerWorkspace {
         }
     }
 
+    /// Puts keyboard focus back on `tab_index`'s currently focused pane.
+    ///
+    /// F-CORE-WSP-05: the divider is a control, not a surface, and GPUI blurs
+    /// whatever held focus when the mouse goes down on an interactive element
+    /// that carries no focus handle of its own. Without re-asserting here,
+    /// focus falls through to F-SID-19's root reclaim and the pane quietly
+    /// stops receiving keystrokes — the row requires nonstructural commands to
+    /// leave focus alone.
+    ///
+    /// File, changes and browser panes have no focus handle, exactly as
+    /// `close_terminal_at` treats them. For those the root fallback stays
+    /// correct and this is a no-op.
+    fn refocus_focused_pane(
+        &mut self,
+        tab_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(tab_index) else {
+            return;
+        };
+        let target = tab.focused_pane;
+        let mut handle = None;
+        tab.panes.for_each(&mut |id, content| {
+            if id == target {
+                handle = match content {
+                    TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
+                    TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                    TabContent::File { .. }
+                    | TabContent::Changes(_)
+                    | TabContent::Browser(_) => None,
+                };
+            }
+        });
+        if let Some(handle) = handle {
+            // Focus twice, for the reason the composer already does the same at
+            // `focus_composer`: GPUI settles its own focus handling for this
+            // mouse-down *after* the listeners run, so an immediate call alone
+            // is overwritten by the blur it is meant to undo. The next-frame
+            // call is the one that actually sticks.
+            window.focus(&handle, cx);
+            window.on_next_frame(move |window, cx| window.focus(&handle, cx));
+        }
+    }
+
     fn update_divider(
         &mut self,
         drag: &DraggedPaneDivider,
@@ -8091,6 +8136,7 @@ impl TillerWorkspace {
                         .child(element)
                 };
                 let drag_entity = entity.clone();
+                let drag_entity_focus = drag_entity.clone();
                 let divider_drag = DraggedPaneDivider {
                     tab_index,
                     path: path.clone(),
@@ -8111,6 +8157,14 @@ impl TillerWorkspace {
                                 .w(px(9.))
                                 .h_full()
                                 .cursor_col_resize()
+                                .on_mouse_down(gpui::MouseButton::Left, {
+                                    let entity = drag_entity_focus.clone();
+                                    move |_, window, cx| {
+                                        entity.update(cx, |workspace, cx| {
+                                            workspace.refocus_focused_pane(tab_index, window, cx);
+                                        });
+                                    }
+                                })
                                 .on_drag(divider_drag.clone(), |_, _, _, cx| {
                                     cx.new(|_| gpui::Empty)
                                 }),
@@ -8126,6 +8180,14 @@ impl TillerWorkspace {
                                 .h(px(9.))
                                 .w_full()
                                 .cursor_row_resize()
+                                .on_mouse_down(gpui::MouseButton::Left, {
+                                    let entity = drag_entity_focus;
+                                    move |_, window, cx| {
+                                        entity.update(cx, |workspace, cx| {
+                                            workspace.refocus_focused_pane(tab_index, window, cx);
+                                        });
+                                    }
+                                })
                                 .on_drag(divider_drag, |_, _, _, cx| cx.new(|_| gpui::Empty)),
                         )
                     });
@@ -8146,8 +8208,16 @@ impl TillerWorkspace {
                             workspace.update_divider(&drag, event, cx)
                         });
                     })
-                    .on_drop::<DraggedPaneDivider>(move |_, _, cx| {
-                        drag_entity_drop.update(cx, |_, cx| cx.notify());
+                    .on_drop::<DraggedPaneDivider>(move |_, window, cx| {
+                        drag_entity_drop.update(cx, |workspace, cx| {
+                            // The mouse-down listener is too early: GPUI's drag
+                            // machinery clears focus after it, and even a
+                            // next-frame re-focus loses the race. Restoring at
+                            // drop is what the user actually experiences --
+                            // the gesture ends with the pane still focused.
+                            workspace.refocus_focused_pane(tab_index, window, cx);
+                            cx.notify();
+                        });
                     })
                     .child(first_style(first_element))
                     .child(drag)
@@ -14565,7 +14635,7 @@ mod tests {
     /// workspace root, not onto either pane -- `FAILED - defective`, not the
     /// hoped-for `PASSED`.**
     #[gpui::test]
-    async fn drawn_divider_drag_blurs_focus_to_workspace_root(cx: &mut TestAppContext) {
+    async fn drawn_divider_drag_leaves_pane_focus_untouched(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -14740,32 +14810,35 @@ mod tests {
              event recorded), or this test proves nothing about the divider"
         );
 
-        // The hoped-for outcome (`focus_new` still holds focus) does not
-        // hold: F-SID-19's own "nothing has focus this frame" fallback
-        // (`main.rs`'s `render()`, just above `render_pane_tree`) reclaims
-        // the blur onto the workspace's `root_focus` by the next frame, not
-        // onto either pane. Asserting that precisely, rather than merely
-        // "not focus_new/focus_old", is what makes this a positive
-        // identification of the real destination and not just a shrug.
+        // F-CORE-WSP-05: the divider is a fraction-class, NONSTRUCTURAL
+        // command, so the gesture must end with focus exactly where it
+        // started. This test previously asserted the opposite -- that the
+        // drag blurred focus onto the workspace `root_focus` via F-SID-19's
+        // "nothing has focus this frame" fallback -- and its own message
+        // said to rewrite it if the defect was ever fixed. It has been:
+        // `refocus_focused_pane` restores focus in the divider's `on_drop`.
+        //
+        // Restoring at DROP rather than at mouse-down is the whole point.
+        // A probe proved the mouse-down listener does fire with the right
+        // pane, and focus was blurred anyway: GPUI's drag machinery clears
+        // it afterwards, and even a next-frame re-focus loses that race.
+        // Drop is the first moment the gesture is over.
         cx.update(|window, cx| {
             let root_focus = workspace.read(cx).root_focus.clone();
             assert!(
-                !focus_new.is_focused(window),
-                "the new pane keeps focus after the divider drag -- the \
-                 defect this test was written to document appears to be \
-                 fixed; rewrite this test to assert focus is preserved"
+                focus_new.is_focused(window),
+                "a divider drag is nonstructural: the pane that held focus \
+                 before the gesture must still hold it afterwards"
             );
             assert!(
                 !focus_old.is_focused(window),
-                "the divider drag moved focus onto the OTHER pane rather \
-                 than losing it to workspace root -- a different bug than \
-                 the one this test documents"
+                "focus must not jump to the OTHER pane either -- that would \
+                 be a different bug than the one this row is about"
             );
             assert!(
-                root_focus.is_focused(window),
-                "expected the blur to land on the workspace's own \
-                 root_focus (F-SID-19's fallback), confirming the \
-                 mechanism this test attributes the defect to"
+                !root_focus.is_focused(window),
+                "the workspace root must NOT have had to reclaim the blur; \
+                 relying on F-SID-19's fallback is the defect, not the fix"
             );
         });
 
