@@ -135,3 +135,33 @@ Forced repaint shows the tab title flip to **`! signal 9`** and the status bar r
 terminated by signal 9"** verbatim —
 `reference/linux-progress/wf-sweep2/f-term-03-signal-9-terminated.png`. All four VERIFY states
 (running, exit 0, exit N, signal) now have live evidence; promoted to PASSED.
+
+## F-TERM-10 — Terminal panes survive a worktree-selection round trip
+
+**Confirmed PASSED — the pre-fix contrast is now driven live.** The ledger row already carried
+`PASSED` for commit `0519ace4`'s negative case (an idle pane correctly still reloads), with an
+orchestrator note that nobody had re-driven the **original** failing scenario
+(`984defa7 fix(F-TERM-10)`) against the current tree to confirm the fix actually closes it, only
+that it didn't overshoot.
+
+Reproduced `FINISH-terminal.md`'s exact original repro shape inside one continuous session (no app
+restart, so a restart can't be confused for the switch itself): opened a fresh Terminal tab in the
+`wf-sweep2-fixture` worktree, ran `echo MARK-TERM10-BEFORE && sleep 300`, confirmed it running —
+`reference/linux-progress/wf-sweep2/f-term-10-marked-before-switch.png`. Added a second, separate
+project (`wf-sweep2-fixture2`) as the "other worktree" to switch to, confirmed the backend
+selection genuinely left the first worktree (`ctl workspace.current` returned the second
+workspace's id, not the first), then clicked back on the original worktree's sidebar row. Result:
+the pane still shows **`MARK-TERM10-BEFORE`**, no fresh shell banner, no exit pill — the same live
+session, `sleep 300` still running — `reference/linux-progress/wf-sweep2/f-term-10-mark-preserved-after-roundtrip.png`.
+This is the exact contrast `FINISH-terminal.md` needed and didn't have: before the fix this same
+shape of round trip produced a brand-new shell with the mark and the running process both gone;
+now it does not.
+
+Side observation, not scored against this row: while the second worktree was selected, the tab
+strip and sidebar's tab list kept showing the first worktree's tabs and content for several
+seconds even after `ctl panel.list` confirmed (empty, then populated) panels genuinely owned by
+the second worktree — sidebar highlight, the Files panel, and the status bar all updated
+immediately, only the tab-host content lagged. Switching back through a real sidebar click
+resolved it cleanly every time. Flagged here for whoever owns cross-project tab-host mounting;
+not reproduced as a loss of PANE STATE (nothing died, nothing reset), so it does not contradict
+this row's own PASSED clause.
