@@ -327,7 +327,7 @@ state than before: a future pass has an exact, named repro (`drawn_divider_drag_
 and an exact mechanism (mousedown on the divider handle empties `window.focus`; F-SID-19's
 `root_focus` reclaim is what prevents total focus loss) rather than an unresolved ambiguity.
 
-Commit: `<to be filled after commit>` (adds `debug_selector`s to `render_pane_tree`'s divider/leaf
-divs and the new drawn test to `rust/crates/tiller/src/main.rs`).
+Commit: `c4ec95ce` (adds `debug_selector`s to `render_pane_tree`'s divider/leaf divs and the new
+drawn test to `rust/crates/tiller/src/main.rs`).
 
 ---
