@@ -245,3 +245,55 @@ the missing `cx.stop_propagation()` in `render_summarizer_trigger`'s `on_click`,
 with the `PLUS-MENU-INVESTIGATION.md` fix. This blocks a genuine end-to-end UI drive of
 auto-naming choosing Oh-My-Pi specifically; the adapter-level `summarizer_command()` itself is
 proven correct both by this pass's live shell run and by the earlier `omp_live.rs` test.
+
+## Addendum — discriminating *why* the summarizer picker didn't open
+
+**Done by re-analysing screenshots already captured during the drive above, not by a fresh
+drive** — the nested display had already been torn down by this point; every pixel value below
+was read back from `/var/tmp/omp-uidrive-1019518/shots2/{15,16,17,18,19,20}-*.png` with
+`convert ... txt:-`.
+
+There were two live hypotheses for why four synthetic clicks on the "Claude Code" trigger never
+opened its popover:
+
+- **A.** The click never becomes a paired click event at all — the same class of bug
+  `PLUS-MENU-INVESTIGATION.md` fixed for the "+" button, whose `on_click` explicitly calls
+  `cx.stop_propagation()` with a comment explaining why omitting it stops GPUI from ever pairing
+  mouse-down with mouse-up into a click. `render_summarizer_trigger`'s `on_click` (`settings.rs:3314`)
+  has no such call.
+- **B.** The click *does* reach `toggle_summarizer_picker` (`settings.rs:2042`), but that function
+  silently no-ops: `if !self.summarizer_picker_enabled() { return; }`, and
+  `summarizer_picker_enabled() == self.auto_naming` (`settings.rs:2038`) — the Settings entity's
+  *in-memory* field, which is a different claim from "the toggle's new value made it into SQLite,"
+  which is all my main report had verified.
+
+These predict the same visible symptom (no popover) but point a builder at two different files, so
+they needed to be told apart before flagging one as the lead.
+
+**Discriminator used**: not text/chevron colour brightness (rejected — at a 12–13px glyph,
+anti-aliasing makes "is this pixel darker" a judgment call, not a fact). Instead:
+`render_summarizer_trigger` attaches `.hover(|style| style.bg(theme.row_hover))` only
+`.when(enabled, |this| ...)` — i.e. the hover-highlighted pill background is reachable through
+exactly one code path, gated on the same `enabled` boolean that also gates the toggle function's
+early return. Whether that background tint appears is a binary fact about which branch rendered,
+not a brightness estimate.
+
+Sampled the pill background at a point inside the pill but clear of any glyph, `(1000, 409)`:
+
+| screenshot | moment | pill background |
+|---|---|---|
+| `15-settings-open-forced.png` | before auto-naming was ever touched (confirmed-disabled baseline) | `#232323` |
+| `16-auto-naming-on.png` | immediately after the toggle click, cursor not yet on the trigger | `#232323` (same base fill — hover is cursor-position-gated, not toggle-gated, so this is the expected still-no-hover reading) |
+| `20-summarizer-try4.png` | cursor resting on the trigger after the 4th click attempt | `#444444` — the hover tint |
+
+`#444444` on that pill is only reachable if `enabled == true` at render time. Corroborating (weaker,
+kept explicitly secondary) signal from the chevron glyph at `(1073,418)`: gray `49` in the
+disabled baseline (`15`) vs. gray `103`–`111`, monotonically brighter and consistent, across the
+just-enabled screenshot and all four click-attempt screenshots (`16`–`20`) — points the same
+direction but is the kind of reading that alone wouldn't have settled it.
+
+**Conclusion: Hypothesis A holds, Hypothesis B is refuted.** The trigger was demonstrably enabled
+and hoverable at the moment of every click attempt, so `toggle_summarizer_picker`'s early-return
+guard was not what stopped it — the click was not becoming a paired click event in the first
+place. A builder should start at `settings.rs:3314`'s missing `cx.stop_propagation()`, not at
+`summarizer_picker_enabled()` or the `auto_naming` field.
