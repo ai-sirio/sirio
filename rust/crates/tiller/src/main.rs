@@ -35,6 +35,7 @@ use tiller_terminal::{
     TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
     TerminalExitStatus, TerminalIdentity, TerminalLinkEvent, TerminalPaneCache,
     TerminalPromptAction, TerminalPromptEvent, TerminalShell, TerminalStateSnapshot, TerminalView,
+    command_shell_invocation,
 };
 use tiller_theme::{AgentBrandColor, Theme, ThemeMode};
 use tiller_ui::{
@@ -2268,11 +2269,8 @@ fn skill_install_shell(command: tiller_project::SkillInstallCommand) -> Terminal
 /// the documented `install_command` string, executed through the user's
 /// shell exactly like [`skill_install_shell`] runs the skill provisioner.
 fn agent_install_shell(command: &str) -> TerminalShell {
-    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    TerminalShell::WithArguments {
-        program: shell_program,
-        args: vec!["-lc".to_string(), command.to_string()],
-    }
+    let (program, args) = command_shell_invocation(command);
+    TerminalShell::WithArguments { program, args }
 }
 
 fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
@@ -2336,15 +2334,16 @@ fn summarizer_candidate_commands(
 }
 
 /// Runs one summarizer candidate through the user's shell exactly like a
-/// terminal-tab command does (`$SHELL`, falling back to `/bin/zsh -lc`),
+/// terminal-tab command does (`command_shell_invocation`: `$SHELL`, falling
+/// back to the platform's own shell),
 /// with its cwd set to the worktree. Every failure mode — missing binary,
 /// empty output, a hung process — returns `None` rather than surfacing an
 /// error, matching `AutoNamer.summarize`'s "never a visible error" contract.
 /// Blocking: callers run this on a background executor, never the UI thread.
 fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration) -> Option<String> {
-    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let (shell_program, shell_args) = command_shell_invocation(command);
     let mut child = std::process::Command::new(&shell_program)
-        .args(["-lc", command])
+        .args(&shell_args)
         .current_dir(worktree_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -7285,11 +7284,8 @@ impl TillerWorkspace {
         }
 
         let command = adapter.command(&worktree_path, &pane_id, &tillerctl_path);
-        let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell = TerminalShell::WithArguments {
-            program: shell_program,
-            args: vec!["-lc".to_string(), command],
-        };
+        let (program, args) = command_shell_invocation(&command);
+        let shell = TerminalShell::WithArguments { program, args };
         // Registers with the one AgentActivityModel this workspace owns,
         // under the same pane key `tab_status` looks up by — this is Layer
         // A's entry point (a later `tillerctl notify` push updates it).
@@ -7833,14 +7829,12 @@ impl TillerWorkspace {
                 adapter.display_name()
             );
         }
-        let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell = TerminalShell::WithArguments {
-            program: shell_program,
-            args: vec![
-                "-lc".to_string(),
-                adapter.command(&worktree_path, &pane_name, &tillerctl_path),
-            ],
-        };
+        let (program, args) = command_shell_invocation(&adapter.command(
+            &worktree_path,
+            &pane_name,
+            &tillerctl_path,
+        ));
+        let shell = TerminalShell::WithArguments { program, args };
         let terminal = cx.new(|cx| {
             TerminalView::with_shell(&worktree_path, shell, cx).expect("start split agent")
         });
@@ -11084,11 +11078,8 @@ fn restored_agent_shell(
             adapter.resume_command(&worktree_path, pane_key, &tillerctl_path, session_ref)
         })
         .unwrap_or_else(|| adapter.command(&worktree_path, pane_key, &tillerctl_path));
-    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    Some(TerminalShell::WithArguments {
-        program: shell_program,
-        args: vec!["-lc".to_string(), command],
-    })
+    let (program, args) = command_shell_invocation(&command);
+    Some(TerminalShell::WithArguments { program, args })
 }
 
 /// Rebuilds the shell's tabs from a restored session: chat tabs get a fresh
