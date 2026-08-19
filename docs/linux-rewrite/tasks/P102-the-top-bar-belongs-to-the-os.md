@@ -3,8 +3,21 @@
 **User directive, 2026-08-19:** «il semaforo non lo devi creare te ma deve dipendere dal SO. In
 generale la top bar deve essere quella del sistema operativo + le nostre icone.»
 
+Confirmed the same day, when asked to choose: «Non deve disegnare 3 cerchi propri.» And on how:
+**«Sì, risolvi come Zed.»**
+
 We must not draw window controls. The window's decorations come from the operating system, and
-our own icons sit alongside them.
+our own icons sit alongside them. **Zed's handling is the instruction, not merely a reference** —
+it is a GPUI application that already runs on Linux under both decoration regimes, and the standing
+goal names Zed's crates as the place to read GPUI patterns from. Read it at
+`~/.cargo/git/checkouts/zed-a70e2ad075855582/c05e346` (its own UI crates, not gpui) and follow what
+it does; do not invent a scheme alongside it.
+
+One thing that must survive the translation, because the two instructions only look contradictory:
+"do not draw our own controls" and "do it like Zed" agree once you notice that Zed does not draw
+unconditionally either — it asks the platform. The rule is **never draw when the OS is drawing**,
+not "never draw". See the risk section below for why the unconditional reading would be a worse
+defect than the one being fixed.
 
 ## Where we stand, per platform
 

@@ -166,9 +166,14 @@ survivors automatically.
    Three different features of the frame, three different reference values, one answer. Note the
    raw pixel measurements were never in dispute: twin A, twin B and this adjudication each measured
    28 px and 46 px independently and agreed to the pixel. Only the divisor was ever contested.
-2. **Content column: lower bound ~676-686 logical px.** Consistent with 720; not a confirmation of
-   it. The open question of what the column *should* be (720 vs ~550 vs ~480) is a taste decision
-   and remains the user's.
+2. **Content column: 720, decided.** The measurement gives a lower bound of ~676-686 logical px,
+   consistent with 720 without uniquely confirming it — an ink-extent scan bounds the column from
+   below, because word wrap breaks a line before the edge. Asked to choose among 720, ~550 and ~480
+   on 2026-08-19, the user answered **«proviamo 720»**. So 720 stays, and it stays for a stated
+   reason rather than by inheritance: it is inside the measured range and it is the user's choice.
+   That closes the open question this remedy was carrying; `TRANSCRIPT_WIDTH`, `CONTENT_WIDTH` and
+   `MARKDOWN_COLUMN_WIDTH` keep 720 and the provenance now reads "measured range, user's choice
+   within it" — never "waku's source says so", which is the defect the gap was opened for.
 3. **The user pill's cap is unmeasurable** — no user turn in either frame is long enough to engage
    it. Both twins reached this independently, which is the strongest single result of the exercise.
 4. Every geometry value must record its origin as measured / derived-from-measured / ours-by-choice
