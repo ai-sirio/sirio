@@ -1,5 +1,33 @@
 # GAP — waku's theme source was read, not its screenshots
 
+> **Remedy applied 2026-08-19, NOT yet cleared.** Step 5 below says a builder
+> cannot clear its own transplant, and that still stands: what follows is a
+> claim awaiting a fresh critic, not a verdict. What was done, against the five
+> steps: the header prose is rewritten (1); the `0.000_000_1` literal is gone,
+> replaced by `#282828`/`#DCDBDB` measured off the seam itself (2); the palette
+> is re-derived from waku's *published screenshots* by
+> `reference/waku/measure-theme.py`, with every value's origin recorded in
+> `THEME-PROVENANCE.md` (3); `03-visual-bar-and-gpui-patterns.md` now opens with
+> a correction instead of the false claim (4).
+>
+> Three things the measurement turned up that reading the source could not:
+>
+> - **The sidebar is unmeasurable, not merely unmeasured.** It is a macOS
+>   vibrancy layer whose rendered colour tracks the wallpaper behind the window
+>   (`#21282A` → `#26292A` as the desktop goes cyan → white, while the content
+>   column beside it never moves). So `0x181818` provably cannot have come from
+>   a screenshot — the transplant confirmed a second way, by measuring.
+> - **The accent is in neither frame at all** — zero pixels, nearest neighbour
+>   37 units away. Only its hue could be recovered, from the warm family that
+>   *is* rendered.
+> - **The transplanted light accent failed WCAG AA** at 3.73:1. Copying a
+>   constant imported an unexamined trade-off along with the number.
+>
+> And one mistake worth leaving visible: the first repair set the accent to
+> `#D97757` from our own Swift, which is impeccable provenance and also
+> `AgentBrandColor::Claude` — it collided with the agent marks and a test caught
+> it. Good provenance is not sufficient; the value still has to be right.
+
 Found 2026-08-19 08:10 by a fresh critic whose only job was the contract clause:
 
 > Dalle app di riferimento si prende solo ispirazione, mai codice: se il critico trova codice

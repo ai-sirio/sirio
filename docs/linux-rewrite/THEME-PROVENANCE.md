@@ -1,0 +1,202 @@
+# Where every theme token comes from
+
+This document exists because of `GAP-transplanted-theme-tokens.md`. The goal
+freezes waku as Tiller's **visual** bar while forbidding its code, and those two
+are only compatible if our palette is *measured off rendered frames* rather than
+read out of `waku/src/theme.rs`. It previously was read out of the source. This
+is the repair, and the audit trail that keeps it honest.
+
+Re-run the measurement yourself:
+
+```
+./reference/waku/measure-theme.py
+```
+
+Frames: `reference/waku/app-screenshot-{dark,light}.png` — waku's own published
+product screenshots (the ones on waku.sh), copied verbatim, 2266x1752 at 2x.
+
+## What the measurement can and cannot settle
+
+Both frames are 8-bit palettized PNGs holding 255 distinct colours. Large flat
+areas get their own palette entry and survive intact; thin antialiased detail is
+an approximation. Every conclusion below rests on regions large enough that
+quantization cannot explain the result.
+
+Patches are sampled as *patches*, and the share of the patch the winning colour
+occupies is reported. That number is the finding, not bookkeeping: 100% means
+the region is genuinely flat and the value is trustworthy; well under 100% means
+the region is not flat, and asking why is how two of the surprises below turned
+up.
+
+## Tokens the frames do settle
+
+Measured, and the code already agreed. These are now ours by measurement rather
+than by transcription — the number did not need to change, its provenance did.
+
+| Token | Frame value (dark / light) | Coverage | Sampled at |
+|---|---|---|---|
+| `surface` | `#1A1A1A` / `#F6F5F6` | 100% / 100% | `80x80+887+351`, transcript above the first bubble |
+| `composer` | `#212121` / `#FFFFFF` | 100% / 100% | `80x40+1608+1360`, composer right of its placeholder |
+| `raised` | `#232323` / `#EBEBEB` | 100% / 75% | `80x10+1814+290`, user bubble above the cap height |
+| `text` | `#E2E2E2` / `#242424` | glyph core | `90x26+700+548`, bold body text "Waku" |
+| `text_tertiary` | `#7C7D7D` / `#868686` | glyph core | `180x26+1330+462`, the "Worked for 10 seconds" line |
+| `sidebar_border` | `#282828` / `#DCDBDB` | 100% / 100% | seam column `x=662..663` |
+| `code_text` | `#E0A882` / `#9A5528` | 3 spans agree | inline code at `+1690+545`, `+720+855`, `+1830+855` |
+
+Two of these moved by one step against what the source had carried:
+`text_tertiary` measures `#7C7D7D`/`#868686` where the transplant said
+`#7D7D7D`/`#858585`, and light `raised` measures `#EBEBEB` where it said
+`#ECECEC`. A one-unit disagreement is what a real measurement looks like. The
+measured values are the ones in the code now.
+
+The seam is worth its own line. It is exactly two frame pixels wide — one
+logical pixel at 2x — and flat at 200/200 in both variants, so `#282828` and
+`#DCDBDB` are solid, not a blend:
+
+```
+x=661  #21282A  95/200      <- sidebar, not flat (see below)
+x=662  #282828  flat        <- the seam
+x=663  #282828  flat
+x=664  #1A1A1A  flat        <- content
+```
+
+That replaces `hsla(126.93, 0.000_000_1, 0.16077, 1.0)`, which was the single
+piece of evidence no innocent explanation covered: seven significant digits and
+Rust underscore grouping do not come out of a screenshot. For the record it
+rendered `#292929`, one step off the measured `#282828`.
+
+## Tokens the frames refuse to settle
+
+This is the part that could not have been reached by re-typing waku's numbers
+more carefully, and it is why the remedy is not merely cosmetic.
+
+### `sidebar` — translucent, so it has no fixed value
+
+The sidebar patch came back `#21282A` at only **57%** coverage, with a cyan cast
+(G and B above R). The content area, sampled the same way at the same heights,
+is neutral and flat at every one of them. Probing both against the desktop
+visible beside the window:
+
+| y | sidebar | content | desktop behind the window |
+|---|---|---|---|
+| 1000 | `#21282A` | `#1A1A1A` | `#88DAF7` |
+| 1300 | `#22282A` | `#1A1A1A` | `#F1FAFC` |
+| 1560 | `#26292A` | `#1A1A1A` | `#E4F8FF` |
+
+The sidebar tracks the wallpaper and the content does not. The light frame says
+it more plainly still — the sidebar climbs `#EAF1F3` → `#F1F3F4` as the desktop
+behind it goes `#86DCF9` → `#E5F8FF`, monotonically.
+
+waku's sidebar is a macOS vibrancy layer. **Its rendered colour is a function of
+whatever is behind the window**, so no screenshot can yield the constant, and
+`0x181818` therefore cannot have been sampled from one — independent
+confirmation of the transplant, arrived at by measuring rather than by reading
+waku's source.
+
+It also has a consequence beyond provenance: macOS vibrancy does not exist on
+Linux or Windows, so the copied constant was a number that **is not a constant
+in its own context**. Tiller's sidebar is opaque and must be chosen. We choose
+it as a stated derivation from our measured `surface` — recessed a step, because
+the reference frames do show a sidebar visually distinct from content, which is
+the part a screenshot *can* establish.
+
+### `accent` — not in either frame
+
+`#E2795B` appears **0 times** in the dark frame; `#C85F44` appears **0 times** in
+the light one. Nearest neighbours are 37–41 units away, and are identifiable as
+other things: `#FF5C5F` is macOS's own traffic-light red, `#A8704B`/`#9A5528` is
+inline-code text. That gap is far outside palette-snapping error for any colour
+occupying real area, and quantization preferentially *preserves* high-area
+colours.
+
+The frames contain no logo, caret, focus ring, or live-activity indicator — no
+brand moment at all — so the accent is simply not on display. The warm colour
+that *is* on display is inline-code text, consistent across three independent
+spans at `#E0A882` (dark) / `#9A5528` (light). That is a syntax colour, not a
+brand accent, and pressing it into service as one would be a different mistake.
+
+So the accent is split: **hue measured, saturation and lightness chosen.**
+
+The hue is `24.3°`, taken from the warm family the frames do render — the
+inline-code tone above, `#E0A882`, agreeing across three independent spans.
+Looking can settle that much and no more.
+
+Saturation `0.70` and lightness `0.60` / `0.40` are ours, and are pinned by two
+constraints rather than by taste. Both are tests, because both were nearly got
+wrong:
+
+**It must stay legible on its own surface.** The light variant's lightness is
+the first step down that clears WCAG AA.
+
+| | value | contrast on its own surface |
+|---|---|---|
+| dark accent | `#E08B52` on `#1A1A1A` | 6.62:1 |
+| light accent | `#AD581F` on `#F6F5F6` | 4.61:1 |
+| *the value this replaces* | `#C85F44` on `#F6F5F6` | **3.73:1** |
+
+The transplanted light accent was **below the 4.5:1 line**. Copying a constant
+out of another project imports its trade-offs unexamined along with its number,
+and this one had a contrast defect in it.
+`accent_clears_contrast_on_its_own_surface` holds the rule now.
+
+**It must not be any agent's brand colour.** A tab row paints its accent and its
+agent's mark together, so an accent that lands on a brand makes that mark stop
+distinguishing anything — every row looks identically tinted whichever agent is
+running. This is not hypothetical. The first repair attempted here set the
+accent to `#D97757` from our own `App/AgentIcon.swift:68`, reasoning that our
+own Swift is unimpeachable provenance. It is — but `#D97757` *is*
+`AgentBrandColor::Claude`, and
+`worktree_activity_colours_name_the_agent_and_never_a_status` failed
+immediately. The tempting shortcut was the one coral this app cannot have.
+
+Distances from the accent as it now stands: Claude 22, Codex 189, OpenCode 88,
+Pi 205, Omp 148. `accent_is_not_any_agent_brand` holds it in `tiller_theme`
+too, next to the values, rather than only in the app crate that noticed.
+
+### Everything else — `inset`, `warning`, `success`, `danger`, `gauge`, `favorite`
+
+None appear in the two frames: the screenshots show one idle chat session, with
+no error state, no progress gauge, no starred row, and no terminal. They cannot
+be measured, and our own Swift defines only `tabError` among them. They are ours
+by choice, and the code says so at each one instead of citing waku.
+
+## Geometry, which has the same problem and less of a cure
+
+The gap report named geometry alongside colour — `conformance.rs` records
+replacing Tiller's own 704 and 800 content widths with a `CONTENT_MAX_WIDTH` of
+720 read out of `waku/src/app.rs:80`. Same vector, so the same question: what
+can a frame settle?
+
+**Measurable, and it confirms what the source said.** The selected session card
+fills a flat `#2F3436` from `y=444` to `y=545` at `x=610` — 102 frame pixels,
+**51 logical px** at 2x. That is exactly the `7 + 18 + 4 + 15 + 7` the sidebar's
+card math claims, arrived at by looking instead of by reading. The
+sidebar/content seam measures one logical pixel, likewise (`x=662..663`).
+
+**Not measurable, and the reasons differ.**
+
+- **Bar heights** (the 48px header, the 40px footer). Both sit on the same
+  `#1A1A1A` as the content, with no divider: `titlebar`, `surface` and `footer`
+  all sample identical at 100% coverage. A boundary that paints nothing cannot
+  be found in a picture of it.
+- **Sidebar width.** It is user-resizable, so the frame shows one user's choice
+  (~251 logical px here), not a constant — the same category of error as the
+  sidebar *colour*, for a different reason.
+- **The 720 content column.** The content pane in this frame is ~725 logical px
+  wide, so a 720 cap would be engaged by five pixels. That cannot be told apart
+  from text simply filling the pane, and claiming otherwise would be reading the
+  answer into the measurement.
+
+So geometry is a smaller win than colour: one number confirmed, three that a
+screenshot provably cannot settle and which therefore have to be ours by
+argument. That is the next piece, and it is deliberately *not* claimed here.
+
+## The rule this all turns on
+
+Sampling a pixel from a rendered reference frame and arriving at `#1A1A1A` is
+inspiration, and is allowed, even though the number ends up identical. Copying
+`0.000_000_1` out of a `.rs` file is not, and no visual argument rescues it.
+**Provenance, not the value, is what the contract governs.**
+
+Which is why roughly half this palette kept its numbers and all of it changed
+its status.

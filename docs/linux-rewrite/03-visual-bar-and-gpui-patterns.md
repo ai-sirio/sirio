@@ -5,7 +5,23 @@
 - `waku` checkout @ `9c21576` ("Share one resident opencode serve...") — primary visual reference. ~85.5K lines of Rust (143 files), GPL-3.0. Builds with a **fork of zed's GPUI** (`egoist/zed`, branch `waku-webview`, = upstream main + PR #61945 "layered scene rendering", which composites menus/tooltips above native child views — see `waku/Cargo.toml`). waku is macOS-first; its non-macOS code is `#[cfg(not(target_os = "macos"))]` no-ops. Its visual language is the target; its macOS-only chrome (vibrancy, traffic lights, native menus) must be re-derived for Linux per Part C.
 - `zed` checkout @ `c05e346` (upstream main, ~Nov 2025) — `crates/gpui`, `crates/gpui_platform`, `crates/gpui_linux`, `crates/theme`. This is the API surface Tiller will build against (the waku fork only adds the layered-scene patch; everything cited below exists in this checkout).
 
-Nothing in this document is copied code. It describes mechanisms, principles, and exact numbers so Tiller's UI can be written without reopening either checkout.
+> **Correction, 2026-08-19.** This document used to open by claiming "nothing
+> in this document is copied code". That was not true as written, and the
+> sentence itself pointed at why: the numbers below were read out of the
+> checkouts' **source files** — this document cites them by file and line — not
+> measured off rendered frames. For a palette, a table of values *is* the code;
+> transcribing `waku/src/theme.rs` into prose and then into Rust is a transplant
+> with an extra step. See `GAP-transplanted-theme-tokens.md` for the finding and
+> `THEME-PROVENANCE.md` for the repair.
+>
+> What holds: the **mechanism and pattern** notes here are descriptions of how
+> something works, written from reading, and those are inspiration in the
+> ordinary sense. What does not: the §A.2 colour tables, which have been
+> superseded. Tiller's palette now comes from `reference/waku/measure-theme.py`
+> sampling waku's published *screenshots*, with every value's origin recorded —
+> including the ones the frames turn out to be unable to settle, which are ours
+> by choice and say so. Where a value in §A.2 disagrees with
+> `THEME-PROVENANCE.md`, the provenance document wins.
 
 ---
 

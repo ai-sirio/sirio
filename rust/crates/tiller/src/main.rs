@@ -8458,8 +8458,8 @@ impl TillerWorkspace {
         // `AgentIcon` view that every one of those three places draws, so a
         // mark looks the same wherever it appears. This port had drifted
         // into three different tints for the same mark, and the badge's was
-        // `theme.tab_focus_accent` = `#E2795B`, Claude's own brand coral, so
-        // a Codex mark was painted in Claude's colour.
+        // `theme.tab_focus_accent` — a coral close enough to Claude's brand to
+        // read as it — so a Codex mark was painted in Claude's colour.
         //
         // This is a deliberate, narrow divergence from a literal port:
         // Swift fills the Codex, OpenCode and Pi marks with `.primary` and
