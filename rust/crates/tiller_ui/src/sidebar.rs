@@ -425,12 +425,12 @@ pub enum RowKind {
 enum WorktreePromptField {
     /// The (required) branch-name field.
     Branch,
-    /// The optional base-branch override (F-PRJ-17); empty means "from
-    /// HEAD", matching `create_worktree`'s own default.
+    /// The optional base-branch override (F-PRJ-17); empty falls back to
+    /// the project's pinned default and only then to HEAD (F-CORE-DOM-02).
     Base,
-    /// The optional checkout-location override (F-PRJ-18); empty means
-    /// the project's sibling directory, matching
-    /// `resolve_parent_directory`'s own default.
+    /// The optional checkout-location override (F-PRJ-18); empty falls back
+    /// to the project's pinned default and only then to the sibling
+    /// directory `resolve_parent_directory` uses on its own (F-CORE-DOM-02).
     Location,
 }
 
@@ -449,6 +449,19 @@ struct WorktreePrompt {
     base_draft: String,
     /// The optional checkout-location override being typed (F-PRJ-18).
     location_draft: String,
+    /// F-CORE-DOM-02: the project's pinned "Default Worktree Base", snapshot
+    /// from `project_worktree_defaults` when the prompt opened. Falls back
+    /// to this — not straight to HEAD — when `base_draft` is left blank,
+    /// mirroring the Swift app's `WorktreeDefaults.resolveBase` (an explicit
+    /// per-project override wins; there is no per-dialog field in Swift at
+    /// all, so `base_draft` is this Rust port's own additive one-off
+    /// override on top of it).
+    default_base: Option<String>,
+    /// F-CORE-DOM-02: the project's pinned "Worktree Location", snapshot the
+    /// same way. Falls back to this — not straight to the sibling directory
+    /// — when `location_draft` is left blank, mirroring
+    /// `WorktreeDefaults.resolveParentDirectory`.
+    default_location_override: Option<String>,
     /// Which of the three fields above Tab/keystrokes currently target.
     focused_field: WorktreePromptField,
     /// A creation error to show under the field, if the last attempt failed.
@@ -1955,15 +1968,29 @@ impl Sidebar {
             // never offered the row in the first place.
             return;
         };
+        let project_row_id = project.id;
+        let project_name = project.title.clone();
+        // F-CORE-DOM-02: snapshot the project's pinned base/location so a
+        // blank dialog field falls back to them instead of straight to
+        // HEAD/the sibling directory — `project_worktree_defaults` is keyed
+        // by the durable project id, not this row's own numeric id.
+        let (default_base, default_location_override) = self
+            .project_ids
+            .get(&project_row_id)
+            .and_then(|id| self.project_worktree_defaults.get(id))
+            .cloned()
+            .unwrap_or_default();
         let focus = cx.focus_handle().tab_stop(true);
         focus.focus(window, cx);
         self.prompt = Some(WorktreePrompt {
-            project_row_id: project.id,
-            project_name: project.title.clone(),
+            project_row_id,
+            project_name,
             repo_root,
             draft: String::new(),
             base_draft: String::new(),
             location_draft: String::new(),
+            default_base,
+            default_location_override,
             focused_field: WorktreePromptField::Branch,
             error: None,
             focus,
@@ -1998,20 +2025,32 @@ impl Sidebar {
         let repo_root = prompt.repo_root.clone();
         let project_name = prompt.project_name.clone();
         let project_row_id = prompt.project_row_id;
-        // F-PRJ-17: an explicit base branch, when typed, is threaded through
-        // to `create_worktree`'s `base` argument instead of the hard-coded
-        // `None` this prompt used to send (git falls back to HEAD itself).
+        // F-PRJ-17/F-CORE-DOM-02: an explicit base branch, when typed, wins
+        // outright (threaded through to `create_worktree`'s `base`
+        // argument); left blank, it falls back to the project's *pinned*
+        // default (`WorktreeDefaults.resolveBase` in the Swift app) rather
+        // than straight to `None` — git's own HEAD fallback only takes over
+        // once neither is set.
         let base = {
             let trimmed = prompt.base_draft.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            if !trimmed.is_empty() {
+                Some(trimmed.to_string())
+            } else {
+                prompt.default_base.clone()
+            }
         };
-        // F-PRJ-18: an explicit checkout-location override, when typed,
-        // replaces the project's sibling directory as the new worktree's
-        // parent — mirroring `WorktreeDefaults.resolveParentDirectory`'s
-        // override arm in the Swift app.
+        // F-PRJ-18/F-CORE-DOM-02: same layering for the checkout location —
+        // an explicit override typed here wins; blank falls back to the
+        // project's pinned override (`WorktreeDefaults.resolveParentDirectory`)
+        // before `resolve_parent_directory` reaches for the sibling
+        // directory default.
         let location_override = {
             let trimmed = prompt.location_draft.trim();
-            (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+            if !trimmed.is_empty() {
+                Some(PathBuf::from(trimmed))
+            } else {
+                prompt.default_location_override.clone().map(PathBuf::from)
+            }
         };
         // The worktree lives next to the project (or at the override
         // above), named `{project}-{branch}` — mirroring the Swift app.
@@ -2451,7 +2490,7 @@ impl Sidebar {
     /// the prompt with no live field at all.
     fn render_worktree_prompt_field(
         id: &'static str,
-        placeholder: &'static str,
+        placeholder: &str,
         value: &str,
         field: WorktreePromptField,
         focused: bool,
@@ -3830,7 +3869,16 @@ impl Render for Sidebar {
                                 ))
                                 .child(Self::render_worktree_prompt_field(
                                     "worktree-prompt-base",
-                                    "base branch (optional, defaults to HEAD)",
+                                    // F-CORE-DOM-02: the placeholder describes
+                                    // what blank actually resolves to, which
+                                    // is the pinned base once one is set —
+                                    // not unconditionally HEAD.
+                                    &match &prompt.default_base {
+                                        Some(base) => {
+                                            format!("optional — defaults to the pinned base ({base})")
+                                        }
+                                        None => "base branch (optional, defaults to HEAD)".to_string(),
+                                    },
                                     &prompt.base_draft,
                                     WorktreePromptField::Base,
                                     prompt.focused_field == WorktreePromptField::Base,
@@ -3839,7 +3887,14 @@ impl Render for Sidebar {
                                 ))
                                 .child(Self::render_worktree_prompt_field(
                                     "worktree-prompt-location",
-                                    "location (optional, defaults next to project)",
+                                    &match &prompt.default_location_override {
+                                        Some(location) => {
+                                            format!("optional — defaults to the pinned location ({location})")
+                                        }
+                                        None => {
+                                            "location (optional, defaults next to project)".to_string()
+                                        }
+                                    },
                                     &prompt.location_draft,
                                     WorktreePromptField::Location,
                                     prompt.focused_field == WorktreePromptField::Location,
@@ -4353,6 +4408,122 @@ mod tests {
         assert!(
             porcelain.contains("branch refs/heads/feature/login"),
             "porcelain reports the new branch:\n{porcelain}"
+        );
+    }
+
+    /// F-CORE-DOM-02: a project's pinned "Default Worktree Base" and
+    /// "Worktree Location" (pushed in the same way a live host applies them
+    /// after a restore — via `set_project_worktree_defaults`, exactly what
+    /// `refresh_sidebar` does) must be honoured by "New Worktree…" when its
+    /// own one-off Base/Location fields are left blank, mirroring the Swift
+    /// app's `WorktreeDefaults.resolveBase`/`resolveParentDirectory`
+    /// (explicit per-project override wins; there is no separate per-dialog
+    /// field in Swift at all). Before this fix, `begin_worktree_prompt`
+    /// never read `project_worktree_defaults`, so the pin had zero effect on
+    /// worktree creation: leaving the dialog fields blank always cut the new
+    /// branch from HEAD and placed it next to the project, no matter what
+    /// was pinned in Project Settings.
+    #[gpui::test]
+    async fn new_worktree_honours_the_pinned_base_and_location_when_the_dialog_is_left_blank(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("pin-base");
+        // A second branch carrying a marker file `main` never gets, so the
+        // created worktree's contents prove which branch it was actually
+        // cut from.
+        assert!(
+            Command::new("git")
+                .args(["checkout", "-b", "release"])
+                .current_dir(&repo)
+                .status()
+                .expect("git")
+                .success()
+        );
+        std::fs::write(repo.join("release-marker.txt"), "release\n").expect("write marker");
+        for args in [
+            vec!["add", "-A"],
+            vec!["commit", "-m", "release marker"],
+            vec!["checkout", "main"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(&repo)
+                    .status()
+                    .expect("git")
+                    .success()
+            );
+        }
+
+        let location_dir = repo
+            .parent()
+            .expect("scratch repo has a parent directory")
+            .join("pinned-location");
+        std::fs::create_dir_all(&location_dir).expect("create pinned location dir");
+
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "pin-project".into(),
+                    name: "pin-project".into(),
+                    is_git: true,
+                    root_path: repo.clone(),
+                    worktrees: vec![SidebarWorktree {
+                        branch: "main".into(),
+                        path: repo.clone(),
+                        is_primary: true,
+                        comment: None,
+                    }],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let sidebar =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+
+        // Simulate the host re-applying the persisted pin, the same call
+        // `refresh_sidebar` makes after a restore or a settings save.
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_project_worktree_defaults(
+                    "pin-project",
+                    Some("release".to_string()),
+                    Some(location_dir.to_string_lossy().into_owned()),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+
+        let row_bounds = cx
+            .debug_bounds("new-worktree-row")
+            .expect("the New Worktree row is rendered");
+        cx.simulate_click(row_bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        // Type only the branch name; leave the dialog's own Base and
+        // Location fields untouched (its placeholder describes them as
+        // optional).
+        cx.simulate_input("cleanbase1");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        let expected_path = location_dir.join("pin-project-cleanbase1");
+        assert!(
+            expected_path.is_dir(),
+            "the pinned Worktree Location override placed the new worktree at {} \
+             instead of the project's sibling directory",
+            expected_path.display()
+        );
+        assert!(
+            expected_path.join("release-marker.txt").is_file(),
+            "the new worktree was cut from the pinned Default Worktree Base \
+             ('release'), not from HEAD -- the release-only marker file must \
+             be present at {}",
+            expected_path.display()
         );
     }
 
