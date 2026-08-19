@@ -290,3 +290,60 @@ re-driving all ~44 `sync_activity` call sites) is accepted as the report frames 
 this specific bug class (worktree becomes current / worktree does not become current). Gap (3) (the
 pre-existing `titlebar.rs` double-click test failure) is not this row's concern and is not re-verified
 here.
+
+---
+
+## F-CHG-18 — a diff dropped onto a terminal reached a real handler and then went nowhere a user could see
+
+**Verdict: PASSED**
+
+### Code check
+
+`git show 544a1f54 -- rust/crates/tiller/src/main.rs` matches the report: `subscribe_terminal_drop`
+is added alongside the three pre-existing per-terminal subscriptions in
+`mount_terminal_subscriptions`, and on `TerminalDropEvent::Diff { path, .. }` calls
+`workspace.add_changes_tab(Some(path.clone()), cx)` — the same call
+`ChangesTabActionEvent::OpenDiff` already used. `grep -rn "TerminalDropEvent"` across
+`rust/crates/tiller/src` and `rust/crates/tiller_ui/src` now finds this subscription as a real
+consumer, where before the fix it found none — independently re-confirmed, not just re-quoted from
+the report.
+
+### Reproduced original defect (pre-fix binary, lane `wfj2prechg18`)
+
+Fresh `project.add`, opened a Changes tab (`+` menu → "Changes"), showing this repo's own real
+uncommitted local diff (`Local changes (4)`: `main.rs`, `chat.rs` changed, 2 untracked reference
+PNGs) — a genuine non-empty Changes panel, not a fixture. `ctl panel.list` before the drop: exactly
+**3** panes (Chat, Terminal, Changes). Drove the exact gesture the report worked out (drag-start on
+the `main.rs` row, `chord ctrl+shift Tab` mid-drag to switch to the Terminal tab without releasing
+the mouse button, move onto the terminal content, release): screenshot
+`/tmp/wf-judge2/shots/prechg18/02-20-after-drop-unfixed.png` shows a **"Dropped diff:
+rust/crates/tiller/src/main.rs" toast** (top right, terminal self-identifies as
+`wf-judge2-tiller-PREFIX`) — the drop genuinely reached `receive_diff_drop` — and **hard
+discriminator**: `ctl panel.list` afterward is still exactly **3** panes, Terminal merely became the
+active tab, no Changes tab appeared. Exactly the ledger's "accepted and then went nowhere a user could
+see," reproduced independently on the pre-fix binary, not read from the report.
+
+### Confirmed fix (current-HEAD binary, lanes `wfj2chg18b` and `wfj2chg18c`)
+
+Identical gesture, same file row, same coordinates, only the binary differs. `wfj2chg18b`: `panel.list`
+before **3** panes; after, **4** — a new `pane-3`, `tab:"Changes"`, `active:"true"`. Screenshot
+`/tmp/wf-judge2/shots/chg18b/02-20-after-drop.png` shows a brand-new, focused Changes tab (second tab
+labelled "Changes", with its own close button) rendering the diff of exactly `main.rs` — the file
+whose row was dragged, visible line-for-line. Re-driven a second time (`wfj2chg18c`, gap 1 below,
+dragging the same row at slightly different pixel coordinates to rule out a coordinate-specific
+fluke): same result, `panel.list` 3→4, new `pane-3` Changes tab active. Two independent runs, same
+outcome, plus the one negative-control run above on the unfixed binary showing the drop is received
+but produces no tab — isolating the fix's effect from the gesture/coordinates themselves, the same
+logic the report used, now independently re-run rather than trusted from its text.
+
+### Gap disposition
+
+Gap (1) (re-drive independently, more than once per binary) is closed: this pass drove the gesture
+itself from scratch — reconstructing the `+`-menu-to-open-Changes step, which the report's own text
+didn't need to spell out since it already had a Changes tab open — once on the pre-fix binary and
+twice on the fixed binary, all three consistent. Gap (2) (no production layout puts Changes and
+Terminal in the same split, so this gesture is the only route to the fix today) is accepted as a real,
+separate UX-discoverability finding the report itself scoped out of this row's own clause ("wire the
+consumer," which is proven wired) — not re-litigated here. Gap (3) (`TerminalDropEvent::Files`, the
+sibling variant, untouched) is accepted as out of scope: the ledger row and this pass both concern the
+`Diff` variant only.
