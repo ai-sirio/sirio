@@ -197,9 +197,7 @@ fn bind_window_keys(cx: &mut App) {
                     KeyBinding::new(shortcut, RestoreLaunchSnapshot, None)
                 }
                 WindowCommand::NewBrowser => KeyBinding::new(shortcut, NewBrowser, None),
-                WindowCommand::FocusAddressBar => {
-                    KeyBinding::new(shortcut, FocusAddressBar, None)
-                }
+                WindowCommand::FocusAddressBar => KeyBinding::new(shortcut, FocusAddressBar, None),
             })
             // F-SET-02: Escape closes the settings surface. Global (no key
             // context) on purpose — it must fire even when the surface
