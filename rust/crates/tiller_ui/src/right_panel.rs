@@ -1377,13 +1377,12 @@ fn find_node_mut<'a>(nodes: &'a mut [FileNode], path: &Path) -> Option<&'a mut F
 /// stay four *different* colours: rendering them all as `git_modified` is
 /// what made F-GIT-STATUS-02's precedence ordering unobservable in the
 /// frame, and rendering `Staged` as `git_modified` is F-CHG-06.
+/// F-CHG-06: delegates to [`crate::git_status_style`], the crate's single
+/// status -> colour mapping, so this and the Changes list cannot drift apart
+/// on precedence again. Kept as a named local so the call sites below read
+/// unchanged.
 fn git_status_color(status: DirectoryGitStatus, theme: Theme) -> Rgba {
-    match status {
-        DirectoryGitStatus::Conflicted => theme.git_conflict,
-        DirectoryGitStatus::Staged => theme.git_staged,
-        DirectoryGitStatus::Changed => theme.git_modified,
-        DirectoryGitStatus::Untracked => theme.git_untracked,
-    }
+    crate::git_status_style::status_color(status, theme)
 }
 
 fn activity_status(status: ActivityStatus, theme: Theme) -> Rgba {
@@ -2187,9 +2186,6 @@ mod tests {
         );
     }
 
-    /// F-CHG-05: the Files focus path supports arrow selection and Space
-    /// toggles the selected directory without needing a mouse click.
-    #[gpui::test]
     /// F-CORE-FILE-01: the Files panel's own comparator, not
     /// `tiller_project::file::read_directory`'s. A critic pass found the
     /// natural-sort port landed in the latter while the panel a user sees
@@ -2218,6 +2214,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// F-CHG-05: the Files focus path supports arrow selection and Space
+    /// toggles the selected directory without needing a mouse click.
+    #[gpui::test]
     async fn arrow_keys_select_and_space_expands_the_files_tree(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let folder = dir.0.join("src");

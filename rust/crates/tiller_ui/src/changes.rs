@@ -1863,18 +1863,14 @@ impl Render for ChangesTab {
 }
 
 /// The status hue for a change row's glyph — the path text stays neutral.
+///
+/// F-CHG-06: this used to be its own precedence chain, testing
+/// `has_worktree_changes()` before `is_staged()` — backwards from Swift's
+/// `GitStatusStyle.color` and from the Files tree, so a staged-then-modified
+/// file rendered amber here and green there. Both views now resolve through
+/// [`crate::git_status_style`]; keep it that way.
 fn status_color(entry: &StatusEntry, theme: Theme) -> Rgba {
-    if entry.is_conflicted() {
-        theme.git_conflict
-    } else if entry.is_untracked() {
-        theme.git_untracked
-    } else if entry.has_worktree_changes() {
-        theme.git_modified
-    } else if entry.is_staged() {
-        theme.git_staged
-    } else {
-        theme.title
-    }
+    crate::git_status_style::entry_color(entry, theme)
 }
 
 /// A per-type glyph for known file kinds; the generic fallback is the file
@@ -2241,6 +2237,37 @@ mod tests {
         };
         assert!(contains_both(staged), "the staged row must list both.txt");
         assert!(contains_both(changed), "the changed row must list both.txt");
+
+        // F-CHG-06. Presence is not the whole contract, and asserting only
+        // presence is why this test stayed green through the bug: `both.txt`
+        // landed in both sections correctly while rendering the *wrong
+        // colour* in the Changes list — amber, where the Files tree drew the
+        // same file green. Pin the colour on this exact entry, through
+        // `status_color`, the function the rows actually call.
+        let entry = tab.read_with(cx, |tab, _| {
+            tab.entries
+                .iter()
+                .find(|entry| entry.path == *"both.txt")
+                .cloned()
+                .expect("both.txt must be among the entries")
+        });
+        let theme = Theme::dark();
+        assert!(
+            entry.is_staged() && entry.has_worktree_changes(),
+            "fixture must really be staged AND further modified, or the \
+             assertion below proves nothing"
+        );
+        assert_eq!(
+            status_color(&entry, theme),
+            theme.git_staged,
+            "a staged-then-modified file reads as staged, matching Swift's \
+             GitStatusStyle.color and the Files tree marker"
+        );
+        assert_ne!(
+            status_color(&entry, theme),
+            theme.git_modified,
+            "the pre-fix order returned git_modified here"
+        );
     }
 
     /// One file per bucket: the sections appear in display order, each
