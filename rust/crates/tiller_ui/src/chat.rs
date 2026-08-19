@@ -601,6 +601,16 @@ pub enum ChatEvent {
     /// browser is handled locally (see [`TranscriptSelectableText`]'s mouse
     /// handler) and never reaches this event.
     OpenLink(String),
+    /// F-CORE-DOM-07: a turn just finished settling into the transcript
+    /// (`AcpEvent::TurnEnded` already handled -- footer pushed, streaming
+    /// cleared, transcript persisted). This is the completion signal
+    /// `request_auto_rename` needs and that no `ChatEvent` variant used to
+    /// provide, so an ACP-hosted chat tab could never be auto-renamed: the
+    /// throttle type was tested in isolation but nothing ever asked it a
+    /// question. The workspace resolves which pane this chat lives in and
+    /// synthesizes the running->done `Transition` `request_auto_rename`
+    /// expects.
+    TurnEnded,
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -1736,6 +1746,12 @@ impl Chat {
                 // exactly once. The footer lands before the queued turn so
                 // the transcript reads: stop stated, then the redirect.
                 self.send_queued_item(cx);
+                // F-CORE-DOM-07: tell the workspace a turn just settled so
+                // throttled auto-naming has a signal to react to. Emitted
+                // after the transcript is persisted so a subscriber reading
+                // `transcript_for_resume()` in response sees this turn's
+                // reply included.
+                cx.emit(ChatEvent::TurnEnded);
             }
             AcpEvent::TransportError(message) => {
                 self.client.take();
@@ -8228,6 +8244,51 @@ mod tests {
                 .any(|entry| matches!(entry, Entry::User(text) if text == "line one\nline two"))
                 && chat.has_completed_turn
         });
+    }
+
+    /// F-CORE-DOM-07: before this pass `ChatEvent` had exactly two variants
+    /// (`OpenFile`, `OpenLink`) and `AcpEvent::TurnEnded`'s handler -- which
+    /// already flips `has_completed_turn`, pushes the footer, and persists
+    /// the transcript -- never told an outside subscriber a turn had
+    /// settled. That is the half of the wiring gap that lives in this
+    /// crate: the workspace's `request_auto_rename` (tiller/src/main.rs)
+    /// is fully ported and unit-tested, but nothing could ever call it for
+    /// a chat pane because no event existed to call it *from*. This drives
+    /// a real turn through the real `chat_fixture.py` ACP agent -- the same
+    /// production path every other test in this file uses, not a
+    /// hand-constructed `AcpEvent` -- and asserts an outside subscriber
+    /// (standing in for `TillerWorkspace::bind_chat`) observes
+    /// `ChatEvent::TurnEnded` by the time `has_completed_turn` flips.
+    #[gpui::test]
+    async fn a_completed_turn_emits_chat_event_turn_ended(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+
+        let turn_ended = Rc::new(RefCell::new(false));
+        let turn_ended_write = turn_ended.clone();
+        cx.update(|_, app_cx| {
+            app_cx
+                .subscribe(&chat, move |_chat, event: &ChatEvent, _cx| {
+                    if matches!(event, ChatEvent::TurnEnded) {
+                        *turn_ended_write.borrow_mut() = true;
+                    }
+                })
+                .detach();
+        });
+
+        focus_and_type(cx, "first");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
+
+        assert!(
+            *turn_ended.borrow(),
+            "AcpEvent::TurnEnded must also emit ChatEvent::TurnEnded -- on the \
+             unfixed tree this assertion is the failure: has_completed_turn flips \
+             true (the turn genuinely ended) but no ChatEvent ever reaches a \
+             subscriber, which is exactly why request_auto_rename was structurally \
+             unreachable from a real chat turn"
+        );
     }
 
     /// F-CHAT-01 + F-CHAT-23 + F-CHAT-18: one streamed turn renders as a

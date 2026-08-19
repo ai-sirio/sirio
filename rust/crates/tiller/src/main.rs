@@ -666,6 +666,12 @@ struct RetainedChat {
 
 enum WorkspaceAction {
     NewTab(NewTabAction),
+    /// F-SID-14: the sidebar worktree context menu's New Terminal/agent-panel/
+    /// New Chat trio. Unlike plain `NewTab` (which trusts `working_directory`
+    /// at drain time), this carries the worktree the user actually
+    /// right-clicked, captured at click time -- see the dispatch site's
+    /// comment for the race this closes.
+    NewTabForWorktree(PathBuf, NewTabAction),
     NewChatAgent(&'static str),
     InstallSkill(tiller_project::SkillInstallCommand),
     /// F-SET-18: an agent row's Install button was clicked. `command` is
@@ -3317,6 +3323,23 @@ impl TillerWorkspace {
                                 WorkspaceAction::NewTab(action) => {
                                     workspace.open_action(action, window, cx)
                                 }
+                                WorkspaceAction::NewTabForWorktree(path, action) => {
+                                    // Re-assert the worktree captured at click
+                                    // time immediately before creating the tab,
+                                    // in case anything (a stray
+                                    // `SidebarEvent::SelectWorktree`, another
+                                    // queued action) moved `working_directory`
+                                    // in the interim -- see the enum variant's
+                                    // doc comment and the dispatch site's.
+                                    if workspace.working_directory != path
+                                        && workspace
+                                            .select_worktree(path, Some(window), cx)
+                                            .is_err()
+                                    {
+                                        continue;
+                                    }
+                                    workspace.open_action(action, window, cx)
+                                }
                                 WorkspaceAction::NewChatAgent(id) => {
                                     workspace.open_chat_agent(id, window, cx);
                                 }
@@ -3940,7 +3963,7 @@ impl TillerWorkspace {
     /// workspace owns the editor tab and routes that intent through the same
     /// de-duplicating path used by the file tree and Changes surface.
     fn bind_chat(chat: &Entity<Chat>, cx: &mut Context<Self>) {
-        cx.subscribe(chat, |workspace, _, event: &ChatEvent, cx| match event {
+        cx.subscribe(chat, |workspace, chat_entity, event: &ChatEvent, cx| match event {
             ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
             // F-BRW-09: this subscription predates a Window-aware callback
             // (see `bind_chat`'s two call sites, one of which has no
@@ -3950,6 +3973,41 @@ impl TillerWorkspace {
             ChatEvent::OpenLink(url) => {
                 if let Ok(mut actions) = workspace.pending_actions.lock() {
                     actions.push(WorkspaceAction::OpenBrowserLink(url.clone()));
+                }
+            }
+            // F-CORE-DOM-07: the only completion signal an ACP-hosted chat
+            // tab produces. `request_auto_rename`'s throttle and summarizer
+            // machinery were already ported and unit-tested, but nothing
+            // ever called it for a Chat pane -- `ChatEvent` had no
+            // completion variant, so a chat tab could never be auto-named.
+            // Resolve which pane this emitting entity lives in (a chat can
+            // be resumed/restored into any pane id, so this cannot be
+            // captured once at bind time) and synthesize the
+            // running->done `Transition` the existing, tested function
+            // expects.
+            ChatEvent::TurnEnded => {
+                let chat_id = chat_entity.entity_id();
+                let mut pane_id = None;
+                for tab in &workspace.tabs {
+                    if pane_id.is_some() {
+                        break;
+                    }
+                    tab.panes.for_each(&mut |leaf_id, content| {
+                        if pane_id.is_none()
+                            && let TabContent::Chat(candidate) = content
+                            && candidate.entity_id() == chat_id
+                        {
+                            pane_id = Some(leaf_id);
+                        }
+                    });
+                }
+                if let Some(pane_id) = pane_id {
+                    let transition = Transition {
+                        pane_id: format!("pane-{pane_id}"),
+                        old: Some(AgentStatus::Running),
+                        new: AgentStatus::Done,
+                    };
+                    workspace.request_auto_rename(&transition, cx);
                 }
             }
         })
@@ -4016,7 +4074,7 @@ impl TillerWorkspace {
                         );
                     }
                     Some(TerminalContextCommand::Close) => {
-                        workspace.request_close_terminal_at(tab_id, pane_id, cx);
+                        workspace.request_close_terminal_at(tab_id, pane_id, None, cx);
                     }
                     Some(TerminalContextCommand::Restart) => {
                         terminal_entity.update(cx, |terminal, cx| terminal.restart(cx));
@@ -4508,8 +4566,22 @@ impl TillerWorkspace {
                 {
                     return;
                 }
+                // F-SID-14: this used to queue a bare `WorkspaceAction::NewTab(action)`
+                // and let the ~40ms-later drain loop read `self.working_directory`
+                // to learn which worktree the tab belongs to. That is an implicit,
+                // mutable channel: a stray `SidebarEvent::SelectWorktree` for a
+                // *different* row -- observed live, fired from the sidebar's own
+                // row `on_click` reaching through the context menu's popup layer --
+                // can land between this call and the drain, flipping
+                // `working_directory` back before the queued action runs. The
+                // agent-panel tab then gets created in whatever worktree last won
+                // that race, not the one actually right-clicked. Carrying `path`
+                // explicitly in the queued action closes the race regardless of
+                // what else touches `working_directory` in the interim -- the
+                // drain re-asserts this exact worktree immediately before
+                // creating the tab.
                 if let Ok(mut actions) = self.pending_actions.lock() {
-                    actions.push(WorkspaceAction::NewTab(action));
+                    actions.push(WorkspaceAction::NewTabForWorktree(path.clone(), action));
                 }
             }
             (_, SidebarContextAction::RemoveProject) => {}
@@ -4705,7 +4777,17 @@ impl TillerWorkspace {
     /// Ctrl-W). Gated by F-TERM-08: a pane doing live work is not closed
     /// silently, it is held in `pending_pane_close` and rendered as a
     /// confirm-or-cancel banner over the pane instead.
-    fn request_close_focused_pane(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// F-CORE-WSP-05: `window` is threaded all the way to `close_terminal_at`
+    /// so a keyboard-driven close moves *real* GPUI keyboard focus to the
+    /// surviving pane, not just the `tab.focused_pane` bookkeeping field.
+    /// Before this, every real caller passed `None` here (the one caller
+    /// with a window discarded it as `_window`), so `close_terminal_at`'s
+    /// `if let Some(window) = window { window.focus(...) }` branch never
+    /// ran outside a test that builds one by hand -- closing a pane with
+    /// `ctrl-alt-w` left the surviving pane visually focused (correct
+    /// `tab.focused_pane`) but keyboard-deaf until the user clicked it.
+    fn request_close_focused_pane(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         let Some((tab_id, focused_pane)) = self
             .tabs
             .get(self.active_tab)
@@ -4713,13 +4795,20 @@ impl TillerWorkspace {
         else {
             return;
         };
-        self.request_close_terminal_at(tab_id, focused_pane, cx);
+        self.request_close_terminal_at(tab_id, focused_pane, window, cx);
     }
 
     /// The interactive entry point for closing a specific pane, e.g. the
     /// terminal context menu's "Close Terminal…" item. See
-    /// `request_close_focused_pane` for the gating rule.
-    fn request_close_terminal_at(&mut self, tab_id: usize, pane_id: usize, cx: &mut Context<Self>) {
+    /// `request_close_focused_pane` for the gating rule and for why `window`
+    /// is threaded through (F-CORE-WSP-05).
+    fn request_close_terminal_at(
+        &mut self,
+        tab_id: usize,
+        pane_id: usize,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
             return;
         };
@@ -4745,7 +4834,7 @@ impl TillerWorkspace {
             self.close_tab_by_id(tab_id, cx);
             return;
         }
-        self.close_terminal_at(tab_id, pane_id, None, cx);
+        self.close_terminal_at(tab_id, pane_id, window, cx);
     }
 
     /// F-CORE-ACT-23: the Activity panel's own close button. It used to call
@@ -4776,12 +4865,16 @@ impl TillerWorkspace {
         self.close_tab(index, cx);
     }
 
-    fn confirm_pending_pane_close(&mut self, cx: &mut Context<Self>) {
+    /// F-CORE-WSP-05: `window` (available from the "Close Anyway" banner's
+    /// own `on_click`) is threaded through for the same reason
+    /// `request_close_focused_pane` threads it -- so real keyboard focus,
+    /// not just `tab.focused_pane`, follows to the surviving pane.
+    fn confirm_pending_pane_close(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if let Some(pending) = self.pending_pane_close.take() {
             if pending.whole_tab {
                 self.close_tab_by_id(pending.tab_id, cx);
             } else {
-                self.close_terminal_at(pending.tab_id, pending.pane_id, None, cx);
+                self.close_terminal_at(pending.tab_id, pending.pane_id, window, cx);
             }
         }
     }
@@ -8105,9 +8198,9 @@ impl TillerWorkspace {
                                 .rounded(px(6.0))
                                 .bg(theme.tab_error)
                                 .text_color(gpui::white())
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     confirm_entity.update(cx, |workspace, cx| {
-                                        workspace.confirm_pending_pane_close(cx)
+                                        workspace.confirm_pending_pane_close(Some(window), cx)
                                     });
                                 })
                                 .child("Close Anyway"),
@@ -9549,8 +9642,8 @@ impl TillerWorkspace {
         self.split_focused_terminal(SplitDirection::Vertical, Some(window), cx);
     }
 
-    fn handle_close_pane(&mut self, _: &ClosePane, _window: &mut Window, cx: &mut Context<Self>) {
-        self.request_close_focused_pane(cx);
+    fn handle_close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_close_focused_pane(Some(window), cx);
     }
 
     fn handle_cycle_tab_forward(
@@ -13415,7 +13508,7 @@ mod tests {
                     status,
                     Instant::now() + Duration::from_millis(1),
                 );
-                workspace.request_close_terminal_at(0, 0, cx);
+                workspace.request_close_terminal_at(0, 0, None, cx);
             });
             cx.run_until_parked();
             assert!(
@@ -13454,7 +13547,7 @@ mod tests {
                 AgentStatus::Done,
                 Instant::now() + Duration::from_millis(2),
             );
-            workspace.request_close_terminal_at(0, 0, cx);
+            workspace.request_close_terminal_at(0, 0, None, cx);
         });
         cx.run_until_parked();
         assert!(
@@ -13512,7 +13605,7 @@ mod tests {
                 AgentStatus::Running,
                 Instant::now() + Duration::from_millis(1),
             );
-            workspace.request_close_terminal_at(0, 0, cx);
+            workspace.request_close_terminal_at(0, 0, None, cx);
         });
         cx.run_until_parked();
         assert!(
@@ -19163,6 +19256,93 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "a timed-out summarizer must not block the caller for the full sleep"
+        );
+    }
+
+    /// F-CORE-DOM-07: the wiring regression. Before this pass `ChatEvent`
+    /// had exactly two variants (`OpenFile`, `OpenLink`) and nothing ever
+    /// produced a `Transition` for an ACP-hosted `Chat` pane -- the
+    /// throttle and summarizer machinery above were fully unit-tested but
+    /// `request_auto_rename` was structurally unreachable from a chat tab's
+    /// own completed turn (wave N, live drive: two full real turns across
+    /// two fresh process boots, a 90+s sqlite poll, and a `pstree` showing
+    /// no summarizer subprocess ever spawns). This drives the exact signal
+    /// a real turn produces -- `Chat` emitting `ChatEvent::TurnEnded` -- and
+    /// asserts the one synchronous, pre-spawn side effect
+    /// `request_auto_rename` has: `auto_naming_throttle` records a request
+    /// for the chat tab's id. `summarizer_agent` is pinned to Oh-My-Pi,
+    /// which this environment's own docs record as failing immediately at
+    /// startup (`ENVIRONMENT.md`), so the async tail this synchronous half
+    /// triggers cannot reach a real network call.
+    #[gpui::test]
+    async fn chat_turn_ended_wires_into_auto_rename(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.settings = cx.new(|cx| {
+                Settings::with_snapshot(
+                    cx,
+                    SettingsSnapshot {
+                        auto_naming: true,
+                        summarizer_agent: tiller_ui::settings::SummarizerChoice::OhMyPi,
+                        ..Default::default()
+                    },
+                )
+            });
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_chat_tab(window, None, cx);
+        });
+        cx.run_until_parked();
+
+        let (chat, tab_id) = workspace.read_with(&cx.cx, |workspace, _| {
+            let tab = workspace.tabs.last().expect("add_chat_tab pushed a tab");
+            let mut chat = None;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Chat(view) = content {
+                    chat = Some(view.clone());
+                }
+            });
+            (
+                chat.expect("the new tab's pane holds a Chat"),
+                tab.id,
+            )
+        });
+
+        chat.update(&mut cx, |chat, cx| {
+            chat.restore_transcript("assistant: DOM07_WIRING_PROOF finished the task", cx);
+        });
+
+        assert!(
+            !workspace.read_with(&cx.cx, |workspace, _| workspace
+                .auto_naming_throttle
+                .contains_key(&tab_id)),
+            "sanity: nothing should have requested a rename before the turn-ended signal"
+        );
+
+        // The exact completion signal a real turn produces (chat.rs's
+        // `AcpEvent::TurnEnded` handler, after the transcript is
+        // persisted).
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::TurnEnded));
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace
+                .auto_naming_throttle
+                .contains_key(&tab_id)),
+            "ChatEvent::TurnEnded must reach request_auto_rename: on the \
+             unfixed tree bind_chat has no arm for it, this assertion is \
+             the failure, and auto_naming_throttle never gains an entry \
+             for an ACP-hosted chat tab no matter how many turns complete"
         );
     }
 }
