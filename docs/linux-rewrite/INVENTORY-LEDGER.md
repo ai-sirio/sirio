@@ -596,6 +596,17 @@ ones**, and most of the half-proven bucket is now waiting on *evidence* rather t
 drive that was never run, or one whose screenshots were lost. That is a different kind of debt
 from a broken feature, and it should not be read as twenty-one bugs.
 
+**A coverage gap the counts cannot show, found the same evening.** All twenty `F-CHAT-*` rows were
+`PASSED` while the chat surface rendered **completely blank after any restart or worktree switch**
+(fixed in `e6b3816c`; see `fullapp/BUILDER-chat-empty.md`). The rows are not wrong and are not being
+downgraded — each exercises a chat *behaviour*, and those behaviours work once the surface is
+visible. But not one of the twenty could have caught this, because none of them asks the prior
+question: *does this surface still appear after the app restarts?* The inventory tests what a
+feature does, rarely whether it survives a restart. `F-CORE-DOM-01` failed for the same shape —
+persisted state that was correct in the database and invisible after boot — and was found only
+because someone restarted the app on purpose. Worth a deliberate pass: restart, then look at every
+surface, before trusting any row that was only ever verified inside one session.
+
 Recomputed from the body by counting rows, not by hand, 2026-08-14 — the previous block
 summed to 388 and disagreed with the body on five of nine verdicts. Anyone editing totals
 should recount rather than adjust:
