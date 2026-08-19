@@ -51,6 +51,13 @@ Do not lose `F-TAB-26` in the process: `close_terminal_at` refuses to remove a t
 single-pane tab's "Close Anyway" has to close the whole tab. That is what `whole_tab` is for and it
 is already correct.
 
+**Checked, so nobody has to worry about it:** making the confirmation unconditional cannot break
+automation. `request_close_terminal_at` has exactly two live callers, and both are user gestures —
+the terminal context menu's Close (`main.rs:4089`) and `request_close_focused_pane` (`:4810`), which
+the `ClosePane` **keybinding** reaches through `handle_close_pane` (`:9787`). The control socket does
+not go through it at all: `ControlAction::ClosePane` (`:3552`) calls `close_focused_pane` directly,
+and the comment at `:3190` says that headless bypass is deliberate. Leave that path alone.
+
 ---
 
 ## 2. `F-TERM-05` — "Set Title" has nowhere to type
