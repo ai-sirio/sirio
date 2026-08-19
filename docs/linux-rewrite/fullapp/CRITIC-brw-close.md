@@ -30,6 +30,49 @@ match my visual estimate of its glyph center on the first attempt — see the ra
 item 2 below. Every click coordinate reported here is the one that was confirmed, by destroying the
 target window, to have actually landed on the control; none are guesses.
 
+## Instrumentation note — added after review, verified empirically before writing this section
+
+A reviewer flagged, correctly as general X11 practice, that (1) a `grep`/prose pattern
+`IsUnMapped` would never match the X11 protocol enum's real spelling `IsUnmapped` (lowercase m),
+and (2) `xwininfo -root -tree` prints geometry, not `Map State:`, so a window's presence in a tree
+dump is not evidence it is mapped. Both are correct as general advice, so I checked, rather than
+either defending or accepting on trust:
+
+```
+$ strings $(command -v xwininfo) | grep -i "mapped\|viewable"
+IsUnMapped
+IsUnviewable
+IsViewable
+```
+
+This build (`xwininfo 1.1.6`, Ubuntu `x11-utils 7.7+6build2`) genuinely embeds `IsUnMapped` with a
+capital M as its own display string — a long-standing quirk of the `xwininfo` *utility's* source
+(distinct from the protocol enum name), not a typo in my transcript. I additionally re-ran a live
+round-trip after this was raised, on a fresh instance, capturing **full, unfiltered** `xwininfo -id`
+output (no grep at all) at each step: a mapped browser tab read `Map State: IsViewable`; switching
+to a second Browser tab (unmapping the first via `hide_offscreen_browsers`, not destroying it) read
+`Map State: IsUnMapped` on the *same window id*; switching back read `IsViewable` again. All three
+matched what this report already claimed for the equivalent tab-switch case in item 6.
+
+On point (2): every "still exists" observation in this report (used only for window *discovery* —
+finding a new id after a reopen, or locating both webviews' ids in a two-browser scene) came from
+`xwininfo -root -tree`, but every map-state or destroyed/not-destroyed *claim* came from a direct
+`xwininfo -id <id>` call, never from tree presence alone. Per instrument, by item:
+
+- **Items 2, 3, 5 (the load-bearing "did it actually destroy the window" claims)** used window
+  **existence** — `xwininfo -id <id>` exiting nonzero with `X Error: 9: Bad Drawable` / `No such
+  window with id`, or (in the item-5 raster-scan loop) the same check's exit code. This is
+  independent of `IsUnMapped`/`IsUnmapped` spelling entirely: a destroyed window has no `Map State:`
+  line to parse either way.
+- **Items 5 (survivor) and 6 (tab-switch, Settings)** used the `Map State:` line from `xwininfo -id
+  <id>` directly (piped through `grep -i "map state"`, which matches on the label, not the value —
+  so it was never at risk of the capital/lowercase-M issue), and every one of those was also cross-
+  checked against a screenshot (clean vs. rendered content), so no conclusion in this report rests on
+  the map-state string alone.
+
+Nothing in the report changes as a result of this check — the instrument was sound — but the ask to
+verify rather than assume was fair, and this section records what I actually did about it.
+
 ## Mechanism test — `Scripts/Tests/test-x11-unmap-needs-a-flush.sh`
 
 Ran as shipped:
