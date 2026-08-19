@@ -40,6 +40,39 @@ isolate `F-BRW-09` from the webview-persistence defect below. All three were tor
 
 ### 1. The native browser webview never unmaps/hides when its tab loses focus, is covered by Settings, or is closed outright — reproduced four independent ways
 
+> **RESOLVED 2026-08-19. All four cases fixed and each verified live by a fresh critic.**
+> Cases 1, 2 and 4 by `382bf383` (`CRITIC-brw-unmap.md`); case 3 — the tab closed outright, which
+> `382bf383` did not fix and which that critic correctly refused to clear — by `474f266a`
+> (`CRITIC-brw-close.md`, **CLEARED**: the webview window becomes fully unaddressable,
+> `xwininfo: No such window`, with zero bleed-through immediately, after 5.5 s, and after three
+> forced repaints, over both an empty pane and a live terminal, reproduced from a second clean
+> instance).
+>
+> **The guess below was half right, and the missing half is the interesting part.** This report
+> offered two candidates: the `Drop` is not running, or `set_visible(false)` "isn't taking effect
+> for this build's Xwayland/wry combination". It *was* taking effect — in the client. wry unmaps
+> with a bare `XUnmapWindow` on GDK's connection and destroys with a bare `XDestroyWindow` on the
+> same one, and Xlib **buffers** both. The only thing that ever drained that buffer was the
+> surface's own 16 ms `gtk::main_iteration_do` pump, which is why hiding on tab-switch and behind
+> Settings could be made to work at all — and why tab-close could not: closing the tab destroys the
+> pump. `Drop` was worse than useless there, since the `webview` field drops *after* the `Drop`
+> body returns, so wry's own `XDestroyWindow` landed in a buffer with nothing alive to flush it.
+>
+> That is a claim about Xlib rather than about Tiller, and no Rust assertion can see it — the
+> request is made either way and the difference is only in what the X server was told. It has its
+> own gate: `Scripts/Tests/test-x11-unmap-needs-a-flush.sh` measures it on a private Xvfb against a
+> second, independent client connection. Its limit, found by the critic trying to break it: it
+> discriminates against "no flush at all", not against the explicit `gdk_display_flush` call, since
+> `events_pending` reaches `XPending` and flushes on its own.
+>
+> One lead from `CRITIC-brw-unmap.md` is **refuted**, not inherited: a reopened Browser tab does
+> *not* land on the closed one's X11 window id. It gets a new one every time
+> (`0x800002 → 0x800062 → …`), which is what destruction looks like.
+>
+> Still open and unexplained, recorded so it is not quietly dropped: a
+> `_gdk_frame_clock_thaw: assertion failed` GTK critical fires on **every** close, in both critics'
+> sessions, and correlates with no functional failure either of them could find.
+
 `browser.rs` has a `Drop for BrowserSurface` that calls `webview.set_visible(false)`, showing this
 was an anticipated failure mode — but in live testing the native child window keeps rendering its
 last page, pinned at its old screen rectangle, regardless of what the app does above it:
