@@ -412,3 +412,99 @@ causal effect (not just green tests against already-passing code). No code chang
 made to the real repo for this row.
 
 ---
+
+## F-CORE-USG-07 — the valid-credentials/200 leg, driven against a genuine local stub
+
+Row: "Codex usage fetching loads credentials, refreshes as needed, calls the ChatGPT backend with
+bearer/account headers, parses usage windows, and exposes mapped logged-out/error outcomes."
+VERIFY: "Run with valid, refresh-needed, missing, and rejected credentials and inspect the
+resulting usage state and window data." (`02-inventory-packages.md:65`, SRC
+`CodexUsageFetcher.swift:3`.)
+
+**Already proven, not re-touched:** missing-creds, rejected-creds/reactive-refresh, and
+bearer/account header construction — all three driven live through the real, unmodified
+`fetch_usage` in a prior wave (wave D), reconfirmed not stale this pass by `git log` (no commits
+touching `codex.rs` since).
+
+**Missing half, per the brief:** the valid-credentials/200-success branch, recorded UNREACHABLE —
+`USAGE_URL` (`tiller_usage/src/codex.rs:25`) was a hardcoded `https://chatgpt.com/backend-api/wham/usage`
+constant with no override seam, and this host's Codex has no working OAuth account to reach it with
+regardless.
+
+### Determining driveability: yes, via the same seam pattern the file already uses
+
+The brief's instruction was explicit: do not fake credentials, do not write user-global config: if
+it truly cannot be driven against a local stub, say so precisely rather than guessing. It **can** be
+driven, without either forbidden move, because the file already has the exact needed precedent:
+`token_url()` reads a `TILLER_CODEX_TOKEN_URL` override (added for F-CORE-USG-05, with the identical
+UNREACHABLE-without-it problem) instead of the hardcoded `TOKEN_URL` constant, specifically so the
+token-refresh path could be driven against a local fixture without ever reaching
+`auth.openai.com`, and `codex_auth_file_path()` already reads `$CODEX_HOME` before falling back to
+`~/.codex/auth.json` — the exact same precedence `codex` itself uses, and already a live seam for
+pointing credential loading at a directory that is not the user's real one.
+
+**Change made** (`rust/crates/tiller_usage/src/codex.rs`): added `usage_url()`, mirroring
+`token_url()` exactly — reads `TILLER_CODEX_USAGE_URL`, falls back to the real `USAGE_URL`
+constant — and pointed `fetch_usage`'s one `get(...)` call at it instead of the hardcoded constant.
+`codex` itself never reads either environment variable, so setting them cannot affect the real
+`codex` CLI's own config or requests, and nothing here forges credentials *against a real account* —
+a locally-generated, self-consistent bearer token is sent only to a local process this test itself
+started and controls, never to OpenAI.
+
+### Driven through the *production* entry point, not a lower-level helper
+
+Confirmed first that `CodexUsageFetcher::fetch()` — the public, zero-argument function this change
+targets — is the actual production caller: `grep -n "CodexUsageFetcher" rust/crates/tiller_ui/src/status_bar.rs`
+finds `executor.spawn(async move { CodexUsageFetcher::fetch() })`, the real status-bar usage-polling
+path, confirming this is not a dead or test-only seam.
+
+New test `a_real_200_response_completes_a_full_fetch_through_codexusagefetcher_fetch`
+(`rust/crates/tiller_usage/src/codex.rs`, reusing the module's existing `one_shot_http_fixture`
+machinery, generalized to take a path so the stub's URL can genuinely read
+`/backend-api/wham/usage`):
+
+1. Starts a real local HTTP fixture (a genuine `TcpListener` + one accepted connection + a real
+   `curl` child process round trip, the same mechanism `F-CORE-USG-05`'s own tests already use for
+   the token endpoint) serving `REAL_RESPONSE` — the module's own real wham API payload, captured
+   live from this developer's account on an earlier review day (`used_percent: 51`,
+   `reset_at: 1787038258`).
+2. Writes a real, local, self-consistent `auth.json` (OAuth-mode, a fresh `last_refresh` so the
+   proactive-refresh branch is skipped and the run exercises the 200 path directly, not a refresh)
+   into a temp directory.
+3. Sets `CODEX_HOME` to that temp directory and `TILLER_CODEX_USAGE_URL` to the fixture's URL —
+   both environment variables the file introduces or already had for exactly this purpose, neither
+   read by the real `codex` CLI.
+4. Calls the bare `CodexUsageFetcher::fetch()` — no test-only parameters, the identical call
+   `status_bar.rs` makes — and asserts `UsageFetchOutcome::Success` with the session window's
+   `used_percent`/`resets_at` matching `REAL_RESPONSE` exactly: a hard discriminator, since those
+   specific numbers could only have arrived through a genuine round trip through
+   `load_credentials` -> `needs_refresh` -> `fetch_usage` -> `parse_usage`, not a stub or an
+   assumption.
+
+```
+$ cargo test --manifest-path rust/Cargo.toml -p tiller_usage -- a_real_200_response_completes_a_full_fetch_through_codexusagefetcher_fetch
+test codex::tests::a_real_200_response_completes_a_full_fetch_through_codexusagefetcher_fetch ... ok
+```
+
+Full `cargo test -p tiller_usage` (56 tests across the lib and three integration-test binaries) and
+`cargo build --manifest-path rust/Cargo.toml` (whole workspace) both stay green after the change —
+no regression in the existing `TILLER_CODEX_TOKEN_URL`-based tests or anywhere else that touches
+`codex.rs`.
+
+### Row verdict
+
+Missing-creds, rejected-creds/reactive-refresh, bearer/account headers: **PASSED** (prior wave,
+live, not re-touched here). Valid-credentials/200-success: **PASSED**, newly driven this pass
+against a genuine local stub through the real production entry point, with a hard numeric
+discriminator.
+
+**Row verdict: `half-proven` -> promoted to `PASSED`.** All four VERIFY branches (valid,
+refresh-needed, missing, rejected) are now independently driven through the real `fetch()`/`fetch_usage`
+code path — three live against the real backend in a prior wave, the fourth against a local stub
+this pass, using the same override-seam pattern the file's own F-CORE-USG-05 fix already
+established, with no credentials faked against a real account and no user-global config touched.
+
+Commit: `<to be filled after commit>` (adds `usage_url()`/`TILLER_CODEX_USAGE_URL` and the new test
+to `rust/crates/tiller_usage/src/codex.rs`).
+
+---

@@ -224,7 +224,7 @@ fn fetch_usage(
         .iter()
         .map(|(name, value)| (*name, value.as_str()))
         .collect();
-    let response = match get(USAGE_URL, &header_refs, timeout.as_secs()) {
+    let response = match get(&usage_url(), &header_refs, timeout.as_secs()) {
         Ok(response) => response,
         Err(HttpError::TimedOut) => return Err(CodexApiFailure::TimedOut),
         Err(HttpError::Network(error)) => {
@@ -266,6 +266,20 @@ fn refresh_token(credentials: &CodexCredentials) -> Result<CodexCredentials, Tok
 /// setting it cannot affect the real `codex` CLI's own token file.
 fn token_url() -> String {
     std::env::var("TILLER_CODEX_TOKEN_URL").unwrap_or_else(|_| TOKEN_URL.to_string())
+}
+
+/// The wham usage endpoint [`fetch_usage`] calls, overridable via
+/// `TILLER_CODEX_USAGE_URL` (F-CORE-USG-07), the same pattern
+/// `TILLER_CODEX_TOKEN_URL`/[`token_url`] already established for the token
+/// endpoint (F-CORE-USG-05): before this override existed, the
+/// valid-credentials/200-success branch of `CodexUsageFetcher::fetch` — the
+/// production entry point `status_bar.rs` calls — was reachable only
+/// through the hardcoded `chatgpt.com` endpoint, which no account on this
+/// development host can reach, leaving that branch permanently
+/// UNREACHABLE. `codex` itself never reads this var, so setting it cannot
+/// affect the real `codex` CLI's own requests.
+fn usage_url() -> String {
+    std::env::var("TILLER_CODEX_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string())
 }
 
 /// [`refresh_token`], against an explicit endpoint rather than the hardcoded
@@ -430,11 +444,18 @@ mod tests {
 
     /// A one-shot local HTTP fixture (F-CORE-USG-05): binds an ephemeral
     /// loopback port, accepts exactly one connection, replies with
-    /// `status_line`/`body`, and hands back the URL to POST to. Lets a test
-    /// drive [`refresh_token_at`] through a real socket and a real curl
+    /// `status_line`/`body`, and hands back the URL at `path` to hit. Lets a
+    /// test drive [`refresh_token_at`] through a real socket and a real curl
     /// child process — a genuine refresh round trip — without reaching
-    /// `auth.openai.com`.
-    fn one_shot_http_fixture(status_line: &'static str, body: &'static str) -> String {
+    /// `auth.openai.com`. The fixture itself does not read the request path
+    /// (it replies unconditionally to whatever `curl` sends), so `path` only
+    /// controls the URL handed back, for a caller whose evidence should name
+    /// the real endpoint it stands in for.
+    fn one_shot_http_fixture_at(
+        path: &'static str,
+        status_line: &'static str,
+        body: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         let addr = listener.local_addr().expect("listener has a local addr");
         std::thread::spawn(move || {
@@ -451,7 +472,14 @@ mod tests {
                 let _ = stream.flush();
             }
         });
-        format!("http://{addr}/oauth/token")
+        format!("http://{addr}{path}")
+    }
+
+    /// `one_shot_http_fixture_at`, defaulted to the token endpoint's own
+    /// path, for the (many) existing callers that stand in for
+    /// `auth.openai.com/oauth/token`.
+    fn one_shot_http_fixture(status_line: &'static str, body: &'static str) -> String {
+        one_shot_http_fixture_at("/oauth/token", status_line, body)
     }
 
     /// F-CORE-USG-05: drives a *real* successful refresh — a genuine HTTP
@@ -549,6 +577,94 @@ mod tests {
         match refresh_token_at(&url, &credentials) {
             Err(error) => assert_eq!(error, TokenRefreshFailure::Revoked),
             Ok(_) => panic!("a 401 response must not report a successful refresh"),
+        }
+    }
+
+    /// F-CORE-USG-07: the valid-credentials/200-success branch of
+    /// [`CodexUsageFetcher::fetch`] — the *production* entry point
+    /// `tiller_ui/src/status_bar.rs` calls (`executor.spawn(async move {
+    /// CodexUsageFetcher::fetch() })`), not a lower-level helper — was
+    /// recorded UNREACHABLE on this development host: no override seam for
+    /// `USAGE_URL` existed, and no Codex account here can reach the real
+    /// `chatgpt.com` endpoint regardless. `usage_url()`'s
+    /// `TILLER_CODEX_USAGE_URL` override (added this pass, mirroring
+    /// `token_url()`/`TILLER_CODEX_TOKEN_URL`, F-CORE-USG-05's own
+    /// precedent) makes it driveable: this test points the *public*,
+    /// zero-argument `fetch()` at a real local HTTP fixture through the var
+    /// alone, with a real, self-consistent (not stolen, not forged against
+    /// a real account) local `CODEX_HOME`/`auth.json` this test also
+    /// controls — nothing is faked *to* OpenAI, and `codex` itself never
+    /// reads either var, so neither can affect the user's real config. The
+    /// fixture serves the exact real captured response below
+    /// (`REAL_RESPONSE`), so a pass requires genuinely parsing a real
+    /// payload shape through the full stack: `fetch()` -> `load_credentials`
+    /// (via `CODEX_HOME`) -> `needs_refresh` (false, `last_refresh` is now)
+    /// -> `fetch_usage` (via `usage_url()`) -> `parse_usage`.
+    #[test]
+    fn a_real_200_response_completes_a_full_fetch_through_codexusagefetcher_fetch() {
+        let url = one_shot_http_fixture_at(
+            "/backend-api/wham/usage",
+            "200 OK",
+            REAL_RESPONSE,
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "tiller-codex-usg07-usage-success-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auth.json"),
+            format!(
+                r#"{{"auth_mode":"oauth","tokens":{{"access_token":"usg07-local-access","refresh_token":"usg07-local-refresh","account_id":"usg07-local-account"}},"last_refresh":"{}"}}"#,
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            ),
+        )
+        .unwrap();
+
+        // SAFETY: no other test in this module reads or writes CODEX_HOME
+        // or TILLER_CODEX_USAGE_URL (only `CodexUsageFetcher::fetch` reads
+        // the former, and only `usage_url` reads the latter, and this is
+        // the only test exercising either).
+        unsafe {
+            std::env::set_var("CODEX_HOME", &dir);
+            std::env::set_var("TILLER_CODEX_USAGE_URL", &url);
+        }
+        let outcome = CodexUsageFetcher::fetch();
+        unsafe {
+            std::env::remove_var("CODEX_HOME");
+            std::env::remove_var("TILLER_CODEX_USAGE_URL");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        match outcome {
+            UsageFetchOutcome::Success(usage) => {
+                // The exact numbers only a genuine round trip through this
+                // test's own local fixture could have produced -- the hard
+                // discriminator this row's VERIFY asks for ("inspect the
+                // resulting usage state and window data").
+                assert_eq!(
+                    usage.session,
+                    Some(UsageWindow {
+                        label: "5h".into(),
+                        used_percent: 51,
+                        resets_at: Some(
+                            std::time::SystemTime::UNIX_EPOCH
+                                + std::time::Duration::from_secs(1787038258)
+                        ),
+                    }),
+                    "the parsed session window must match REAL_RESPONSE's own \
+                     primary_window exactly"
+                );
+                assert_eq!(
+                    usage.weekly, None,
+                    "REAL_RESPONSE's secondary_window is null"
+                );
+            }
+            other => panic!(
+                "expected UsageFetchOutcome::Success from a real 200 response \
+                 through the public fetch() entry point, got {other:?}"
+            ),
         }
     }
 
