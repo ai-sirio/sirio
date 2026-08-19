@@ -780,6 +780,61 @@ fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, 
     flag.set(want);
 }
 
+/// Push GTK's pending work and Xlib's output buffer all the way to the X
+/// server.
+///
+/// This is the other half of the F-BRW tab-close bug, and the half that is
+/// invisible from Rust. wry's `set_visible(false)` is
+/// `XUnmapWindow(gdk_display, child)` and dropping a `WebView` ends in
+/// `XDestroyWindow` on that same connection (wry 0.56.1,
+/// `webkitgtk/mod.rs`: `set_visible_x11`, `X11Data::drop`). Xlib *buffers*
+/// both: neither reaches the server until something flushes. In every other
+/// case the surface's own 16 ms pump — `while gtk::events_pending() {
+/// main_iteration_do }` — flushes it on the next tick, which is why hiding a
+/// browser on tab-switch or behind Settings works.
+///
+/// Closing the tab is the one case where that pump is what we are destroying.
+/// The unmap and the destroy are issued into a buffer nobody will ever drain
+/// again, so the last page stays `IsViewable` and keeps painting over the
+/// empty pane or the terminal that takes its place — reproduced twice by the
+/// `brw-unmap` critic, once from a clean instance, five seconds and many
+/// forced repaints after the tab was gone.
+///
+/// Two rounds because the first iteration is what lets GTK act on
+/// `gtk_widget_destroy`/`gtk_window_close` and emit their own X requests; the
+/// flush after it is what puts those on the wire.
+fn flush_native_window_ops() {
+    for _ in 0..2 {
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.flush();
+        }
+    }
+}
+
+/// Unmap and destroy the native child, now, and make sure the server hears
+/// about it.
+///
+/// Split out from [`BrowserSurface::close_native`] so the cell arithmetic has
+/// somewhere to be tested without a live X11 window; see
+/// `closing_takes_the_child_out_of_the_shared_cell`.
+fn close_native_window(webview: &SharedWebView, flag: &SharedNativeVisibility) {
+    apply_native_visible(webview, flag, false);
+    // Taking the value out of the cell is what destroys the X11 window: the
+    // `Rc` clones held by the element share the *cell*, not the `WebView`, so
+    // this drop is the last one and runs wry's teardown here rather than
+    // whenever GPUI happens to release the entity. Every other holder is left
+    // looking at `None`, which every call site already handles.
+    let taken = webview.borrow_mut().take();
+    let had_native_window = taken.is_some();
+    drop(taken);
+    if had_native_window {
+        flush_native_window_ops();
+    }
+}
+
 /// F-CTRL-BROWSER-06: shadows `console.log/warn/error/info/debug` with
 /// wrappers that append to `window.__tillerConsole` before calling through
 /// to the original method, so page output keeps working in devtools while
@@ -993,6 +1048,24 @@ impl BrowserSurface {
     /// offers no read-back, so this reports our mirror of it.
     pub fn native_visible(&self) -> bool {
         self.webview_visible.get()
+    }
+
+    /// Tear the native child down for good, on the close path.
+    ///
+    /// [`Self::set_native_visible`] is not enough here and `Drop` is not a
+    /// close path. Both issue their X requests into a buffer that only this
+    /// surface's own pump drains, and closing the tab is precisely when that
+    /// pump goes away — see [`flush_native_window_ops`]. So the host has to
+    /// say "closed" explicitly, exactly as `close_tab` already interrupts a
+    /// terminal rather than trusting its `Drop`.
+    ///
+    /// Idempotent: a second call finds an empty cell and does nothing.
+    pub fn close_native(&mut self) {
+        close_native_window(&self.webview, &self.webview_visible);
+        // The pump exists to service a webview that no longer exists. Dropping
+        // the task cancels it (GPUI tasks are cancel-on-drop); leaving it would
+        // keep iterating GTK every 16 ms for a dead surface.
+        self.pump_task = None;
     }
 
     /// The error produced while constructing this surface (e.g. an invalid
@@ -1519,7 +1592,13 @@ impl Render for BrowserSurface {
 
 impl Drop for BrowserSurface {
     fn drop(&mut self) {
-        apply_native_visible(&self.webview, &self.webview_visible, false);
+        // The backstop for surfaces nobody closed explicitly — a restore that
+        // replaces a pane's content, a worktree going away. It has to do the
+        // full teardown and not just the unmap: dropping `self.webview` as an
+        // ordinary field happens *after* this body returns, so an
+        // `XDestroyWindow` issued then would land in the buffer with nothing
+        // left to flush it.
+        self.close_native();
     }
 }
 
@@ -1971,6 +2050,32 @@ mod tests {
 
         apply_native_visible(&webview, &flag, true);
         assert!(flag.get(), "a hidden child can be shown again");
+    }
+
+    /// The two properties `close_tab` leans on. Not the flush — that one needs
+    /// a real X server and lives in `Scripts/Tests/`, because the whole point
+    /// of the bug is that it is invisible from inside the process.
+    #[test]
+    fn closing_takes_the_child_out_of_the_shared_cell() {
+        let webview: SharedWebView = Rc::new(RefCell::new(None));
+        // The clone an element would be holding, made before the close.
+        let element_side = Rc::clone(&webview);
+        let flag = initial_native_visibility();
+
+        close_native_window(&webview, &flag);
+        assert!(!flag.get(), "closing hides the child");
+        assert!(
+            element_side.borrow().is_none(),
+            "closing empties the cell every other holder reads through, so a \
+             late `set_bounds` or `set_visible` finds nothing instead of a \
+             destroyed window"
+        );
+
+        close_native_window(&webview, &flag);
+        assert!(
+            !flag.get(),
+            "closing twice is harmless — Drop runs after an explicit close"
+        );
     }
 
     #[test]
