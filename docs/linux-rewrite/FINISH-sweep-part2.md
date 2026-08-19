@@ -351,3 +351,38 @@ in this pass given the higher-value, more directly drivable rows still ahead of 
 every screenshot this pass), so there is also no real working account to exercise the branch
 against directly. Row verdict stays `half-proven`; the valid-creds/200 leg specifically is
 `UNREACHABLE` on this host — not claimed closed, not guessed at.
+
+## F-CORE-DOM-02 — Worktree defaults: explicit base > primary branch, explicit location > sibling
+
+**Promoted: PASSED.** The location half was already proven live-wired. The branch half's gap was
+sharp: `confirm_worktree_prompt` (`rust/crates/tiller_ui/src/sidebar.rs:1937`) computes `base` as
+`Some(trimmed)` or `None` and never reads any stored "primary worktree branch" value — so a blank
+field falls through to plain git HEAD resolution, not an explicit read of the primary branch. The
+ledger held this as the correct code-level observation but hadn't live-driven the user-visible
+consequence for lack of a fixture where a primary worktree sits on a **non-default** branch (so
+"git's HEAD default" and "the primary worktree's actual branch" would visibly differ if the code
+were wrong).
+
+Built exactly that fixture (`reference/linux-progress/wf-sweep2/f-core-dom-02-repro-recipe.sh`): a
+repo whose primary worktree is checked out on `primary-feature` (one commit ahead of `master`, git's
+own init default). Added it as a real Tiller project and drove **New Worktree** twice from the live
+UI:
+
+- **Blank base branch**, branch name `blank-base-test`: the created worktree's checked-out commit
+  is `4e39f10` — the exact tip of `primary-feature`, **not** `master`'s `4a56174` —
+  `reference/linux-progress/wf-sweep2/f-core-dom-02-blank-base-lands-on-primary-branch.png`.
+- **Explicit base branch `master`**, branch name `explicit-master-test`: the created worktree's
+  checked-out commit is `4a56174` — `master`'s tip, correctly overriding the primary-branch
+  fallback — `reference/linux-progress/wf-sweep2/f-core-dom-02-explicit-base-overrides.png`.
+
+Both tiers of the precedence chain are now live-confirmed with a hard discriminator (exact commit
+SHA, not a branch-name label that could be spoofed by a symlink or a stale ref): explicit override
+wins when given, and blank correctly lands on the primary worktree's own branch rather than git's
+generic default. The code's internal mechanism for the blank case is indirect — it relies on
+`repo_root` always being the primary worktree's own directory, so plain git HEAD resolution there
+is *structurally* identical to reading the primary branch explicitly, not because the primary
+branch is separately consulted — but the clause is about the **observable choice**, and the
+observable choice is correct in every topology reachable through this app's current wiring (every
+"New Worktree" entry point resolves `repo_root` from `project.path` via `enclosing_project_index`,
+confirmed by reading `sidebar.rs`, so there is no reachable path where `repo_root` and "the primary
+worktree" could diverge). Promoted to PASSED.
