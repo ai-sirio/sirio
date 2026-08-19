@@ -73,5 +73,16 @@ Two hypotheses, and they call for different fixes:
 2. The control-socket `pane.split` handler reaches a split path that does not call
    `schedule_save`, in which case a *graceful* quit would lose it too.
 
-What discriminates them: make the split, wait past the debounce, and read the sqlite **while the app
-is still running**. Non-empty means (1); empty means (2). Do that before writing any code.
+**Hypothesis 2 is refuted by reading, 2026-08-19.** `ControlAction::SplitPane` (`main.rs:3541`)
+calls `split_focused_terminal_with_placement`, which is one of the two sites that push
+`PaneEvent::Split` (`:7836`, `:7928`), and both are followed by `self.schedule_save(cx)` a few lines
+down. The socket split does schedule. So the surviving explanation is (1) — but note (1) is not
+free either: the store has a real background flush thread (`session.rs:1262`), so a scheduled
+layout should reach disk on its own within the debounce, and the critic waited. Something still
+does not add up.
+
+What discriminates it, and this comes **before any code**: make the split over the socket, wait past
+the debounce, and read the sqlite **while the app is still running**. Non-empty `pane_events` means
+the write path works and only the SIGTERM kill lost it, which the fix above already covers. Empty
+means there is a third cause nobody has named yet, and finding it is the task — do not fold it into
+the signal handler and call the row closed.
