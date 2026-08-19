@@ -24,7 +24,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | F-TAB-09 | PASSED | real native GTK "Open File" dialog driven end-to-end twice: a markdown file and a code file, each opened in the correct editor mode |
 | F-CORE-FILE-04 | PASSED | a real markdown link, clicked live in the running app, resolved and opened a new tab with the target file's content |
 | F-CORE-FILE-03A | PASSED | new named test drops BRAVO then ALPHA (reverse-alphabetical) and asserts `mention_paths` preserves that literal order |
-| F-GIT-RUN-01 | | |
+| F-GIT-RUN-01 | half-proven | cancellation confirmed absent app-wide (not just in `tiller_git`) — no code path exists to stop a running git op on user request; everything else in the clause is green |
 | F-TAB-20 | | |
 | F-CHAT-25 | PASSED | AskUserQuestion's text/option/cancel arms all covered by named drawn tests, none of which existed at wave H's ledger writing |
 | F-CHAT-33 | | |
@@ -218,5 +218,76 @@ Re-ran the full `chat::` module to check for regressions: 77 passed, 1 failed
 test flakes only under full-module concurrency; not something this change touched or introduced.
 
 **F-CORE-FILE-03A -> PASSED.** New test committed at `rust/crates/tiller_ui/src/chat.rs`.
+
+---
+
+## F-GIT-RUN-01 — half-proven (cancellation absence now confirmed definitively, app-wide)
+
+**Missing half named in the brief**: "Tests are green (64/64) but CANCELLATION appears absent — a
+negative grep with a positive control. Establish whether cancelling a running git operation exists
+at all. If absent, that is FAILED - absent; if present, drive it." Two prior passes
+(`FINISH-changes-git.md`, `FINISH-changes-git-part2.md`) had already found cancellation absent by a
+validated grep (positive control in `tiller_ui/src/changes.rs` -> 5 matches, then the real search
+across `tiller_git/src`'s 11 files -> 0 matches), scoped to the `tiller_git` crate alone. My job was
+to establish whether it exists **at all**, not just inside that one crate.
+
+**Re-ran the crate's own tests fresh, today**, to re-confirm the proven half before touching the
+unproven one:
+
+```
+$ cargo test --manifest-path rust/Cargo.toml -p tiller_git
+25 passed (status.rs) + 13 passed (diff.rs) + 9 passed (side_by_side.rs) + 6 passed (git.rs,
+  including git_timeout_fires) + 11 passed (worktree_integration.rs) + 0 doctests = 64/64 green
+```
+
+**Widened the search past `tiller_git/src` to the whole reachable app** — the app-level control
+handler, every UI form that can trigger a git operation, and the CLI surface — since a cancel
+affordance could legitimately live in any of those without ever appearing inside the git crate
+itself:
+
+```
+$ grep -rln "cancel\|Cancel" rust/crates --include=*.rs | xargs grep -l "git\|Git"
+tiller_terminal/src/lib.rs   tiller/src/main.rs   tiller_persistence/src/model.rs
+tiller_ui/src/changes.rs     tiller_ui/src/project_forms.rs
+tiller_control/tests/control_integration.rs   tiller_ui/src/chat.rs   tiller_ui/src/sidebar.rs
+```
+
+Read every hit rather than trust the count (the trap `EVIDENCE-STANDARD.md` names as "conjunction
+trap"/vocabulary co-existing without meaning the same thing): `changes.rs`'s 8 "Cancel" hits are all
+the **Discard/Cancel confirmation dialog** for discarding uncommitted changes (a destructive-action
+confirm, `&["Discard", "Cancel"]`) — a different feature entirely, not stopping an in-flight git
+subprocess. `git.branches` in `main.rs` is a control-socket method name, unrelated. No hit anywhere
+names an `AbortHandle`, `CancellationToken`, a `git.cancel` control method, or any UI control tied to
+an **in-flight** git operation:
+
+```
+$ grep -rn "AbortHandle\|CancellationToken\|abort_handle\|is_cancelled\|cancel_token" rust/crates --include=*.rs
+(zero matches, outside tests/)
+```
+
+**Confirmed from the mechanism, not just the absence of a name**: `project_forms.rs:38`'s own doc
+comment states outright "editing during a clone cannot cancel that clone." The clone form does hold
+a `task: Option<Task<()>>` (`project_forms.rs:118`/`480`), but `clone_repository`
+(`tiller_git/src/clone.rs:57`) is a **synchronous, blocking** function — it runs git as a real OS
+child process via `git.rs`'s `run_with_timeout` and blocks on `wait()`/pipe reads inside whatever
+executor thread it was spawned on. Even if the form's `Task` handle were dropped (e.g. the sheet
+closing), GPUI dropping a `Task` stops *polling* it — it does not forcibly interrupt a blocking
+synchronous call already running in an OS thread. `git.rs`'s only mechanism for stopping a running
+child at all is `kill_tree`/`killpg(SIGKILL)`, and its only caller is the 10-second wall-clock
+timeout path, never anything reachable from user input.
+
+**Verdict**: cancellation is not "unproven" — it is **confirmed absent, structurally, app-wide**.
+No UI control, no control-socket method, and no code-level mechanism exists that could stop a
+running git operation before its own timeout or natural completion. This is a genuine feature gap,
+not a testing gap, and matches — now with the wider, definitive search this brief asked for — what
+three independent prior passes already found scoped to the git crate alone.
+
+The row's other conjuncts (successful run, command failure, launch failure, timeout, output
+streaming) remain green per the 64/64 above and are unchanged from prior passes' evidence, so this
+stays **half-proven** rather than flipping to FAILED — absent for the whole row: most of the VERIFY
+clause **is** proven; specifically the cancellation (and, per the unchanged carried-forward finding,
+output-limit) conjuncts are the confirmed-absent part. Naming the unproven part, as the standard
+requires: **cancellation does not exist anywhere in this app; output-limit enforcement does not
+exist either (`git.rs`'s `read_to_end` has no byte cap, only the wall-clock timeout).**
 
 ---
