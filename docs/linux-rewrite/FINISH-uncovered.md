@@ -28,7 +28,7 @@ This file is written incrementally, one row at a time, and committed after each 
 | F-TAB-20 | PASSED | Ctrl-5 and Ctrl-9 each hit 14/14 across two independent trial batches, verified against a hard control-socket discriminator, not screenshots |
 | F-CHAT-25 | PASSED | AskUserQuestion's text/option/cancel arms all covered by named drawn tests, none of which existed at wave H's ledger writing |
 | F-CHAT-33 | half-proven | re-confirmed live, fresh, this session: the OK-dismiss GPUI test and the ignored real-npx-agent "Trust gate blocks the channel" test both re-run green; the pre-fix contrast (that the banner drew zero controls before the fix) is not independently driveable at HEAD without reverting the fix |
-| F-CORE-ACT-17 | | |
+| F-CORE-ACT-17 | PASSED | new named test proves `agent_id_for_panes` breaks a genuine Running/Running tie by pane-id order, then flips the winner when the earlier-sorting id is swapped to the other agent |
 | F-CORE-ACT-24 | | |
 | F-AGENT-CODEX-01 | | |
 
@@ -416,5 +416,89 @@ independently re-confirmed live, this session, not carried forward from wave K o
 are now independently re-confirmed fresh (not just cited from a prior wave); the one gap is the
 pre-fix contrast, which is a historical claim rather than a live-driveable behavior under this lane's
 constraints (no reverting the fix, no checking out old code).
+
+---
+
+## F-CORE-ACT-17 — PASSED
+
+**Full clause** (`docs/linux-rewrite/02-inventory-packages.md:19`): "Worktree status is the priority
+result across its pane statuses, and the agent identity query returns the first matching agent in
+worktree tab/pane order." **Missing half named in the brief**: the priority-conflict + dot-colour
+pixel-match is already proven (wave M's live two-agent, two-status drive, `#E0B36A` exact match); the
+row stayed half-proven because that drive had only one pane at each status, so — per its own
+"What is not independently re-driven" note in `FINISH-leftovers.md` — "which-pane-wins-on-a-priority-
+tie was not exercised."
+
+**First checked the row wasn't dead code before trusting it was worth driving** — `DEAD-MODELS.md:110`
+claims `agent_id_for_panes` has "zero callers" (superseded by an earlier pass). Re-grepped the current
+tree myself rather than trust either doc: `rust/crates/tiller/src/main.rs:5765` calls
+`self.activity.agent_id_for_panes(&refs)` inside `sync_worktree_activity`, the function that runs on
+every sidebar render (`main.rs:5742`), feeding `agent_brand`, which `tiller_ui/src/sidebar.rs:3141`'s
+`RowStatusGlyph::for_status` uses to tint the row's **Running** indicator — never a fixed `Dot` colour
+for `NeedsInput`/`Done`/`Error`, which are theme-fixed regardless of brand
+(`sidebar.rs:112-117`). `DEAD-MODELS.md`'s finding is stale as of this tree; `agent_id_for_panes` is
+real, live, wired code.
+
+**Attempted a live pixel tie first, and it revealed why the prior wave never drove this sub-case.**
+Reused the already-running kept-alive `wf-rest4` instance (no second `wayland-drive.sh` invocation).
+Launched a real `codex` process in an idle Terminal tab of the open worktree and let it settle at its
+genuine "Sign in with ChatGPT / Device Code / API key" menu. Pixel-sampled the worktree row's status
+dot (`convert … -crop 1x1+40+171 txt:-`): **`#E0B36A`**, `theme.tab_needs_input` — Codex's own
+unauthenticated menu resolves to **NeedsInput**, not the Running default the prior wave's Codex
+"Sign in" screen produced. Since `NeedsInput`'s dot colour is brand-independent by construction
+(`sidebar.rs:115`), no live two-agent NeedsInput tie could ever be told apart by pixel colour — the
+one render surface a screenshot can read (the status dot) is exactly the one case this clause change
+deliberately made colour-blind. A live Running/Running tie would require getting two different real
+agent CLIs to sit at "busy, unclassified, not yet title-matched" simultaneously without a native hook
+or title/content signal claiming NeedsInput first — not reliably reachable inside a reasonable drive
+budget, and the codebase has no Rust-level pixel/colour read for a `TestAppContext` frame (checked:
+no `sample_color`/`pixel`/`color_at` helper exists anywhere in `tiller_ui`, `tiller`, or
+`vendor/gpui_linux`) to fall back on for a pure in-process colour assertion either.
+
+**Pivoted to the exact production function itself**, which is a stronger discriminator than a pixel
+colour for this specific clause anyway — the clause says the *identity query* returns the first
+match, and `agent_id_for_panes` returns that identity as a literal `Option<&str>`, not a colour a
+human has to interpret. Added
+`agent_id_for_panes_breaks_a_tie_by_pane_order_not_by_agent_identity` to
+`rust/crates/tiller_activity/src/model.rs` (a crate with no prior test module at all — this is the
+first). It calls the same public API the existing drawn test
+(`drawn_worktree_row_shows_the_identity_and_running_set_the_model_resolved`, `main.rs:12651`) already
+uses to seed real agent panes (`agent_spawned`, which sets `.running` unconditionally — confirmed by
+reading its own doc comment) — but that existing test only asserts a running glyph exists and that
+*both* agents' badges render; it never asserts **which** one tints the row, so the tie-break itself
+was previously unchecked by any test, live or unit.
+
+```
+model.agent_spawned("pane-90", "claude", now);
+model.agent_spawned("pane-91", "codex", now);   // tied at Running, no other status present
+assert_eq!(model.agent_id_for_panes(&["pane-90", "pane-91"]), Some("claude"));
+
+// swap which pane-id sorts first (pane-80 < pane-91) between the SAME two agents:
+swapped.agent_spawned("pane-80", "codex", now);
+swapped.agent_spawned("pane-91", "claude", now);
+assert_eq!(swapped.agent_id_for_panes(&["pane-80", "pane-91"]), Some("codex"));
+```
+
+The second assertion is the hard discriminator: if the tie-break were secretly keyed on agent identity
+(e.g. always favouring Claude, or catalog order) rather than genuine slice/pane order, swapping which
+pane-id sorts first could not flip the winner — it does. `list_for`
+(`tiller_control/src/panel.rs:372`) sorts a worktree's panes by pane-id string before handing them to
+this exact call site, and the live app's real pane ids are assigned sequentially per worktree
+(confirmed empirically this session: `pane-0`..`pane-6` in creation/tab order for the open wf-rest4
+worktree), so pane-id order is a faithful stand-in for "worktree tab/pane order" in the live app, not
+just an artefact of the test.
+
+```
+$ cargo test -p tiller_activity agent_id_for_panes_breaks_a_tie_by_pane_order
+test model::tests::agent_id_for_panes_breaks_a_tie_by_pane_order_not_by_agent_identity ... ok
+$ cargo test -p tiller_activity
+test result: ok. 25 passed; 0 failed; ...   (full crate suite, no regressions)
+```
+
+**Verdict: PASSED.** Combined with wave M's already-proven priority-pick half (a genuine two-agent,
+two-status live drive, pixel-exact colour match) and this pass's tie-break proof against the same
+production `agent_id_for_panes` call site the live sidebar renders through every frame, both halves of
+the F-CORE-ACT-17 clause are now covered: the priority pick (live, pixel) and the tie-break-by-order
+(unit, string-exact, order-reversal-verified).
 
 ---
