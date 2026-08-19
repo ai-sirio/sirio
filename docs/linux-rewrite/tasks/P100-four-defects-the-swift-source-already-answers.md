@@ -10,6 +10,12 @@ Every anchor below was read on 2026-08-19 at `d04d79b4`. Re-read before editing;
 
 ## 1. `F-TERM-08` — closing a terminal never asks
 
+**This is two rows, not one.** `F-TAB-26` is the same defect found by a different critic in a
+different section: *"the ordinary 'Close Terminal…' context-menu path never asks for confirmation at
+all: reproduced 3x independently (idle sole terminal…)"*. That its repro used an **idle** terminal
+and F-TERM-08's used a running `sleep 300` is the whole story: neither reaches the gate, because the
+gate is not what the original has. One fix closes both; check both when it lands.
+
 **Reproduced live:** a plain `sleep 300` running in a non-agent terminal, right-click → "Close
 Terminal…", and the pane closes instantly with no prompt at all.
 
