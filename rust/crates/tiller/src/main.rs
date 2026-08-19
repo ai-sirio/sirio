@@ -10864,6 +10864,16 @@ fn sidebar_projects_with_comments(
         .collect()
 }
 
+/// Test-only: a sidebar built from the catalog alone, with no comment map.
+///
+/// Deliberately `cfg(test)` rather than a general helper. Production code
+/// once used exactly this shape and it was a defect — a restored
+/// `worktree.comment` stayed invisible until the next `worktree.set`, because
+/// an empty map cannot carry one (see the note at the startup Sidebar
+/// construction). Real callers must pass real comments through
+/// [`sidebar_projects_with_comments`]; only tests that assert nothing about
+/// comments may take this shortcut.
+#[cfg(test)]
 fn sidebar_projects(catalog: &ProjectCatalog) -> Vec<SidebarProject> {
     sidebar_projects_with_comments(catalog, &BTreeMap::new())
 }
@@ -11900,14 +11910,18 @@ fn main() {
                 // seeded from the durable `worktree.comment` column above
                 // (`apply_persisted_comments`), but that seed only reached
                 // `ControlState` itself -- the initial `Sidebar` entity built
-                // a few lines below used to be constructed via bare
-                // `sidebar_projects`, which always passes an empty comment
-                // map (see `sidebar_projects`'s doc comment). That made a
-                // restored comment invisible until the next `worktree.set`
-                // triggered `refresh_sidebar` (which does look the comment up
-                // via `Workspace::sidebar_projects`). Look the persisted
-                // comments up here too so the very first paint already shows
-                // them.
+                // a few lines below used to be constructed via a bare
+                // `sidebar_projects(catalog)` helper that always passed an
+                // empty comment map. That made a restored comment invisible
+                // until the next `worktree.set` triggered `refresh_sidebar`
+                // (which does look the comment up, via
+                // `Workspace::sidebar_projects`). Look the persisted comments
+                // up here too so the very first paint already shows them.
+                //
+                // That helper has since been deleted rather than left as a
+                // convenience: its entire behaviour was the bug, so any future
+                // caller reaching for it would silently reintroduce this. Call
+                // `sidebar_projects_with_comments` and pass a real map.
                 let comments_for_sidebar: BTreeMap<String, String> = control_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)

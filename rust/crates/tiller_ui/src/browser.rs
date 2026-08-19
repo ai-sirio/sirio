@@ -829,6 +829,17 @@ pub struct BrowserSurface {
     webview_scale_correction: SharedScaleCorrection,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
+    /// Load-bearing by existing, not by being read. A GPUI [`Task`] is
+    /// cancel-on-drop, so this field owning the 16 ms pump — the loop that
+    /// drains GTK's event queue and calls `pump_web_events` — is the only
+    /// thing keeping the page alive. Drop the field and the browser renders
+    /// once and then freezes.
+    ///
+    /// The `dead_code` allow is therefore deliberate: it is not a task whose
+    /// handle went missing. An independent critic read the bare warning as a
+    /// "possible task-cancellation gap", which is the natural misreading, so
+    /// the reason is written here rather than left to be re-derived.
+    #[allow(dead_code)]
     pump_task: Option<Task<()>>,
     startup_error: Option<String>,
 }
