@@ -6,6 +6,31 @@ ever driven the whole inventory in one continuous app session**. That pass has n
 file is its brief, written while the disk blocked all building, so it can be launched immediately
 once `~/FIX-SYSLOG-FLOOD.sh` has run and `cargo build --workspace` is green.
 
+## Launch it with everything off the root filesystem
+
+Measured 2026-08-19: the flood writes **38 GB/hour** to `/var/log/syslog` (370 GB when measured),
+and nothing an unprivileged user can do touches it — the file is `syslog:adm 0640`, so membership
+in `adm` grants read, not truncate, and `sudo` needs a password. `bash ~/FIX-SYSLOG-FLOOD.sh` is
+the only unblock; its filter vocabulary was verified against a live 2477-line sample and covers
+100% of it, so it works as written.
+
+Once the disk is fixed, keep the pass cheap anyway — every one of these redirects a writer that
+would otherwise land on `/`:
+
+```bash
+export CARGO_TARGET_DIR=/dev/shm/tt          # build artefacts -> RAM (16G tmpfs, ~13G free)
+export CARGO_PROFILE_DEV_DEBUG=none          # no debug info; this is what makes RAM enough
+export RUSTC_WRAPPER=sccache SCCACHE_DIR=/dev/shm/sccache SCCACHE_CACHE_SIZE=4G
+export PATH="/dev/shm/tt/debug:$PATH"        # REQUIRED: the agent tests resolve tillerctl here
+export XDG_DATA_HOME=/dev/shm/xdg            # the app's SQLite and its tillerctl install
+export TMPDIR=/dev/shm/tmp                   # fixtures, scratch repos, screenshots
+```
+
+`tillerctl` is not built by `cargo build -p tiller`; build it explicitly with
+`cargo build -p tiller_control --bin tillerctl`. Without it on `PATH`, three agent tests fail in a
+way that reads exactly like a regression in whatever commit landed last — see STATE.md's
+2026-08-19 08:00 section, which cost this project a full diagnosis to establish.
+
 ## Why this pass is not "the waves again"
 
 The waves proved rows in isolation, each in its own app instance, often with a fixture built for
