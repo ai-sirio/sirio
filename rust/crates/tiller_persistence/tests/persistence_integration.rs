@@ -1811,3 +1811,90 @@ fn concurrent_writers_save_disjoint_records_and_exit() {
         .expect("quick check");
     assert_eq!(check, "ok", "concurrent writers left a valid SQLite store");
 }
+
+/// A write that reads first must *wait* for a peer holding the write lock,
+/// not fail as busy.
+///
+/// `save_tabs` reads the worktree's existing tab ids before replacing them, so
+/// under `BEGIN DEFERRED` its writes are a read→write *upgrade*: the SELECT
+/// takes a read snapshot, and the UPDATE behind it then asks for a write lock
+/// the connection did not hold when the transaction opened. SQLite refuses
+/// that upgrade without ever running the busy handler — waiting while already
+/// holding a read lock can deadlock — so `SQLITE_BUSY` comes back at once and
+/// the connection's five-second `busy_timeout` is never consulted. That is why
+/// concurrent writers failed here about one run in five, and why the two saves
+/// beside it in the same loop never did: `save_project` and `save_worktree`
+/// both open with a write, which is the path where the timeout works.
+///
+/// The peer holds the lock far longer than a refusal takes to surface, so the
+/// outcome is a decision about behaviour rather than a race. The elapsed
+/// assertion is the positive control: it proves the contention this test
+/// claims to create actually happened, so a pass cannot come from a peer that
+/// quietly failed to take the lock at all.
+#[test]
+fn a_contended_write_waits_for_the_peer_instead_of_failing() {
+    const HELD_FOR: std::time::Duration = std::time::Duration::from_millis(750);
+
+    let dir = TempDir::new();
+    let database_path = dir.db_path("contended-write");
+    let db = AppDatabase::open(&database_path).expect("open the database under test");
+    db.save_project(&sample_project("p", "p"))
+        .expect("seed a project");
+    db.save_worktree(&sample_worktree("w", "p", "main"))
+        .expect("seed a worktree for the tab to hang off");
+
+    // A second connection takes the write lock and keeps it for HELD_FOR.
+    let peer = rusqlite::Connection::open(&database_path).expect("peer connection");
+    peer.busy_timeout(std::time::Duration::from_secs(5))
+        .expect("peer busy timeout");
+    peer.execute_batch("BEGIN IMMEDIATE")
+        .expect("peer takes the write lock");
+    let peer_release = std::thread::spawn(move || {
+        std::thread::sleep(HELD_FOR);
+        peer.execute_batch("COMMIT")
+            .expect("peer releases the write lock");
+    });
+
+    let started = std::time::Instant::now();
+    let outcome = db.save_tabs("w", &[sample_tab("t", "w", "Terminal", "terminal")]);
+    let waited = started.elapsed();
+    peer_release.join().expect("peer thread");
+
+    outcome.expect("a contended write must wait for the peer, not fail as busy");
+    assert!(
+        waited >= HELD_FOR / 2,
+        "the write returned after {waited:?}, so it never contended with the peer \
+         that held the lock for {HELD_FOR:?} — a pass here would prove nothing"
+    );
+    assert_eq!(
+        db.tabs().expect("tabs").len(),
+        1,
+        "the write that waited its turn still landed"
+    );
+}
+
+/// No write path may open a deferred transaction.
+///
+/// The test above proves one call site waits under contention. This one keeps
+/// the other ten honest, because the defect is invisible at the call site: the
+/// tempting `conn.unchecked_transaction()` compiles, reads like the obvious
+/// thing, and only misbehaves when a second writer happens to hold the lock at
+/// the moment a read-then-write transaction tries to upgrade. Route writes
+/// through `write_transaction`, which is `BEGIN IMMEDIATE`.
+///
+/// The needle is assembled at runtime so this test does not match itself.
+#[test]
+fn no_write_path_opens_a_deferred_transaction() {
+    let source = include_str!("../src/db.rs");
+    let needle = format!("{}_{}(", "unchecked", "transaction");
+    let offenders: Vec<&str> = source
+        .lines()
+        .filter(|line| line.contains(&needle))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "db.rs opens a deferred transaction, which cannot wait on a peer's \
+         write lock — use write_transaction instead:\n{}",
+        offenders.join("\n")
+    );
+}

@@ -31,6 +31,32 @@ pub struct AppDatabase {
     path: Option<PathBuf>,
 }
 
+/// Opens a transaction that is going to write, as `BEGIN IMMEDIATE`.
+///
+/// Every write path in this file goes through here, and none of them may use
+/// rusqlite's `unchecked_transaction`, which is `BEGIN DEFERRED`. A deferred
+/// transaction takes no lock until its first statement, so one that reads
+/// before it writes — `save_tabs` reads the worktree's tab ids first, and it
+/// is not alone — holds a read snapshot by the time it asks to write. SQLite
+/// refuses that read→write upgrade *without running the busy handler*: waiting
+/// while already holding a read lock the peer may need is a deadlock, so it
+/// returns `SQLITE_BUSY` immediately. The connection's five-second
+/// `busy_timeout` is never consulted on that path, which is exactly how two
+/// writer processes managed to fail with "database is locked" despite it.
+///
+/// `IMMEDIATE` takes the write lock up front, before any read is held. There
+/// is then nothing for a peer to be blocked behind, so waiting is safe, the
+/// busy handler runs, and the second writer queues instead of failing. The
+/// cost is that writers serialize from the `BEGIN` rather than from their
+/// first write — which is what we want, since these transactions are short
+/// and the alternative is a spurious error.
+fn write_transaction(conn: &Connection) -> Result<rusqlite::Transaction<'_>, PersistenceError> {
+    Ok(rusqlite::Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )?)
+}
+
 impl AppDatabase {
     /// Opens (creating if missing) the database at `path`, migrating it
     /// forward to the current schema. The parent directory must exist.
@@ -175,7 +201,7 @@ impl AppDatabase {
     /// `order_idx` from the slice order. Worktrees and tabs of projects not
     /// in the list are cascade-deleted.
     pub fn save_projects(&self, projects: &[ProjectRecord]) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         transaction.execute("DELETE FROM project", [])?;
         for (index, project) in projects.iter().enumerate() {
             let mut project = project.clone();
@@ -228,7 +254,7 @@ impl AppDatabase {
 
     /// Upserts a single worktree.
     pub fn save_worktree(&self, worktree: &WorktreeRecord) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         clear_other_primaries(&transaction, worktree)?;
         transaction.execute(
             "INSERT INTO worktree
@@ -264,7 +290,7 @@ impl AppDatabase {
     /// `order_idx` from the slice order. Tabs of worktrees not in the list
     /// are cascade-deleted.
     pub fn save_worktrees(&self, worktrees: &[WorktreeRecord]) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         transaction.execute("DELETE FROM worktree", [])?;
         for (index, worktree) in worktrees.iter().enumerate() {
             let mut worktree = worktree.clone();
@@ -337,7 +363,7 @@ impl AppDatabase {
     /// invariant gets a constraint error, not a silently ambiguous restore
     /// state.
     pub fn save_tab(&self, tab: &TabRecord) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         if tab.is_active {
             transaction.execute(
                 "UPDATE tab SET is_active = 0
@@ -380,7 +406,7 @@ impl AppDatabase {
     /// chat transcript for that tab. Only tabs no longer present in `tabs`
     /// are deleted, which cascades their transcripts away deliberately.
     pub fn save_tabs(&self, worktree_id: &str, tabs: &[TabRecord]) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         let keep_ids: std::collections::HashSet<&str> =
             tabs.iter().map(|t| t.id.as_str()).collect();
         let stale_ids: Vec<String> = {
@@ -443,7 +469,7 @@ impl AppDatabase {
         worktree_id: &str,
         states: &[TabStateRecord],
     ) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         transaction.execute(
             "DELETE FROM tab_state
              WHERE tab_id IN (SELECT id FROM tab WHERE worktree_id = ?1)",
@@ -541,7 +567,7 @@ impl AppDatabase {
         retained.reverse();
         let updated_at = unix_millis();
 
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         transaction.execute(
             "DELETE FROM chat_turn WHERE tab_id = ?1",
             [&transcript.tab_id],
@@ -852,7 +878,7 @@ impl AppDatabase {
         provider: &str,
         id: Option<&str>,
     ) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         let key = active_agent_account_key(provider);
         match id {
             Some(id) => set_setting(&transaction, &key, id)?,
@@ -954,7 +980,7 @@ impl AppDatabase {
 
     /// Persists the complete settings contract in one transaction.
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         set_setting(
             &transaction,
             settings_keys::APPEARANCE_THEME,
@@ -1136,7 +1162,7 @@ impl AppDatabase {
     /// Persists the sidebar state atomically: the singleton row plus the
     /// expanded-project set are replaced together.
     pub fn save_sidebar_state(&self, state: &SidebarState) -> Result<(), PersistenceError> {
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = write_transaction(&self.conn)?;
         transaction.execute(
             "INSERT INTO sidebar_state (id, selected_worktree_id) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET selected_worktree_id = excluded.selected_worktree_id",
@@ -1447,7 +1473,7 @@ fn quarantine_rows(
     if rows.is_empty() {
         return Ok(());
     }
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = write_transaction(conn)?;
     for row in rows {
         transaction.execute(
             "INSERT INTO quarantine_record
