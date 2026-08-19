@@ -36,7 +36,6 @@ pub(crate) enum TabCommand {
     CloseTabsToRight,
     MoveTabEarlier,
     MoveTabLater,
-    MoveTabToCurrentPane,
     MoveTabToOtherPane,
     ResumeChat,
 }
@@ -381,20 +380,23 @@ pub(crate) fn entries(context: &PaletteContext) -> Vec<PaletteEntry> {
             "Move Tab Later",
             None,
         ),
-        if context.has_other_pane {
-            PaletteEntry::enabled(
-                PaletteCommand::Tab(TabCommand::MoveTabToCurrentPane),
-                "Move Tab to This Pane",
-                None,
-            )
-        } else {
-            PaletteEntry::disabled(
-                PaletteCommand::Tab(TabCommand::MoveTabToCurrentPane),
-                "Move Tab to This Pane",
-                None,
-                PaletteDisabledReason::NoOtherPane,
-            )
-        },
+        // F-TAB-12: "Move Tab to This Pane" used to sit here, gated on
+        // `has_other_pane`. It is deleted for the same reason the tab context
+        // menu's copy was, and the gate is why it was worth catching: the gate
+        // asks whether *another pane exists*, but the command moves
+        // `move_selected_tab(MoveTarget::CurrentPane)`, and from the palette
+        // `tab_menu_tab` is always `None`, so the tab it moves is the active
+        // one -- already in the active group by definition. The entry was
+        // therefore *enabled* and inert whenever a second pane existed, which
+        // is worse than the context menu's copy: that one at least drew
+        // visibly disabled.
+        //
+        // Note this is not the feature Swift has. `SplitContentMenu.swift:286`
+        // offers a "Move Existing Tab" submenu listing individual tabs *by
+        // name* under "This Pane" / "Other Panes", so you choose which tab to
+        // bring into the pane you right-clicked. Collapsing that per-tab
+        // picker into one command that moves the active tab is what made it
+        // degenerate. Re-porting it means the submenu, not re-adding this.
         if context.has_other_pane {
             PaletteEntry::enabled(
                 PaletteCommand::Tab(TabCommand::MoveTabToOtherPane),
@@ -563,6 +565,48 @@ mod tests {
         );
         assert!(commands.iter().any(|entry| entry.label == "Codex"));
         assert!(commands.iter().any(|entry| entry.label == "Oh-My-Pi"));
+    }
+
+    /// F-TAB-12: the palette must not offer "Move Tab to This Pane". It is
+    /// pinned here rather than left to the absence of code because the entry
+    /// was **enabled** whenever a second pane existed, and did nothing — an
+    /// inert enabled command is harder to notice than a disabled one, and the
+    /// context menu's identical copy had already been deleted once.
+    ///
+    /// The gate is asserted alongside the label deliberately: `has_other_pane`
+    /// is true in `context()`, which is exactly the state that used to enable
+    /// it. A test built on the false branch would pass on an accidental
+    /// re-addition.
+    #[test]
+    fn the_palette_does_not_offer_move_tab_to_this_pane() {
+        let context = context();
+        assert!(
+            context.has_other_pane,
+            "the fixture must have a second pane, or this asserts nothing — \
+             that is the state the deleted entry was enabled in"
+        );
+
+        let commands = entries(&context);
+        assert!(
+            !commands
+                .iter()
+                .any(|entry| entry.label == "Move Tab to This Pane"),
+            "the entry moved the active tab into the group it is already in"
+        );
+
+        // The neighbours it sat between must survive, so this test fails on a
+        // re-addition rather than on the whole tab family going missing.
+        assert!(
+            commands
+                .iter()
+                .any(|entry| entry.label == "Move Tab to Other Pane"
+                    && entry.is_enabled()),
+            "the genuinely meaningful move command is still offered"
+        );
+        assert!(
+            commands.iter().any(|entry| entry.label == "Move Tab Earlier"),
+            "tab reordering is still offered"
+        );
     }
 
     #[test]

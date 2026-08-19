@@ -80,7 +80,7 @@ use panes::{
     CloseOtherTabs, ClosePane, CloseTab, CloseTabsToRight, CycleTabBackward, CycleTabForward,
     FocusPaneAbove, FocusPaneBelow, FocusPaneLeft, FocusPaneRight, JumpToTab1, JumpToTab2,
     JumpToTab3, JumpToTab4, JumpToTab5, JumpToTab6, JumpToTab7, JumpToTab8, JumpToTab9,
-    MoveTabEarlier, MoveTabLater, MoveTabToCurrentPane, MoveTabToOtherPane, OpenAllTabs,
+    MoveTabEarlier, MoveTabLater, MoveTabToOtherPane, OpenAllTabs,
     OpenTabMenu, PaneContent as TabContent, PaneNode, ResumeChat, SplitDirection, SplitPaneDown,
     SplitPaneRight, SplitPlacement, TabSelection,
 };
@@ -6325,8 +6325,7 @@ impl TillerWorkspace {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         }
         // F-TERM-PTY-08: every tab placement transition (MoveTabToOtherPane,
-        // MoveTabToCurrentPane, "Move to New Pane", and tab reordering all
-        // funnel through here) is a real seam moment -- record each terminal
+        // "Move to New Pane", and tab reordering all funnel through here) is a real seam moment -- record each terminal
         // pane's current placement so the cache stays a true mirror of the
         // pane tree, not just of the specific moves the row names.
         let tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
@@ -10341,15 +10340,6 @@ impl TillerWorkspace {
         self.move_active_tab(MoveDirection::Later, cx);
     }
 
-    fn handle_move_tab_to_current_pane(
-        &mut self,
-        _: &MoveTabToCurrentPane,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_selected_tab(MoveTarget::CurrentPane, cx);
-    }
-
     fn handle_move_tab_to_other_pane(
         &mut self,
         _: &MoveTabToOtherPane,
@@ -10692,9 +10682,6 @@ impl TillerWorkspace {
                 }
                 TabCommand::MoveTabEarlier => window.dispatch_action(Box::new(MoveTabEarlier), cx),
                 TabCommand::MoveTabLater => window.dispatch_action(Box::new(MoveTabLater), cx),
-                TabCommand::MoveTabToCurrentPane => {
-                    window.dispatch_action(Box::new(MoveTabToCurrentPane), cx)
-                }
                 TabCommand::MoveTabToOtherPane => {
                     window.dispatch_action(Box::new(MoveTabToOtherPane), cx)
                 }
@@ -11312,7 +11299,6 @@ impl Render for TillerWorkspace {
             .on_action(cx.listener(Self::handle_close_tabs_to_right))
             .on_action(cx.listener(Self::handle_move_tab_earlier))
             .on_action(cx.listener(Self::handle_move_tab_later))
-            .on_action(cx.listener(Self::handle_move_tab_to_current_pane))
             .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
             .on_action(cx.listener(Self::handle_resume_chat))
             .child(
