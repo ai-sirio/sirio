@@ -1234,6 +1234,58 @@ impl Sidebar {
         cx.notify();
     }
 
+}
+
+/// What a platform path prompt came back with, reduced to the three cases the
+/// surface actually distinguishes.
+#[derive(Debug, PartialEq, Eq)]
+enum PickedPath {
+    /// The user chose a path.
+    Chosen(PathBuf),
+    /// Nothing to do, and nothing to say: the user cancelled, chose an empty
+    /// selection, or the window went away with the prompt still open.
+    Nothing,
+    /// No chooser could be opened at all. Carries the reason, which must reach
+    /// the user.
+    Unavailable(String),
+}
+
+impl PickedPath {
+    /// Classifies a raw prompt outcome.
+    ///
+    /// The raw type is `Result<Result<Option<Vec<PathBuf>>>, Canceled>`, which
+    /// stacks three unrelated failures — the window went away, the platform
+    /// could not open a chooser, the user cancelled — into one shape. The terse
+    /// way to read it, `let Ok(Ok(Some(paths))) = outcome else { return }`, is
+    /// correct for two of those and wrong for the third, and reads as though it
+    /// handled all three. That is how `choose_worktree_location` came to
+    /// swallow a missing XDG portal in silence while its two siblings reported
+    /// it, and it is why this lives in one place now instead of three.
+    fn from_prompt<E: std::fmt::Display, C>(
+        outcome: Result<Result<Option<Vec<PathBuf>>, E>, C>,
+    ) -> Self {
+        match outcome {
+            // A real selection. `prompt_for_paths` is asked for one directory,
+            // so take the last and ignore any surprise extras.
+            Ok(Ok(Some(mut paths))) => match paths.pop() {
+                Some(path) => Self::Chosen(path),
+                // An empty vector is a selection of nothing: same as cancel.
+                None => Self::Nothing,
+            },
+            // Cancelled.
+            Ok(Ok(None)) => Self::Nothing,
+            // The platform could not open a chooser at all — no XDG portal on
+            // this session, for example. Never silent: a control that is drawn,
+            // clicked, and then does nothing is indistinguishable from a broken
+            // app.
+            Ok(Err(error)) => Self::Unavailable(error.to_string()),
+            // The prompt was dropped with the window. Nobody is left to tell.
+            Err(_) => Self::Nothing,
+        }
+    }
+}
+
+impl Sidebar {
     /// F-PRJ-18: "Choose…" opens the same platform folder picker
     /// `start_open_project` uses (the XDG portal on Linux, the system
     /// open-panel on macOS) and writes the chosen path into the draft.
@@ -1248,12 +1300,16 @@ impl Sidebar {
             prompt: Some("Choose a folder for new worktrees".into()),
         });
         cx.spawn_in(window, async move |sidebar, cx| {
-            let outcome = receiver.await;
-            let Ok(Ok(Some(mut paths))) = outcome else {
-                return;
-            };
-            let Some(path) = paths.pop() else {
-                return;
+            let path = match PickedPath::from_prompt(receiver.await) {
+                PickedPath::Chosen(path) => path,
+                PickedPath::Nothing => return,
+                PickedPath::Unavailable(reason) => {
+                    let _ = sidebar.update(cx, |sidebar, cx| {
+                        sidebar.notice = Some(format!("could not open the folder picker: {reason}"));
+                        cx.notify();
+                    });
+                    return;
+                }
             };
             let _ = sidebar.update(cx, |sidebar, cx| {
                 let Some(card) = sidebar.project_settings.as_ref() else {
@@ -1414,35 +1470,25 @@ impl Sidebar {
             prompt: Some("Add Project".into()),
         });
         cx.spawn_in(window, async move |sidebar, cx| {
-            let outcome = receiver.await;
-            match outcome {
+            match PickedPath::from_prompt(receiver.await) {
                 // A real selection: a non-git folder gets a confirmation
                 // prompt (F-PRJ-03) before it silently becomes a project —
                 // adding a plain folder as a project when the user most
                 // likely meant to pick their repo checkout is surprising,
                 // and a project with no git backing loses worktrees,
                 // branches, and every git-driven sidebar affordance.
-                Ok(Ok(Some(mut paths))) => {
-                    if let Some(path) = paths.pop() {
-                        let _ = sidebar.update_in(cx, |sidebar, window, cx| {
-                            sidebar.confirm_add_project(path, window, cx);
-                        });
-                    }
+                PickedPath::Chosen(path) => {
+                    let _ = sidebar.update_in(cx, |sidebar, window, cx| {
+                        sidebar.confirm_add_project(path, window, cx);
+                    });
                 }
-                // Cancelled (or an empty selection): nothing, silently.
-                Ok(Ok(None)) => {}
-                // The platform could not open a chooser at all (no XDG
-                // portal on this session, for example). A silent no-op
-                // here is the exact "drawn but does nothing" defect — say
-                // why instead of pretending nothing happened.
-                Ok(Err(error)) => {
+                PickedPath::Nothing => {}
+                PickedPath::Unavailable(reason) => {
                     let _ = sidebar.update(cx, |sidebar, cx| {
-                        sidebar.notice = Some(format!("could not open the folder picker: {error}"));
+                        sidebar.notice = Some(format!("could not open the folder picker: {reason}"));
                         cx.notify();
                     });
                 }
-                // The prompt was dropped with the window.
-                Err(_) => {}
             }
         })
         .detach();
@@ -3838,6 +3884,58 @@ impl Render for Sidebar {
 mod tests {
     use super::*;
     use crate::project_identity::ProjectGlyph;
+
+    /// A path picker that cannot open must say so, not fail silently.
+    ///
+    /// The three call sites — add-project, worktree-location, and the icon
+    /// chooser — all take the same `Result<Result<Option<Vec<PathBuf>>>, _>`,
+    /// and one of them used to read it as `let Ok(Ok(Some(paths))) = outcome
+    /// else { return }`. That collapses "no XDG portal on this session" into
+    /// the same branch as "the user pressed Cancel", so clicking the control
+    /// on a portal-less desktop did nothing at all and explained nothing.
+    /// Found by a critic driving the real dialog, not by a test — hence this
+    /// one.
+    #[test]
+    fn a_picker_that_cannot_open_is_never_silent() {
+        let unavailable: Result<Result<Option<Vec<PathBuf>>, String>, ()> =
+            Ok(Err("no portal".into()));
+        assert_eq!(
+            PickedPath::from_prompt(unavailable),
+            PickedPath::Unavailable("no portal".into()),
+            "a platform failure must carry a reason to the surface"
+        );
+    }
+
+    /// ...and the three ways of choosing nothing stay silent, so the notice
+    /// means something when it does appear.
+    #[test]
+    fn cancelling_a_picker_says_nothing() {
+        let cancelled: Result<Result<Option<Vec<PathBuf>>, String>, ()> = Ok(Ok(None));
+        let empty: Result<Result<Option<Vec<PathBuf>>, String>, ()> = Ok(Ok(Some(Vec::new())));
+        let window_gone: Result<Result<Option<Vec<PathBuf>>, String>, ()> = Err(());
+        for (label, outcome) in [
+            ("cancelled", cancelled),
+            ("empty selection", empty),
+            ("window dropped", window_gone),
+        ] {
+            assert_eq!(
+                PickedPath::from_prompt(outcome),
+                PickedPath::Nothing,
+                "{label} should not raise a notice"
+            );
+        }
+    }
+
+    #[test]
+    fn choosing_a_folder_yields_that_folder() {
+        let chosen: Result<Result<Option<Vec<PathBuf>>, String>, ()> =
+            Ok(Ok(Some(vec![PathBuf::from("/tmp/somewhere")])));
+        assert_eq!(
+            PickedPath::from_prompt(chosen),
+            PickedPath::Chosen(PathBuf::from("/tmp/somewhere"))
+        );
+    }
+
     use gpui::{
         Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, VisualTestContext,
         point,
