@@ -27,12 +27,22 @@ Exactly three rows are actionable. Each has a repro, so none of them needs re-in
 
 | Row | State | What is actually missing |
 |---|---|---|
-| `F-GIT-RUN-01` | `FAILED — absent` | Output limits and truncated-output reporting are unbuilt — no byte cap, no size constant, no `Truncated`-shaped error variant. Confirmed live by pushing a 10.4 MB blob through `run_streaming` and getting it back whole. Cancellation *was* built this pass (`GitCancellationToken`, `run_streaming_cancellable`, `GitError::Cancelled`) with a red-then-green test that kills a real slow clone. The remaining work needs a policy decision for every existing caller — diff, status, actions, worktree — on what a truncated command returns. |
+| `F-GIT-RUN-01` | `half-proven` — **built 06:50, commit `18e2a7a9`** | The cap and the truncation report now exist (`read_capped`, `GitCommandResult::truncated`, `GitError::OutputTruncated`), 69 tests green. A critic owes a live drive and a workspace build, which the disk could not afford. It also surfaced work for someone else: **`tiller_project` carries a duplicate git runner** — its own `run`/`run_with_timeout` and its own 3-variant `GitError` — with no output cap at all. *Original finding, kept for context:* output limits and truncated-output reporting were unbuilt — no byte cap, no size constant, no `Truncated`-shaped error variant. Confirmed live by pushing a 10.4 MB blob through `run_streaming` and getting it back whole. Cancellation *was* built this pass (`GitCancellationToken`, `run_streaming_cancellable`, `GitError::Cancelled`) with a red-then-green test that kills a real slow clone. The remaining work needs a policy decision for every existing caller — diff, status, actions, worktree — on what a truncated command returns. |
 | `F-CORE-WSP-05` | `FAILED — defective` | A divider mousedown empties `window.focus`: `focus_new` and `focus_old` both read false, `tab.focused_pane` unchanged (ruling out `select_pane`), focus landing on `root_focus`. Only F-SID-19's "nothing has focus" fallback prevents total keyboard-input loss. Named repro: `drawn_divider_drag_blurs_focus_to_workspace_root` (commit `c4ec95ce`). |
 | `F-TERM-PTY-04` | `half-proven` | Fixed, but by the orchestrator, so it is held out of PASSED. A fresh critic owes a live drive of a System pane with `$SHELL` unset, and a judgment on whether preferring `/bin/bash` over the passwd-file shell is the right Linux answer. |
 
 The other three non-PASSED rows are `F-AGENT-OMP-01/02/03`, blocked upstream — see the section
 below; do not spend a pass on them.
+
+### Where to restart, in order
+
+1. Run `~/FIX-SYSLOG-FLOOD.sh` (needs sudo, no logout). Nothing that compiles is worth starting first.
+2. `cargo build --workspace` — `rust/target` was deleted, so expect a full cold build (~15 min).
+3. Fix `F-CORE-WSP-05`, the only defect left. Its repro already exists:
+   `cargo test -p tiller --bin tiller -- drawn_divider_drag_blurs_focus_to_workspace_root`.
+4. Send a fresh critic at the two orchestrator-built rows, `F-TERM-PTY-04` and `F-GIT-RUN-01`. Both
+   are held out of PASSED only because their builder cannot pass them; each names its owed drive.
+5. Then the full-app critic pass the goal actually asks for.
 
 ### Do not launch a build-heavy wave until the log flood is stopped
 
