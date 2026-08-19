@@ -86,3 +86,32 @@ installed) was not separately driven — OpenCode's row has no distinct "Update"
 found, only while absent, so this appears to be the same Install control repurposed, not a
 separate state; not scored as a gap since the row's own clause is satisfied by the states actually
 drawn.
+
+## F-SET-22 — Customize each agent's accent color
+
+**half-proven, unchanged verdict, but now proven live instead of by code-reading.** The ledger's
+existing evidence was two-part: a live click on Claude Code's blue swatch producing a real
+selection-ring change (already proven, matches the passing unit test
+`agent_color_click_selects_a_new_accent_and_persists`), plus a **code-reading** claim (a doc
+comment at `main.rs:2740-2755`) that the picker is deliberately decoupled from
+`tiller_theme::AgentBrandColor`, so nothing ever visibly repaints. Per `EVIDENCE-STANDARD.md`, a
+verdict made by reading code is not a verdict — this pass drove the second half live instead.
+
+Opened a Claude Code chat tab in the fixture project (`wf-sweep2-fixture`); its tab icon, the
+sidebar worktree-row badge, and the "+" new-tab menu's Claude Code entry are all the same coral
+sun icon —`reference/linux-progress/wf-sweep2/f-set-22-claude-tab-coral-before.png`. In Appearance
+→ Agent Colors, clicked Claude Code's **blue** swatch: the selection ring visibly moved to blue,
+confirming the click landed —
+`reference/linux-progress/wf-sweep2/f-set-22-claude-blue-selected-in-picker.png`. Went back to the
+main view with a forced repaint: the open Claude Code tab's icon and the sidebar worktree badge
+are **still coral**, pixel-identical to the before shot —
+`reference/linux-progress/wf-sweep2/f-set-22-claude-tab-still-coral-after.png`. Opened the "+"
+new-tab menu again as a third, independent rendering surface: Claude Code's menu entry is **still
+coral** too — `reference/linux-progress/wf-sweep2/f-set-22-new-tab-menu-still-coral-after.png`.
+
+Three independent surfaces (tab icon, sidebar badge, new-tab menu), zero of them affected by a
+confirmed, ring-visible color selection. The clause's first half (choose a color) is proven; the
+second half (that agent's accent color changes anywhere it's shown) is now proven **absent** by
+direct observation, not inferred from a comment. Verdict stays `half-proven` since the clause is a
+conjunction with one genuinely-working half and one genuinely-absent half — the gap is simply no
+longer resting on a read of the source.
