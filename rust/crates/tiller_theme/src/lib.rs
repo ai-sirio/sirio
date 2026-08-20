@@ -1,19 +1,18 @@
 //! Tiller's shared color, spacing, and typography tokens.
 //!
-//! Tiller keeps its chrome quiet. Surfaces are neutral greys that step by
-//! lightness alone, so depth reads as depth and never as hue; a row that is
-//! selected, hovered or pressed lifts by a few percent of neutral rather than
-//! taking on a tint. Colour is spent only where it carries meaning — the coral
-//! accent marks brand and focus, and the semantic hues mark state. Nothing
-//! structural is coloured.
+//! Tiller keeps its chrome quiet through a compact cool-tinted shell hierarchy:
+//! a translucent frame surrounds opaque panel surfaces, selected rows, and
+//! shell borders. Within that hierarchy, generic hover, pressed, and divider
+//! washes remain neutral veils; the coral accent marks focus, and semantic hues
+//! retain their existing state meanings.
 //!
 //! Where each value comes from is recorded in
-//! `docs/linux-rewrite/THEME-PROVENANCE.md`, and the measurement that produced
-//! the ones taken off reference frames is re-runnable:
-//! `./reference/waku/measure-theme.py`. Tokens the frames cannot settle say so
-//! at their own definition and name our source instead. That distinction is
-//! load-bearing: matching a reference's look is the goal, lifting its source is
-//! not, and only a recorded measurement tells the two apart afterwards.
+//! `docs/linux-rewrite/THEME-PROVENANCE.md`. The re-runnable
+//! `./reference/waku/measure-theme.py` script reproduces the **historical**
+//! Waku measurements only. Current shell values are audited there through the
+//! IntelliJ screenshot fingerprint, dimensions, sampling method, and pixel
+//! rectangles. Tokens the frames cannot settle say so at their own definition
+//! and name our source instead.
 //!
 //! A resolved [`Theme`] is installed as a GPUI global so views can retrieve
 //! the same tokens from their render context.
@@ -116,15 +115,25 @@ impl ThemeMode {
 /// `docs/linux-rewrite/THEME-PROVENANCE.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThemeColors {
-    /// Panel surface for the tab bar, workspace column, right panel and
-    /// settings. The chrome merges with the reading surface; only the sidebar
-    /// steps a hair darker (see [`ThemeColors::sidebar`]).
+    /// Translucent window-frame material. Its RGB value is paired with
+    /// [`ThemeColors::frame_fallback`] for platforms without translucency.
+    pub frame_surface: Rgba,
+    /// Opaque fallback behind the app shell and window canvas.
+    pub frame_fallback: Rgba,
+    /// Opaque reading and sidebar surface inside the shell.
+    pub panel_surface: Rgba,
+    /// Opaque separator between shell panels.
+    pub panel_border: Rgba,
+    /// Focus ring for shell panels; deliberately the existing accent.
+    pub panel_focus_ring: Rgba,
+    /// Compatibility alias for [`ThemeColors::panel_surface`], used by the tab
+    /// bar, workspace column, right panel, and settings.
     pub background: Rgba,
-    /// Window canvas behind the working column. Same value as `background` —
-    /// the distinction is which component asks, not what it gets.
+    /// Compatibility alias for [`ThemeColors::frame_fallback`], used behind
+    /// the working columns when translucency is unavailable.
     pub canvas: Rgba,
-    /// Terminal surface — paper-white in light, near-black in dark, one step
-    /// deeper than `background` so a terminal reads as a well.
+    /// Terminal surface — paper-white in light and the pre-shell dark well in
+    /// dark mode, retained independently of the shell panel hierarchy.
     pub terminal_surface: Rgba,
     /// Brand accent, a coral spent only on meaning: focus rings, caret, live
     /// activity, selected states. Never structure.
@@ -135,12 +144,12 @@ pub struct ThemeColors {
     pub tab_done: Rgba,
     /// Errored status.
     pub tab_error: Rgba,
-    /// Chat transcript surface. Deliberately the same as `background`: the
-    /// transcript is the reading surface, not a panel floating on one.
+    /// Compatibility alias for [`ThemeColors::panel_surface`]; the transcript
+    /// reads directly on the central panel rather than a floating card.
     pub chat_surface: Rgba,
-    /// Tint used by the sidebar material (same as `background`).
+    /// Legacy sidebar material tint, aliased to [`ThemeColors::panel_surface`].
     pub chrome_tint: Rgba,
-    /// Tab-chip underline.
+    /// Tab-chip underline, aliased to [`ThemeColors::panel_border`].
     pub tab_chip_underline: Rgba,
     /// Shared one-pixel border/divider stroke: a near-white neutral at 7-8%,
     /// so it reads as a seam rather than a line.
@@ -151,18 +160,20 @@ pub struct ThemeColors {
     /// `row_hover` because transcript rows are wider and a 6% wash over that
     /// area reads as a block.
     pub chat_row_hover: Rgba,
-    /// Selected row fill — the same 6% neutral wash as hover, never a colour.
-    /// Text selection is a different concept: see [`ThemeColors::selection`].
+    /// Selected-row fill, aliased to [`ThemeColors::selected_fill`]. Text
+    /// selection is a different concept: see [`ThemeColors::selection`].
     pub selection_fill: Rgba,
     /// Focused-field border. The focus ring is the accent, not a second blue.
     pub selection_ring: Rgba,
     /// Row title text.
     pub title: Rgba,
-    /// Selected row title text — a step brighter than `title`.
+    /// Selected row title text, aliased to [`ThemeColors::title`].
     pub title_selected: Rgba,
     /// Secondary row text.
     pub subtitle: Rgba,
-    /// Caption/meta text — the faintest step that still passes as body copy.
+    /// Raw sampled meta text, reserved for nonessential metadata and disabled
+    /// labels. Body-size secondary text uses [`ThemeColors::subtitle`], which
+    /// clears WCAG AA on the panel surface.
     pub meta: Rgba,
     /// Primary pill fill.
     pub primary_pill_bg: Rgba,
@@ -207,10 +218,8 @@ pub struct ThemeColors {
     pub rail_tool: Rgba,
 
     // ── Role tokens: what a value does, rather than who consumes it ───────
-    /// The sidebar fill. Opaque, and one of the tokens no reference frame
-    /// could settle — see `THEME-PROVENANCE.md`; it is derived from
-    /// `background` a step down, plus the 1px [`ThemeColors::sidebar_border`]
-    /// seam.
+    /// The sidebar fill, retained as an alias for [`ThemeColors::panel_surface`]
+    /// while existing consumers migrate to the semantic shell role.
     pub sidebar: Rgba,
     /// Floating cards, popovers, tooltips: a step *above* the surface.
     pub raised: Rgba,
@@ -224,7 +233,7 @@ pub struct ThemeColors {
     pub overlay_strong: Rgba,
     /// Stronger divider, for seams that separate rather than merely delimit.
     pub border_strong: Rgba,
-    /// The 1px seam between sidebar and content.
+    /// Legacy sidebar seam, aliased to [`ThemeColors::panel_border`].
     pub sidebar_border: Rgba,
     /// Faintest text step — placeholder copy and disabled labels, below
     /// [`ThemeColors::meta`].
@@ -234,10 +243,9 @@ pub struct ThemeColors {
     /// Quota-meter blue. Blue is reserved for quantity, so a gauge never
     /// competes with the accent for attention.
     pub gauge: Rgba,
-    /// Selected *row* fill: the 6% neutral wash that selected, hovered and
-    /// pressed rows all share. Components that paint a selected row or tab
-    /// chip should use this; [`ThemeColors::selection`] is reserved for
-    /// painted text-selection under glyphs.
+    /// Approved selected-row fill, aliased by [`ThemeColors::selection_fill`].
+    /// [`ThemeColors::selection`] remains reserved for text-selection under
+    /// glyphs.
     pub selected_fill: Rgba,
     /// Text-selection wash — the familiar browser blue, painted under
     /// glyphs: `hsla(211,100%,50%,0.55)` / `0.35`. Never used for row
@@ -338,12 +346,19 @@ impl ThemeColors {
             let (hue, lightness) = hue_and_lightness(warning);
             hsla(hue, 1.0, lightness, 1.0)
         };
-        let text = Self::adaptive(rgb_hex(TEXT_DARK), rgb_hex(TEXT_LIGHT), appearance);
-        let text_secondary = Self::adaptive(rgb_hex(0xA3A3A3), rgb_hex(0x666666), appearance);
-        let text_tertiary = Self::adaptive(rgb_hex(0x7C7D7D), rgb_hex(0x868686), appearance);
+        let frame_fallback = Self::adaptive(rgb_hex(0x222427), rgb_hex(0xDCE5E9), appearance);
+        let frame_surface = match appearance {
+            Appearance::Dark => softened(frame_fallback, 0.88),
+            Appearance::Light => softened(frame_fallback, 0.82),
+        };
+        let panel_surface = Self::adaptive(rgb_hex(0x18191A), rgb_hex(0xF4F7F8), appearance);
+        let panel_border = Self::adaptive(rgb_hex(0x27292D), rgb_hex(0xCCD8DD), appearance);
+        let selected_fill = Self::adaptive(rgb_hex(0x2D2F34), rgb_hex(0xD7E2E7), appearance);
+        let text = Self::adaptive(rgb_hex(0xCBCDD4), rgb_hex(0x313A40), appearance);
+        let text_secondary = Self::adaptive(rgb_hex(0x85888F), rgb_hex(0x667379), appearance);
+        let text_tertiary = Self::adaptive(rgb_hex(0x686B71), rgb_hex(0x68757B), appearance);
         let text_ghost = Self::adaptive(rgb_hex(0x575757), rgb_hex(0xA4A4A4), appearance);
-        let surface = Self::adaptive(rgb_hex(SURFACE_DARK), rgb_hex(SURFACE_LIGHT), appearance);
-        let raised = Self::adaptive(rgb_hex(0x232323), rgb_hex(0xEBEBEB), appearance);
+        let raised = Self::adaptive(rgb_hex(0x1D1E21), rgb_hex(0xFBFCFC), appearance);
         // One step *into* the page, and derived from the measured surface for
         // the same reason `sidebar` is: a well is a relationship to the page
         // it is cut into, so it should move when the page does. The two
@@ -352,8 +367,12 @@ impl ThemeColors {
         // and would go grey long before it read as a well. Both were picked to
         // make the well legible at a glance and neither is a measurement;
         // `the_depth_ladder_reads_as_depth` holds the ordering.
-        let inset = Self::adaptive(scaled(surface, 0.72), scaled(surface, 0.93), appearance);
-        let composer = Self::adaptive(rgb_hex(0x212121), color(1.0, 1.0, 1.0, 1.0), appearance);
+        let inset = Self::adaptive(
+            scaled(panel_surface, 0.72),
+            scaled(panel_surface, 0.93),
+            appearance,
+        );
+        let composer = raised;
         // A terminal is the deepest thing on the page in dark, and paper in
         // light — the same two extremes `inset` already names.
         let terminal_surface = Self::adaptive(
@@ -361,16 +380,6 @@ impl ThemeColors {
             color(1.0, 1.0, 1.0, 1.0),
             appearance,
         );
-        // Opaque, and ours by necessity. The reference sidebar is a macOS
-        // vibrancy layer: measured across the frame it drifts #21282A ->
-        // #26292A as the desktop behind the window goes cyan -> near-white,
-        // while the content column beside it never moves. A translucent layer
-        // has no constant to sample, and macOS vibrancy does not exist on the
-        // two platforms this app also targets. What the frames *do* establish
-        // is that the sidebar reads as recessed from the content, so it is
-        // derived from the measured `surface` by one step down rather than
-        // named as a number nobody can check.
-        let sidebar = Self::adaptive(scaled(surface, 0.92), scaled(surface, 0.98), appearance);
         // Everything from here to `danger_soft` is a veil off the ladder — see
         // [`veil`] for why washes cannot be measured and must come from one
         // rule instead.
@@ -379,7 +388,7 @@ impl ThemeColors {
         // Measured off the seam itself, which is two frame pixels wide — one
         // logical pixel at 2x — and flat at 200/200 in both variants, so these
         // are solid values and not a blend of the surfaces either side.
-        let sidebar_border = Self::adaptive(rgb_hex(0x282828), rgb_hex(0xDCDBDB), appearance);
+        let sidebar_border = panel_border;
         let row_hover = veil(VEIL_LOW, appearance);
         // A chat row is most of the width of the pane. The same veil a sidebar
         // row uses would read as a change of surface at that size, so the
@@ -403,28 +412,33 @@ impl ThemeColors {
         // appearance's page, so it is the same measured pair, swapped. No new
         // number, and it stays right by construction if either is ever
         // re-measured.
-        let inverse = Self::adaptive(rgb_hex(SURFACE_LIGHT), rgb_hex(SURFACE_DARK), appearance);
-        let on_inverse = Self::adaptive(rgb_hex(TEXT_LIGHT), rgb_hex(TEXT_DARK), appearance);
+        let inverse = Self::adaptive(rgb_hex(0xF4F7F8), rgb_hex(0x18191A), appearance);
+        let on_inverse = Self::adaptive(rgb_hex(0x313A40), rgb_hex(0xCBCDD4), appearance);
         let danger_soft = softened(danger, VEIL_MID);
 
         Self {
-            background: surface,
-            canvas: surface,
+            frame_surface,
+            frame_fallback,
+            panel_surface,
+            panel_border,
+            panel_focus_ring: accent,
+            background: panel_surface,
+            canvas: frame_fallback,
             terminal_surface,
             tab_focus_accent: accent,
             tab_needs_input: warning,
             tab_done: success,
             tab_error: danger,
-            chat_surface: surface,
-            chrome_tint: sidebar,
-            tab_chip_underline: border_strong,
+            chat_surface: panel_surface,
+            chrome_tint: panel_surface,
+            tab_chip_underline: panel_border,
             hairline: border,
             row_hover,
             chat_row_hover: overlay,
-            selection_fill: selection,
+            selection_fill: selected_fill,
             selection_ring: accent,
             title: text,
-            title_selected: Self::adaptive(rgb_hex(0xF5F5F5), rgb_hex(0x101010), appearance),
+            title_selected: text,
             subtitle: text_secondary,
             meta: text_tertiary,
             primary_pill_bg: raised,
@@ -457,7 +471,7 @@ impl ThemeColors {
                 color(0.55, 0.57, 0.65, 1.0),
                 appearance,
             ),
-            sidebar,
+            sidebar: panel_surface,
             raised,
             composer,
             inset,
@@ -469,7 +483,7 @@ impl ThemeColors {
             accent,
             gauge,
             selection,
-            selected_fill: row_hover,
+            selected_fill,
             code_text,
             code_wash,
             inverse,
@@ -484,6 +498,10 @@ impl ThemeColors {
 /// (4/6/7/8/12/13 radius steps; 48px bars; 2/4/6/8/10/12/14/20 spacing).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spacing {
+    /// Gap between adjacent panels in the compact shell.
+    pub shell_gap: Pixels,
+    /// Inset between the shell and the window frame.
+    pub shell_outer_inset: Pixels,
     /// Floating-card corner radius (waku's default control radius).
     pub card_corner_radius: Pixels,
     /// Gap between cards and the window edge.
@@ -527,6 +545,8 @@ pub struct Spacing {
 impl Default for Spacing {
     fn default() -> Self {
         Self {
+            shell_gap: px(4.0),
+            shell_outer_inset: px(4.0),
             card_corner_radius: px(6.0),
             card_gap: px(10.0),
             card_shadow_radius: px(18.0),
@@ -557,6 +577,8 @@ impl Default for Spacing {
 /// for the same value.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Radii {
+    /// Corner radius for a shell panel (7px).
+    pub shell_panel: Pixels,
     /// Chips-in-rows, code-wash quads, sidebar close buttons (4px).
     pub chip: Pixels,
     /// Activity chips, focus-ring proxies, the active segment of a
@@ -580,6 +602,7 @@ pub struct Radii {
 impl Default for Radii {
     fn default() -> Self {
         Self {
+            shell_panel: px(7.0),
             chip: px(4.0),
             chip_active: px(5.0),
             control: px(6.0),
@@ -1199,16 +1222,12 @@ fn scaled(color: Rgba, factor: f32) -> Rgba {
 /// A neutral veil at `alpha`: white over the dark palette, black over the
 /// light one.
 ///
-/// Every hairline, hover, overlay and wash in this theme is one of these. That
-/// is a rule, not a convenience — the module header says surfaces step by
-/// lightness alone and colour is spent only where it means something, and a
-/// tinted hairline breaks it: it spends colour on structure, where there is
-/// nothing to mean. The rule also settles a question measurement cannot. A
-/// veil is translucent, and a screenshot is flat: whatever a wash looked like
-/// in the reference, compositing had already happened by the time the shutter
-/// closed, so there is no pixel anywhere that carries its rgba back. Washes
-/// are therefore ours by necessity, and the only honest way to write them is
-/// to derive them all from one stated rule instead of naming twenty numbers.
+/// Generic hairlines, hovers, overlays, guides, and code/hunk washes use these
+/// neutral veils. The approved shell frame, panels, selected rows, and panel
+/// borders are separate cool-tinted roles and must not be folded into this
+/// helper. A veil is translucent while a screenshot is flat, so compositing
+/// cannot recover its source rgba; centralizing these generic washes in one
+/// rule avoids inventing independent structural colours.
 fn veil(alpha: f32, appearance: Appearance) -> Rgba {
     match appearance {
         Appearance::Dark => color(1.0, 1.0, 1.0, alpha),
@@ -1225,18 +1244,9 @@ const VEIL_LOW: f32 = 0.08;
 const VEIL_MID: f32 = 0.12;
 const VEIL_HIGH: f32 = 0.18;
 
-/// The page itself, in each appearance — the two values the measurement is
-/// most confident about (`measure-theme.py` reports them at 100% patch
-/// coverage, i.e. every sampled pixel agreed). Named because several other
-/// tokens are stated as transformations of them and one, [`ThemeColors::inverse`],
-/// is stated as the pair swapped.
+/// The former dark page, retained solely to preserve the terminal's established
+/// dark well while the shell moves to its new panel surface.
 const SURFACE_DARK: u32 = 0x1A_1A_1A;
-const SURFACE_LIGHT: u32 = 0xF6_F5_F6;
-
-/// Body text on each of the surfaces above, likewise measured, and likewise
-/// swapped to make [`ThemeColors::on_inverse`].
-const TEXT_DARK: u32 = 0xE2_E2_E2;
-const TEXT_LIGHT: u32 = 0x24_24_24;
 
 /// The same colour at a lower opacity.
 ///
@@ -1334,6 +1344,92 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    #[test]
+    fn intellij_shell_palette_matches_the_approved_reference() {
+        let dark = Theme::dark();
+        let light = Theme::light();
+        assert_eq!(dark.frame_fallback, rgb_hex(0x222427));
+        assert_eq!(
+            dark.frame_surface,
+            Rgba {
+                r: 0x22 as f32 / 255.0,
+                g: 0x24 as f32 / 255.0,
+                b: 0x27 as f32 / 255.0,
+                a: 0.88,
+            }
+        );
+        assert_eq!(dark.panel_surface, rgb_hex(0x18191A));
+        assert_eq!(dark.selected_fill, rgb_hex(0x2D2F34));
+        assert_eq!(dark.panel_border, rgb_hex(0x27292D));
+        assert_eq!(dark.raised, rgb_hex(0x1D1E21));
+        assert_eq!(dark.inset, scaled(dark.panel_surface, 0.72));
+        assert_eq!(dark.title, rgb_hex(0xCBCDD4));
+        assert_eq!(dark.subtitle, rgb_hex(0x85888F));
+        assert_eq!(dark.meta, rgb_hex(0x686B71));
+
+        assert_eq!(light.frame_fallback, rgb_hex(0xDCE5E9));
+        assert_eq!(
+            light.frame_surface,
+            Rgba {
+                r: 0xDC as f32 / 255.0,
+                g: 0xE5 as f32 / 255.0,
+                b: 0xE9 as f32 / 255.0,
+                a: 0.82,
+            }
+        );
+        assert_eq!(light.panel_surface, rgb_hex(0xF4F7F8));
+        assert_eq!(light.selected_fill, rgb_hex(0xD7E2E7));
+        assert_eq!(light.panel_border, rgb_hex(0xCCD8DD));
+        assert_eq!(light.raised, rgb_hex(0xFBFCFC));
+        assert_eq!(light.inset, scaled(light.panel_surface, 0.93));
+        assert_eq!(light.title, rgb_hex(0x313A40));
+        assert_eq!(light.subtitle, rgb_hex(0x667379));
+        assert_eq!(light.meta, rgb_hex(0x68757B));
+
+        for theme in [dark, light] {
+            assert_eq!(theme.background, theme.panel_surface);
+            assert_eq!(theme.sidebar, theme.panel_surface);
+            assert_eq!(theme.chat_surface, theme.panel_surface);
+            assert_eq!(theme.chrome_tint, theme.panel_surface);
+            assert_eq!(theme.canvas, theme.frame_fallback);
+            assert_eq!(theme.selection_fill, theme.selected_fill);
+            assert_eq!(theme.title_selected, theme.title);
+            assert_eq!(theme.sidebar_border, theme.panel_border);
+            assert_eq!(theme.tab_chip_underline, theme.panel_border);
+            assert_eq!(theme.composer, theme.raised);
+            assert_eq!(theme.card_fill, theme.raised);
+            assert_eq!(theme.primary_pill_bg, theme.raised);
+            assert_eq!(theme.filter_field_bg, theme.inset);
+            assert_eq!(theme.code_inset_fill, theme.inset);
+            assert_eq!(theme.panel_focus_ring, theme.accent);
+            assert_eq!(theme.selection_ring, theme.panel_focus_ring);
+            assert_eq!(theme.tab_focus_accent, theme.accent);
+            assert_eq!(theme.primary_text_color, theme.title);
+        }
+    }
+
+    #[test]
+    fn shell_body_text_meets_wcag_aa_on_its_panel() {
+        for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            for (role, text) in [("primary", theme.title), ("secondary", theme.subtitle)] {
+                let ratio = contrast_ratio(text, theme.panel_surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{label} {role} text contrast on the panel is {ratio:.2}:1, under WCAG AA"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_geometry_is_compact_and_consistent() {
+        let spacing = Spacing::default();
+        let radii = Radii::default();
+        assert_eq!(spacing.shell_gap, px(4.0));
+        assert_eq!(spacing.shell_outer_inset, px(4.0));
+        assert_eq!(radii.shell_panel, px(7.0));
+    }
+
     /// Composites `over` (which may be translucent) onto `under`, so a wash
     /// can be judged the way a reader actually sees it.
     fn composite(over: Rgba, under: Rgba) -> Rgba {
@@ -1366,38 +1462,27 @@ mod tests {
         }
     }
 
-    /// No structural token carries a hue.
+    /// Veil-backed structural washes remain neutral.
     ///
-    /// The module header says surfaces step by lightness alone and colour is
-    /// spent only where it means something. A hairline, a hover, an overlay
-    /// and a tree guide mean nothing — they are shape — so they must be
-    /// neutral. This is the test that caught the theme's largest provenance
-    /// defect: the ten washes that failed it were tinted `hsla(220, 10%, …)`,
-    /// which is not a colour anyone here chose for a reason, and could not
-    /// have been measured either, because compositing has already happened by
-    /// the time a screenshot exists.
+    /// The cool-tinted shell surfaces have their own approved roles. This test
+    /// deliberately covers only the generic washes backed by [`veil`]: a
+    /// hairline, hover, overlay, guide, or hunk wash communicates structure,
+    /// not an additional semantic colour.
     #[test]
-    fn no_structural_token_carries_a_hue() {
+    fn veil_backed_structural_washes_are_neutral() {
         for (label, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
             for (name, c) in [
                 ("hairline", theme.hairline),
-                ("tab_chip_underline", theme.tab_chip_underline),
                 ("row_hover", theme.row_hover),
                 ("chat_row_hover", theme.chat_row_hover),
                 ("overlay", theme.overlay),
                 ("overlay_strong", theme.overlay_strong),
                 ("tree_guide", theme.tree_guide),
                 ("diff_hunk_background", theme.diff_hunk_background),
-                ("inverse", theme.inverse),
-                ("on_inverse", theme.on_inverse),
-                ("background", theme.background),
-                ("sidebar", theme.sidebar),
-                ("inset", theme.inset),
-                ("raised", theme.raised),
             ] {
                 assert!(
                     (c.r - c.g).abs() < 0.01 && (c.g - c.b).abs() < 0.01,
-                    "{label} {name} is tinted: ({}, {}, {})",
+                    "{label} veil-backed {name} is tinted: ({}, {}, {})",
                     c.r,
                     c.g,
                     c.b
@@ -1489,12 +1574,7 @@ mod tests {
         );
         expect_color(
             light.inverse,
-            (
-                dark.background.r,
-                dark.background.g,
-                dark.background.b,
-                1.0,
-            ),
+            (dark.background.r, dark.background.g, dark.background.b, 1.0),
         );
         expect_color(
             dark.on_inverse,
@@ -1634,10 +1714,11 @@ mod tests {
 
     /// The dark palette, against `docs/linux-rewrite/THEME-PROVENANCE.md`.
     ///
-    /// Each value there is either a recorded measurement off a reference frame
-    /// or a stated choice of ours; this test is what stops the two drifting
-    /// apart silently. Re-derive the measured ones with
-    /// `./reference/waku/measure-theme.py`.
+    /// The assertions cover the current shell values recorded in provenance.
+    /// `./reference/waku/measure-theme.py` reproduces historical Waku values
+    /// only; the current shell is audited via the IntelliJ screenshot
+    /// fingerprint, dimensions, method, and sampling rectangles documented
+    /// there.
     #[test]
     fn dark_palette_matches_recorded_provenance() {
         let theme = Theme::dark();
@@ -1646,16 +1727,16 @@ mod tests {
         expect_color(
             theme.canvas,
             f(
-                0x1A as f32 / 255.0,
-                0x1A as f32 / 255.0,
-                0x1A as f32 / 255.0,
+                0x22 as f32 / 255.0,
+                0x24 as f32 / 255.0,
+                0x27 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.background,
             f(
-                0x1A as f32 / 255.0,
-                0x1A as f32 / 255.0,
+                0x18 as f32 / 255.0,
+                0x19 as f32 / 255.0,
                 0x1A as f32 / 255.0,
             ),
         );
@@ -1663,8 +1744,8 @@ mod tests {
             theme.sidebar,
             f(
                 0x18 as f32 / 255.0,
-                0x18 as f32 / 255.0,
-                0x18 as f32 / 255.0,
+                0x19 as f32 / 255.0,
+                0x1A as f32 / 255.0,
             ),
         );
         // The well: the measured 0x1A surface stepped down by the declared
@@ -1675,20 +1756,27 @@ mod tests {
         expect_color(
             theme.raised,
             f(
-                0x23 as f32 / 255.0,
-                0x23 as f32 / 255.0,
-                0x23 as f32 / 255.0,
+                0x1D as f32 / 255.0,
+                0x1E as f32 / 255.0,
+                0x21 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.composer,
             f(
-                0x21 as f32 / 255.0,
-                0x21 as f32 / 255.0,
+                0x1D as f32 / 255.0,
+                0x1E as f32 / 255.0,
                 0x21 as f32 / 255.0,
             ),
         );
-        expect_color(theme.inset, f(well, well, well));
+        expect_color(
+            theme.inset,
+            f(
+                0x18 as f32 * 0.72 / 255.0,
+                0x19 as f32 * 0.72 / 255.0,
+                0x1A as f32 * 0.72 / 255.0,
+            ),
+        );
         expect_color(
             theme.accent,
             f(
@@ -1710,25 +1798,25 @@ mod tests {
         expect_color(
             theme.title,
             f(
-                0xE2 as f32 / 255.0,
-                0xE2 as f32 / 255.0,
-                0xE2 as f32 / 255.0,
+                0xCB as f32 / 255.0,
+                0xCD as f32 / 255.0,
+                0xD4 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.subtitle,
             f(
-                0xA3 as f32 / 255.0,
-                0xA3 as f32 / 255.0,
-                0xA3 as f32 / 255.0,
+                0x85 as f32 / 255.0,
+                0x88 as f32 / 255.0,
+                0x8F as f32 / 255.0,
             ),
         );
         expect_color(
             theme.meta,
             f(
-                0x7D as f32 / 255.0,
-                0x7D as f32 / 255.0,
-                0x7D as f32 / 255.0,
+                0x68 as f32 / 255.0,
+                0x6B as f32 / 255.0,
+                0x71 as f32 / 255.0,
             ),
         );
         expect_color(
@@ -1759,26 +1847,33 @@ mod tests {
         expect_color(
             theme.inverse,
             f(
-                0xF6 as f32 / 255.0,
-                0xF5 as f32 / 255.0,
-                0xF6 as f32 / 255.0,
+                0xF4 as f32 / 255.0,
+                0xF7 as f32 / 255.0,
+                0xF8 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.on_inverse,
             f(
-                0x24 as f32 / 255.0,
-                0x24 as f32 / 255.0,
-                0x24 as f32 / 255.0,
+                0x31 as f32 / 255.0,
+                0x3A as f32 / 255.0,
+                0x40 as f32 / 255.0,
             ),
         );
 
-        // Veils are pure white over dark — no hue at all, per the module
-        // header — at their rung of the ladder.
+        // Hairlines, hover, and overlay remain neutral veils; panel seams use
+        // the separate opaque shell role.
         expect_color(theme.row_hover, (1.0, 1.0, 1.0, VEIL_LOW));
         expect_color(theme.overlay, (1.0, 1.0, 1.0, VEIL_FAINT));
         expect_color(theme.hairline, (1.0, 1.0, 1.0, VEIL_LOW));
-        expect_color(theme.tab_chip_underline, (1.0, 1.0, 1.0, VEIL_HIGH));
+        expect_color(
+            theme.tab_chip_underline,
+            f(
+                0x27 as f32 / 255.0,
+                0x29 as f32 / 255.0,
+                0x2D as f32 / 255.0,
+            ),
+        );
         // Selection is the accent turned down, not a borrowed browser blue.
         expect_color(
             theme.selection,
@@ -1800,26 +1895,26 @@ mod tests {
         expect_color(
             theme.canvas,
             f(
-                0xF6 as f32 / 255.0,
-                0xF5 as f32 / 255.0,
-                0xF6 as f32 / 255.0,
+                0xDC as f32 / 255.0,
+                0xE5 as f32 / 255.0,
+                0xE9 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.background,
             f(
-                0xF6 as f32 / 255.0,
-                0xF5 as f32 / 255.0,
-                0xF6 as f32 / 255.0,
+                0xF4 as f32 / 255.0,
+                0xF7 as f32 / 255.0,
+                0xF8 as f32 / 255.0,
             ),
         );
         expect_color(theme.terminal_surface, f(1.0, 1.0, 1.0));
         expect_color(
             theme.raised,
             f(
-                0xEB as f32 / 255.0,
-                0xEB as f32 / 255.0,
-                0xEB as f32 / 255.0,
+                0xFB as f32 / 255.0,
+                0xFC as f32 / 255.0,
+                0xFC as f32 / 255.0,
             ),
         );
         expect_color(
@@ -1835,25 +1930,25 @@ mod tests {
         expect_color(
             theme.title,
             f(
-                0x24 as f32 / 255.0,
-                0x24 as f32 / 255.0,
-                0x24 as f32 / 255.0,
+                0x31 as f32 / 255.0,
+                0x3A as f32 / 255.0,
+                0x40 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.subtitle,
             f(
                 0x66 as f32 / 255.0,
-                0x66 as f32 / 255.0,
-                0x66 as f32 / 255.0,
+                0x73 as f32 / 255.0,
+                0x79 as f32 / 255.0,
             ),
         );
         expect_color(
             theme.meta,
             f(
-                0x85 as f32 / 255.0,
-                0x85 as f32 / 255.0,
-                0x85 as f32 / 255.0,
+                0x68 as f32 / 255.0,
+                0x75 as f32 / 255.0,
+                0x7B as f32 / 255.0,
             ),
         );
         // `App/AppTheme.swift`'s three state hues, light variants.
@@ -1866,7 +1961,14 @@ mod tests {
         expect_color(theme.row_hover, (0.0, 0.0, 0.0, VEIL_LOW));
         expect_color(theme.overlay, (0.0, 0.0, 0.0, VEIL_FAINT));
         expect_color(theme.hairline, (0.0, 0.0, 0.0, VEIL_LOW));
-        expect_color(theme.tab_chip_underline, (0.0, 0.0, 0.0, VEIL_HIGH));
+        expect_color(
+            theme.tab_chip_underline,
+            f(
+                0xCC as f32 / 255.0,
+                0xD8 as f32 / 255.0,
+                0xDD as f32 / 255.0,
+            ),
+        );
         expect_color(
             theme.selection,
             (
@@ -1881,9 +1983,9 @@ mod tests {
         expect_color(
             theme.inset,
             f(
-                0xF6 as f32 * 0.93 / 255.0,
-                0xF5 as f32 * 0.93 / 255.0,
-                0xF6 as f32 * 0.93 / 255.0,
+                0xF4 as f32 * 0.93 / 255.0,
+                0xF7 as f32 * 0.93 / 255.0,
+                0xF8 as f32 * 0.93 / 255.0,
             ),
         );
         expect_color(
@@ -1898,17 +2000,17 @@ mod tests {
         expect_color(
             theme.inverse,
             f(
-                0x1A as f32 / 255.0,
-                0x1A as f32 / 255.0,
+                0x18 as f32 / 255.0,
+                0x19 as f32 / 255.0,
                 0x1A as f32 / 255.0,
             ),
         );
         expect_color(
             theme.on_inverse,
             f(
-                0xE2 as f32 / 255.0,
-                0xE2 as f32 / 255.0,
-                0xE2 as f32 / 255.0,
+                0xCB as f32 / 255.0,
+                0xCD as f32 / 255.0,
+                0xD4 as f32 / 255.0,
             ),
         );
     }
@@ -1918,6 +2020,15 @@ mod tests {
         let light = Theme::light().colors;
         let dark = Theme::dark().colors;
         let tokens = [
+            ("frame_surface", light.frame_surface, dark.frame_surface),
+            ("frame_fallback", light.frame_fallback, dark.frame_fallback),
+            ("panel_surface", light.panel_surface, dark.panel_surface),
+            ("panel_border", light.panel_border, dark.panel_border),
+            (
+                "panel_focus_ring",
+                light.panel_focus_ring,
+                dark.panel_focus_ring,
+            ),
             ("background", light.background, dark.background),
             ("canvas", light.canvas, dark.canvas),
             ("sidebar", light.sidebar, dark.sidebar),
