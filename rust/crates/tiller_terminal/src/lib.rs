@@ -293,6 +293,19 @@ struct TerminalHandle {
     /// even though the origin-subtraction half of the same hit-test was
     /// already correct and unit-tested.
     last_cell_width: Arc<Mutex<Option<Pixels>>>,
+    /// F-TERM-03: the PTY master's raw fd, captured once at spawn time
+    /// before `pty` is moved into `EventLoop::new` (the event loop owns the
+    /// `File` from then on, but the fd *number* stays valid for the
+    /// process's lifetime, so holding just the number — not the `File` — is
+    /// enough to query it without contending with the reader/writer thread).
+    /// `tcgetpgrp` on this fd is a read-only terminal-driver ioctl
+    /// (`TIOCGPGRP`) and is safe to call concurrently with the event loop's
+    /// `read`/`write` on the same fd; it does not consume PTY data.
+    ///
+    /// Unix-only: on non-unix targets [`Self::foreground_command_running`]
+    /// always reports `false` (see that method) and no fd is captured.
+    #[cfg(unix)]
+    pty_master_fd: std::os::unix::io::RawFd,
 }
 
 /// The shell a `TerminalShell::System` pane falls back to when `$SHELL` is unset,
@@ -459,6 +472,14 @@ impl TerminalHandle {
         };
         let pty = tty::new(&options, size, 0).context("creating terminal PTY")?;
         let shell_pid = pty.child().id();
+        // Captured before `pty` moves into `EventLoop::new` below — see the
+        // field doc on `pty_master_fd` for why the bare fd number outlives
+        // that move.
+        #[cfg(unix)]
+        let pty_master_fd = {
+            use std::os::unix::io::AsRawFd;
+            pty.file().as_raw_fd()
+        };
         let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)
             .context("creating terminal event loop")?;
         let sender = event_loop.channel();
@@ -474,9 +495,62 @@ impl TerminalHandle {
                 resize_generation: Arc::new(AtomicU64::new(0)),
                 last_bounds: Arc::new(Mutex::new(None)),
                 last_cell_width: Arc::new(Mutex::new(None)),
+                #[cfg(unix)]
+                pty_master_fd,
             },
             wakeup_rx,
         ))
+    }
+
+    /// Whether a foreground command other than the shell itself currently
+    /// owns the terminal — i.e. whether the pane should show "Running".
+    ///
+    /// A terminal pane's shell process is always alive from spawn to
+    /// teardown, so "a child process exists" cannot distinguish "idle at the
+    /// prompt" from "running a command": both have a live shell. The signal
+    /// that actually distinguishes them is the PTY's **foreground process
+    /// group** (`tcgetpgrp` on the master fd, `TIOCGPGRP` under the hood):
+    /// alacritty's PTY setup calls `setsid()` in the child's `pre_exec`
+    /// (`tty/unix.rs`), so the shell starts as its own session and process
+    /// group leader — `getpgid(shell_pid) == shell_pid`. When an interactive
+    /// shell with job control runs a foreground command, it puts that
+    /// command in a *new* process group and hands the PTY's foreground
+    /// group to it for the duration; the shell reclaims it when the command
+    /// exits. So `tcgetpgrp(master_fd) != shell_pid` is true exactly while a
+    /// foreground command is running, and false at an idle prompt — this is
+    /// the same technique terminal multiplexers use to report pane activity.
+    ///
+    /// Rejected alternatives:
+    /// - **A live child process exists** (`descendant_pids`/libproc): true
+    ///   the entire time the shell itself is alive, so it can never report
+    ///   "idle" — the exact bug this method exists to fix.
+    /// - **The tab's agent-activity dot** (`AgentCatalog`/Layer A-D in
+    ///   CLAUDE.md): identity-gated to the five supported agent CLIs. A
+    ///   prior pass already confirmed a bare `sleep 20` never moves it, so
+    ///   it is silent for exactly the case this pill needs to cover.
+    ///
+    /// Unix-only: `tcgetpgrp`/process groups are a POSIX job-control notion
+    /// with no Windows equivalent, so this always reports `false` there —
+    /// the pill simply never shows "Running" on that platform, a known gap
+    /// rather than a silent wrong answer.
+    fn foreground_command_running(&self) -> bool {
+        #[cfg(unix)]
+        {
+            // SAFETY: `pty_master_fd` is a plain fd number captured while
+            // the underlying `File` was alive; the `File` (owned by the
+            // event-loop thread) keeps the fd open for exactly the
+            // `TerminalHandle`'s lifetime, so it is still open here.
+            // `tcgetpgrp` is documented to return -1 with `errno` set (e.g.
+            // `ENOTTY`, `EBADF`) rather than to invoke UB on any input fd,
+            // so a race with teardown is a plain error return, not memory
+            // unsafety.
+            let foreground_pgid = unsafe { libc::tcgetpgrp(self.pty_master_fd) };
+            foreground_pgid > 0 && foreground_pgid as u32 != self.shell_pid
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     fn write(&self, bytes: Vec<u8>) {
@@ -1018,6 +1092,18 @@ impl TerminalView {
     /// The child's final status once the PTY has reported `ChildExit`.
     pub fn exit_status(&self) -> Option<TerminalExitStatus> {
         self.exit_status
+    }
+
+    /// F-TERM-03: whether the pane's status pill should show "Running" right
+    /// now — a live PTY, no recorded exit yet, and a foreground command
+    /// currently holds the terminal (see
+    /// [`TerminalHandle::foreground_command_running`] for the definition and
+    /// the alternatives it rejects). Exit takes priority by construction:
+    /// once `exit_status` is recorded the PTY is gone, so this is `false`
+    /// from then on without needing an explicit check here.
+    pub fn is_command_running(&self) -> bool {
+        self.running_terminal()
+            .is_some_and(TerminalHandle::foreground_command_running)
     }
 
     /// The working directory used to spawn this pane.
@@ -1974,9 +2060,29 @@ impl gpui::Render for TerminalView {
                             .child(format!("Dropped diff: {path}")),
                     )
                 })
-                .when_some(
-                    self.exit_status.map(TerminalExitStatus::label),
-                    |this, label| {
+                // F-TERM-03: running wins while running, exactly as Swift's
+                // `statusChip` orders its four branches (running first, then
+                // the exit variants) — mirrored here as an if/else-if
+                // instead of two independent `.when`s so the two pills can
+                // never both paint. `is_command_running()` is already `false`
+                // once `exit_status` is recorded (the PTY is gone by then),
+                // but the explicit `else` keeps that ordering true by
+                // construction rather than by relying on the callee.
+                .map(|this| {
+                    if self.is_command_running() {
+                        this.child(
+                            div()
+                                .absolute()
+                                .left(px(8.0))
+                                .bottom(px(8.0))
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .bg(theme.primary_pill_bg)
+                                .text_size(px(11.0))
+                                .text_color(theme.tab_needs_input)
+                                .child("Running"),
+                        )
+                    } else if let Some(label) = self.exit_status.map(TerminalExitStatus::label) {
                         this.child(
                             div()
                                 .absolute()
@@ -1989,8 +2095,10 @@ impl gpui::Render for TerminalView {
                                 .text_color(theme.subtitle)
                                 .child(label),
                         )
-                    },
-                )
+                    } else {
+                        this
+                    }
+                })
                 .when_some(context_menu, |this, menu| this.child(menu))
                 .into_any_element(),
             TerminalState::Failed { message } => {
@@ -2302,6 +2410,104 @@ mod tests {
             TerminalExitStatus::from_signal(15),
             TerminalExitStatus::Signal(15)
         );
+    }
+
+    /// F-TERM-03: a shell is alive for the pane's whole life, so "a live
+    /// child exists" would report "running" forever — the exact bug this
+    /// asserts is fixed. Without `foreground_command_running`'s
+    /// `tcgetpgrp`-based definition this test would fail (the method did not
+    /// exist before this change; any process-existence stand-in would return
+    /// `true` here, since the shell itself is always alive).
+    #[test]
+    fn foreground_command_running_is_false_at_an_idle_prompt() {
+        let working_directory = test_working_directory("idle-prompt");
+        std::fs::create_dir_all(&working_directory).unwrap();
+        // An interactive shell run directly as the PTY child (no outer shell
+        // in between) so job control is active without depending on
+        // `$SHELL` in the test environment.
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/bash".to_string(),
+            args: vec![
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
+            ],
+        };
+        let (handle, _events) = TerminalHandle::new(&working_directory, &shell).unwrap();
+
+        // Drain bash's own startup (it writes nothing to stdout by default
+        // with --norc, but give the fork/exec and setsid a moment to settle
+        // before asserting on process-group state).
+        std::thread::sleep(Duration::from_millis(500));
+
+        assert!(
+            !handle.foreground_command_running(),
+            "an interactive shell sitting at its prompt must not report a foreground command"
+        );
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// F-TERM-03: proves the positive case (`true` while a foreground
+    /// command holds the PTY) and that the signal is self-correcting once
+    /// the command finishes and the shell reclaims the foreground process
+    /// group — not merely a latch that flips on and stays on. Both this and
+    /// the previous test exercise `foreground_command_running` directly
+    /// because it is `TerminalHandle`-private mechanism; the public,
+    /// render-facing surface (`TerminalView::is_command_running`) is covered
+    /// by `running_pill_state_is_replaced_by_exit_status_when_the_child_exits`
+    /// below, which also proves the exit-state hand-off Swift's
+    /// `statusChip` ordering requires.
+    #[test]
+    fn foreground_command_running_is_true_while_a_command_executes_then_false_again() {
+        let working_directory = test_working_directory("running-then-idle");
+        std::fs::create_dir_all(&working_directory).unwrap();
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/bash".to_string(),
+            args: vec![
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
+            ],
+        };
+        let (handle, _events) = TerminalHandle::new(&working_directory, &shell).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !handle.foreground_command_running(),
+            "must start out idle before the probe command is sent"
+        );
+
+        handle.write(b"sleep 3\n".to_vec());
+
+        let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut observed_running = false;
+        while std::time::Instant::now() < running_deadline {
+            if handle.foreground_command_running() {
+                observed_running = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            observed_running,
+            "sleep 3 must be observed as the PTY's foreground process group within 2s"
+        );
+
+        let idle_deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let mut observed_idle_again = false;
+        while std::time::Instant::now() < idle_deadline {
+            if !handle.foreground_command_running() {
+                observed_idle_again = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            observed_idle_again,
+            "the shell must reclaim the foreground process group once sleep 3 exits"
+        );
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     #[test]
@@ -3490,6 +3696,131 @@ mod view_tests {
 
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
+    }
+
+    /// F-TERM-03: the render-facing surface. `TerminalView::render`'s pill
+    /// branch is a direct, one-line function of `is_command_running()` and
+    /// `exit_status()` (`if self.is_command_running() { .. } else if let
+    /// Some(label) = self.exit_status.map(..) { .. }`), so asserting on
+    /// those two getters across one real command's full lifecycle is
+    /// equivalent to asserting on the pill it produces without needing a
+    /// separate paint-inspection harness (this crate has none for pill
+    /// text; the closest existing pattern, `debug_selector`, names an
+    /// element for hit-testing, not its text content).
+    ///
+    /// Drives one PTY through all three pill states in the order Swift's
+    /// `statusChip` uses them (running wins first; exit replaces it once the
+    /// child is actually gone): idle prompt -> `sleep 2` running in the
+    /// foreground -> shell's own `exit 7` tears down the PTY child. Without
+    /// this change `is_command_running` does not exist and the running
+    /// assertion below has nothing to hold; before the exit hand-off is
+    /// respected, a stale `true` could in principle outlive `exit_status`
+    /// becoming `Some` -- this test's final assertion catches that.
+    #[gpui::test]
+    async fn running_pill_state_is_replaced_by_exit_status_when_the_child_exits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let working_directory = std::env::temp_dir().join(format!(
+            "tiller-terminal-running-pill-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        // The shell itself is the PTY's direct child (no wrapping login
+        // shell) so this test does not depend on `$SHELL` in the sandbox,
+        // but it is still the interactive, job-control-capable shell a real
+        // terminal pane runs -- the same shape `TerminalShell::System`
+        // spawns.
+        let shell = TerminalShell::WithArguments {
+            program: "/bin/bash".to_string(),
+            args: vec![
+                "--norc".to_string(),
+                "--noprofile".to_string(),
+                "-i".to_string(),
+            ],
+        };
+        let (terminal, cx) = cx.add_window_view(|_, cx| {
+            TerminalView::with_shell(&working_directory, shell, cx).expect("spawn PTY")
+        });
+
+        let settle = |cx: &mut gpui::VisualTestContext, extra: Duration| {
+            let deadline = std::time::Instant::now() + extra;
+            while std::time::Instant::now() < deadline {
+                cx.run_until_parked();
+                cx.background_executor
+                    .advance_clock(Duration::from_millis(5));
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        // Startup settling: real fork/exec/setsid wall-clock time.
+        settle(cx, Duration::from_millis(500));
+        assert!(
+            !terminal.read_with(&cx.cx, |terminal, _| terminal.is_command_running()),
+            "a freshly spawned interactive shell sitting at its prompt must not show Running"
+        );
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status()),
+            None
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| {
+            terminal.input(b"sleep 2; exit 7\n".to_vec())
+        });
+
+        let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut observed_running = false;
+        while std::time::Instant::now() < running_deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if terminal.read_with(&cx.cx, |terminal, _| terminal.is_command_running()) {
+                observed_running = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            observed_running,
+            "the pill must report Running while `sleep 2` holds the PTY's foreground process group"
+        );
+        assert_eq!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status()),
+            None,
+            "the running command has not exited yet -- the exit pill must not appear early"
+        );
+
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let mut observed_exit = None;
+        while std::time::Instant::now() < exit_deadline {
+            cx.run_until_parked();
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            cx.run_until_parked();
+            if let Some(status) =
+                terminal.read_with(&cx.cx, |terminal, _| terminal.exit_status())
+            {
+                observed_exit = Some(status);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            observed_exit,
+            Some(TerminalExitStatus::Code(7)),
+            "the shell's own `exit 7` must surface as this pane's recorded exit status"
+        );
+        assert!(
+            !terminal.read_with(&cx.cx, |terminal, _| terminal.is_command_running()),
+            "once the PTY child has exited, Running must not still be reported -- \
+             the exit pill replaces it rather than the two ever coexisting"
+        );
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
     }
 
     /// F-TERM-UI-02: a platform-modifier (Super on Linux) left click on a
