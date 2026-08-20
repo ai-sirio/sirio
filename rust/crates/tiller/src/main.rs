@@ -20227,6 +20227,56 @@ mod tests {
         );
     }
 
+    /// F-CORE-WSP-05: `insert_terminal_tab_with_agent` -- reached here
+    /// through the real `ctrl-t` chord, exactly like
+    /// `ctrl_t_from_the_empty_worktree_state_creates_a_terminal` above --
+    /// gates its `rebuild_tab_machinery` call on a real
+    /// `LayoutCommand::Insert` run through `classify_layout_command`'s
+    /// `.structural` answer, the leg `commit_tab_rename` (F-CORE-WSP-04)
+    /// could never exercise since Rename classifies as nonstructural.
+    /// `render_group_surfaces` picks which tab's content to paint from
+    /// `tab_machinery`'s own `active_tab`, not from `self.active_tab` --
+    /// so without this wiring, a freshly inserted tab is pushed into
+    /// `self.tabs` and even becomes `self.active_tab`, but the pane
+    /// group's own placement model never learns about it, and the
+    /// content area keeps showing whatever tab was active before.
+    #[gpui::test]
+    async fn ctrl_t_makes_the_new_tab_the_pane_groups_own_active_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<TillerWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_machinery.active_tab()),
+            Some(0),
+            "the fixture's own single tab starts as the pane group's active tab"
+        );
+
+        cx.simulate_keystrokes("ctrl-t");
+        cx.run_until_parked();
+
+        let (tab_count, new_tab_id) = workspace.read_with(&cx.cx, |workspace, _| {
+            (
+                workspace.tabs.len(),
+                workspace.tabs.last().map(|tab| tab.id),
+            )
+        });
+        assert_eq!(tab_count, 2, "ctrl-t must create a second terminal tab");
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.tab_machinery.active_tab()),
+            new_tab_id,
+            "committing a tab insert must make the new tab the pane group's \
+             own active tab, or its content surface keeps showing whatever \
+             tab was active before"
+        );
+    }
+
     /// F-TERM-02: a pane group that lost its last tab to a move -- distinct
     /// from F-SID-18's group-0-with-a-worktree case above, which the comment
     /// on `drawn_selected_worktree_without_tabs_offers_a_new_terminal`
