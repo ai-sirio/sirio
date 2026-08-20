@@ -141,9 +141,30 @@ kill_ours() {
   # Linux caps a process's comm at 15 characters and `pgrep -x` matches comm, so a longer name
   # matches NOTHING and pgrep only warns on stderr. A pinned snapshot called /tmp/L2crit-tiller
   # therefore leaked past cleanup silently. Truncate the pattern the same way the kernel did.
-  local var="$1" want="$2" name="${3:0:15}" p
+  local var="$1" want="$2" name="${3:0:15}" p doomed="" waited=0
   for p in $(pgrep -x "$name" 2>/dev/null); do
-    tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "$var=$want" && kill "$p" 2>/dev/null
+    tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "$var=$want" && {
+      kill "$p" 2>/dev/null && doomed="$doomed $p"
+    }
+  done
+  # `kill` only *requests* an exit, and this app does not leave promptly -- it has
+  # PTYs and a SQLite database to close, and takes anything up to a couple of
+  # seconds. Returning here without waiting leaves a race exactly as wide as that
+  # shutdown, and the caller's next move is to boot a replacement, so the window
+  # is entered every time rather than occasionally. Two instances then hold the
+  # same `/tmp/$LABEL.sqlite`, and the departing one still has the *old* project
+  # catalog in memory: its final `write_catalog` upserts every field from that
+  # stale copy and deletes any project not in its own `desired_ids`, silently
+  # overwriting or removing rows the new instance just wrote. It surfaces as a
+  # verification reading back an empty or reverted row -- never as an error --
+  # which is how it outlived a trap-table entry claiming this function was fixed.
+  # Wait for the exits to actually happen; escalate only if one will not go.
+  for p in $doomed; do
+    while kill -0 "$p" 2>/dev/null && [ "$waited" -lt 120 ]; do
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+    kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
   done
 }
 # Everything Tiller spawned in a pane -- the agent CLIs a critic launches over ACP, and whatever
@@ -201,7 +222,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-kill_ours TILLER_SOCKET "$SOCK" tiller
+# Same `$(basename "$BIN")` as cleanup() above, and for the same reason: the literal
+# "tiller" never matches a renamed snapshot. This start-of-run pre-kill is the more
+# important of the two call sites, because cleanup() deliberately does not run under
+# TILLER_WL_KEEP -- so under a KEEP session this is the *only* thing standing between
+# a relaunch and two live instances sharing one database.
+kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
 kill_ours SWAYSOCK "$SWAYSOCK" sway
 # The three helpers below leak wherever cleanup() does not run, and cleanup()
 # deliberately does not run under TILLER_WL_KEEP. The app and the compositor are
