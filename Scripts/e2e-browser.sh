@@ -1,10 +1,10 @@
 #!/bin/bash
-# Browser surface e2e against a running Tiller.app. Pass the worktree UUID as
+# Browser surface e2e against a running Tiller instance. Pass the worktree UUID as
 # the first argument; all content is served from a local temporary directory.
 set -euo pipefail
 
 WT="${1:?usage: e2e-browser.sh <worktree-uuid>}"
-TILLERCTL="$(dirname "$0")/../Packages/TillerControl/.build/debug/tillerctl"
+TILLERCTL="$(dirname "$0")/../rust/target/debug/tillerctl"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tiller-browser-e2e.XXXXXX")"
 SERVER_PID=""
 
@@ -22,7 +22,7 @@ if [ ! -x "$TILLERCTL" ]; then
     exit 1
 fi
 if ! "$TILLERCTL" ping >/dev/null 2>&1; then
-    echo "Tiller.app is not running or its control socket is unavailable" >&2
+    echo "Tiller is not running or its control socket is unavailable" >&2
     exit 1
 fi
 

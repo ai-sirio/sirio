@@ -2,9 +2,12 @@
 //! the agent hooks report status back. Ported from the Swift
 //! `TillerControl` package.
 //!
-//! The server listens on a unix socket (default
-//! `~/Library/Application Support/Tiller/control.sock`, overridable by
-//! `$TILLER_SOCKET`) and dispatches line-delimited JSON requests
+//! The server listens on a unix socket — `$TILLER_SOCKET` when set, otherwise
+//! `$XDG_RUNTIME_DIR/TillerRust/control.sock`, falling back to the XDG state
+//! directory when no runtime directory exists (see [`protocol`]). The Swift
+//! original defaulted to `~/Library/Application Support/Tiller/control.sock`;
+//! that path is history, not current behaviour. It dispatches line-delimited
+//! JSON requests
 //! ([`protocol::ControlRequest`]) to a [`server::ControlHandler`] the app
 //! implements — this crate carries the transport and the protocol and knows
 //! nothing about GPUI.
