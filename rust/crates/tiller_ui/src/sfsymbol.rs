@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use gpui::{DevicePixels, RenderImage, Size};
+use gpui::RenderImage;
 use image::{Frame, ImageBuffer, Rgba as ImageRgba};
 use smallvec::SmallVec;
 
@@ -101,8 +101,8 @@ pub(crate) fn rasterize_symbol(
 /// be used because `TIFFRepresentation` rasterizes at the symbol's
 /// intrinsic size, not the size the image is asked to report.
 fn rasterize_symbol_mask(symbol: &str, width: u32, height: u32) -> Option<Vec<u8>> {
+    use objc2::AnyThread;
     use objc2::rc::autoreleasepool;
-    use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{
         NSBitmapImageRep, NSCalibratedRGBColorSpace, NSCompositingOperation, NSGraphicsContext,
         NSImage,
@@ -200,13 +200,6 @@ fn bake_tint(rgba: &[u8], width: u32, height: u32, tint: (u8, u8, u8)) -> Vec<u8
     bgra
 }
 
-/// The pixel dimensions a symbol rasterized for `size_pt` will have; lets
-/// callers size layout boxes without rasterizing first.
-pub(crate) fn raster_size(size_pt: f32) -> Size<DevicePixels> {
-    let px = (size_pt * RASTER_SCALE as f32).round() as i32;
-    Size::new(DevicePixels(px), DevicePixels(px))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,96 +219,23 @@ mod tests {
 
         let bytes = image.as_bytes(0).expect("single frame");
         let mut painted = 0;
-        let mut untinted = 0;
         for pixel in bytes.chunks_exact(4) {
             let (b, g, r, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
             if a == 0 {
                 continue;
             }
             painted += 1;
-            // Premultiplied tint: rgb == tint * alpha / 255.
-            if (r as u32 * 255) / 255 == 255 && (g as u32 * 255) / 255 == 128 && b < 4 {
-                untinted += 1;
-            }
+            // Premultiplied BGRA tint: blue is zero, red is alpha, and
+            // green is the orange tint scaled by alpha. A fully opaque
+            // correctly tinted pixel is therefore [0, 128, 255, 255], not
+            // an "untinted" pixel.
+            assert_eq!(b, 0, "blue channel stays zero in an orange tint");
+            assert_eq!(r, a, "red channel is the 255 tint scaled by alpha");
+            assert_eq!(g, (128u32 * a as u32 / 255) as u8);
         }
         assert!(
             painted > 100,
             "the folder glyph paints a real shape, got {painted} non-transparent pixels"
-        );
-        // The tint must actually be baked in: an orange tint leaves blue at
-        // zero (within rounding).
-        let blue_max = bytes
-            .chunks_exact(4)
-            .filter(|p| p[3] > 0)
-            .map(|p| p[0])
-            .max()
-            .unwrap_or(0);
-        assert!(
-            blue_max < 8,
-            "blue channel stays ~0 for an orange tint, got {blue_max}"
-        );
-        assert_eq!(untinted, 0);
-    }
-
-    #[test]
-    fn probe_sf_steps() {
-        use objc2::rc::autoreleasepool;
-        use objc2_app_kit::{NSBitmapImageRep, NSImage};
-        use objc2_foundation::{NSSize, NSString};
-        autoreleasepool(|_| {
-            let name = NSString::from_str("folder.fill");
-            let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None);
-            println!(
-                "step1 image: {}",
-                if image.is_some() { "Some" } else { "None" }
-            );
-            let Some(image) = image else { return };
-            image.setSize(NSSize {
-                width: 28.0,
-                height: 28.0,
-            });
-            image.setTemplate(true);
-            let size = image.size();
-            println!("step2 image size: {:?}", size);
-            let tiff = image.TIFFRepresentation();
-            println!(
-                "step3 tiff: {}",
-                if tiff.is_some() { "Some" } else { "None" }
-            );
-            let Some(tiff) = tiff else { return };
-            println!("step3b tiff len: {}", tiff.length());
-            let rep = NSBitmapImageRep::imageRepWithData(&tiff);
-            println!("step4 rep: {}", if rep.is_some() { "Some" } else { "None" });
-            let Some(rep) = rep else { return };
-            println!(
-                "step5 wide={} high={} samples={} bpp={} bpr={} fmt={:?}",
-                rep.pixelsWide(),
-                rep.pixelsHigh(),
-                rep.samplesPerPixel(),
-                rep.bitsPerPixel(),
-                rep.bytesPerRow(),
-                rep.bitmapFormat().0
-            );
-        });
-    }
-
-    #[test]
-    fn probe_pixels() {
-        let image = rasterize_symbol("folder.fill", 14.0, (255, 128, 0)).expect("image");
-        let bytes = image.as_bytes(0).unwrap();
-        let mut shown = 0;
-        let mut max_b = 0;
-        for (i, pixel) in bytes.chunks_exact(4).enumerate() {
-            let (b, g, r, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
-            max_b = max_b.max(b);
-            if a > 0 && shown < 6 {
-                println!("px {i}: b={b} g={g} r={r} a={a}");
-                shown += 1;
-            }
-        }
-        println!(
-            "max_b={max_b} total_painted={}",
-            bytes.chunks_exact(4).filter(|p| p[3] > 0).count()
         );
     }
 
