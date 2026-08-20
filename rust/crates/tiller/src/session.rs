@@ -2058,6 +2058,32 @@ mod tests {
         assert!(!store.persistence_enabled(), "newer schema disables writes");
     }
 
+    /// Polls until `predicate` holds, or the deadline passes.
+    ///
+    /// The debounce tests used to `sleep` a fixed 250 ms and then assert. A
+    /// sleep only guarantees that *wall-clock* time passed, not that the
+    /// writer thread was ever scheduled — and `cargo test --workspace` runs
+    /// roughly fifty test binaries at once, which is exactly when it is not.
+    /// Observed under that load: the whole 250 ms elapsed with the worker
+    /// never having run, so `writes()` was still `0`.
+    ///
+    /// The deadline is deliberately generous (30 s against a 60 ms debounce).
+    /// Measured on this box under `--workspace` load, the two flushes together
+    /// took ~9 s of wall clock — so a tight bound would just reintroduce the
+    /// flake in a new place. A healthy run still returns in milliseconds,
+    /// because this polls rather than sleeps; the deadline only bounds how
+    /// long a pathological run waits before failing with a clear message.
+    fn wait_until(deadline: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < deadline {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        predicate()
+    }
+
     #[test]
     fn the_debounce_collapses_a_burst_into_one_write() {
         let dir = TempDir::new();
@@ -2071,20 +2097,33 @@ mod tests {
             tabs[0].title = format!("Chat {index}");
             store.schedule(layout(&dir.0, tabs));
         }
-        std::thread::sleep(Duration::from_millis(250));
+
+        // Wait for the burst to actually land, instead of sleeping and hoping.
+        // This assertion also replaces an earlier `writes() <= 2`, which was
+        // satisfied by `0` — so the one failure that matters here, the worker
+        // never running at all, *passed* that check and only surfaced further
+        // down as a confusing `left: 0, right: 2`.
         assert!(
-            store.writes() <= 2,
-            "a burst of 10 changes must not produce a write per change; wrote {}",
-            store.writes()
+            wait_until(Duration::from_secs(30), || store.writes() >= 1),
+            "the debounce worker never flushed the burst at all"
+        );
+        assert_eq!(
+            store.writes(),
+            1,
+            "a burst of 10 changes inside one window must collapse to a single write"
         );
 
         // A later change flushes again once the window has passed.
         store.schedule(layout(&dir.0, three_tabs()));
-        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            wait_until(Duration::from_secs(30), || store.writes() >= 2),
+            "a quiet gap must let the next change flush on its own; wrote {}",
+            store.writes()
+        );
         assert_eq!(
             store.writes(),
             2,
-            "a quiet gap lets the next change flush on its own"
+            "the later change must add exactly one more write, not a burst"
         );
 
         // And the last scheduled layout is the one that landed.
