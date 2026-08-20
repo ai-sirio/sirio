@@ -689,21 +689,79 @@ fn descendant_pids(root: u32) -> Vec<u32> {
     discovered
 }
 
-/// macOS/BSD stand-in for [`descendant_pids`]. No `/proc` here, so the Linux walk
-/// cannot run.
-///
-/// Gating this `cfg(unix)` — as it briefly was — handed macOS the Linux body, where
-/// every `read_dir("/proc/<pid>/task")` fails and the function returns empty. That is
-/// not a harmless degradation for this particular caller: an empty descendant list
-/// reduces [`terminate_login_process_group`] to `kill <launcher>`, which is *precisely*
-/// the failure F-SET-14's evidence recorded (the login command survived). The bug would
-/// have reappeared on macOS wearing the fix's own comment explaining why it was fixed.
-///
-/// Counterpart: libproc `proc_listchildpids`, already implemented in the Swift original
-/// (`App/ForegroundProcessAgent.swift`).
+/// macOS implementation of [`descendant_pids`], using libproc's live child
+/// table because macOS has no `/proc` filesystem.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn descendant_pids(_root: u32) -> Vec<u32> {
-    Vec::new()
+fn descendant_pids(root: u32) -> Vec<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut discovered = Vec::new();
+        let mut seen = std::collections::HashSet::from([root]);
+        let mut frontier = vec![root];
+        while let Some(pid) = frontier.pop() {
+            let Ok(children) = macos_child_pids(pid) else {
+                continue;
+            };
+            for child in children {
+                if seen.insert(child) {
+                    discovered.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+        discovered
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_child_pids(parent: u32) -> std::io::Result<Vec<u32>> {
+    use std::os::raw::{c_int, c_void};
+
+    const INITIAL_PID_CAPACITY: usize = 64;
+    const MAX_PID_CAPACITY: usize = 16_384;
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
+    }
+
+    let parent = c_int::try_from(parent).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "process id is too large")
+    })?;
+    let mut buffer = vec![0_i32; INITIAL_PID_CAPACITY];
+    loop {
+        let buffer_size = (buffer.len() * std::mem::size_of::<i32>()) as c_int;
+        // libproc returns the number of PIDs copied, not a byte count.
+        let reported_count =
+            unsafe { proc_listchildpids(parent, buffer.as_mut_ptr().cast(), buffer_size) };
+        if reported_count < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let count = (reported_count as usize).min(buffer.len());
+        if (reported_count as usize) < buffer.len() {
+            return Ok(buffer[..count]
+                .iter()
+                .copied()
+                .filter(|pid| *pid > 0)
+                .map(|pid| pid as u32)
+                .collect());
+        }
+
+        if buffer.len() >= MAX_PID_CAPACITY {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "macOS child-process list exceeded safety limit",
+            ));
+        }
+        buffer.resize((buffer.len() * 2).min(MAX_PID_CAPACITY), 0);
+    }
 }
 
 /// Kills the login terminal and every process it has spawned since launch
@@ -718,20 +776,6 @@ fn descendant_pids(_root: u32) -> Vec<u32> {
 /// without depending on process-group membership at all.
 #[cfg(unix)]
 fn terminate_login_process_group(pid: u32) {
-    // See `descendant_pids`' non-Linux twin: without /proc the target list collapses to
-    // the launcher alone, which is the F-SET-14 failure itself. Announce the gap rather
-    // than shipping a kill that looks thorough and is not.
-    #[cfg(not(target_os = "linux"))]
-    {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            eprintln!(
-                "tiller: descendant process discovery is unimplemented on this platform \
-                 (needs libproc proc_listchildpids); a canceled login may leave its \
-                 login command running."
-            );
-        });
-    }
     let mut targets = vec![pid];
     targets.extend(descendant_pids(pid));
     for target in &targets {
@@ -3982,19 +4026,25 @@ mod tests {
     /// command in a *different* pgid from the launcher's own, confirmed
     /// live against this sandbox's real terminal emulator) that made a
     /// single `kill <launcher_pid>` leave the login command running.
-    /// `setsid` here reproduces that detachment without depending on any
+    /// `setsid` (or Python's `os.setsid` on macOS, where the command is not
+    /// installed) reproduces that detachment without depending on any
     /// terminal emulator being installed.
     #[test]
     fn descendant_pids_finds_a_child_detached_into_its_own_session() {
         // `sh` is the launcher (kept as one live process, same pid the
         // whole time — the same shape `x-terminal-emulator` has, confirmed
         // live against this sandbox's real terminal emulator). Its
-        // backgrounded `setsid sleep` grandchild detaches into a brand new
-        // session/process group, the exact detachment that made a single
-        // `kill <launcher_pid>` leave the real login command running.
+        // backgrounded detached child creates a brand new session/process
+        // group, the exact detachment that made a single `kill <launcher_pid>`
+        // leave the real login command running.
+        let detached_command = if cfg!(target_os = "macos") {
+            "python3 -c 'import os,time; child=os.fork(); os.setsid() if child == 0 else os.waitpid(child,0); time.sleep(60)'"
+        } else {
+            "setsid sleep 60"
+        };
         let mut launcher = std::process::Command::new("sh")
             .arg("-c")
-            .arg("setsid sleep 60 & wait")
+            .arg(format!("{detached_command} & wait"))
             .spawn()
             .expect("spawn launcher");
         let launcher_pid = launcher.id();
