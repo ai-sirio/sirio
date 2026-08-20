@@ -4,9 +4,8 @@
 //! is the platform boundary that supplies it with the process names below a
 //! terminal shell. Linux exposes the equivalent of the macOS libproc walk via
 //! `/proc/<pid>/task/<pid>/children` and `/proc/<pid>/comm` — implemented
-//! below. macOS and Windows are not: see the `cfg(not(target_os = "linux"))`
-//! stub at the bottom of this file for their counterparts and why they are
-//! not implemented here yet.
+//! below. macOS uses the system `libproc` API because it has no `/proc` tree;
+//! Windows remains unsupported here.
 
 use std::collections::HashSet;
 use std::io;
@@ -28,9 +27,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
 const PROC_ROOT: &str = "/proc";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_DEPTH: usize = 5;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROCESSES: usize = 50;
 
 /// Returns process comm names for the shell's descendants, including direct
@@ -102,19 +101,126 @@ fn read_comm(proc_root: &Path, pid: u32) -> io::Result<Option<String>> {
     }
 }
 
-/// Non-Linux stand-in. macOS counterpart: libproc's `proc_listchildpids`/`proc_name` —
-/// already written in the Swift original (`App/ForegroundProcessAgent.swift`), a port
-/// rather than a design problem. Windows counterpart: Toolhelp32
-/// (`CreateToolhelp32Snapshot` + `Process32First`/`Process32Next`, walking `th32ParentProcessID`
-/// to find descendants). Neither is implemented here; reports honestly via `Err` rather
-/// than a silent empty result, which callers could otherwise misread as "no agent running"
-/// instead of "not implemented on this platform".
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos_process {
+    use std::io;
+    use std::os::raw::{c_int, c_void};
+
+    const INITIAL_PID_CAPACITY: usize = 64;
+    const MAX_PID_CAPACITY: usize = 16_384;
+    const PROCESS_NAME_CAPACITY: usize = 256;
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
+        fn proc_name(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
+    }
+
+    fn to_pid_t(pid: u32) -> io::Result<c_int> {
+        c_int::try_from(pid)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "process id is too large"))
+    }
+
+    pub fn child_pids(parent: u32) -> io::Result<Vec<u32>> {
+        let parent = to_pid_t(parent)?;
+        let mut buffer = vec![0_i32; INITIAL_PID_CAPACITY];
+
+        loop {
+            let buffer_size = (buffer.len() * std::mem::size_of::<i32>()) as c_int;
+            // libproc returns the number of PIDs copied, not a byte count.
+            let reported_count =
+                unsafe { proc_listchildpids(parent, buffer.as_mut_ptr().cast(), buffer_size) };
+            if reported_count < 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            let count = (reported_count as usize).min(buffer.len());
+            if (reported_count as usize) < buffer.len() {
+                return Ok(buffer[..count]
+                    .iter()
+                    .copied()
+                    .filter(|pid| *pid > 0)
+                    .map(|pid| pid as u32)
+                    .collect());
+            }
+
+            if buffer.len() >= MAX_PID_CAPACITY {
+                return Err(io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    "macOS child-process list exceeded safety limit",
+                ));
+            }
+            buffer.resize((buffer.len() * 2).min(MAX_PID_CAPACITY), 0);
+        }
+    }
+
+    pub fn process_name(pid: u32) -> io::Result<Option<String>> {
+        let pid = to_pid_t(pid)?;
+        let mut buffer = [0_u8; PROCESS_NAME_CAPACITY];
+        let reported_length =
+            unsafe { proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+        if reported_length <= 0 {
+            return Ok(None);
+        }
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or((reported_length as usize).min(buffer.len()));
+        Ok(Some(
+            String::from_utf8_lossy(&buffer[..length]).into_owned(),
+        ))
+    }
+
+    pub fn is_process_gone(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::NotFound || matches!(error.raw_os_error(), Some(3))
+    }
+}
+
+/// Returns process names for the shell's descendants using macOS's live
+/// `libproc` process table. The traversal has the same depth and process-count
+/// bounds as the Linux `/proc` implementation above.
+#[cfg(target_os = "macos")]
+pub fn inspect_process_names(shell_pid: u32) -> io::Result<HashSet<String>> {
+    use std::collections::VecDeque;
+
+    let mut names = HashSet::new();
+    let mut queue = VecDeque::from([(shell_pid, 0_usize)]);
+    let mut visited = HashSet::new();
+
+    while let Some((pid, depth)) = queue.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        if visited.len() > MAX_PROCESSES {
+            break;
+        }
+
+        if depth > 0
+            && let Some(name) = macos_process::process_name(pid)?
+        {
+            names.insert(name);
+        }
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+
+        match macos_process::child_pids(pid) {
+            Ok(children) => queue.extend(children.into_iter().map(|child| (child, depth + 1))),
+            Err(error) if depth > 0 && macos_process::is_process_gone(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(names)
+}
+
+/// Windows counterpart: Toolhelp32 (`CreateToolhelp32Snapshot` plus
+/// `Process32First`/`Process32Next`, walking `th32ParentProcessID`).
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn inspect_process_names(_shell_pid: u32) -> io::Result<HashSet<String>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "process-tree inspection is not implemented on this platform yet \
-         (macOS: libproc; Windows: Toolhelp32)",
+        "process-tree inspection is not implemented on this platform (Windows: Toolhelp32)",
     ))
 }
 

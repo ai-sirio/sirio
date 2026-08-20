@@ -768,22 +768,76 @@ fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
     discovered
 }
 
-/// macOS/BSD stand-in for [`descendant_pids`]. There is no `/proc` here, so the
-/// Linux walk cannot run at all.
-///
-/// This was originally gated `cfg(unix)`, which silently gave macOS the Linux
-/// implementation: every `read_dir("/proc/<pid>/task")` fails, the loop falls through,
-/// and it returns an empty vec — indistinguishable from "this shell has no
-/// descendants". That is the exact failure mode the seam rules exist to prevent, and it
-/// was caught by a critic rather than by a compiler, because it type-checks perfectly.
-///
-/// The counterpart is libproc's `proc_listchildpids`/`proc_name`, which the Swift
-/// original already implements (`App/ForegroundProcessAgent.swift`). Until that is
-/// ported, [`terminate_descendant_process_groups`] says out loud that it is only
-/// tearing down the shell's own group.
+/// macOS implementation of [`descendant_pids`], using libproc's live child
+/// table because macOS has no `/proc` filesystem.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn descendant_pids(_root: libc::pid_t) -> Vec<libc::pid_t> {
-    Vec::new()
+fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut discovered = Vec::new();
+        let mut seen = std::collections::HashSet::from([root]);
+        let mut frontier = vec![root];
+        while let Some(pid) = frontier.pop() {
+            let Ok(children) = macos_child_pids(pid) else {
+                continue;
+            };
+            for child in children {
+                if seen.insert(child) {
+                    discovered.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+        discovered
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_child_pids(parent: libc::pid_t) -> std::io::Result<Vec<libc::pid_t>> {
+    use std::os::raw::{c_int, c_void};
+
+    const INITIAL_PID_CAPACITY: usize = 64;
+    const MAX_PID_CAPACITY: usize = 16_384;
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
+    }
+
+    let mut buffer = vec![0_i32; INITIAL_PID_CAPACITY];
+    loop {
+        let buffer_size = (buffer.len() * std::mem::size_of::<libc::pid_t>()) as c_int;
+        // libproc returns the number of PIDs copied, not a byte count.
+        let reported_count =
+            unsafe { proc_listchildpids(parent, buffer.as_mut_ptr().cast(), buffer_size) };
+        if reported_count < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let count = (reported_count as usize).min(buffer.len());
+        if (reported_count as usize) < buffer.len() {
+            return Ok(buffer[..count]
+                .iter()
+                .copied()
+                .filter(|pid| *pid > 0)
+                .map(|pid| pid as libc::pid_t)
+                .collect());
+        }
+
+        if buffer.len() >= MAX_PID_CAPACITY {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "macOS child-process list exceeded safety limit",
+            ));
+        }
+        buffer.resize((buffer.len() * 2).min(MAX_PID_CAPACITY), 0);
+    }
 }
 
 /// The distinct process groups spanning the shell (`shell_pid`) and every
@@ -815,22 +869,6 @@ fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
 /// SIGKILL handling via [`terminate_process_group`].
 #[cfg(unix)]
 fn terminate_descendant_process_groups(shell_pid: u32) {
-    // On macOS/BSD `descendant_pids` cannot walk /proc, so the groups below collapse to
-    // the shell's own. That still tears down the common case correctly via `getpgid` +
-    // `killpg`, but a job-control child that detached into its own group survives —
-    // partial teardown, not full. Say so once per process rather than degrading quietly:
-    // the whole point of F-PER-06 is that the detached-child case is the one that leaks.
-    #[cfg(not(target_os = "linux"))]
-    {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| {
-            eprintln!(
-                "tiller: descendant process discovery is unimplemented on this platform \
-                 (needs libproc proc_listchildpids); terminating only the shell's own \
-                 process group, so a detached job-control child may survive."
-            );
-        });
-    }
     for group in descendant_process_groups(shell_pid as libc::pid_t) {
         terminate_process_group(group as u32);
     }
@@ -2330,6 +2368,34 @@ mod tests {
         assert!(window.chars().all(|character| character == 'é'));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_descendant_pids_enumerates_a_real_child_process() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn child process");
+
+        let parent_pid = std::process::id() as libc::pid_t;
+        let mut descendants = Vec::new();
+        for _ in 0..50 {
+            descendants = descendant_pids(parent_pid);
+            if descendants.contains(&(child.id() as libc::pid_t)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            descendants.contains(&(child.id() as libc::pid_t)),
+            "macOS child enumeration must find spawned child pid {} in {:?}",
+            child.id(),
+            descendants
+        );
+        child.kill().expect("kill child process");
+        child.wait().expect("reap child process");
+    }
+
     fn palette() -> TerminalPalette {
         TerminalPalette::from_theme(&Theme::light())
     }
@@ -2839,13 +2905,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&working_directory).unwrap();
         let pid_file = working_directory.join("detached.pid");
+        let detached_process = if cfg!(target_os = "macos") {
+            format!(
+                "python3 -c 'exec(\"import os,time\\nchild=os.fork()\\nif child == 0:\\n os.setsid()\\n open(\\\"{}\\\",\\\"w\\\").write(str(os.getpid()))\\n time.sleep(60)\\nelse:\\n os.waitpid(child, 0)\")'",
+                pid_file.display()
+            )
+        } else {
+            format!(
+                "setsid sleep 60 & printf '%s' \"$!\" > {}",
+                pid_file.display()
+            )
+        };
         let shell = TerminalShell::WithArguments {
             program: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
                 format!(
-                    "trap '' HUP; setsid sleep 60 & printf '%s' \"$!\" > {}; wait",
-                    pid_file.display()
+                    "trap '' HUP; {detached_process} & wait"
                 ),
             ],
         };
@@ -2920,6 +2996,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn process_is_running(pid: i32) -> bool {
         let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
             return false;
@@ -2928,6 +3005,22 @@ mod tests {
             return false;
         };
         fields
+            .as_bytes()
+            .first()
+            .is_some_and(|state| *state != b'Z')
+    }
+
+    #[cfg(target_os = "macos")]
+    fn process_is_running(pid: i32) -> bool {
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        let state = String::from_utf8_lossy(&output.stdout);
+        state
+            .trim()
             .as_bytes()
             .first()
             .is_some_and(|state| *state != b'Z')
