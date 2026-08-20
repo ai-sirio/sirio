@@ -1,24 +1,23 @@
-//! P72 browser-composition surface (WebKitGTK via `wry` in a native X11
-//! child window, composited alongside GPUI's own X11 surface).
+//! P72 browser-composition surface (WKWebView/WebKitGTK via `wry` in a native
+//! child window, composited alongside GPUI's own surface).
 //!
-//! This module is Linux-only and is part of the production module graph:
-//! `lib.rs` declares `#[cfg(target_os = "linux")] pub mod browser;`, gated
-//! to match `wry`/`raw-window-handle` being declared only under
-//! `[target.'cfg(target_os = "linux")'.dependencies]` in this crate's
-//! `Cargo.toml` (PORT-1, docs/linux-rewrite/PLATFORM-GATING-2026-08-18.md).
+//! This module is part of the production module graph on both Linux and
+//! macOS. GTK/X11 setup remains Linux-only; macOS uses the AppKit handle
+//! exposed by GPUI directly.
 //! The `browser_spike`/`browser_surface` examples and `crates/tiller`'s
 //! panes both use it directly.
 
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeSet,
-    ffi::c_ulong,
     ops::Range,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::mpsc,
     time::Duration,
-    time::Instant,
 };
+
+#[cfg(target_os = "linux")]
+use std::{ffi::c_ulong, time::Instant};
 
 use gpui::{
     App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, FocusHandle, Focusable,
@@ -27,9 +26,9 @@ use gpui::{
     Render, ShapedLine, SharedString, Style, Task, TextRun, Window, div, fill, point, prelude::*,
     px, relative, size,
 };
-use raw_window_handle::{
-    HandleError, HasWindowHandle, RawWindowHandle, WindowHandle, XlibWindowHandle,
-};
+use raw_window_handle::HasWindowHandle;
+#[cfg(target_os = "linux")]
+use raw_window_handle::{HandleError, RawWindowHandle, WindowHandle, XlibWindowHandle};
 use tiller_theme::Theme;
 use wry::{
     NewWindowFeatures, NewWindowResponse, PageLoadEvent, Rect, WebView, WebViewBuilder,
@@ -40,11 +39,13 @@ use wry::{
 /// WebKitGTK backend currently accepts only an Xlib window ID. The ID is
 /// shared by both X11 APIs, so this adapter tests that narrow seam without
 /// pretending the two handle types are interchangeable in general.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 struct XlibParent {
     window: c_ulong,
 }
 
+#[cfg(target_os = "linux")]
 impl XlibParent {
     fn from_gpui(window: &Window) -> Result<Self, String> {
         let handle = HasWindowHandle::window_handle(window)
@@ -58,6 +59,7 @@ impl XlibParent {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl HasWindowHandle for XlibParent {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         // The XID is copied from a live GPUI window and remains valid while
@@ -79,6 +81,47 @@ fn build_webview<W: HasWindowHandle>(parent: &W) -> Result<WebView, wry::Error> 
         .build_as_child(parent)
 }
 
+#[cfg(target_os = "linux")]
+fn build_spike_webview(window: &Window) -> (Option<WebView>, Option<String>) {
+    match gtk::init() {
+        Ok(()) => match build_webview(window) {
+            Ok(webview) => (Some(webview), None),
+            Err(direct_error) => match XlibParent::from_gpui(window) {
+                Ok(parent) => match build_webview(&parent) {
+                    Ok(webview) => (
+                        Some(webview),
+                        Some(
+                            "WebKitGTK child · XCB→Xlib adapter · GTK loop pumped by GPUI"
+                                .to_owned(),
+                        ),
+                    ),
+                    Err(bridge_error) => (
+                        None,
+                        Some(format!(
+                            "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
+                        )),
+                    ),
+                },
+                Err(bridge_error) => (
+                    None,
+                    Some(format!(
+                        "Direct XCB build failed: {direct_error}; XCB→Xlib adapter failed: {bridge_error}"
+                    )),
+                ),
+            },
+        },
+        Err(error) => (None, Some(format!("GTK init failed: {error}"))),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn build_spike_webview(window: &Window) -> (Option<WebView>, Option<String>) {
+    match build_webview_for_macos(window) {
+        Ok(webview) => (Some(webview), None),
+        Err(error) => (None, Some(error)),
+    }
+}
+
 /// Native GPUI chrome with a live WebKitGTK child window on the right.
 pub struct BrowserSpike {
     webview: Option<WebView>,
@@ -87,39 +130,12 @@ pub struct BrowserSpike {
 }
 
 impl BrowserSpike {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (webview, startup_error) = match gtk::init() {
-            Ok(()) => match build_webview(window) {
-                Ok(webview) => (Some(webview), None),
-                Err(direct_error) => match XlibParent::from_gpui(window) {
-                    Ok(parent) => match build_webview(&parent) {
-                        Ok(webview) => (
-                            Some(webview),
-                            Some(
-                                "WebKitGTK child · XCB→Xlib adapter · GTK loop pumped by GPUI"
-                                    .to_owned(),
-                            ),
-                        ),
-                        Err(bridge_error) => (
-                            None,
-                            Some(format!(
-                                "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
-                            )),
-                        ),
-                    },
-                    Err(bridge_error) => (
-                        None,
-                        Some(format!(
-                            "Direct XCB build failed: {direct_error}; XCB→Xlib adapter failed: {bridge_error}"
-                        )),
-                    ),
-                },
-            },
-            Err(error) => (None, Some(format!("GTK init failed: {error}"))),
-        };
+    pub fn new(window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        let (webview, startup_error) = build_spike_webview(window);
 
+        #[cfg(target_os = "linux")]
         let pump_task = webview.as_ref().map(|_| {
-            cx.spawn(async move |this, cx| {
+            _cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
                         .timer(Duration::from_millis(16))
@@ -137,6 +153,9 @@ impl BrowserSpike {
                 }
             })
         });
+
+        #[cfg(not(target_os = "linux"))]
+        let pump_task = None;
 
         Self {
             webview,
@@ -815,6 +834,7 @@ fn apply_native_visible(webview: &SharedWebView, flag: &SharedNativeVisibility, 
 /// version of that loop would silently take the flush with it. Not cargo cult:
 /// the test isolates "no flush at all", and that limit is stated in the report
 /// rather than papered over.
+#[cfg(target_os = "linux")]
 fn flush_native_window_ops() {
     for _ in 0..2 {
         while gtk::events_pending() {
@@ -840,8 +860,10 @@ fn close_native_window(webview: &SharedWebView, flag: &SharedNativeVisibility) {
     // whenever GPUI happens to release the entity. Every other holder is left
     // looking at `None`, which every call site already handles.
     let taken = webview.borrow_mut().take();
+    #[cfg(target_os = "linux")]
     let had_native_window = taken.is_some();
     drop(taken);
+    #[cfg(target_os = "linux")]
     if had_native_window {
         flush_native_window_ops();
     }
@@ -871,6 +893,42 @@ const CONSOLE_CAPTURE_SCRIPT: &str = r#"(function () {
     };
   });
 })();"#;
+
+fn wait_for_script_result(
+    receiver: mpsc::Receiver<String>,
+    timeout: Duration,
+) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            match receiver.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("evaluate_script callback disconnected".to_string());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                return Err("evaluate_script timed out".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        receiver.recv_timeout(timeout).map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => "evaluate_script timed out".to_string(),
+            mpsc::RecvTimeoutError::Disconnected => {
+                "evaluate_script callback disconnected".to_string()
+            }
+        })
+    }
+}
 
 fn build_production_webview<W: HasWindowHandle>(
     parent: &W,
@@ -922,8 +980,71 @@ fn build_production_webview<W: HasWindowHandle>(
         .build_as_child(parent)
 }
 
+#[cfg(target_os = "linux")]
+fn build_production_webview_for_platform(
+    window: &Window,
+    initial_url: &str,
+    events: &SharedWebEvents,
+) -> Result<WebView, String> {
+    match gtk::init() {
+        Ok(()) => match build_production_webview(window, initial_url, events) {
+            Ok(webview) => Ok(webview),
+            Err(direct_error) => match XlibParent::from_gpui(window) {
+                Ok(parent) => build_production_webview(&parent, initial_url, events).map_err(
+                    |bridge_error| {
+                        format!(
+                            "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
+                        )
+                    },
+                ),
+                Err(bridge_error) => Err(format!(
+                    "Direct XCB build failed: {direct_error}; XCB→Xlib adapter failed: {bridge_error}"
+                )),
+            },
+        },
+        Err(error) => Err(format!("GTK init failed: {error}")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn build_production_webview_for_platform(
+    window: &Window,
+    initial_url: &str,
+    events: &SharedWebEvents,
+) -> Result<WebView, String> {
+    build_production_webview_for_macos(window, initial_url, events)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn build_webview_for_macos<W: HasWindowHandle>(parent: &W) -> Result<WebView, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_webview(parent))) {
+        Ok(Ok(webview)) => Ok(webview),
+        Ok(Err(error)) => Err(format!("WKWebView child failed: {error}")),
+        Err(_) => Err(
+            "WKWebView child failed: GPUI did not expose a usable AppKit window handle".to_string(),
+        ),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn build_production_webview_for_macos(
+    window: &Window,
+    initial_url: &str,
+    events: &SharedWebEvents,
+) -> Result<WebView, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build_production_webview(window, initial_url, events)
+    })) {
+        Ok(Ok(webview)) => Ok(webview),
+        Ok(Err(error)) => Err(format!("WKWebView child failed: {error}")),
+        Err(_) => Err(
+            "WKWebView child failed: GPUI did not expose a usable AppKit window handle".to_string(),
+        ),
+    }
+}
+
 /// A production browser surface: all browser chrome is GPUI, while page
-/// pixels live in the proven native X11 child window below it.
+/// pixels live in the native child window below it.
 pub struct BrowserSurface {
     state: BrowserState,
     address_editor: AddressEditor,
@@ -935,18 +1056,17 @@ pub struct BrowserSurface {
     /// selection the user is actively editing.
     address_focused: bool,
     webview: SharedWebView,
-    /// F-BRW-01: GTK/GDK-side geometry correction, calibrated once against
-    /// real X11 window attributes; see [`SharedScaleCorrection`].
+    /// F-BRW-01: native-side geometry correction, calibrated once against
+    /// the child bounds reported by wry; see [`SharedScaleCorrection`].
     webview_scale_correction: SharedScaleCorrection,
     /// F-BRW: whether the native child is mapped; see [`SharedNativeVisibility`].
     webview_visible: SharedNativeVisibility,
     web_events: SharedWebEvents,
     events: Vec<BrowserEvent>,
     /// Load-bearing by existing, not by being read. A GPUI [`Task`] is
-    /// cancel-on-drop, so this field owning the 16 ms pump — the loop that
-    /// drains GTK's event queue and calls `pump_web_events` — is the only
-    /// thing keeping the page alive. Drop the field and the browser renders
-    /// once and then freezes.
+    /// cancel-on-drop, so this field owns the 16 ms event task that calls
+    /// `pump_web_events`; on Linux it also drains GTK's event queue. Drop the
+    /// field and the browser event state stops being observed.
     ///
     /// The `dead_code` allow is therefore deliberate: it is not a task whose
     /// handle went missing. An independent critic read the bare warning as a
@@ -958,7 +1078,7 @@ pub struct BrowserSurface {
 }
 
 impl BrowserSurface {
-    /// Creates a browser surface attached to the current GPUI X11 window.
+    /// Creates a browser surface attached to the current GPUI native window.
     ///
     /// The caller owns the returned entity and can consume [`BrowserEvent`]
     /// values with [`Self::take_events`]. Persistence of browser grants stays
@@ -973,32 +1093,13 @@ impl BrowserSurface {
         };
         let address_editor = AddressEditor::new(state.address());
         let web_events = Rc::new(RefCell::new(Vec::new()));
-        let (webview, startup_error) = match gtk::init() {
-            Ok(()) => match build_production_webview(window, state.address(), &web_events) {
+        let (webview, startup_error) =
+            match build_production_webview_for_platform(window, state.address(), &web_events) {
                 Ok(webview) => (Some(webview), startup_error),
-                Err(direct_error) => match XlibParent::from_gpui(window) {
-                    Ok(parent) => {
-                        match build_production_webview(&parent, state.address(), &web_events) {
-                            Ok(webview) => (Some(webview), startup_error),
-                            Err(bridge_error) => (
-                                None,
-                                Some(format!(
-                                    "Direct XCB build failed: {direct_error}; XCB→Xlib build failed: {bridge_error}"
-                                )),
-                            ),
-                        }
-                    }
-                    Err(bridge_error) => (
-                        None,
-                        Some(format!(
-                            "Direct XCB build failed: {direct_error}; XCB→Xlib adapter failed: {bridge_error}"
-                        )),
-                    ),
-                },
-            },
-            Err(error) => (None, Some(format!("GTK init failed: {error}"))),
-        };
+                Err(error) => (None, Some(error)),
+            };
         let webview = Rc::new(RefCell::new(webview));
+        #[cfg(target_os = "linux")]
         let pump_task = webview.borrow().as_ref().map(|_| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -1008,9 +1109,30 @@ impl BrowserSurface {
                     if this
                         .update(cx, |surface, cx| {
                             surface.pump_web_events();
+                            #[cfg(target_os = "linux")]
                             while gtk::events_pending() {
                                 gtk::main_iteration_do(false);
                             }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        });
+
+        #[cfg(not(target_os = "linux"))]
+        let pump_task = webview.borrow().as_ref().map(|_| {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    if this
+                        .update(cx, |surface, cx| {
+                            surface.pump_web_events();
                             cx.notify();
                         })
                         .is_err()
@@ -1160,37 +1282,21 @@ impl BrowserSurface {
 
     /// F-CTRL-BROWSER-06: runs `script` in the page and returns its result
     /// (JSON-serialized by WebKit) as a string, or an error if the page
-    /// throws or the timeout elapses first. wry's callback fires off a
-    /// WebKit-internal GLib callback that only runs while something pumps
-    /// the process-global GTK main loop, so this drives it directly rather
-    /// than trusting the surface's own 16ms pump timer to win the race
-    /// before `timeout` expires — the same approach `browser.wait` uses.
+    /// throws or the timeout elapses first. Linux drains the WebKitGTK/GLib
+    /// queue while waiting; macOS waits for WKWebView's completion callback
+    /// and leaves AppKit's run loop to GPUI.
     pub fn evaluate_script(&self, script: &str, timeout: Duration) -> Result<String, String> {
         let webview_ref = self.webview.borrow();
         let webview = webview_ref
             .as_ref()
             .ok_or_else(|| "Browser child is unavailable".to_string())?;
-        let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let result_slot = result.clone();
+        let (sender, receiver) = mpsc::channel();
         webview
             .evaluate_script_with_callback(script, move |value| {
-                *result_slot.lock().unwrap() = Some(value);
+                let _ = sender.send(value);
             })
             .map_err(|error| format!("evaluate_script failed: {error}"))?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            while gtk::events_pending() {
-                gtk::main_iteration_do(false);
-            }
-            if result.lock().unwrap().is_some() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("evaluate_script timed out".to_string());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        Ok(result.lock().unwrap().clone().unwrap_or_default())
+        wait_for_script_result(receiver, timeout)
     }
 
     fn load_url(&mut self, address: &str) -> Result<(), BrowserError> {
@@ -2056,6 +2162,17 @@ mod tests {
         assert!(
             initial_native_visibility().get(),
             "wry maps the child window on creation, so our mirror must start mapped"
+        );
+    }
+
+    #[test]
+    fn script_result_wait_returns_the_callback_value() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send("callback-result".to_string()).unwrap();
+
+        assert_eq!(
+            wait_for_script_result(receiver, Duration::from_millis(10)),
+            Ok("callback-result".to_string())
         );
     }
 
