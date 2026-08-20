@@ -22,8 +22,12 @@ pub enum CloneStatus {
     Running { progress: f64 },
     /// Git failed. The URL remains in the form so the user can retry.
     Failed(String),
-    /// The repository was cloned successfully.
-    Complete(PathBuf),
+    /// The repository was cloned successfully. `truncated` is set when the
+    /// clone's streamed diagnostic capture hit its byte cap (see
+    /// `GitCommandResult::truncated`); the clone itself still completed, so
+    /// this is a notice, not a failure — see `clone_status_line` for how it
+    /// is worded and colored.
+    Complete { destination: PathBuf, truncated: bool },
 }
 
 /// Pure state and guards for [`CloneForm`].
@@ -71,7 +75,7 @@ impl CloneFormState {
         !self.url.trim().is_empty()
             && !matches!(
                 self.status,
-                CloneStatus::Running { .. } | CloneStatus::Complete(_)
+                CloneStatus::Running { .. } | CloneStatus::Complete { .. }
             )
     }
 
@@ -94,20 +98,31 @@ impl CloneFormState {
         self.status = CloneStatus::Failed(error.into());
     }
 
-    pub fn complete(&mut self, destination: PathBuf) {
-        self.status = CloneStatus::Complete(destination);
+    pub fn complete(&mut self, destination: PathBuf, truncated: bool) {
+        self.status = CloneStatus::Complete {
+            destination,
+            truncated,
+        };
     }
 }
 
 /// The typed result published when [`CloneForm`] finishes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloneFormEvent {
-    Cloned(PathBuf),
+    /// `truncated` mirrors [`CloneStatus::Complete`]'s field: the clone
+    /// succeeded either way. A subscriber that auto-dismisses the form on
+    /// this event (as `Sidebar` does) should keep it open when `truncated`
+    /// is set, so the status line's notice is actually seen rather than
+    /// closed the same frame it appears — see `Sidebar::start_clone_project`.
+    Cloned { destination: PathBuf, truncated: bool },
 }
 
 enum CloneWorkerMessage {
     Progress(f64),
-    Finished(Result<PathBuf, String>),
+    /// `Ok` carries the destination and whether `GitClone::clone`'s
+    /// diagnostic capture was truncated — a non-fatal condition the form
+    /// surfaces as a notice rather than folding into `Failed`.
+    Finished(Result<(PathBuf, bool), String>),
 }
 
 /// A GPUI surface for cloning a repository from a URL.
@@ -179,7 +194,7 @@ impl CloneForm {
             let result = clone_repository(&url, &worker_destination, |progress| {
                 let _ = sender.send(CloneWorkerMessage::Progress(progress));
             })
-            .map(|_| worker_destination)
+            .map(|truncated| (worker_destination, truncated))
             .map_err(|error| error.to_string());
             let _ = sender.send(CloneWorkerMessage::Finished(result));
         });
@@ -211,9 +226,12 @@ impl CloneForm {
                             let _ = this.update(cx, |form, cx| {
                                 form.task = None;
                                 match result {
-                                    Ok(destination) => {
-                                        form.state.complete(destination.clone());
-                                        cx.emit(CloneFormEvent::Cloned(destination));
+                                    Ok((destination, truncated)) => {
+                                        form.state.complete(destination.clone(), truncated);
+                                        cx.emit(CloneFormEvent::Cloned {
+                                            destination,
+                                            truncated,
+                                        });
                                     }
                                     Err(error) => form.state.fail(error),
                                 }
@@ -720,7 +738,20 @@ fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Rg
             theme.tab_focus_accent,
         ),
         CloneStatus::Failed(error) => (format!("Clone failed: {error}"), theme.tab_error),
-        CloneStatus::Complete(destination) => (
+        CloneStatus::Complete {
+            destination,
+            truncated: true,
+        } => (
+            format!(
+                "Cloned to {} — progress output was truncated (repository is large)",
+                destination.display()
+            ),
+            theme.git_modified,
+        ),
+        CloneStatus::Complete {
+            destination,
+            truncated: false,
+        } => (
             format!("Cloned to {}", destination.display()),
             theme.tab_done,
         ),
@@ -758,8 +789,10 @@ mod tests {
 
     use super::{
         CloneForm, CloneFormState, CloneStatus, CreateForm, CreateFormState, CreateStatus,
+        clone_status_line,
     };
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use tiller_theme::Theme;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use std::time::Duration;
 
@@ -843,7 +876,7 @@ mod tests {
 
         let status = form.read_with(&cx.cx, |form, _| form.status().clone());
         assert!(
-            matches!(status, CloneStatus::Complete(_)),
+            matches!(status, CloneStatus::Complete { .. }),
             "two real clicks must produce exactly one successful clone, not a destination-exists \
              failure from a second racing clone: {status:?}"
         );
@@ -920,9 +953,52 @@ mod tests {
         state.set_progress(0.47);
         assert_eq!(state.progress(), Some(0.47));
         let destination = PathBuf::from("/tmp/source");
-        state.complete(destination.clone());
-        assert_eq!(state.status(), &CloneStatus::Complete(destination));
+        state.complete(destination.clone(), false);
+        assert_eq!(
+            state.status(),
+            &CloneStatus::Complete {
+                destination,
+                truncated: false,
+            }
+        );
         assert!(!state.can_submit());
+    }
+
+    /// F-PRJ-truncation: a truncated clone completes (it is not `Failed`)
+    /// but the status line names the condition and uses the theme's
+    /// warning hue rather than the success color, so a truncated clone
+    /// cannot be mistaken for a Failed one or an ordinary Complete one.
+    /// This is the pure-state layer of the finding this change fixes —
+    /// `GitCommandResult::truncated` used to have nowhere to go.
+    #[test]
+    fn clone_completion_can_carry_a_truncation_notice() {
+        let mut state = CloneFormState::default();
+        state.set_url("file:///tmp/source");
+        assert!(state.begin());
+        let destination = PathBuf::from("/tmp/source");
+        state.complete(destination.clone(), true);
+        assert_eq!(
+            state.status(),
+            &CloneStatus::Complete {
+                destination: destination.clone(),
+                truncated: true,
+            }
+        );
+
+        let theme = Theme::dark();
+        let (line, color) = clone_status_line(&state, &theme);
+        assert!(
+            line.contains("truncated"),
+            "the status line must name the truncation, got: {line:?}"
+        );
+        assert_ne!(
+            color, theme.tab_error,
+            "a truncated clone is not a failure and must not use the error color"
+        );
+        assert_ne!(
+            color, theme.tab_done,
+            "a truncated clone must be visually distinct from a clean completion"
+        );
     }
 
     #[test]
