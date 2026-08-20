@@ -7590,7 +7590,7 @@ impl TillerWorkspace {
                         for event in surface.take_events() {
                             if let BrowserEvent::OpenExternal(url) = event
                                 && let Err(error) =
-                                    platform_open_command(OsStr::new(url)).spawn()
+                                    platform_open_command(OsStr::new(&url)).spawn()
                             {
                                 eprintln!("[browser] could not open external link: {error}");
                             }
