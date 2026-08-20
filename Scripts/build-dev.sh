@@ -12,8 +12,12 @@ LOG="/tmp/tiller-dev.log"
 
 pkill -x tiller || true
 
-# setsid detaches the new instance from this script's session so it survives the
-# script exiting, the same as `open` detaching the app from the shell on macOS.
-setsid "$BIN" >"$LOG" 2>&1 &
+# `open` detaches the app from the shell on macOS; `setsid` provides the same
+# behavior on Linux.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  open "$BIN" >"$LOG" 2>&1 &
+else
+  setsid "$BIN" >"$LOG" 2>&1 &
+fi
 disown
 echo "launched $BIN (pid $!); log: $LOG"
