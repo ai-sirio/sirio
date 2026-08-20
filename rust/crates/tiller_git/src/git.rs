@@ -142,6 +142,15 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Sets (or clears, with `None`) [`OUTPUT_LIMIT_OVERRIDE`] on the calling
+/// thread. `pub(crate)` so other modules' tests — e.g. clone.rs's proof that
+/// [`crate::GitClone::clone`] surfaces truncation — can force the condition
+/// without the process-global `set_var` footgun documented above.
+#[cfg(test)]
+pub(crate) fn set_output_limit_override_for_test(limit: Option<usize>) {
+    OUTPUT_LIMIT_OVERRIDE.with(|cell| cell.set(limit));
+}
+
 /// Resolves the byte cap for a single stream. A malformed or zero value falls
 /// back to the default rather than disabling the cap, so a typo in the
 /// environment cannot quietly restore unbounded buffering.
