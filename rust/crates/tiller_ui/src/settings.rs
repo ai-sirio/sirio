@@ -2135,7 +2135,10 @@ impl Settings {
                             callback();
                         }
                     })
-                    .child(IconElement::new(Icon::ChevronLeft, px(14.0)).text_color(theme.meta))
+                    .child(
+                        IconElement::new(Icon::ChevronLeft, theme.typography.headline)
+                            .text_color(theme.title),
+                    )
                     .child(text!("Back")),
             )
             .child(
@@ -2194,7 +2197,12 @@ impl Settings {
                             .items_center()
                             .justify_center()
                             .child(
-                                IconElement::new(category.glyph(), px(14.0)).text_color(theme.meta),
+                                IconElement::new(category.glyph(), theme.typography.headline)
+                                    .text_color(if selected {
+                                        theme.title
+                                    } else {
+                                        theme.subtitle
+                                    }),
                             ),
                     )
                     .child(text!(
@@ -3360,8 +3368,8 @@ impl Settings {
             })
             .child(text!(selected.title()))
             .child(
-                IconElement::new(Icon::ChevronDown, px(12.0)).text_color(if enabled {
-                    theme.meta
+                IconElement::new(Icon::ChevronDown, theme.typography.callout).text_color(if enabled {
+                    theme.title
                 } else {
                     theme.hairline
                 }),

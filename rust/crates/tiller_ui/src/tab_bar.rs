@@ -366,14 +366,18 @@ impl TabBar {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(IconElement::new(icon, px(14.0)).text_color(glyph_color)),
+                            .child(
+                                IconElement::new(icon, theme.typography.footnote)
+                                    .text_color(glyph_color),
+                            ),
                     )
                     .child(text!(id = format!("new-tab-label-{label}"), label)),
             )
             .when(chevron, |this| {
                 this.child(
                     div().text_color(theme.meta).child(
-                        IconElement::new(Icon::ChevronRight, px(12.0)).text_color(theme.meta),
+                        IconElement::new(Icon::ChevronRight, theme.typography.footnote)
+                            .text_color(theme.meta),
                     ),
                 )
             })
@@ -417,8 +421,8 @@ impl TabBar {
                             .items_center()
                             .justify_center()
                             .child(
-                                IconElement::new(Icon::MessageSquare, px(14.0))
-                                    .text_color(theme.meta),
+                                IconElement::new(Icon::MessageSquare, theme.typography.footnote)
+                                    .text_color(theme.title),
                             ),
                     )
                     .child(text!(id = "new-tab-label-New Chat", "New Chat")),
@@ -429,7 +433,7 @@ impl TabBar {
                 } else {
                     Icon::ChevronRight
                 },
-                px(12.0),
+                theme.typography.footnote,
             )))
     }
 
@@ -458,7 +462,7 @@ impl TabBar {
             .text_color(theme.title)
             .hover(|style| style.bg(theme.row_hover))
             .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.emit_chat_agent(id, cx)))
-            .child(IconElement::new(icon, px(14.0)).text_color(theme.title))
+            .child(IconElement::new(icon, theme.typography.footnote).text_color(theme.title))
             .child(text!(id = format!("new-tab-chat-label-{id}"), display_name))
     }
 
@@ -663,7 +667,10 @@ impl Render for TabBar {
                 .absolute()
                 .size_full(),
             )
-            .child(IconElement::new(Icon::Plus, px(13.0)).text_color(theme.meta));
+            .child(
+                IconElement::new(Icon::Plus, theme.typography.footnote)
+                    .text_color(theme.title),
+            );
 
         if menu_open {
             new_tab_button = new_tab_button.child(
