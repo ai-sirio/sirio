@@ -6298,6 +6298,38 @@ impl TillerWorkspace {
             .expect("workspace tabs must form a valid tab placement model");
     }
 
+    /// F-CORE-WSP-05: every "Insert" affordance (the tab-bar "+" menu's
+    /// New Chat/Terminal/Changes entries, the command palette's mirrors of
+    /// them, and every agent-tab launcher) gates its call to
+    /// `rebuild_tab_machinery` -- the structural pane-tree recompute a real
+    /// Insert requires -- on a genuine `LayoutCommand::Insert` run through
+    /// `classify_layout_command`. This is the structural counterpart of
+    /// `commit_tab_rename`'s `FocusIntent::Tab` gate (F-CORE-WSP-04):
+    /// Rename classifies as nonstructural and so never exercised this leg.
+    /// A wrong classification here is observable -- the new tab would be
+    /// pushed into `self.tabs` but left out of every `TabGroup`, so
+    /// `apply_tab_machinery`'s later reordering (and the tab strip itself,
+    /// which walks `tab_machinery`, not `self.tabs`, for placement) would
+    /// never see it.
+    fn insert_requires_rebuild(
+        &self,
+        tab_id: usize,
+        kind: tiller_project::ContentKind,
+        title: &str,
+    ) -> bool {
+        let command = tiller_project::LayoutCommand::Insert {
+            group: self.tab_machinery.active_group().to_string(),
+            tab: tiller_project::WorkspaceTab {
+                id: tab_id.to_string(),
+                content_id: format!("tab:{tab_id}"),
+                kind,
+                title: title.to_string(),
+                view_state: tiller_project::WorkspaceTabViewState::default(),
+            },
+        };
+        tiller_project::classify_layout_command(&command).structural
+    }
+
     /// Applies a placement transition to the live tab entities, preserving
     /// the pure model's order and making the moved tab active.
     ///
@@ -6823,11 +6855,12 @@ impl TillerWorkspace {
         // activity model — no identity, and so no place for its streaming
         // state to land either.
         register_restored_agent(&mut self.activity, self.next_pane_id, agent_id.as_deref());
+        let tab_id = self.next_tab_id;
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title,
+            title: title.clone(),
             kind: TabKind::AgentChat,
             agent_icon,
             agent_id,
@@ -6839,7 +6872,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Chat, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         window.focus(&composer_focus, cx);
@@ -6878,11 +6913,12 @@ impl TillerWorkspace {
         let composer_focus = chat.focus_handle(cx);
         Self::bind_chat(&chat, cx);
         register_restored_agent(&mut self.activity, pane_id, agent_id.as_deref());
+        let tab_id = self.next_tab_id;
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title,
+            title: title.clone(),
             kind: TabKind::AgentChat,
             agent_icon,
             agent_id,
@@ -6894,7 +6930,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Chat, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         window.focus(&composer_focus, cx);
@@ -6970,13 +7008,14 @@ impl TillerWorkspace {
     ) {
         let tab_id = self.next_tab_id;
         let pane_id = self.next_pane_id;
+        let title = title.into();
         let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title: title.into(),
+            title: title.clone(),
             kind: TabKind::Terminal,
             agent_icon,
             agent_id,
@@ -6988,7 +7027,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Terminal, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7050,12 +7091,13 @@ impl TillerWorkspace {
         );
         let view = cx.new(|cx| FileView::new(path, cx));
         Self::subscribe_file_view(&view, cx);
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
-            title,
+            title: title.clone(),
             // The existing UI tab model has only chat/terminal kinds. File
             // identity stays in TabContent; the shell overlay adjusts its
             // glyph and width below without changing the menu component.
@@ -7070,7 +7112,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Document, &title) {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7085,9 +7129,10 @@ impl TillerWorkspace {
         if let Some(path) = focus_path {
             changes.update(cx, |tab, cx| tab.focus_path(&path, cx));
         }
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: "Changes".to_string(),
@@ -7102,7 +7147,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Diff, "Changes") {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -7120,9 +7167,10 @@ impl TillerWorkspace {
         let browser = cx.new(|cx| BrowserSurface::new(&initial_url, window, cx));
         let origins = self.browser_origins.iter().cloned().collect::<Vec<_>>();
         browser.update(cx, |surface, _| surface.set_allowed_origins(origins));
-        let persistence_id = session::new_tab_id(&self.working_directory, self.next_tab_id);
+        let tab_id = self.next_tab_id;
+        let persistence_id = session::new_tab_id(&self.working_directory, tab_id);
         self.tabs.push(OpenTab {
-            id: self.next_tab_id,
+            id: tab_id,
             persistence_id,
             group_id: self.tab_machinery.active_group(),
             title: "Browser".to_string(),
@@ -7137,7 +7185,9 @@ impl TillerWorkspace {
         self.active_tab = self.tabs.len() - 1;
         self.next_tab_id += 1;
         self.next_pane_id += 1;
-        self.rebuild_tab_machinery();
+        if self.insert_requires_rebuild(tab_id, tiller_project::ContentKind::Browser, "Browser") {
+            self.rebuild_tab_machinery();
+        }
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
