@@ -6300,7 +6300,15 @@ impl TillerWorkspace {
 
     /// Applies a placement transition to the live tab entities, preserving
     /// the pure model's order and making the moved tab active.
-    fn apply_tab_machinery(&mut self, machinery: TabMachinery) {
+    ///
+    /// `rebuild_pane_cache` gates the `F-TERM-PTY-08` structural rebuild
+    /// below. Tab reordering and close pass a literal `true`, unconditional
+    /// exactly as before this row; `move_selected_tab_with_machinery`
+    /// (F-CORE-WSP-05) is the one caller that threads through the real
+    /// `classify_layout_command(&LayoutCommand::Move { .. }).structural`
+    /// answer, so a wrong classification is observable here: the moved
+    /// tab's live pane would go untracked in `terminal_pane_cache`.
+    fn apply_tab_machinery(&mut self, machinery: TabMachinery, rebuild_pane_cache: bool) {
         let mut remaining = std::mem::take(&mut self.tabs);
         let mut ordered = Vec::with_capacity(remaining.len());
         for group in machinery.groups() {
@@ -6323,6 +6331,9 @@ impl TillerWorkspace {
             self.active_tab = 0;
         } else {
             self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        }
+        if !rebuild_pane_cache {
+            return;
         }
         // F-TERM-PTY-08: every tab placement transition (MoveTabToOtherPane,
         // "Move to New Pane", and tab reordering all funnel through here) is a real seam moment -- record each terminal
@@ -6544,7 +6555,7 @@ impl TillerWorkspace {
             self.next_retained_chat_id += 1;
             self.retained_chats.push(retained_chat);
         }
-        self.apply_tab_machinery(machinery);
+        self.apply_tab_machinery(machinery, true);
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -6615,7 +6626,7 @@ impl TillerWorkspace {
         if !machinery.move_active_tab(direction) {
             return;
         }
-        self.apply_tab_machinery(machinery);
+        self.apply_tab_machinery(machinery, true);
         self.schedule_save(cx);
         self.sync_activity(cx);
         cx.notify();
@@ -6641,7 +6652,7 @@ impl TillerWorkspace {
         machinery
     }
 
-    fn move_selected_tab(&mut self, target: MoveTarget, cx: &mut Context<Self>) {
+    fn move_selected_tab(&mut self, target: MoveTarget, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab_id) = self
             .tab_menu_tab
             .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
@@ -6652,7 +6663,7 @@ impl TillerWorkspace {
         if machinery.move_tab(tab_id, target).is_err() {
             return;
         }
-        self.move_selected_tab_with_machinery(target, machinery, cx);
+        self.move_selected_tab_with_machinery(target, machinery, window, cx);
     }
 
     /// Attaches a fresh, empty pane group and moves the selected tab into
@@ -6660,7 +6671,7 @@ impl TillerWorkspace {
     /// beyond a single group -- everywhere else groups are inherited from
     /// existing tabs' `group_id`, so without this the "Move to Other Pane"
     /// family of actions could never have a second pane to target.
-    fn move_selected_tab_to_new_pane(&mut self, cx: &mut Context<Self>) {
+    fn move_selected_tab_to_new_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab_id) = self
             .tab_menu_tab
             .or_else(|| self.tabs.get(self.active_tab).map(|tab| tab.id))
@@ -6684,13 +6695,32 @@ impl TillerWorkspace {
         {
             return;
         }
-        self.move_selected_tab_with_machinery(MoveTarget::Group(new_group_id), machinery, cx);
+        self.move_selected_tab_with_machinery(
+            MoveTarget::Group(new_group_id),
+            machinery,
+            window,
+            cx,
+        );
     }
 
+    /// F-CORE-WSP-05: routes the real tab-placement mutation through
+    /// `LayoutCommand::Move` + `classify_layout_command`, the same
+    /// load-bearing pattern `commit_tab_rename` uses for `Rename`
+    /// (F-CORE-WSP-04). Move classifies as `structural: true` -- unlike
+    /// Rename, which is nonstructural and so never exercised that leg --
+    /// which is why `apply_tab_machinery`'s pane-cache rebuild is gated on
+    /// `.structural` here rather than always running. Its `FocusIntent::Tab`
+    /// answer is what sends keyboard focus back into the moved tab's own
+    /// content: the tab's live view is detached and reattached under a
+    /// different (possibly brand-new) pane group by `apply_tab_machinery`,
+    /// and nothing else claims keyboard focus, so without this a move left
+    /// focus on whatever the tab-menu button last held until the user
+    /// clicked back into the pane.
     fn move_selected_tab_with_machinery(
         &mut self,
         _target: MoveTarget,
         machinery: TabMachinery,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(tab_id) = self
@@ -6699,18 +6729,37 @@ impl TillerWorkspace {
         else {
             return;
         };
-        if machinery
+        let Some(from_group) = self
+            .tab_machinery
             .groups()
             .iter()
-            .all(|group| !group.tabs.contains(&tab_id))
-        {
+            .find(|group| group.tabs.contains(&tab_id))
+            .map(|group| group.id)
+        else {
             return;
-        }
-        self.apply_tab_machinery(machinery);
+        };
+        let Some(to_group) = machinery
+            .groups()
+            .iter()
+            .find(|group| group.tabs.contains(&tab_id))
+            .map(|group| group.id)
+        else {
+            return;
+        };
+        let command = tiller_project::LayoutCommand::Move {
+            tab: tab_id.to_string(),
+            from: from_group.to_string(),
+            to: to_group.to_string(),
+        };
+        let transition = tiller_project::classify_layout_command(&command);
+        self.apply_tab_machinery(machinery, transition.structural);
         self.tab_menu_open = false;
         self.tab_menu_tab = None;
         self.schedule_save(cx);
         self.sync_activity(cx);
+        if transition.focus == tiller_project::FocusIntent::Tab {
+            self.focus_tab_content(tab_id, window, cx);
+        }
         cx.notify();
     }
 
@@ -9298,10 +9347,10 @@ impl TillerWorkspace {
                 self.move_selected_tab_direction(MoveDirection::Later, cx)
             }
             TabContextAction::MoveToPane(group_id) if group_id != usize::MAX => {
-                self.move_selected_tab(MoveTarget::Group(group_id), cx)
+                self.move_selected_tab(MoveTarget::Group(group_id), window, cx)
             }
             TabContextAction::MoveToPane(_) => {
-                self.move_selected_tab_to_new_pane(cx);
+                self.move_selected_tab_to_new_pane(window, cx);
             }
             TabContextAction::AttachToCurrentTerminal => {
                 if let Some(tab_id) = self.tab_menu_tab {
@@ -9417,7 +9466,7 @@ impl TillerWorkspace {
         if !machinery.move_active_tab(direction) {
             return;
         }
-        self.apply_tab_machinery(machinery);
+        self.apply_tab_machinery(machinery, true);
         self.dismiss_tab_menu(cx);
         self.schedule_save(cx);
         self.sync_activity(cx);
@@ -10343,7 +10392,7 @@ impl TillerWorkspace {
     fn handle_move_tab_to_other_pane(
         &mut self,
         _: &MoveTabToOtherPane,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let active_group = self.tab_machinery.active_group();
@@ -10356,7 +10405,7 @@ impl TillerWorkspace {
         else {
             return;
         };
-        self.move_selected_tab(MoveTarget::Group(target), cx);
+        self.move_selected_tab(MoveTarget::Group(target), window, cx);
     }
 
     fn handle_resume_chat(&mut self, _: &ResumeChat, window: &mut Window, cx: &mut Context<Self>) {
@@ -20074,9 +20123,9 @@ mod tests {
         // group -- `TabMachinery::move_tab` only ever empties a group's
         // `tabs` list, it never removes the group itself -- so this leaves a
         // genuinely detached, non-zero-id, tabless pane group behind.
-        workspace.update(&mut cx.cx, |workspace, cx| {
+        workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.active_tab = 1;
-            workspace.move_selected_tab_to_new_pane(cx);
+            workspace.move_selected_tab_to_new_pane(window, cx);
         });
         cx.run_until_parked();
         let detached_group_id = workspace.read_with(&cx.cx, |workspace, _| {
@@ -20088,8 +20137,8 @@ mod tests {
                 .find(|id| *id != 0)
                 .expect("move_selected_tab_to_new_pane created a second group")
         });
-        workspace.update(&mut cx.cx, |workspace, cx| {
-            workspace.move_selected_tab(MoveTarget::Group(0), cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.move_selected_tab(MoveTarget::Group(0), window, cx);
         });
         cx.run_until_parked();
         assert!(
