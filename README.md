@@ -80,7 +80,7 @@ tillerctl panel read --id "$WORKER"
 tillerctl panel close --id "$WORKER"
 ```
 
-The nine panel subcommands are:
+The eleven panel subcommands are:
 
 - `create` — create a panel and return its UUID.
 - `split` — split an existing panel identified by `--from` and return the new UUID.
@@ -88,6 +88,8 @@ The nine panel subcommands are:
 - `write` — write text to a panel UUID.
 - `key` — send a key to a panel UUID.
 - `read` — read a panel UUID's output.
+- `state` — report a panel UUID's current state.
+- `scrollback` — read a panel UUID's scrollback buffer.
 - `wait` — wait for a panel UUID to exit.
 - `focus` — focus a panel UUID.
 - `close` — close a panel UUID.
