@@ -15,6 +15,88 @@ Re-run the measurement yourself:
 Frames: `reference/waku/app-screenshot-{dark,light}.png` — waku's own published
 product screenshots (the ones on waku.sh), copied verbatim, 2266x1752 at 2x.
 
+## IntelliJ-inspired shell (2026-08-20)
+
+The source reference is the user-supplied
+`Screenshot 2026-08-20 alle 19.39.17.png`. The approved sample extraction and
+the corresponding light translation are recorded in
+`docs/superpowers/specs/2026-08-20-intellij-inspired-translucent-shell-design.md`.
+This shell layer is separate from the older waku-frame measurements below: it
+defines translucent frame material, its opaque fallback, and the opaque panels
+inside that frame.
+
+The image is intentionally not copied into this repository. Read-only
+verification on 2026-08-20 found a SHA-256 of
+`ca3f249dd03bca9ea39fdd60235eca048f455c78c46ff4ec692c8b42fc06b662` and PNG
+dimensions of **3802 × 2110** pixels (`sips`, `file`, Spotlight metadata, and
+Pillow all agreed). This is the actual coordinate space used below; it differs
+from the nominal 3840 × 2160 capture size, so the nominal size must not be used
+to replay these rectangles.
+
+Sampling used solid interior patches for surfaces and seams, and only opaque
+glyph-core pixels for text (not antialiased edge pixels). Rectangles are
+`x..x, y..y`, inclusive, in the verified 3802 × 2110 source coordinate space:
+
+| Role | Rectangle(s) | Method |
+| --- | --- | --- |
+| outer frame | `0..3801, 10..77` | dominant non-control frame pixels |
+| title frame | `1000..2500, 12..76` | dominant titlebar interior pixels |
+| status frame | `1000..2500, 2048..2109` | dominant statusbar interior pixels |
+| left panel interior | `60..930, 90..2000` | dominant flat interior pixels |
+| centre panel interior | `990..2510, 150..2000` | dominant flat interior pixels |
+| right panel interior | `2580..3730, 240..2000` | dominant flat interior pixels |
+| active/selected row | `2580..3725, 160..210` | dominant row-fill pixels, excluding glyphs |
+| panel border/seam | `959..966, 90..2000` | one-pixel seam/border runs, excluding corners |
+| primary text | `67..160, 100..122` | repeated opaque glyph-core pixels in “Project” |
+| meta/disabled text | `1076..1370, 1547..1594` | opaque glyph-core pixels in secondary empty-state copy |
+
+The recorded extraction covers these regions and roles: the outer frame,
+integrated titlebar, and status-bar frame; the interiors of the left, centre,
+and right panels; an active/selected row; the panel seam/border; primary text;
+and meta/disabled text. The resulting approved tokens are:
+
+| Role | Dark | Light |
+| --- | --- | --- |
+| `frame_fallback` | `#222427` | `#DCE5E9` |
+| `frame_surface` | `#222427` at 0.88 alpha | `#DCE5E9` at 0.82 alpha |
+| `panel_surface` | `#18191A` | `#F4F7F8` |
+| `selected_fill` | `#2D2F34` | `#D7E2E7` |
+| `panel_border` | `#27292D` | `#CCD8DD` |
+| primary text | `#CBCDD4` | `#313A40` |
+| raw sampled meta/disabled text | `#686B71` | `#68757B` |
+| final accessible secondary text | `#85888F` | `#667379` |
+
+`background`, `sidebar`, and `chat_surface` deliberately alias
+`panel_surface`, preserving compatibility for existing consumers while later
+shell work adopts the semantic role directly. `canvas` maps to the opaque
+`frame_fallback`; the fallback remains correct when platform translucency is
+unavailable. Raised surfaces are `#1D1E21` / `#FBFCFC`, and `composer` aliases
+that raised role. Insets remain a derivation of `panel_surface` with the
+existing 0.72 dark and 0.93 light factors. The compact shell geometry is a
+4px panel gap, 4px outer inset, and 7px shell-panel radius.
+
+The raw sampled meta/disabled values are **not** the final secondary-body
+values. The final `#85888F` / `#667379` secondary tokens are an explicit
+accessibility adjustment: both primary and secondary body roles clear WCAG AA
+(4.5:1) against their respective opaque panel surfaces. `panel_focus_ring`
+remains the established accent.
+
+This shell change does not retune the terminal surface or terminal ANSI palette,
+syntax colours, diff/status hues, agent-brand colours, or activity-status
+colours; those meanings stay byte-for-byte stable. The shell palette changes
+only structural shell and text roles.
+
+## Historical waku measurements (superseded where noted)
+
+The sections below document the earlier 2266 × 1752 waku screenshots. They are
+historical evidence, not the current source of shell values. In particular,
+their `surface`, `composer`, `raised`, `text`, `text_tertiary`, and
+`sidebar_border` values are superseded by the 2026-08-20 shell roles above.
+The dark terminal baseline and inline `code_text` measurement remain active;
+the terminal and syntax palettes were deliberately not retuned. Other legacy
+wash and semantic discussions remain active only where the current token is
+still explicitly derived from them.
+
 ## What the measurement can and cannot settle
 
 Both frames are 8-bit palettized PNGs holding 255 distinct colours. Large flat
@@ -28,10 +110,10 @@ the region is genuinely flat and the value is trustworthy; well under 100% means
 the region is not flat, and asking why is how two of the surprises below turned
 up.
 
-## Tokens the frames do settle
+## Historical tokens the waku frames settled
 
-Measured, and the code already agreed. These are now ours by measurement rather
-than by transcription — the number did not need to change, its provenance did.
+These values describe the prior waku-led palette. The rows identified above as
+superseded are retained for audit history, not as current `ThemeColors` values.
 
 | Token | Frame value (dark / light) | Coverage | Sampled at |
 |---|---|---|---|
@@ -43,11 +125,12 @@ than by transcription — the number did not need to change, its provenance did.
 | `sidebar_border` | `#282828` / `#DCDBDB` | 100% / 100% | seam column `x=662..663` |
 | `code_text` | `#E0A882` / `#9A5528` | 3 spans agree | inline code at `+1690+545`, `+720+855`, `+1830+855` |
 
-Two of these moved by one step against what the source had carried:
+Two of these historical values moved by one step against what the source had carried:
 `text_tertiary` measures `#7C7D7D`/`#868686` where the transplant said
 `#7D7D7D`/`#858585`, and light `raised` measures `#EBEBEB` where it said
 `#ECECEC`. A one-unit disagreement is what a real measurement looks like. The
-measured values are the ones in the code now.
+measurements remain recorded here even where the current shell intentionally
+uses a different role.
 
 The seam is worth its own line. It is exactly two frame pixels wide — one
 logical pixel at 2x — and flat at 200/200 in both variants, so `#282828` and
