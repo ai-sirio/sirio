@@ -91,9 +91,25 @@
 #      TILLER_WL_HOST_DBUS=1 opts OUT of the private bus and shares the caller's. Read the note
 #      above the bus setup before using it: on a desktop login this is what puts a real "Open
 #      Folder" window on the operator's own screen.
+#      TILLER_WL_ATTACH=1 attaches to an ALREADY-RUNNING TILLER_WL_KEEP=1 session for this same
+#      TILLER_WL_LABEL instead of restarting anything: it skips the start-of-run pre-kill and the
+#      compositor/app boot entirely, re-derives the compositor's wayland display from its own log
+#      (nothing else survives across invocations — KEEP leaves the processes running, not this
+#      script's shell, so no variable does), and reuses the existing control socket, app process
+#      and virtual-input FIFO/keyboard as found. This is what lets a gesture chain span multiple
+#      invocations — e.g. open a context menu in call 1, click one of its items in call 2 — against
+#      the SAME process, which a plain KEEP relaunch cannot do (every invocation, KEEP included,
+#      kills and reboots both the compositor and the app). It never tears anything down on exit,
+#      whether or not TILLER_WL_KEEP is also set: an attach invocation must not disturb the
+#      session it attached to. It fails loudly (exit 7) rather than silently doing nothing when
+#      there is nothing to attach to — a dead app, a missing control socket, a missing input FIFO,
+#      or (for a keyboard verb) no live virtual-keyboard process — because a `ctl`/`shot`-only KEEP
+#      session has NO input devices bound at all (the pre-app device dance only runs when the
+#      ORIGINAL invocation's own action string mentioned an input verb), and attaching cannot
+#      conjure a device that was never created.
 #
 # Exit: 0 ok · 2 no binary · 3 compositor never came up · 4 app died · 5 first frame blank
-#       6 the session bus could not be isolated
+#       6 the session bus could not be isolated · 7 TILLER_WL_ATTACH=1 had nothing to attach to
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -102,6 +118,11 @@ ACTIONS="${2:-}"
 SETTLE="${3:-6}"
 LABEL="${TILLER_WL_LABEL:-wl-$$}"
 BIN="${TILLER_WL_BIN:-$ROOT/rust/target/debug/tiller}"
+# Attach to an already-running TILLER_WL_KEEP=1 session for this label instead of booting a new
+# one. See the header comment above for the full contract; ATTACH short-circuits every boot step
+# below (pre-kill, sway, dbus, the app launch) in favour of finding and verifying what is already
+# there, and fails loudly (exit 7) when it isn't.
+ATTACH="${TILLER_WL_ATTACH:-0}"
 MIN_COLORS=200
 # Standalone crate (deliberately outside rust/'s workspace — see Scripts/xdnd-source/Cargo.toml)
 # providing the `xdnd` action's real wl_data_device_manager drag SOURCE. Built on first use, not
@@ -132,7 +153,12 @@ POINTER_ENABLED=0
 POINTER_COMMAND_ID=0
 
 mkdir -p "$OUTDIR"
-[ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p tiller)" >&2; exit 2; }
+# In attach mode the binary is never exec'd — only its basename is used, to recognise the
+# already-running process by comm — so it need not still exist at this path (the process it
+# named may have been launched from a snapshot that was since cleaned up).
+if [ "$ATTACH" != "1" ]; then
+  [ -x "$BIN" ] || { echo "FAIL: no binary at $BIN (cargo build -p tiller)" >&2; exit 2; }
+fi
 command -v grim >/dev/null || { echo "FAIL: grim is not installed" >&2; exit 3; }
 
 # Kill only processes whose environment names THIS instance. Matching on the process name would
@@ -167,6 +193,17 @@ kill_ours() {
     kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
   done
 }
+# Read-only twin of kill_ours, for TILLER_WL_ATTACH=1: find a process that names THIS instance
+# without touching it. Prints its pid and returns 0 on a match, prints nothing and returns 1 on
+# none — attach mode uses this to tell "already running, safe to reuse" from "nothing here, fail
+# loudly" instead of ever assuming.
+find_ours() {
+  local var="$1" want="$2" name="${3:0:15}" p
+  for p in $(pgrep -x "$name" 2>/dev/null); do
+    tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "$var=$want" && { echo "$p"; return 0; }
+  done
+  return 1
+}
 # Everything Tiller spawned in a pane -- the agent CLIs a critic launches over ACP, and whatever
 # those spawn in turn -- inherits Tiller's environment, and an inherited environ SURVIVES
 # REPARENTING. So `TILLER_SOCKET=$SOCK` in /proc/N/environ identifies this lane's descendants
@@ -192,6 +229,14 @@ kill_lane_descendants() {
   done
 }
 cleanup() {
+  [ "$ATTACH" = "1" ] && {
+    # Never tear down a session this invocation did not create — that is the entire point of
+    # attaching. This fires whether or not TILLER_WL_KEEP is also set; an attach run leaves
+    # everything it found exactly as it found it, on every exit path including a failure partway
+    # through setup.
+    echo "NOTE: attach mode — leaving $LABEL exactly as found (SOCK=$SOCK WAYLAND_DISPLAY=${WD:-<not yet resolved>} VP_FIFO=$VP_FIFO)"
+    return 0
+  }
   [ -n "${TILLER_WL_KEEP:-}" ] && {
     echo "NOTE: leaving $LABEL running (SOCK=$SOCK WAYLAND_DISPLAY=$WD VP_FIFO=$VP_FIFO)"
     # The bus daemon stays too, and it is the one leftover an environment scan
@@ -227,6 +272,14 @@ trap cleanup EXIT
 # important of the two call sites, because cleanup() deliberately does not run under
 # TILLER_WL_KEEP -- so under a KEEP session this is the *only* thing standing between
 # a relaunch and two live instances sharing one database.
+#
+# None of it runs under TILLER_WL_ATTACH=1. Attaching means reusing exactly what this label
+# already has running — the app, the compositor, the dbus-daemon, the virtual-pointer, the
+# virtual-keyboard — so killing any of it here would defeat the whole point before the script even
+# gets to the part that looks for something to attach to.
+if [ "$ATTACH" = "1" ]; then
+  :
+else
 kill_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")"
 kill_ours SWAYSOCK "$SWAYSOCK" sway
 # The three helpers below leak wherever cleanup() does not run, and cleanup()
@@ -255,10 +308,33 @@ kill_ours SWAYSOCK "$SWAYSOCK" sway
 kill_ours TILLER_WL_LABEL "$LABEL" dbus-daemon
 kill_ours TILLER_WL_LABEL "$LABEL" virtual-pointer
 kill_ours TILLER_WL_LABEL "$LABEL" wtype
+fi
 
 W1=1715 H1=972          # the two sizes shot() alternates between; see the repaint note below
 W2=1400 H2=900
 OUTPUT_W="$W1" OUTPUT_H="$H1"
+if [ "$ATTACH" = "1" ]; then
+  # Nothing gets booted. Verify the compositor this label already has is really there, then
+  # re-derive the wayland display it announced — the ONE thing about it that does not survive
+  # across invocations, because TILLER_WL_KEEP leaves the compositor process running, not this
+  # script's own shell, so no variable carries it forward. SWAYLOG is the only durable record.
+  [ -S "$SWAYSOCK" ] || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no compositor socket at $SWAYSOCK for label '$LABEL' — nothing to attach to. Start a TILLER_WL_KEEP=1 session under this label first." >&2
+    exit 7
+  }
+  find_ours SWAYSOCK "$SWAYSOCK" sway >/dev/null || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no live sway process owns $SWAYSOCK — a stale socket, nothing to attach to." >&2
+    exit 7
+  }
+  WD="$(sed -n "s/.*Running compositor on wayland display '\([^']*\)'.*/\1/p" "$SWAYLOG" | head -1)"
+  [ -n "$WD" ] || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but $SWAYLOG never recorded a wayland display — nothing to attach to." >&2
+    exit 7
+  }
+  export XDG_RUNTIME_DIR=/run/user/"$(id -u)"
+  export WAYLAND_DISPLAY="$WD"
+  echo "NOTE: attach mode — reusing compositor on $WD (label=$LABEL, sway pid $(find_ours SWAYSOCK "$SWAYSOCK" sway))"
+else
 # Xwayland off: the app is a native Wayland client here, and Xwayland claims a global
 # /tmp/.X11-unix/XN. Two instances of this script race for the same number and the loser refuses
 # to start at all — which is fatal to the one property this lane is for, running in parallel.
@@ -362,6 +438,8 @@ done
 # config path is unique to this run, so it is a stronger check than trusting a wayland-N name.
 export XDG_RUNTIME_DIR=/run/user/"$(id -u)"
 export WAYLAND_DISPLAY="$WD"
+fi
+
 verify_nested_sway() {
   [ "${WAYLAND_DISPLAY:-}" = "$WD" ] || {
     echo "FAIL: WAYLAND_DISPLAY is not this nested instance" >&2
@@ -422,13 +500,65 @@ start_virtual_keyboard() {
   kill -0 "$VK_PID" 2>/dev/null || { cat "$VK_LOG" >&2; return 1; }
 }
 
+# TILLER_WL_ATTACH=1 twins of the two functions above: never create a device, only find and reuse
+# one this label already has running — and fail loudly, not silently, when there is none. This is
+# the exact case the trap table already records: a KEEP session started with a `ctl`/`shot`-only
+# action string never ran start_virtual_pointer/start_virtual_keyboard at all, so it has NO input
+# devices bound, and a later type/click sent to it would otherwise reach nothing and exit 0 — a
+# false "it worked". These functions turn that into an explicit, non-zero FAIL instead.
+attach_virtual_pointer() {
+  [ -p "$VP_FIFO" ] || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no virtual-pointer FIFO at $VP_FIFO for label '$LABEL'." >&2
+    echo "      The session you attached to was never started with a pointer verb" >&2
+    echo "      (click/move/rightclick/down/up/drag/scroll/modclick/xdnd) in its OWN action" >&2
+    echo "      string, so it has no input device bound at all -- attaching cannot conjure one." >&2
+    echo "      Tear it down and reissue a KEEP session whose first invocation includes one." >&2
+    return 1
+  }
+  find_ours TILLER_WL_LABEL "$LABEL" virtual-pointer >/dev/null || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no live virtual-pointer process for label '$LABEL' -- the FIFO exists at $VP_FIFO but nothing is serving it (its process died)." >&2
+    return 1
+  }
+  verify_nested_sway || return 1
+  # Resume the id sequence above anything the ack log already has, rather than restarting at 1.
+  # pointer_command's wait loop is `grep -qx "$id" "$VP_ACK"` -- a bare existence check, not "the
+  # newest line" -- so replaying an id this FIFO already acked in an EARLIER invocation would
+  # return success instantly without ever waiting for the server to process the new command.
+  local last
+  last="$(grep -oE '^[0-9]+$' "$VP_ACK" 2>/dev/null | sort -n | tail -1)"
+  POINTER_COMMAND_ID="${last:-0}"
+  POINTER_ENABLED=1
+  echo "NOTE: attach mode — reusing virtual pointer at $VP_FIFO (ack ids resume at $((POINTER_COMMAND_ID + 1)))"
+}
+
+attach_virtual_keyboard() {
+  find_ours TILLER_WL_LABEL "$LABEL" wtype >/dev/null || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no live virtual-keyboard (wtype) process for label '$LABEL'." >&2
+    echo "      The session you attached to was never started with a keyboard verb" >&2
+    echo "      (type/key/title/chord/modclick) in its OWN action string, so it has no input" >&2
+    echo "      device bound at all -- attaching cannot conjure one." >&2
+    echo "      Tear it down and reissue a KEEP session whose first invocation includes one." >&2
+    return 1
+  }
+  verify_nested_sway || return 1
+  echo "NOTE: attach mode — reusing virtual keyboard for label '$LABEL'"
+}
+
 # modclick needs BOTH devices pre-created: the pointer for the click itself, the keyboard because
 # it holds a modifier around it. It appears in both guards below.
 if grep -Eq '(^|[;[:space:]])(click|move|rightclick|down|up|drag|scroll|modclick|xdnd)([;[:space:]]|$)' <<<"$ACTIONS"; then
-  start_virtual_pointer || exit 3
+  if [ "$ATTACH" = "1" ]; then
+    attach_virtual_pointer || exit 7
+  else
+    start_virtual_pointer || exit 3
+  fi
 fi
 if grep -Eq '(^|[;[:space:]])(type|key|title|chord|modclick)([;[:space:]]|$)' <<<"$ACTIONS"; then
-  start_virtual_keyboard || exit 3
+  if [ "$ATTACH" = "1" ]; then
+    attach_virtual_keyboard || exit 7
+  else
+    start_virtual_keyboard || exit 3
+  fi
 fi
 
 # DISPLAY must be UNSET, not empty: with it set at all, GPUI takes the X11 path, which under
@@ -442,6 +572,21 @@ fi
 # button event arrived", which no screenshot or ctl call can answer: a screenshot shows the
 # *result* of event processing, never the order events were delivered in. Built for P130's modclick
 # investigation; leave it available for the next primitive that needs the same question answered.
+if [ "$ATTACH" = "1" ]; then
+  # Nothing gets launched. Find the app process this label already has running and verify it is
+  # actually alive and actually serving this socket -- a stale socket file from a process that
+  # since died is exactly the silent-success shape this mode exists to refuse.
+  [ -S "$SOCK" ] || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no control socket at $SOCK for label '$LABEL' — nothing to attach to. Start a TILLER_WL_KEEP=1 session under this label first." >&2
+    exit 7
+  }
+  APP_PID="$(find_ours TILLER_SOCKET "$SOCK" "$(basename "$BIN")")"
+  [ -n "$APP_PID" ] || {
+    echo "FAIL: TILLER_WL_ATTACH=1 but no live app process owns $SOCK — a stale socket, nothing to attach to." >&2
+    exit 7
+  }
+  echo "NOTE: attach mode — reusing app pid $APP_PID (label=$LABEL socket=$SOCK)"
+else
 # Launch from a neutral directory, never the caller's. The app's
 # `initial_working_directory()` walks *ancestors* for the nearest git repository and
 # adopts it as the starting project, so an instance launched from anywhere inside this
@@ -488,6 +633,7 @@ for _ in $(seq 1 120); do
   sleep 0.25
 done
 [ -S "$SOCK" ] || { echo "FAIL: no control socket at $SOCK in 30s" >&2; tail -20 "$APP_LOG" >&2; exit 4; }
+fi
 
 export SOCK WD SWAYSOCK APP_LOG OUTDIR W1 H1 W2 H2 MIN_COLORS VP_FIFO VP_ACK POINTER_ENABLED
 # grim reads WAYLAND_DISPLAY, and on a machine where the operator is logged into a Wayland session
