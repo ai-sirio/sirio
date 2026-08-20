@@ -7,6 +7,35 @@
 //! calls in a task. What matters is parity of *behavior* — same commands,
 //! same acceptance rules, same stderr passthrough on failure.
 //!
+//! # There is deliberately no output cap here — read this before adding a caller
+//!
+//! `tiller_git::GitRunner` caps captured output (`DEFAULT_OUTPUT_LIMIT_BYTES`,
+//! overridable, raising `OutputTruncated`). This runner does not: `read_to_end`
+//! reads each pipe to EOF into an unbounded `Vec<u8>`, and this crate's
+//! `GitError` has no truncation variant at all. That is currently safe, and it
+//! is safe by *scope* rather than by luck — checked, not assumed (2026-08-20):
+//!
+//!   - `run`/`run_with_timeout`/`run_success` are all `pub(crate)`, so nothing
+//!     outside this crate can reach them.
+//!   - There are exactly **two** call sites, both in `discovery.rs`:
+//!     `git worktree list --porcelain` (:80) and `git branch --show-current`
+//!     (:91). Both outputs scale with worktree *count* and branch *name*, never
+//!     with repository content — so neither can grow the way `diff`/`log`/`show`
+//!     output does, which is what the cap one crate over exists to defend
+//!     against. There is no hang risk either: `read_to_end` fully drains the
+//!     pipe before returning.
+//!
+//! The hazard is therefore a *future* one, and it is aimed at whoever adds the
+//! third call site. `run_success` is already imported here and convenient, so a
+//! feature wanting `git log`/`git show` output during discovery has an easy,
+//! obvious, uncapped path sitting ready. **If you are adding a command whose
+//! output scales with repository content, do not just call it — go read
+//! `tiller_git`'s `read_capped` first and decide deliberately.** The duplication
+//! between these two runners is intentional (this crate stays dependency-free,
+//! mirroring the Swift app's separate `TillerGit` package), but nothing
+//! structural keeps them from drifting apart the moment one is changed and the
+//! other is not.
+//!
 //! Every invocation is bounded by a wall-clock timeout ([`run_with_timeout`],
 //! default [`DEFAULT_GIT_TIMEOUT`]), so a hung git process or a stalled
 //! filesystem can never block the caller indefinitely — the caller is a GPUI
