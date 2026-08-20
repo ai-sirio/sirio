@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tiller — a native Linux app (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory — see `docs/linux-rewrite/README.md` for the exact retirement commit and how to read the retired source. Terminal rendering is built on `alacritty_terminal`.
 
+### External references
+
+- [gpui-component](https://github.com/longbridge/gpui-component) — component library for gpui. Consult it before hand-rolling a new UI primitive in `tiller_ui`; it is the reference for how a gpui component is normally structured.
+- [waku](https://github.com/egoist/waku) — a comparable app (multiple coding agents, one pane each). Reference for prior art on the same problem, not a dependency.
+
 ## Commands
 
 ```bash
